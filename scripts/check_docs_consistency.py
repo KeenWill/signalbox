@@ -254,7 +254,7 @@ RUST_TEST_DECLARATION = re.compile(
     re.MULTILINE,
 )
 RUST_TEST_ATTRIBUTE = re.compile(
-    r"#\[[ \t\r\n]*(?:[A-Za-z_][A-Za-z0-9_]*::)*"
+    r"#\[[ \t\r\n]*(?:::)?(?:[A-Za-z_][A-Za-z0-9_]*::)*"
     r"test(?=[ \t\r\n(\]])[^\]]*\]",
     re.IGNORECASE,
 )
@@ -271,7 +271,9 @@ RUST_CFG_PREDICATE = re.compile(
     re.DOTALL,
 )
 RUST_TEST_META = re.compile(
-    r"^(?:[A-Za-z_][A-Za-z0-9_]*::)*test(?=[ \t\r\n(]|$)", re.IGNORECASE
+    r"^(?:::)?(?:[A-Za-z_][A-Za-z0-9_]*::)*"
+    r"test(?=[ \t\r\n(]|$)",
+    re.IGNORECASE,
 )
 RUST_RAW_STRING_OPEN = re.compile(r'(?:br|rb|cr|r)(?P<hashes>#{0,255})"')
 RUST_INLINE_MODULE = re.compile(
@@ -281,6 +283,7 @@ RUST_MACRO_RULES = re.compile(
     rf"\bmacro_rules![ \t\r\n]*(?P<name>{RUST_IDENTIFIER_PATTERN})"
     r"[ \t\r\n]*(?P<opening>[\(\[\{])"
 )
+RUST_FORWARDED_ATTRIBUTE = re.compile(r"#\[[^\]]*\$[^\]]*\]", re.DOTALL)
 PULL_REQUEST_MERGE = re.compile(
     r"^Merge pull request #(?P<number>[1-9][0-9]*) from "
     r"[^/\s]+/(?P<branch>[^\r\n]+)$",
@@ -520,11 +523,25 @@ def rust_cfg_attr_has_test(prefix: str) -> bool:
     return False
 
 
+def rust_meta_disables_item(meta: str) -> bool:
+    """Return whether one active meta universally disables its item."""
+    meta = meta.strip()
+    cfg = RUST_CFG_META.fullmatch(meta)
+    if cfg is not None:
+        return rust_cfg_truth(cfg.group("body")) is False
+    cfg_attr = RUST_CFG_ATTR_META.fullmatch(meta)
+    if cfg_attr is None:
+        return False
+    items = split_rust_meta_items(cfg_attr.group("body"))
+    if not items or rust_cfg_truth(items[0]) is not True:
+        return False
+    return any(rust_meta_disables_item(item) for item in items[1:])
+
+
 def rust_item_is_disabled(prefix: str) -> bool:
     """Return whether attached cfg metadata disables an item in every build."""
     for attribute in RUST_ATTRIBUTE.finditer(prefix):
-        cfg = RUST_CFG_META.fullmatch(attribute.group("meta").strip())
-        if cfg is not None and rust_cfg_truth(cfg.group("body")) is False:
+        if rust_meta_disables_item(attribute.group("meta")):
             return True
     return False
 
@@ -562,6 +579,33 @@ def rust_matching_delimiters(code: str) -> dict[int, int]:
                 stack.pop()
                 pairs[offset] = index
     return pairs
+
+
+def rust_macro_invocation_applies_test(
+    code: str,
+    name: str,
+    definition_start: int,
+    definition_end: int,
+    delimiters: dict[int, int],
+) -> bool:
+    """Return whether a forwarding macro is invoked with test metadata."""
+    definition_body = code[definition_start:definition_end]
+    if RUST_FORWARDED_ATTRIBUTE.search(definition_body) is None:
+        return False
+    invocation_pattern = re.compile(
+        rf"\b{re.escape(name)}![ \t\r\n]*(?P<opening>[\(\[\{{])"
+    )
+    for invocation in invocation_pattern.finditer(code):
+        if definition_start <= invocation.start() < definition_end:
+            continue
+        opening = invocation.start("opening")
+        closing = delimiters.get(opening)
+        if closing is None:
+            continue
+        arguments = split_rust_meta_items(code[opening + 1 : closing])
+        if any(rust_meta_applies_test(argument) for argument in arguments):
+            return True
+    return False
 
 
 def rust_enclosing_module_names(
@@ -1649,14 +1693,22 @@ def rust_test_invariant_tags(text: str) -> list[tuple[str, int]]:
     return sorted(found.items())
 
 
-def rust_invariant_test_files(root: Path) -> dict[tuple[str, str], int]:
+def rust_invariant_test_files(
+    root: Path, text_cache: dict[Path, str] | None = None
+) -> dict[tuple[str, str], int]:
     """Discover every repository Rust test file carrying an INV tag."""
+    if text_cache is None:
+        text_cache = {}
     found: dict[tuple[str, str], int] = {}
     for source in sorted(root.rglob("*.rs")):
         if ".git" in source.parts or "target" in source.parts:
             continue
         source_label = repository_path(root, source)
-        text = source.read_text(encoding="utf-8", errors="replace")
+        if source not in text_cache:
+            text_cache[source] = source.read_text(
+                encoding="utf-8", errors="replace"
+            )
+        text = text_cache[source]
         for invariant, line in rust_test_invariant_tags(text):
             found[(invariant, source_label)] = line
     return found
@@ -1681,6 +1733,13 @@ def check_rust_test_generation(root: Path) -> list[Violation]:
             if (
                 RUST_TEST_ATTRIBUTE.search(body) is None
                 and not rust_cfg_attr_has_test(body)
+                and not rust_macro_invocation_applies_test(
+                    code,
+                    macro.group("name"),
+                    macro.start(),
+                    closing,
+                    delimiters,
+                )
             ):
                 continue
             violations.append(
@@ -1688,8 +1747,8 @@ def check_rust_test_generation(root: Path) -> list[Violation]:
                     source_label,
                     line_number(text, macro.start()),
                     "invariant-test-generation",
-                    f"`macro_rules! {macro.group('name')}` emits a test "
-                    "attribute; write explicit test declarations so "
+                    f"`macro_rules! {macro.group('name')}` emits or forwards "
+                    "a test attribute; write explicit test declarations so "
                     "invariant registration remains mechanically visible",
                 )
             )
@@ -1705,6 +1764,12 @@ def check_invariant_citations(
     violations: list[Violation] = []
     enforcement_links: set[tuple[int, str]] = set()
     catalog_pairs: set[tuple[str, str]] = set()
+    target_text_cache: dict[Path, str] = {}
+    rust_test_files = rust_invariant_test_files(root, target_text_cache)
+    declared_tags_by_file: dict[str, set[str]] = {}
+    for invariant_and_path in rust_test_files:
+        invariant, source_label = invariant_and_path
+        declared_tags_by_file.setdefault(source_label, set()).add(invariant)
 
     for number, line in enumerate(text.splitlines(), start=1):
         if not re.match(r"^\|[ \t]*INV-[0-9]{3}[ \t]*\|", line):
@@ -1792,12 +1857,7 @@ def check_invariant_citations(
             else:
                 target_label = repository_path(root, target)
                 catalog_pairs.add((invariant, target_label))
-                target_text = target.read_text(
-                    encoding="utf-8", errors="replace"
-                )
-                declared_tags = {
-                    tag for tag, _ in rust_test_invariant_tags(target_text)
-                }
+                declared_tags = declared_tags_by_file.get(target_label, set())
                 if (
                     link.destination in tagged_destinations
                     and invariant not in declared_tags
@@ -1821,7 +1881,11 @@ def check_invariant_citations(
             if not is_inside(root, target) or not target.is_file():
                 continue
             terminal_name = test_name.rsplit("::", 1)[-1]
-            target_text = target.read_text(encoding="utf-8", errors="replace")
+            if target not in target_text_cache:
+                target_text_cache[target] = target.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            target_text = target_text_cache[target]
             if not re.search(rf"\b{re.escape(terminal_name)}\b", target_text):
                 violations.append(
                     Violation(
@@ -1834,7 +1898,7 @@ def check_invariant_citations(
                     )
                 )
 
-    for pair, line in rust_invariant_test_files(root).items():
+    for pair, line in rust_test_files.items():
         if pair in catalog_pairs:
             continue
         invariant, source_label = pair

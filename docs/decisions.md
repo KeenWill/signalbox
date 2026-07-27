@@ -26,8 +26,8 @@ already present on the event's exact base commit remain valid in a stacked child
 until that base PR merges. This reverses PR #246's mechanical exclusions without
 adding a dependency or network access to the checker; the CI validate job
 therefore supplies full history at checkout. Rust tests remain explicit source
-declarations: macros that emit test attributes are rejected so reverse
-registration never depends on expanding arbitrary macros.
+declarations: macros that emit or forward test attributes are rejected so
+reverse registration never depends on expanding arbitrary macros.
 
 **Rejected alternatives.** Reviewer-only checks repeat deterministic work.
 GitHub calls or per-token fetches add mutable network state and do not inspect

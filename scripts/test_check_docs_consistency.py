@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 
+import check_docs_consistency
 from check_docs_consistency import PR_TOKEN, Violation, github_slug, run_checks
 
 
@@ -337,6 +338,33 @@ class DocsConsistencyTests(unittest.TestCase):
         self.assertEqual(failure_categories(failures), ["invariant-tag"])
         self.assertIn("test name or attached doc comment", failures[0].message)
 
+    def test_rust_tag_scan_is_cached_per_source_file(self) -> None:
+        (self.root / "src/tests.rs").write_text(
+            "#[test]\n"
+            "fn s01_inv_001_inv_002_shared_file() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | First law. | Domain | Accepted | INV-001-tagged "
+            "tests in [`src/tests.rs`](../src/tests.rs). |\n"
+            "| INV-002 | Second law. | Domain | Accepted | INV-002-tagged "
+            "tests in [`src/tests.rs`](../src/tests.rs). |\n",
+            encoding="utf-8",
+        )
+
+        with patch.object(
+            check_docs_consistency,
+            "rust_test_invariant_tags",
+            wraps=check_docs_consistency.rust_test_invariant_tags,
+        ) as tag_scan:
+            failures = run_checks(self.root)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(tag_scan.call_count, 1)
+
     def test_reverse_discovers_doc_tag_across_comment_gap(self) -> None:
         (self.root / "src/uncited.rs").write_text(
             "/// INV-001: attached despite the gap.\n"
@@ -437,6 +465,21 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("src/uncited.rs", failures[0].message)
 
+    def test_reverse_discovers_root_qualified_test_attribute(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[::tokio::test]\n"
+            "async fn s01_inv_001_root_qualified_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
     def test_invariant_tag_requires_identifier_boundary(self) -> None:
         (self.root / "src/context.rs").write_text(
             "#[test]\n"
@@ -505,6 +548,15 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_active_cfg_attr_can_disable_test_declaration(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[cfg_attr(all(), cfg(any()), test)]\n"
+            "fn s01_inv_001_never_exists() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_test_generating_macro_is_rejected(self) -> None:
         (self.root / "src/generated.rs").write_text(
             "macro_rules! invariant_test {\n"
@@ -524,10 +576,47 @@ class DocsConsistencyTests(unittest.TestCase):
             ["invariant-test-generation"],
         )
         self.assertIn(
-            "`macro_rules! invariant_test` emits a test attribute",
+            "`macro_rules! invariant_test` emits or forwards a test attribute",
             failures[0].message,
         )
 
+
+    def test_attribute_forwarding_macro_is_rejected(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! invariant_test {\n"
+            "    ($attr:meta, $name:ident) => {\n"
+            "        #[$attr]\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "invariant_test!(test, s01_inv_001_generated);\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "`macro_rules! invariant_test` emits or forwards a test attribute",
+            failures[0].message,
+        )
+
+    def test_non_test_attribute_forwarding_macro_is_allowed(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! documented {\n"
+            "    ($attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        struct Item;\n"
+            "    };\n"
+            "}\n"
+            "documented!(derive(Clone));\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
 
     def test_cfg_predicate_test_token_does_not_mark_function_as_test(self) -> None:
         (self.root / "src/context.rs").write_text(
