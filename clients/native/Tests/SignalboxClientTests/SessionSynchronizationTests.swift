@@ -9,25 +9,36 @@ final class SessionSynchronizationTests: XCTestCase {
     var transport = try SynchronizationFixture.transport()
 
     let connectEffects = transport.send(.start)
-    let helloEffects = transport.send(.connected(generation: 1))
+    let helloEffects = transport.send(
+      .connected(generation: SynchronizationFixture.initialGeneration)
+    )
     let historyEffects = transport.send(
       .frame(
-        generation: 1,
+        generation: SynchronizationFixture.initialGeneration,
         message: try SynchronizationFixture.snapshotStart(cursor: snapshotCursor)
       )
     )
     let turnEffects = transport.send(
-      .frame(generation: 1, message: try SynchronizationFixture.queuedTurn())
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.queuedTurn()
+      )
     )
     let textEffects = transport.send(
-      .frame(generation: 1, message: try SynchronizationFixture.textEntry())
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.textEntry()
+      )
     )
     let contentEffects = transport.send(
-      .frame(generation: 1, message: try SynchronizationFixture.content())
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.content()
+      )
     )
     let replayEffects = transport.send(
       .frame(
-        generation: 1,
+        generation: SynchronizationFixture.initialGeneration,
         message: try SynchronizationFixture.snapshotEnd(
           cursor: snapshotCursor,
           turnCount: 1,
@@ -35,15 +46,20 @@ final class SessionSynchronizationTests: XCTestCase {
         )
       )
     )
-    let steadyEffects = transport.send(.replayCompleted(generation: 1))
+    let steadyEffects = transport.send(
+      .replayCompleted(generation: SynchronizationFixture.initialGeneration)
+    )
     let snapshot = try SynchronizationFixture.publishedSnapshot(in: replayEffects)
 
     XCTAssertEqual(
       connectEffects,
       [
-        .openFollow(sessionID: try SynchronizationFixture.sessionID(), generation: 1),
+        .openFollow(
+          sessionID: try SynchronizationFixture.sessionID(),
+          generation: SynchronizationFixture.initialGeneration
+        ),
         .armDeadline(
-          token: .connect(generation: 1),
+          token: .connect(generation: SynchronizationFixture.initialGeneration),
           duration: SynchronizationFixture.policy.deadlines.connect
         ),
       ]
@@ -51,9 +67,9 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(
       helloEffects,
       [
-        .cancelDeadline(.connect(generation: 1)),
+        .cancelDeadline(.connect(generation: SynchronizationFixture.initialGeneration)),
         .armDeadline(
-          token: .hello(generation: 1),
+          token: .hello(generation: SynchronizationFixture.initialGeneration),
           duration: SynchronizationFixture.policy.deadlines.hello
         ),
       ]
@@ -61,9 +77,9 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(
       historyEffects,
       [
-        .cancelDeadline(.hello(generation: 1)),
+        .cancelDeadline(.hello(generation: SynchronizationFixture.initialGeneration)),
         .armDeadline(
-          token: .history(generation: 1),
+          token: .history(generation: SynchronizationFixture.initialGeneration),
           duration: SynchronizationFixture.policy.deadlines.history
         ),
       ]
@@ -75,12 +91,16 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(snapshot.records.count, 3)
     XCTAssertEqual(
       steadyEffects,
-      [.cancelDeadline(.replay(generation: 1))]
+      [
+        .cancelDeadline(
+          .replay(generation: SynchronizationFixture.initialGeneration)
+        )
+      ]
     )
     XCTAssertEqual(
       transport.machine.phase,
       .steady(
-        generation: 1,
+        generation: SynchronizationFixture.initialGeneration,
         cursor: SignalboxCanonicalUInt64(rawValue: snapshotCursor),
         refreshID: nil
       )
