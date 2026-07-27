@@ -211,6 +211,32 @@ fn render_message(message: &ConversationMessage) -> Result<PromptMessage<'_>, Tr
         ConversationRole::User => "user",
         ConversationRole::Assistant => "assistant",
     };
+    // Reject locally knowable role/part contradictions before the operation
+    // crosses the spawn boundary, matching the sibling adapters: a tool call is
+    // replayed assistant output and a tool result is caller-produced, so
+    // neither belongs under the opposite role, and thinking is assistant-only.
+    for part in &message.parts {
+        let valid = matches!(part, MessagePart::Text(_))
+            || matches!(
+                (message.role, part),
+                (ConversationRole::User, MessagePart::ToolResult(_))
+                    | (
+                        ConversationRole::Assistant,
+                        MessagePart::ToolCall(_)
+                            | MessagePart::Thinking { .. }
+                            | MessagePart::RedactedThinking { .. }
+                    )
+            );
+        if !valid {
+            return Err(TranslationError::Failure(
+                PreparationFailure::UnsupportedOperation {
+                    detail: "Codex requires tool results in user messages and tool calls or \
+                             thinking blocks in assistant messages"
+                        .to_string(),
+                },
+            ));
+        }
+    }
     let parts = message
         .parts
         .iter()
@@ -311,10 +337,72 @@ mod tests {
     use signalbox_model_runtime::{
         ConversationMessage, ConversationRole, CredentialReference, MessagePart, ModelOperation,
         ModelSettings, RequestedTarget, ResolvedTarget, ToolCallId, ToolCallProposal,
-        ToolDefinition, ToolName,
+        ToolDefinition, ToolName, ToolResultRecord,
     };
 
     use super::translate;
+
+    fn operation_with_message(message: ConversationMessage) -> ModelOperation<()> {
+        ModelOperation::new(
+            (),
+            CredentialReference::new("codex-subscription"),
+            RequestedTarget::new("requested"),
+            ResolvedTarget::new("resolved"),
+            vec![message],
+            ModelSettings::new(64),
+        )
+    }
+
+    #[test]
+    fn tool_call_in_a_user_message_is_unsupported() {
+        let operation = operation_with_message(ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call_role"),
+                name: ToolName::new("lookup"),
+                arguments_json: "{}".to_string(),
+            })],
+        });
+
+        assert!(translate(&operation).is_err());
+    }
+
+    #[test]
+    fn tool_result_in_an_assistant_message_is_unsupported() {
+        let operation = operation_with_message(ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                tool_call_id: ToolCallId::new("call_role"),
+                content: "done".to_string(),
+                is_error: false,
+            })],
+        });
+
+        assert!(translate(&operation).is_err());
+    }
+
+    #[test]
+    fn valid_role_part_pairs_translate() {
+        let user = operation_with_message(ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                tool_call_id: ToolCallId::new("call_role"),
+                content: "done".to_string(),
+                is_error: false,
+            })],
+        });
+        let assistant = operation_with_message(ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call_role"),
+                name: ToolName::new("lookup"),
+                arguments_json: "{}".to_string(),
+            })],
+        });
+
+        assert!(translate(&user).is_ok());
+        assert!(translate(&assistant).is_ok());
+    }
 
     fn deeply_nested_operation() -> ModelOperation<()> {
         let depth = 512;
