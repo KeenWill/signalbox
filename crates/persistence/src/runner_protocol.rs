@@ -925,7 +925,7 @@ impl RunnerProtocolStore {
             })
             .transpose()?;
         loaded
-            .into_reconstituted_loss(no_execution.as_ref())
+            .into_reconstituted_loss(no_execution.as_ref(), false)
             .map(Some)
             .map_err(RunnerProtocolStoreError::Domain)
     }
@@ -2147,6 +2147,8 @@ fn decode_lease(
             recorded_effect: decode_effect(row.get("effect_class"))?,
             recorded_credential_authorization: authorization.clone(),
             recorded_state: decode_lease_state(row.get("state_kind"))?,
+            retry_prepared: false,
+            recorded_retry_prepared: false,
         },
         registration,
     )

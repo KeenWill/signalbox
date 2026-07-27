@@ -295,6 +295,8 @@ fn lease_with_cross_wired_dispatch(
             recorded_effect: lease.effect(),
             recorded_credential_authorization: authorization,
             recorded_state: lease.state(),
+            retry_prepared: false,
+            recorded_retry_prepared: false,
         },
         registration,
     )
@@ -319,6 +321,8 @@ fn duplicate_lease(lease: &RunnerLease, registration: &ValidatedRunnerRegistrati
             recorded_effect: lease.effect(),
             recorded_credential_authorization: authorization,
             recorded_state: lease.state(),
+            retry_prepared: false,
+            recorded_retry_prepared: false,
         },
         registration,
     )
