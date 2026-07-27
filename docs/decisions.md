@@ -10,6 +10,47 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Surface turn control as the interrupt treatment and the canonical decision command
+
+**Context.** A client could observe a runaway or tool-parked turn but could not
+act on it: no wire request stopped the active turn or decided a pending tool
+request. The domain and persistence spine for both actions already exists — the
+applied-interrupt stop path with its durable cancellation requests, and the
+`DecideToolRequest` command with replay-equality — with no client surface.
+
+**Decision.** Protocol version eight adds two additive requests. `stop_turn` is
+the accepted `Interrupt` delivery on the wire: it names the observed active
+turn, carries the immediate-successor content the interrupt algebra requires,
+and projects the previously daemon-internal interrupt refusals as typed wire
+rejections. `decide_tool_request` issues the canonical decision command; its
+wire posture requires a denial reason, and the named session is a routing
+precondition refused before command recording rather than part of the canonical
+payload. Version eight was taken while version seven was still reserved by the
+then-open owner turn-reconciliation stack; that stack has since landed, so the
+admitted chain is complete. The tool-loop repository's replay-payload mismatch
+became the typed `ConflictingCommandReuse` error so the wire reports
+`conflicting_reuse` without string matching.
+
+**Rejected alternatives.** A standalone content-free cancellation command is the
+obvious verb shape, but the accepted algebra makes an applied interrupt — with
+its immediate successor — the only cancellation authority (INV-029), and the
+recorded open question reserves the standalone command for a future foundation
+decision with its own proof and disposition rules and a migration; fabricating
+synthetic successor content daemon-side would launder a stop into owner speech.
+An optional wire denial reason would mirror the domain, but every
+client-recorded denial is rendered to the model, and an unexplained denial
+invites a retry loop. Separate approve and deny wire requests would split one
+canonical command into two vocabularies.
+
+**Affects.** `crates/process-protocol` (version eight, two requests, one
+receipt, eight rejection details), the daemon request adapter and its
+session-correlation precondition read, `crates/persistence`
+(`ConflictingCommandReuse`, the `tool_request_session` read, the public
+recorded-decision probe), the terminal client's `stop`, `approve`, and `deny`
+verbs and version selection, the terminal-client CI suite filter, and the
+process-protocol, turn-lifecycle-and-scheduling, and tool-loop specification
+pages.
+
 ## 2026-07-26 — Narrow a credential file to its value, and name credential faults
 
 **Context.** The first live dogfood run of the dev instance could not use a
