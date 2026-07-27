@@ -143,7 +143,87 @@ fn redact_text_literal(text: &str) -> String {
     for name in VALUE_CREDENTIAL_NAMES {
         sanitized = redact_spaced_credential(&sanitized, name, ValueTermination::Token);
     }
+    sanitized = redact_identifier_assignment(&sanitized);
     sanitized
+}
+
+/// Whether the credential shape inside a key is a free-form secret whose
+/// unquoted value can carry spaces, so its assignment consumes the whole line
+/// rather than stopping at the first whitespace.
+fn credential_key_is_free_form(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .map(|character| character.to_ascii_lowercase())
+        .collect::<String>();
+    [
+        "authorization",
+        "password",
+        "secret",
+        "credential",
+        "cookie",
+    ]
+    .iter()
+    .any(|shape| normalized.contains(shape))
+}
+
+/// The credential identifier immediately before an assignment separator: a
+/// bare `[A-Za-z0-9_-]+` run or a quoted key, whichever ends the text. Returns
+/// the identifier content for the `credential_key` contains-policy check.
+fn trailing_identifier(before_separator: &str) -> Option<(&str, bool)> {
+    let trimmed = before_separator.trim_end_matches([' ', '\t']);
+    for quote in ['"', '\''] {
+        if let Some(without_close) = trimmed.strip_suffix(quote) {
+            let start = without_close.rfind(quote)?;
+            return Some((&without_close[start + 1..], true));
+        }
+    }
+    let start = trimmed
+        .rfind(|character: char| {
+            !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
+        })
+        .map_or(0, |index| index + 1);
+    (start < trimmed.len()).then_some((&trimmed[start..], false))
+}
+
+/// Redacts `identifier = value` / `identifier: value` where the identifier is
+/// a complete name (bare or quoted) whose contains-policy matches a credential
+/// shape, catching composite names (`AWS_SECRET_ACCESS_KEY`, `client_secret`)
+/// and TOML quoted keys (`"api_key" = …`) the exact-name scanners miss.
+fn redact_identifier_assignment(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(separator) = remaining
+        .bytes()
+        .position(|byte| matches!(byte, b'=' | b':'))
+    {
+        let is_colon = remaining.as_bytes()[separator] == b':';
+        // A quoted key before `:` is a JSON member the JSON scanner already
+        // owns; only a `=` after a quoted key (TOML) or any separator after a
+        // bare key is a plaintext credential assignment.
+        if let Some((identifier, quoted)) = trailing_identifier(&remaining[..separator])
+            && !(quoted && is_colon)
+            && credential_key(identifier)
+        {
+            let termination = if credential_key_is_free_form(identifier) {
+                ValueTermination::Line
+            } else {
+                ValueTermination::Token
+            };
+            let value_start = separator + 1;
+            output.push_str(&remaining[..value_start]);
+            let (prefix, token_start, value_end) =
+                credential_value_bounds(remaining, value_start, termination);
+            output.push_str(prefix);
+            output.push_str(REDACTED);
+            remaining = &remaining[value_end.max(token_start)..];
+        } else {
+            output.push_str(&remaining[..=separator]);
+            remaining = &remaining[separator + 1..];
+        }
+    }
+    output.push_str(remaining);
+    output
 }
 
 /// Credential names whose spaced `name = value` / `name : value` form the
@@ -480,6 +560,19 @@ fn credential_value_bounds(
         };
         return (&text[value_start..value_body], value_body, value_end);
     }
+    // A TOML multiline value opens with three quotes; a plain `quoted_value_end`
+    // would treat the second quote as the close and emit the body. Consume
+    // through the matching triple delimiter, or to the text end when
+    // unterminated.
+    for triple in ["\"\"\"", "'''"] {
+        if text[value_body..].starts_with(triple) {
+            let body_start = value_body + triple.len();
+            let value_end = text[body_start..]
+                .find(triple)
+                .map_or(text.len(), |offset| body_start + offset + triple.len());
+            return (&text[value_start..value_body], value_body, value_end);
+        }
+    }
     let opening_quote = opening.filter(|character| matches!(character, '"' | '\''));
     let prefix_end = value_body + usize::from(opening_quote.is_some());
     let value_end = opening_quote.map_or_else(
@@ -511,17 +604,26 @@ fn credential_value_bounds(
 /// when the block is unterminated. `None` when the value is not a PEM block.
 fn pem_block_end(text: &str, value_start: usize) -> Option<usize> {
     const BEGIN: &str = "-----BEGIN";
-    const END: &str = "-----END";
     const DASHES: &str = "-----";
     if !text[value_start..].starts_with(BEGIN) {
         return None;
     }
-    let end_marker = match find_ascii_case_insensitive(&text[value_start..], END) {
-        Some(offset) => value_start + offset + END.len(),
-        None => return Some(text.len()),
+    // The BEGIN header is `-----BEGIN <label>-----`; the matching close is
+    // `-----END <label>-----`. Requiring the same label prevents an intervening
+    // mismatched marker (a `-----END CERTIFICATE-----` before the real
+    // `-----END PRIVATE KEY-----`) from releasing the key body; a missing
+    // matching marker suppresses through the input end.
+    let after_begin = value_start + BEGIN.len();
+    let Some(label_end) = text[after_begin..]
+        .find(DASHES)
+        .map(|offset| after_begin + offset)
+    else {
+        return Some(text.len());
     };
-    match text[end_marker..].find(DASHES) {
-        Some(offset) => Some(end_marker + offset + DASHES.len()),
+    let label = text[after_begin..label_end].trim();
+    let end_marker = format!("-----END {label}{DASHES}");
+    match find_ascii_case_insensitive(&text[label_end..], &end_marker) {
+        Some(offset) => Some(label_end + offset + end_marker.len()),
         None => Some(text.len()),
     }
 }
@@ -980,6 +1082,7 @@ fn stream_candidate_starts_at_zero(text: &str) -> bool {
         }
         || trailing_partial_unicode_escape(text) == Some(0)
         || spaced_credential_starts_at_zero(text)
+        || identifier_assignment_unsafe_start(text) == Some(0)
 }
 
 /// Whether `text` begins a spaced credential assignment — a recognized name
@@ -1069,6 +1172,9 @@ fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
     if let Some(start) = spaced_credential_unsafe_start(text) {
         earliest = Some(earliest.map_or(start, |current| current.min(start)));
     }
+    if let Some(start) = identifier_assignment_unsafe_start(text) {
+        earliest = Some(earliest.map_or(start, |current| current.min(start)));
+    }
     earliest
 }
 
@@ -1119,6 +1225,51 @@ fn spaced_credential_unsafe_start(text: &str) -> Option<usize> {
             }
             offset = after_name;
         }
+    }
+    earliest
+}
+
+/// Byte offset of a trailing credential identifier assignment still in progress
+/// at the end of a fragment — a composite (`AWS_SECRET_ACCESS_KEY`) or quoted
+/// (`"api_key"`) key that the exact-name scanners miss, either awaiting its
+/// separator or with an unterminated value — so a credential split across
+/// deltas is held rather than emitted piecewise.
+fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
+    let mut earliest: Option<usize> = None;
+    let mut fold = |start: usize| {
+        earliest = Some(earliest.map_or(start, |current: usize| current.min(start)));
+    };
+    let base = text.as_ptr() as usize;
+    for (separator, byte) in text.bytes().enumerate() {
+        if !matches!(byte, b'=' | b':') {
+            continue;
+        }
+        let is_colon = byte == b':';
+        if let Some((identifier, quoted)) = trailing_identifier(&text[..separator])
+            && !(quoted && is_colon)
+            && credential_key(identifier)
+        {
+            let termination = if credential_key_is_free_form(identifier) {
+                ValueTermination::Line
+            } else {
+                ValueTermination::Token
+            };
+            let (_, token_start, value_end) =
+                credential_value_bounds(text, separator + 1, termination);
+            if value_end.max(token_start) == text.len() {
+                let content = identifier.as_ptr() as usize - base;
+                fold(if quoted { content - 1 } else { content });
+            }
+        }
+    }
+    // A trailing identifier with no separator yet — a separator may arrive in
+    // the next delta.
+    let end_trimmed = text.trim_end_matches([' ', '\t']);
+    if let Some((identifier, quoted)) = trailing_identifier(end_trimmed)
+        && credential_key(identifier)
+    {
+        let content = identifier.as_ptr() as usize - base;
+        fold(if quoted { content - 1 } else { content });
     }
     earliest
 }
@@ -1691,6 +1842,55 @@ mod tests {
         assert!(!output.contains("BEGIN PRIVATE KEY"));
         assert!(output.contains("[redacted]"));
         assert!(output.contains("safe-after"));
+    }
+
+    /// INV-035: a mismatched intervening `-----END …-----` marker does not
+    /// release the PEM body; suppression continues to the matching END.
+    #[test]
+    fn inv_035_pem_requires_the_matching_end_label() {
+        let fixture = "private_key = -----BEGIN PRIVATE KEY-----\nMIIBmismatch-body\n-----END CERTIFICATE-----\nMIIBmore-key-body\n-----END PRIVATE KEY-----\nsafe-tail";
+        let output = redact_text(fixture);
+
+        assert!(!output.contains("MIIBmismatch-body"));
+        assert!(!output.contains("MIIBmore-key-body"));
+        assert!(output.contains("[redacted]"));
+        assert!(output.contains("safe-tail"));
+    }
+
+    /// INV-035: a TOML triple-quoted credential value is consumed through its
+    /// matching triple delimiter, not just the empty span between the first
+    /// two quotes.
+    #[test]
+    fn inv_035_redacts_triple_quoted_credential_values() {
+        let fixture = "private_key = \"\"\"-----BEGIN PRIVATE KEY-----\nMIIBtriple-body\n-----END PRIVATE KEY-----\"\"\"\nsafe-tail";
+        let output = redact_text(fixture);
+
+        assert!(!output.contains("MIIBtriple-body"));
+        assert!(output.contains("[redacted]"));
+        assert!(output.contains("safe-tail"));
+    }
+
+    /// INV-035: a quoted TOML assignment key with `=` is redacted.
+    #[test]
+    fn inv_035_redacts_quoted_key_equals_assignment() {
+        let output = redact_text("\"api_key\" = opaque-quoted-key-value tail");
+
+        assert!(!output.contains("opaque-quoted-key-value"));
+        assert!(output.contains("[redacted]"));
+        assert!(output.contains("tail"));
+    }
+
+    /// INV-035: composite identifier assignments whose credential shape is
+    /// embedded (not at the identifier end) are redacted in plaintext.
+    #[test]
+    fn inv_035_redacts_composite_identifier_assignments() {
+        let client = redact_text("client_secret = opaque-client-secret and tail");
+        let aws = redact_text("AWS_SECRET_ACCESS_KEY=opaque-aws-secret");
+
+        assert!(!client.contains("opaque-client-secret"));
+        assert!(client.contains("[redacted]"));
+        assert!(!aws.contains("opaque-aws-secret"));
+        assert!(aws.contains("[redacted]"));
     }
 
     /// The trailing credential context is the unsafe suffix; a clean-ending

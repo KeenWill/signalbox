@@ -773,34 +773,48 @@ async fn execute_process<C: Clone + Send + Sync>(
                     biased;
                     result = &mut exit_wait => result,
                     () = &mut *cancellation => {
-                        interrupt_then_kill(
-                            &mut child,
-                            remaining_interrupt_grace(prepared.interrupt_grace, deadline),
-                        )
-                        .await;
-                        // A cancellation that arrives after the terminal
-                        // marker drives cleanup but cannot replace the
-                        // definitive evidence, exactly as on the stdout and
-                        // stderr waits above.
-                        if terminal_observed {
-                            let evidence = if let Some(error) = input_error {
-                                decoder.boundary_loss_unless_provider_failure(
-                                    incomplete_upload_cause(&error),
-                                    &redacting_sink,
-                                )
-                            } else {
-                                decoder.finish(&mut redacting_sink)
-                            };
+                        // Re-probe: the leader may have exited nonzero while the
+                        // blocking waiter was scheduling; preserve that
+                        // definitive status through classification below rather
+                        // than laundering it via cancellation cleanup.
+                        if leader_exited_without_reaping(child.id()) {
+                            Ok(())
+                        } else {
+                            interrupt_then_kill(
+                                &mut child,
+                                remaining_interrupt_grace(prepared.interrupt_grace, deadline),
+                            )
+                            .await;
+                            // A cancellation after a terminal marker drives
+                            // cleanup but cannot replace the definitive
+                            // evidence, exactly as on the stdout and stderr
+                            // waits above.
+                            if terminal_observed {
+                                let evidence = if let Some(error) = input_error {
+                                    decoder.boundary_loss_unless_provider_failure(
+                                        incomplete_upload_cause(&error),
+                                        &redacting_sink,
+                                    )
+                                } else {
+                                    decoder.finish(&mut redacting_sink)
+                                };
+                                redacting_sink.finish();
+                                return evidence;
+                            }
                             redacting_sink.finish();
-                            return evidence;
+                            return decoder.boundary_loss(LossCause::CancellationRequested);
                         }
-                        redacting_sink.finish();
-                        return decoder.boundary_loss(LossCause::CancellationRequested);
                     },
                     () = tokio::time::sleep_until(deadline) => {
-                        force_kill(&mut child).await;
-                        redacting_sink.finish();
-                        return decoder.boundary_loss(timeout_cause());
+                        // Re-probe before timeout cleanup so a leader that
+                        // exited while the waiter scheduled keeps its status.
+                        if leader_exited_without_reaping(child.id()) {
+                            Ok(())
+                        } else {
+                            force_kill(&mut child).await;
+                            redacting_sink.finish();
+                            return decoder.boundary_loss(timeout_cause());
+                        }
                     },
                 }
             };
@@ -910,11 +924,17 @@ async fn reap_exited_leader(
         return None;
     };
     child.disarm();
-    let detail = if stderr_task.is_finished() {
-        stderr_result((&mut *stderr_task).await)
-    } else {
-        abort_stderr_task(stderr_task).await;
-        "Codex stderr was unavailable after cancellation".to_string()
+    // Killing the group closes the descendants' stderr write ends, so the
+    // reader reaches EOF and finishes with its already-buffered classifiable
+    // failure text; await it under a short bound (rather than aborting an
+    // is_finished()-not-yet reader) so that detail is not discarded and a
+    // recognizable provider failure is not degraded to `Unrecognized`.
+    let detail = match tokio::time::timeout(POST_KILL_REAP_BOUND, &mut *stderr_task).await {
+        Ok(result) => stderr_result(result),
+        Err(_) => {
+            abort_stderr_task(stderr_task).await;
+            "Codex stderr was unavailable after cancellation".to_string()
+        }
     };
     Some((Ok(status), detail))
 }
