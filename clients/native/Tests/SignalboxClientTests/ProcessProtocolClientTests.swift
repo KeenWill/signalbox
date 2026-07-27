@@ -138,23 +138,17 @@ final class ProcessProtocolClientTests: XCTestCase {
     let client = SignalboxProcessClient(
       connectionFactory: ScriptedProcessConnectionFactory(connection: connection)
     )
-    let opening = Task { () -> Bool in
-      do {
-        _ = try await client.open(.listSessions)
-        return false
-      } catch is CancellationError {
-        return true
-      } catch {
-        return false
-      }
-    }
+    let opening = Task { await capturedOpenError(client) }
     await connection.waitUntilSendStarted()
 
     opening.cancel()
-    let wasCancelled = await opening.value
+    let error = await opening.value
     let closeCount = await connection.closeCount
 
-    XCTAssertTrue(wasCancelled)
+    XCTAssertEqual(
+      error,
+      .sendOutcomeUnknown(ProcessProtocolClientFixture.cancelledSendMessage)
+    )
     XCTAssertEqual(closeCount, 1)
   }
 
@@ -301,6 +295,10 @@ private actor ScriptedProcessConnection: SignalboxProcessConnection {
     receiveContinuation?.resume(throwing: CancellationError())
     receiveContinuation = nil
   }
+}
+
+private enum ProcessProtocolClientFixture {
+  static let cancelledSendMessage = SignalboxProcessClient.sendCancellationMessage
 }
 
 private enum ProcessProtocolClientFixtureError: LocalizedError {

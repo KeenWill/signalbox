@@ -71,6 +71,9 @@ public enum SignalboxProcessRequestOpenError: LocalizedError, Equatable {
 }
 
 public actor SignalboxProcessClient: SignalboxProcessRequesting {
+  static let sendCancellationMessage =
+    "The process request send was cancelled after it began."
+
   private let connectionFactory: any SignalboxProcessConnectionFactory
   private var nextRequestID: UInt64
 
@@ -112,14 +115,18 @@ public actor SignalboxProcessClient: SignalboxProcessRequesting {
         try await connection.send(encoded)
       } catch is CancellationError {
         await connection.close()
-        throw CancellationError()
+        throw SignalboxProcessRequestOpenError.sendOutcomeUnknown(
+          Self.sendCancellationMessage
+        )
       } catch {
         await connection.close()
         throw SignalboxProcessRequestOpenError.sendOutcomeUnknown(error.localizedDescription)
       }
       guard !Task.isCancelled else {
         await connection.close()
-        throw CancellationError()
+        throw SignalboxProcessRequestOpenError.sendOutcomeUnknown(
+          Self.sendCancellationMessage
+        )
       }
       return SignalboxPullProcessExchange(
         connection: connection,
