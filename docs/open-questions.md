@@ -64,13 +64,13 @@ identifiers refer to [scenarios.md](scenarios.md).
   converter. A later slice must select each source format's exact mapping and
   converter version, with synthetic fixtures and persistence round-trip
   coverage. The accepted format-versioned converter seam remains fixed. (S28)
-- **Import discovery and operational surfaces beyond one file.** The owner
-  terminal's explicit-format, one-file operation and its distinct inserted or
-  already-imported receipt are implemented in
-  [conversation-import](spec/conversation-import.md#operational-surface).
-  Directory traversal, file watching, bulk-import policy, source-size admission
-  beyond the inherited process-frame bound, raw-record access, and any
-  authorization beyond the owner-private local socket remain undecided. (S28)
+- **Import operational surfaces beyond explicit file and directory scans.** The
+  owner terminal's explicit-format, one-file and recursive directory-scan
+  operations are implemented in
+  [conversation-import](spec/conversation-import.md#operational-surface). File
+  watching, source-size admission beyond the inherited process-frame bound,
+  raw-record access, and any authorization beyond the owner-private local socket
+  remain undecided. (S28)
 
 ## Delegation
 

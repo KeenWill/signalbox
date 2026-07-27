@@ -1,16 +1,25 @@
 //! Terminal client for the closed local Signalbox process protocol.
 
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
+    fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    os::unix::ffi::OsStrExt as _,
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
-use arguments::{Command, DangerousToolAutoApprovalArgument, ParseOutcome, SystemPromptArgument};
+use arguments::{
+    Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome,
+    SystemPromptArgument,
+};
 use connection::ProcessClient;
 use error::ClientError;
 use presentation::{Output, SessionMetadataRow, SnapshotSelection};
+use rustix::{
+    fd::OwnedFd,
+    fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fstat, openat, statat},
+};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportFormat,
     ConversationImportSource, ErrorCode, InputContent, MAX_FRAME_BYTES,
@@ -55,6 +64,34 @@ impl SessionMetadataPageRequest {
             after_session_id: self.after_session_id,
         }
     }
+}
+
+enum PreparedImport {
+    File(Vec<u8>),
+    Scan(PreparedImportScan),
+}
+
+struct PreparedImportScan {
+    root: OwnedFd,
+    paths: Vec<ScannedImportPath>,
+}
+
+struct ScannedImportPath {
+    relative: PathBuf,
+    display: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConversationImportOutcome {
+    Inserted(CanonicalUuid),
+    AlreadyImported(CanonicalUuid),
+}
+
+#[derive(Default)]
+pub(crate) struct ImportScanSummary {
+    pub(crate) imported: usize,
+    pub(crate) already_imported: usize,
+    pub(crate) skipped: usize,
 }
 
 /// Parses and runs one terminal-client invocation.
@@ -106,8 +143,15 @@ async fn execute(
     } else {
         None
     };
-    let import_source = match &arguments.command {
-        Command::Import { path, .. } => Some(read_import_source(path).await?),
+    let prepared_import = match &arguments.command {
+        Command::Import {
+            source: ImportSourceArgument::File(path),
+            ..
+        } => Some(PreparedImport::File(read_import_source(path).await?)),
+        Command::Import {
+            source: ImportSourceArgument::Scan(path),
+            ..
+        } => Some(PreparedImport::Scan(collect_import_paths(path)?)),
         Command::Create { .. }
         | Command::List
         | Command::Search(_)
@@ -214,8 +258,15 @@ async fn execute(
         }
         Command::Follow { session_id } => follow(&mut client, &mut output, session_id).await,
         Command::Import { format, .. } => {
-            let source = import_source.ok_or(ClientError::Input("import source was not read"))?;
-            import_conversation(&mut client, &mut output, format, source).await
+            match prepared_import.ok_or(ClientError::Input("import source was not prepared"))? {
+                PreparedImport::File(source) => {
+                    let outcome = import_conversation(&mut client, format, source).await?;
+                    write_single_import_outcome(&mut output, outcome)
+                }
+                PreparedImport::Scan(scan) => {
+                    scan_conversations(&mut client, &mut output, format, scan).await
+                }
+            }
         }
         Command::Reconcile {
             session_id,
@@ -291,6 +342,10 @@ async fn read_import_source(path: &Path) -> Result<Vec<u8>, ClientError> {
     let file = tokio::fs::File::open(path)
         .await
         .map_err(ClientError::source_file)?;
+    read_import_file(file).await
+}
+
+async fn read_import_file(file: tokio::fs::File) -> Result<Vec<u8>, ClientError> {
     let read_limit = MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES
         .checked_add(1)
         .ok_or(ClientError::Protocol("import read bound overflow"))?;
@@ -662,12 +717,127 @@ async fn read_session_metadata_page(
     }
 }
 
+fn collect_import_paths(root: &Path) -> Result<PreparedImportScan, ClientError> {
+    let root_metadata = std::fs::symlink_metadata(root).map_err(ClientError::scan_directory)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(ClientError::Input("--scan requires a directory"));
+    }
+
+    let root_fd = openat(
+        CWD,
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)
+    .map_err(ClientError::scan_directory)?;
+    let root_directory = Dir::read_from(&root_fd)
+        .map_err(std::io::Error::from)
+        .map_err(ClientError::scan_directory)?;
+    let mut pending = vec![(PathBuf::new(), root_directory)];
+    let mut paths = Vec::new();
+    while let Some((relative_directory, directory)) = pending.last_mut() {
+        let Some(entry) = directory.read() else {
+            pending.pop();
+            continue;
+        };
+        let entry = entry
+            .map_err(std::io::Error::from)
+            .map_err(ClientError::scan_directory)?;
+        let name_bytes = entry.file_name().to_bytes();
+        if name_bytes == b"." || name_bytes == b".." {
+            continue;
+        }
+        let name = OsStr::from_bytes(name_bytes);
+        let relative = relative_directory.join(name);
+        let descriptor = directory
+            .fd()
+            .map_err(std::io::Error::from)
+            .map_err(ClientError::scan_directory)?;
+        let status = statat(descriptor, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(std::io::Error::from)
+            .map_err(ClientError::scan_directory)?;
+        match FileType::from_raw_mode(status.st_mode) {
+            FileType::Directory => {
+                let child = openat(
+                    descriptor,
+                    name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(std::io::Error::from)
+                .map_err(ClientError::scan_directory)?;
+                let child = Dir::new(child)
+                    .map_err(std::io::Error::from)
+                    .map_err(ClientError::scan_directory)?;
+                pending.push((relative, child));
+            }
+            FileType::RegularFile if relative.extension() == Some(OsStr::new("jsonl")) => {
+                paths.push(ScannedImportPath {
+                    display: root.join(&relative),
+                    relative,
+                });
+            }
+            FileType::RegularFile
+            | FileType::Symlink
+            | FileType::Fifo
+            | FileType::Socket
+            | FileType::CharacterDevice
+            | FileType::BlockDevice
+            | FileType::Unknown => {}
+        }
+    }
+    paths.sort_by(|left, right| left.display.cmp(&right.display));
+    Ok(PreparedImportScan {
+        root: root_fd,
+        paths,
+    })
+}
+
+fn open_scanned_import_source(
+    root: &OwnedFd,
+    relative: &Path,
+) -> Result<tokio::fs::File, ClientError> {
+    let mut components = relative.components().peekable();
+    let mut current = None;
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(ClientError::Protocol(
+                "scan produced a non-relative candidate path",
+            ));
+        };
+        let parent = current.as_ref().unwrap_or(root);
+        let flags = if components.peek().is_some() {
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+        } else {
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC
+        };
+        current = Some(
+            openat(parent, name, flags, Mode::empty())
+                .map_err(std::io::Error::from)
+                .map_err(ClientError::source_file)?,
+        );
+    }
+    let descriptor = current.ok_or(ClientError::Protocol(
+        "scan produced an empty candidate path",
+    ))?;
+    let status = fstat(&descriptor)
+        .map_err(std::io::Error::from)
+        .map_err(ClientError::source_file)?;
+    if FileType::from_raw_mode(status.st_mode) != FileType::RegularFile {
+        return Err(ClientError::source_file(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "scan candidate is no longer a regular file",
+        )));
+    }
+    Ok(tokio::fs::File::from_std(File::from(descriptor)))
+}
+
 async fn import_conversation(
     client: &mut ProcessClient,
-    output: &mut Output<'_>,
     format: ConversationImportFormat,
     source: Vec<u8>,
-) -> Result<(), ClientError> {
+) -> Result<ConversationImportOutcome, ClientError> {
     let mut connection = client
         .mutation_request(ClientRequest::ImportConversation {
             format,
@@ -677,22 +847,80 @@ async fn import_conversation(
     match connection.message().await.map_err(ClientError::mutation)? {
         ServerMessage::ConversationImportInserted {
             imported_conversation_id,
-        } => {
-            output.conversation_import_inserted(imported_conversation_id)?;
-            Ok(())
-        }
+        } => Ok(ConversationImportOutcome::Inserted(
+            imported_conversation_id,
+        )),
         ServerMessage::ConversationImportAlreadyImported {
             imported_conversation_id,
-        } => {
-            output.conversation_import_already_imported(imported_conversation_id)?;
-            Ok(())
-        }
+        } => Ok(ConversationImportOutcome::AlreadyImported(
+            imported_conversation_id,
+        )),
         ServerMessage::Error {
             code,
             message,
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("import returned an unexpected response").mutation()),
+    }
+}
+
+fn write_single_import_outcome(
+    output: &mut Output<'_>,
+    outcome: ConversationImportOutcome,
+) -> Result<(), ClientError> {
+    match outcome {
+        ConversationImportOutcome::Inserted(imported_conversation_id) => {
+            output.conversation_import_inserted(imported_conversation_id)?;
+        }
+        ConversationImportOutcome::AlreadyImported(imported_conversation_id) => {
+            output.conversation_import_already_imported(imported_conversation_id)?;
+        }
+    }
+    Ok(())
+}
+
+async fn scan_conversations(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    format: ConversationImportFormat,
+    scan: PreparedImportScan,
+) -> Result<(), ClientError> {
+    let mut summary = ImportScanSummary::default();
+    for path in scan.paths {
+        let outcome = match open_scanned_import_source(&scan.root, &path.relative) {
+            Ok(file) => read_import_file(file).await,
+            Err(error) => Err(error),
+        };
+        let outcome = match outcome {
+            Ok(source) => import_conversation(client, format, source).await,
+            Err(error) => Err(error),
+        };
+        match outcome {
+            Ok(ConversationImportOutcome::Inserted(imported_conversation_id)) => {
+                summary.imported += 1;
+                output
+                    .conversation_import_scan_inserted(&path.display, imported_conversation_id)?;
+            }
+            Ok(ConversationImportOutcome::AlreadyImported(imported_conversation_id)) => {
+                summary.already_imported += 1;
+                output.conversation_import_scan_already_imported(
+                    &path.display,
+                    imported_conversation_id,
+                )?;
+            }
+            Err(error) => {
+                summary.skipped += 1;
+                output.conversation_import_scan_skipped(&path.display, &error)?;
+            }
+        }
+    }
+    output.conversation_import_scan_summary(&summary)?;
+    if summary.skipped == 0 {
+        Ok(())
+    } else {
+        Err(ClientError::ScanIncomplete {
+            skipped_files: summary.skipped,
+        })
     }
 }
 
@@ -1499,7 +1727,9 @@ mod tests {
     use std::{
         error::Error,
         ffi::OsString,
+        fs,
         io::{self, Cursor},
+        os::unix::fs::symlink,
         path::PathBuf,
         process::ExitCode,
         time::Duration,
@@ -1519,10 +1749,10 @@ mod tests {
 
     use super::{
         MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES, ProcessClient,
-        SessionMetadataPageRequest, SnapshotSelection, TurnTerminal, create, decide,
-        model_call_recovery_transition, read_input, reconcile_turn, run, search, socket_path,
-        stop_turn, submit_input, terminal_event_state, terminal_snapshot_selection,
-        terminal_snapshot_state, tool_recovery_transition,
+        SessionMetadataPageRequest, SnapshotSelection, TurnTerminal, collect_import_paths, create,
+        decide, model_call_recovery_transition, open_scanned_import_source, read_input,
+        reconcile_turn, run, search, socket_path, stop_turn, submit_input, terminal_event_state,
+        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -1897,6 +2127,59 @@ mod tests {
             String::from_utf8_lossy(&error)
                 .contains("conversation import source cannot fit within the process frame bound")
         );
+        Ok(())
+    }
+
+    /// S28 / INV-038: a directory replaced after enumeration cannot redirect
+    /// a queued candidate read through a symbolic link.
+    #[tokio::test]
+    async fn s28_inv038_scan_refuses_directory_symlink_replacement() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        let queued_directory = root.path().join("queued");
+        let retained_directory = root.path().join("retained");
+        fs::create_dir(&queued_directory)?;
+        fs::write(queued_directory.join("conversation.jsonl"), b"inside")?;
+        fs::write(outside.path().join("conversation.jsonl"), b"outside")?;
+        let scan = collect_import_paths(root.path())?;
+        let candidate = scan
+            .paths
+            .first()
+            .ok_or("fixture must select one candidate")?;
+        let relative = candidate.relative.clone();
+        fs::rename(&queued_directory, retained_directory)?;
+        symlink(outside.path(), &queued_directory)?;
+
+        let opened = open_scanned_import_source(&scan.root, &relative);
+
+        assert!(matches!(opened, Err(ClientError::SourceFile(_))));
+        Ok(())
+    }
+
+    /// S28 / INV-038: a regular candidate replaced after enumeration by a
+    /// FIFO is rejected without waiting for a writer.
+    #[tokio::test]
+    async fn s28_inv038_scan_refuses_fifo_replacement_without_blocking()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let candidate_path = root.path().join("conversation.jsonl");
+        fs::write(&candidate_path, b"inside")?;
+        let scan = collect_import_paths(root.path())?;
+        let candidate = scan
+            .paths
+            .first()
+            .ok_or("fixture must select one candidate")?;
+        let relative = candidate.relative.clone();
+        fs::remove_file(&candidate_path)?;
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &candidate_path,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )?;
+
+        let opened = open_scanned_import_source(&scan.root, &relative);
+
+        assert!(matches!(opened, Err(ClientError::SourceFile(_))));
         Ok(())
     }
 

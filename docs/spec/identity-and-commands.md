@@ -17,19 +17,25 @@ are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [configuration-and-credentials](configuration-and-credentials.md). The
 tool-attributed metadata command and reconstitution surface was verified through
 PR #265 (`agent/tool-batch-tier0`). The failed tool-attempt telemetry fields
-were verified through PR #285 (`agent/dev-instance-code-host-credential`).
+were verified through PR #285 (`agent/dev-instance-code-host-credential`). The
+current command/telemetry identity-generation, command-family, and
+ambiguity-ownership inventory was verified through PR #288
+(`agent/audit-fix-docs-coherence`).
 
 ## Identity model
 
-Every semantic identity is a distinct, opaque, UUID-backed newtype built by the
-`define_identity!` macro in `crates/domain/src/lib.rs`: `DurableCommandId`,
-`SessionId`, `AcceptedInputId`, `TurnId`, `TurnAttemptId`, `ModelCallId`,
+The session, command, transcript, model, and tool identities owned by this page
+are distinct, opaque, UUID-backed newtypes built by the `define_identity!` macro
+in `crates/domain/src/lib.rs`: `DurableCommandId`, `SessionId`,
+`AcceptedInputId`, `TurnId`, `TurnAttemptId`, `ModelCallId`,
 `ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` there, plus
 `ImportedConversationId` and `ImportedTranscriptEntryId`
 (`imported_conversation.rs`), `SemanticTranscriptEntryId` and
 `ContextFrontierId` (`context_frontier.rs`), `DirectModelSelection` and
 `ModelAlias` (`configuration.rs`), and `ProviderModelIdentity`
-(`model_call.rs`). Each exposes only `from_uuid`, `as_uuid`, and `into_uuid`;
+(`model_call.rs`). Review-run, pass, finding, target, and external-link
+identities are owned and inventoried by [review-workflows](review-workflows.md).
+Each identity listed here exposes only `from_uuid`, `as_uuid`, and `into_uuid`;
 the macro derives value semantics and `Debug` but no storage or serialization
 traits, so every storage boundary maps explicitly (INV-001, INV-002). The
 derived `Debug` is the one logging-reachable render path (see Encoding).
@@ -189,24 +195,13 @@ records keep each command's comparison payload and result reviewable and
 constraint-checked instead of delegating meaning to a serializer; there is no
 universal JSONB or byte-blob payload anywhere.
 
-For `SubmitInput`, a second deferred constraint trigger
-(`submit_input_command_requires_correlated_effect`, migration `202607180003`,
-redefined for occupied-slot pending steering in `202607180005`) enforces effect
-correlation at every transaction boundary: an `applied` turn-origin row must
-agree field-by-field with exactly one committed `accepted_input` plus
-`queued_input_origin` effect, including the frozen model configuration; an
-applied `next_safe_point` row instead initially correlates with exactly one
-`pending_steering` accepted input naming the expected active turn, with no
-`queued_input_origin` effect permitted; a `rejected` row must have no
-accepted-input effect; and an `unknown_model_alias` rejection must match real
-alias evidence in `session_defaults_version`. The next-safe-point receipt
-remains immutable when that accepted input later becomes consumed steering or a
-reclassified origin. Equal replay returns its original
-`Applied(PendingSteering)` result only after the accepted input's current
-lifecycle passes the correlation checks owned by
-[persistence-protocol](persistence-protocol.md). Why: replay returns recorded
-results as truth, so an applied record without its exact committed effect must
-be unable to commit.
+For `SubmitInput`, each terminal command result must correlate with exactly its
+committed domain effects. Equal replay returns the recorded result only after
+the current durable state still proves that correlation; otherwise the adapter
+fails closed rather than treating an effectless receipt as truth. The exact
+relational representation, deferred triggers, migration evolution, and
+lifecycle-transition checks are owned by
+[persistence-protocol](persistence-protocol.md#relational-representation).
 
 All registry and typed-record tables are append-only, enforced by
 `reject_immutable_record_change` triggers. Why: a claimed identifier's recorded
