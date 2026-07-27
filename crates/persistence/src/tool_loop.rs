@@ -273,7 +273,8 @@ impl PostgresToolLoopRepository {
                 | CommandKind::CreateSessionFromImportedFrontier
                 | CommandKind::ReplaceSessionDefaults
                 | CommandKind::ReplaceSessionMetadata
-                | CommandKind::SubmitInput,
+                | CommandKind::SubmitInput
+                | CommandKind::ReviewWorkflow,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }
     }

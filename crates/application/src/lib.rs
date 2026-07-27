@@ -10,6 +10,7 @@ mod load_session;
 mod model_execution;
 mod operator_failure;
 mod replace_session_defaults;
+mod review_workflow;
 mod scheduler;
 mod session_metadata;
 mod start_eligible_turn;
@@ -53,6 +54,11 @@ pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{
     ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
     ReplaceSessionDefaultsTransaction,
+};
+pub use review_workflow::{
+    ReviewWorkflowCommand, ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult,
+    ReviewWorkflowCommandService, ReviewWorkflowOperation, ReviewWorkflowOperationKind,
+    ReviewWorkflowReader, ReviewWorkflowTransaction,
 };
 pub use scheduler::{
     EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass, EligibilitySweep,

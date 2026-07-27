@@ -10,6 +10,8 @@ mod support;
 use std::error::Error;
 
 use signalbox_application::{
+    ReviewWorkflowCommand, ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult,
+    ReviewWorkflowCommandService, ReviewWorkflowOperation, ReviewWorkflowOperationKind,
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
 };
 use signalbox_domain::{
@@ -27,13 +29,13 @@ use signalbox_domain::{
     ReviewFindingProposal, ReviewFindingRef, ReviewFindingSeverity, ReviewFindingStatus,
     ReviewFindingTransitionFailure, ReviewKey, ReviewLineRange, ReviewPass,
     ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
-    ReviewPassRef, ReviewPassResult, ReviewPassState, ReviewPassTurnEvidence,
-    ReviewPassTurnOutcome, ReviewPolicy, ReviewProducedFindings, ReviewReferencedFindingEvidence,
-    ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget,
-    ReviewTargetId, ReviewTargetSubject, ReviewText, ReviewWorkflowKind, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SubmitInput, TranscriptAncestry, TurnAttemptId, TurnId,
-    UserContent,
+    ReviewPassRef, ReviewPassResult, ReviewPassState, ReviewPassTransitionFailure,
+    ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewProducedFindings,
+    ReviewReferencedFindingEvidence, ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunRef,
+    ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
+    ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SubmitInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
@@ -238,41 +240,6 @@ fn pass_evidence(
         ),
         ReviewPassState::Cancelled { turn: None } => (TurnId::from_uuid(uuid(0x203)), None),
     };
-    if kind == ReviewPassKind::ReadOnlyReview
-        && matches!(&state, ReviewPassState::Succeeded { result: None, .. })
-    {
-        let mut run =
-            ReviewRun::try_reconstitute(signalbox_domain::ReviewRunReconstitutionInput::new(
-                reference.run(),
-                workflow_for_pass(kind),
-                policy,
-                ReviewRunState::Queued,
-                None,
-            ))
-            .expect("fixture run is queued");
-        let pass = ReviewPass::try_new(
-            reference,
-            kind,
-            &mut run,
-            session,
-            ReviewPassAcceptedInputEvidence::new(accepted_input, session, Some(origin_turn)),
-        )
-        .expect("fixture pass is queued")
-        .transition(
-            ReviewPassState::Running { turn: origin_turn },
-            Some(ReviewPassTurnEvidence::new(
-                origin_turn,
-                session,
-                accepted_input,
-                ReviewPassTurnOutcome::Active,
-                None,
-            )),
-        )
-        .expect("fixture pass starts")
-        .transition(state, turn_evidence)
-        .expect("fixture pass reaches its transient terminal state");
-        return ReviewPassEvidence::from_pass(&pass, policy);
-    }
     let pass = ReviewPass::try_reconstitute(signalbox_domain::ReviewPassReconstitutionInput::new(
         reference,
         kind,
@@ -712,7 +679,11 @@ fn finding_with_confidence_and_side(
             turn: *turn,
             output_frontier: *output_frontier,
             result: match result {
-                Some(result @ ReviewPassResult::ProducedFindings(_)) => Some(result.clone()),
+                Some(result @ ReviewPassResult::ProducedFindings(findings))
+                    if !findings.findings().is_empty() =>
+                {
+                    Some(result.clone())
+                }
                 _ => Some(ReviewPassResult::ProducedFindings(
                     ReviewProducedFindings::try_new(vec![reference])
                         .expect("one fixture finding is a canonical inventory"),
@@ -821,6 +792,64 @@ async fn insert_review_pass_fixture(pool: &PgPool) -> PersistedReviewPassFixture
         target_snapshot,
         run,
         pass,
+    }
+}
+
+struct ReviewCommandAdmissionFixture {
+    store: ReviewWorkflowStore,
+    target: ReviewTargetId,
+    run: ReviewRun,
+    pass: ReviewPass,
+    session: SessionId,
+    accepted_input: AcceptedInputId,
+    origin_turn: TurnId,
+}
+
+async fn review_command_admission_fixture(pool: &PgPool) -> ReviewCommandAdmissionFixture {
+    let store = ReviewWorkflowStore::new(pool.clone());
+    let session = SessionId::from_uuid(uuid(0x771));
+    let accepted_input = AcceptedInputId::from_uuid(uuid(0x772));
+    let origin_turn = TurnId::from_uuid(uuid(0x773));
+    insert_active_turn(pool, session, accepted_input, origin_turn).await;
+    let target = ReviewTargetId::from_uuid(uuid(0x774));
+    store
+        .insert_target(
+            &ReviewTarget::try_new(
+                target,
+                key("example-code-host"),
+                key("example/admission-repository"),
+                ReviewTargetSubject::Commit,
+                key("admission-head"),
+                Some(key("admission-base")),
+                None,
+            )
+            .expect("admission target is valid"),
+        )
+        .await
+        .expect("admission target persists");
+    let run_reference = ReviewRunRef::new(target, ReviewRunId::from_uuid(uuid(0x775)));
+    let pass_reference = ReviewPassRef::new(run_reference, ReviewPassId::from_uuid(uuid(0x776)));
+    let mut run = ReviewRun::new(
+        run_reference,
+        ReviewWorkflowKind::ReadOnlyReview,
+        ReviewPolicy::version_one(),
+    );
+    let pass = ReviewPass::try_new(
+        pass_reference,
+        ReviewPassKind::ReadOnlyReview,
+        &mut run,
+        session,
+        ReviewPassAcceptedInputEvidence::new(accepted_input, session, Some(origin_turn)),
+    )
+    .expect("admission pass is valid");
+    ReviewCommandAdmissionFixture {
+        store,
+        target,
+        run,
+        pass,
+        session,
+        accepted_input,
+        origin_turn,
     }
 }
 
@@ -1032,6 +1061,42 @@ async fn conclude_review_pass(
         .expect("fixture run and pass exist");
     pass_evidence(pass.reference(), pass.kind(), policy, pass.state().clone())
 }
+async fn propose_read_only_success(
+    store: &ReviewWorkflowStore,
+    pass: ReviewPass,
+    output_frontier: ContextFrontierId,
+) -> ReviewPassEvidence {
+    let reference = pass.reference();
+    let policy = store
+        .load_run(reference.run().run())
+        .await
+        .expect("fixture run loads")
+        .expect("fixture run exists")
+        .policy();
+    let ReviewPassState::Running { turn } = pass.state() else {
+        panic!("read-only success proposal requires a running pass");
+    };
+    let turn = *turn;
+    let state = ReviewPassState::Succeeded {
+        turn,
+        output_frontier,
+        result: Some(ReviewPassResult::ProducedFindings(
+            ReviewProducedFindings::try_new(Vec::new())
+                .expect("empty fixture inventory is canonical"),
+        )),
+    };
+    let turn_evidence = ReviewPassTurnEvidence::new(
+        turn,
+        pass.session(),
+        pass.accepted_input(),
+        ReviewPassTurnOutcome::Completed,
+        Some(output_frontier),
+    );
+    let terminal_pass = pass
+        .transition(state, Some(turn_evidence))
+        .expect("read-only fixture proposes its atomic inventory");
+    ReviewPassEvidence::from_pass(&terminal_pass, policy)
+}
 
 async fn succeed_fixture_passes(
     pool: &PgPool,
@@ -1040,26 +1105,62 @@ async fn succeed_fixture_passes(
 ) -> Vec<ReviewPassEvidence> {
     let mut terminal = Vec::with_capacity(references.len());
     for reference in references {
-        let (_, turn) = start_review_pass(store, *reference).await;
+        let (pass, turn) = start_review_pass(store, *reference).await;
         let output_frontier = synthetically_terminalize_turn(pool, turn, "completed").await;
-        terminal.push((*reference, turn, output_frontier));
+        terminal.push((pass, turn, output_frontier));
     }
     let mut evidence = Vec::with_capacity(terminal.len());
-    for (reference, turn, output_frontier) in terminal {
-        evidence.push(
-            conclude_review_pass(
-                store,
-                reference,
-                ReviewPassState::Succeeded {
-                    turn,
-                    output_frontier,
-                    result: None,
-                },
-            )
-            .await,
-        );
+    for (pass, turn, output_frontier) in terminal {
+        let reference = pass.reference();
+        if pass.kind() == ReviewPassKind::ReadOnlyReview {
+            let proposed = propose_read_only_success(store, pass, output_frontier).await;
+            evidence.push(proposed);
+        } else {
+            evidence.push(
+                conclude_review_pass(
+                    store,
+                    reference,
+                    ReviewPassState::Succeeded {
+                        turn,
+                        output_frontier,
+                        result: None,
+                    },
+                )
+                .await,
+            );
+        }
     }
     evidence
+}
+
+#[track_caller]
+fn assert_read_only_success_requires_atomic_inventory(error: ReviewWorkflowStoreError) {
+    let ReviewWorkflowStoreError::InvalidTransition(ReviewWorkflowTransitionError::Pass(error)) =
+        error
+    else {
+        panic!("missing read-only inventory must be a typed pass-transition rejection");
+    };
+    assert_eq!(
+        error.failure(),
+        ReviewPassTransitionFailure::IncompatibleResult
+    );
+}
+
+async fn load_review_aggregate(
+    store: &ReviewWorkflowStore,
+    reference: ReviewPassRef,
+) -> (ReviewRun, ReviewPass) {
+    let run = store
+        .load_run(reference.run().run())
+        .await
+        .expect("review run loads without corruption")
+        .expect("review run exists");
+    let pass = store
+        .load_pass(reference.pass())
+        .await
+        .expect("review pass loads without corruption")
+        .expect("review pass exists");
+    (run, pass)
 }
 
 fn assert_sqlstate(error: &sqlx::Error, expected: &str) {
@@ -1217,7 +1318,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         ReviewPassKind::ImportExternalContext,
     )
     .await;
-    start_review_pass(&store, pass_ref).await;
+    let (running_review, _) = start_review_pass(&store, pass_ref).await;
     start_review_pass(&store, judge_pass).await;
     start_review_pass(&store, publish_pass).await;
     start_review_pass(&store, import_pass).await;
@@ -1231,16 +1332,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         synthetically_terminalize_turn(&pool, import_turn, "completed").await;
     let unchanged_import_output_frontier =
         synthetically_terminalize_turn(&pool, unchanged_import_turn, "completed").await;
-    let review_evidence = conclude_review_pass(
-        &store,
-        pass_ref,
-        ReviewPassState::Succeeded {
-            turn,
-            output_frontier,
-            result: None,
-        },
-    )
-    .await;
+    let review_evidence = propose_read_only_success(&store, running_review, output_frontier).await;
     let judge_evidence = conclude_review_pass(
         &store,
         judge_pass,
@@ -2158,30 +2250,91 @@ async fn inv040_generic_transition_rejects_effect_result() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// INV-040: a completed read-only pass may atomically bind an exact empty
-/// produced-finding inventory.
+/// INV-040: canonical read-only success admission is atomic, so every committed
+/// intermediate aggregate remains loadable rather than appearing corrupt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_empty_finding_inventory_binds_exact_result() -> Result<(), Box<dyn Error>> {
+async fn inv040_read_only_success_admission_is_atomic_and_always_loadable()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
-    let succeeded = succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass]).await[0].clone();
-    let no_finding_references = Vec::new();
-    let evidence = pass_with_produced_findings(no_finding_references, succeeded);
-    let no_findings = Vec::<ReviewFinding>::new();
 
+    let (queued_run, queued_pass) = load_review_aggregate(&fixture.store, fixture.pass).await;
+    assert_eq!(queued_run.state(), ReviewRunState::Queued);
+    assert_eq!(queued_pass.state(), &ReviewPassState::Queued);
+
+    let (running, turn) = start_review_pass(&fixture.store, fixture.pass).await;
+    let running_run_state = ReviewRunState::Running {
+        active_pass: fixture.pass,
+    };
+    assert_eq!(running.state(), &ReviewPassState::Running { turn });
+    let (loaded_run, loaded_pass) = load_review_aggregate(&fixture.store, fixture.pass).await;
+    assert_eq!(loaded_run.state(), running_run_state);
+    assert_eq!(loaded_pass.state(), running.state());
+
+    let output_frontier = synthetically_terminalize_turn(&pool, turn, "completed").await;
+    let (loaded_run, loaded_pass) = load_review_aggregate(&fixture.store, fixture.pass).await;
+    assert_eq!(loaded_run.state(), running_run_state);
+    assert_eq!(loaded_pass.state(), running.state());
+
+    let unbound_success = ReviewPassState::Succeeded {
+        turn,
+        output_frontier,
+        result: None,
+    };
+    let error = fixture
+        .store
+        .transition_run_and_pass(
+            fixture.run.run(),
+            fixture.pass.pass(),
+            ReviewRunState::Succeeded {
+                concluding_pass: fixture.pass,
+            },
+            unbound_success,
+        )
+        .await
+        .expect_err("read-only success without its inventory is rejected before commit");
+    assert_read_only_success_requires_atomic_inventory(error);
+    let (loaded_run, loaded_pass) = load_review_aggregate(&fixture.store, fixture.pass).await;
+    assert_eq!(loaded_run.state(), running_run_state);
+    assert_eq!(loaded_pass.state(), running.state());
+
+    let no_finding_references = Vec::new();
+    let no_findings = Vec::<ReviewFinding>::new();
+    let produced_findings = ReviewPassResult::ProducedFindings(
+        ReviewProducedFindings::try_new(no_finding_references)
+            .expect("empty inventory is canonical"),
+    );
+    let completed_turn = ReviewPassTurnEvidence::new(
+        turn,
+        running.session(),
+        running.accepted_input(),
+        ReviewPassTurnOutcome::Completed,
+        Some(output_frontier),
+    );
+    let succeeded = running
+        .transition(
+            ReviewPassState::Succeeded {
+                turn,
+                output_frontier,
+                result: Some(produced_findings),
+            },
+            Some(completed_turn),
+        )
+        .expect("completed read-only pass proposes its exact inventory");
+    let evidence = ReviewPassEvidence::from_pass(&succeeded, queued_run.policy());
     fixture
         .store
         .insert_findings(&evidence, &no_findings)
         .await?;
+
+    let (loaded_run, loaded_pass) = load_review_aggregate(&fixture.store, fixture.pass).await;
+    assert_eq!(loaded_pass.state(), evidence.state());
     assert_eq!(
-        fixture
-            .store
-            .load_pass(fixture.pass.pass())
-            .await?
-            .expect("pass with empty result inventory loads")
-            .state(),
-        evidence.state()
+        loaded_run.state(),
+        ReviewRunState::Succeeded {
+            concluding_pass: fixture.pass,
+        }
     );
     Ok(())
 }
@@ -5433,20 +5586,12 @@ async fn inv040_finding_event_rejects_failed_pass() -> Result<(), Box<dyn Error>
     )
     .await;
     let turn = TurnId::from_uuid(uuid(0x203));
-    start_review_pass(&fixture.store, fixture.pass).await;
+    let (running_review, _) = start_review_pass(&fixture.store, fixture.pass).await;
     start_review_pass(&fixture.store, judge_pass).await;
     let output_frontier = synthetically_terminalize_turn(&pool, turn, "completed").await;
     synthetically_terminalize_turn(&pool, other_turn, "failed").await;
-    let review_evidence = conclude_review_pass(
-        &fixture.store,
-        fixture.pass,
-        ReviewPassState::Succeeded {
-            turn,
-            output_frontier,
-            result: None,
-        },
-    )
-    .await;
+    let review_evidence =
+        propose_read_only_success(&fixture.store, running_review, output_frontier).await;
     conclude_review_pass(
         &fixture.store,
         judge_pass,
@@ -5489,7 +5634,12 @@ async fn inv040_finding_event_rejects_failed_pass() -> Result<(), Box<dyn Error>
 async fn inv041_attachment_rejects_read_only_review_pass() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
-    succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass]).await;
+    let review_evidence = succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass]).await;
+    let no_findings = Vec::<ReviewFinding>::new();
+    fixture
+        .store
+        .insert_findings(&review_evidence[0], &no_findings)
+        .await?;
     let link = ReviewExternalLinkId::from_uuid(uuid(0x708));
     fixture
         .store
@@ -6087,7 +6237,7 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
     )
     .await;
 
-    let (_, turn) = start_review_pass(&fixture.store, fixture.pass).await;
+    let (running_review, turn) = start_review_pass(&fixture.store, fixture.pass).await;
     let (_, judge_turn) = start_review_pass(&fixture.store, judge_pass).await;
     let (_, attaching_turn) = start_review_pass(&fixture.store, attaching_pass).await;
     let (_, other_publish_turn) = start_review_pass(&fixture.store, other_publish_pass).await;
@@ -6101,16 +6251,8 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
         synthetically_terminalize_turn(&pool, other_publish_turn, "completed").await;
     synthetically_terminalize_turn(&pool, blocked_turn, "reconciliation_required").await;
 
-    let review_evidence = conclude_review_pass(
-        &fixture.store,
-        fixture.pass,
-        ReviewPassState::Succeeded {
-            turn,
-            output_frontier,
-            result: None,
-        },
-    )
-    .await;
+    let review_evidence =
+        propose_read_only_success(&fixture.store, running_review, output_frontier).await;
     let judge_evidence = conclude_review_pass(
         &fixture.store,
         judge_pass,
@@ -6439,6 +6581,12 @@ async fn inv040_inv041_review_workflow_tables_reject_truncate() -> Result<(), Bo
         "TRUNCATE TABLE review_external_link_observation CASCADE",
     )
     .await;
+    assert_review_workflow_truncate_rejected(
+        &pool,
+        "review_workflow_command",
+        "TRUNCATE TABLE review_workflow_command CASCADE",
+    )
+    .await;
     Ok(())
 }
 
@@ -6464,5 +6612,452 @@ async fn inv040_maximum_target_keys_do_not_overflow_indexes() -> Result<(), Box<
 
     store.insert_target(&target).await?;
     assert_eq!(store.load_target(target.id()).await?, Some(target));
+    Ok(())
+}
+
+/// INV-012: exact review-command replay and effect recovery preserve one result.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_workflow_command_receipts_replay_and_recover() -> Result<(), Box<dyn Error>> {
+    const TARGET_IDENTITY: u128 = 0x760;
+    const RECOVERED_TARGET_IDENTITY: u128 = 0x761;
+    const COMMAND_IDENTITY: u128 = 0x762;
+    const RECOVERY_COMMAND_IDENTITY: u128 = 0x763;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let store = ReviewWorkflowStore::new(pool);
+    let target = ReviewTarget::try_new(
+        ReviewTargetId::from_uuid(uuid(TARGET_IDENTITY)),
+        key("provider"),
+        key("repository"),
+        ReviewTargetSubject::ChangeRequest(
+            ReviewChangeRequestNumber::try_new(42).expect("fixture number is positive"),
+        ),
+        key("head"),
+        Some(key("base")),
+        None,
+    )
+    .expect("target fixture is admitted");
+    let command_id = DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY));
+    let command = ReviewWorkflowCommand::new(
+        command_id,
+        [7; 32],
+        ReviewWorkflowOperation::CreateTarget(target.clone()),
+    );
+    let mut service = ReviewWorkflowCommandService::new(store.clone());
+    let expected =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::TargetCreated {
+            target: target.id(),
+        });
+
+    assert_eq!(service.execute(command.clone()).await?, expected);
+    assert_eq!(service.execute(command).await?, expected);
+    assert_eq!(
+        store
+            .load_command_outcome(
+                command_id,
+                [7; 32],
+                ReviewWorkflowOperationKind::CreateTarget,
+            )
+            .await?,
+        Some(expected.clone()),
+    );
+    assert_eq!(store.load_target(target.id()).await?, Some(target.clone()));
+    assert_eq!(
+        store
+            .load_command_outcome(
+                command_id,
+                [8; 32],
+                ReviewWorkflowOperationKind::CreateTarget,
+            )
+            .await?,
+        Some(ReviewWorkflowCommandOutcome::ConflictingReuse { command_id }),
+    );
+    assert_eq!(
+        service
+            .execute(ReviewWorkflowCommand::new(
+                command_id,
+                [8; 32],
+                ReviewWorkflowOperation::CreateTarget(target),
+            ))
+            .await?,
+        ReviewWorkflowCommandOutcome::ConflictingReuse { command_id },
+    );
+
+    let recovered_target = ReviewTarget::try_new(
+        ReviewTargetId::from_uuid(uuid(RECOVERED_TARGET_IDENTITY)),
+        key("provider"),
+        key("repository"),
+        ReviewTargetSubject::ChangeRequest(
+            ReviewChangeRequestNumber::try_new(43).expect("fixture number is positive"),
+        ),
+        key("later-head"),
+        Some(key("later-base")),
+        None,
+    )
+    .expect("recovery target fixture is admitted");
+    store.insert_target(&recovered_target).await?;
+    let recovery_command_id = DurableCommandId::from_uuid(uuid(RECOVERY_COMMAND_IDENTITY));
+    let recovery_command = ReviewWorkflowCommand::new(
+        recovery_command_id,
+        [9; 32],
+        ReviewWorkflowOperation::CreateTarget(recovered_target.clone()),
+    );
+    let recovered =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::TargetCreated {
+            target: recovered_target.id(),
+        });
+
+    assert_eq!(service.execute(recovery_command.clone()).await?, recovered);
+    assert_eq!(service.execute(recovery_command).await?, recovered);
+    assert_eq!(
+        store.load_target(recovered_target.id()).await?,
+        Some(recovered_target),
+    );
+    Ok(())
+}
+
+/// INV-012: a formerly legal run-only commit remains loadable and its exact
+/// command retry completes the admitted pass.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_start_run_recovers_a_loadable_run_only_commit() -> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x777;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = review_command_admission_fixture(&pool).await;
+    fixture.store.insert_run(&fixture.run).await?;
+    let partial = fixture
+        .store
+        .load_run_with_pass(fixture.run.reference().run())
+        .await?
+        .expect("run-only admission remains loadable");
+    assert_eq!(partial.0.reference(), fixture.run.reference());
+    assert_eq!(partial.0.workflow(), fixture.run.workflow());
+    assert_eq!(partial.0.policy(), fixture.run.policy());
+    assert_eq!(partial.0.recorded_pass(), None);
+    assert_eq!(partial.1, None);
+
+    let command = ReviewWorkflowCommand::new(
+        DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY)),
+        [13; 32],
+        ReviewWorkflowOperation::StartRun {
+            run: fixture.run.clone(),
+            pass: fixture.pass.clone(),
+        },
+    );
+    let expected =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::RunStarted {
+            run: fixture.run.reference().run(),
+            pass: fixture.pass.reference().pass(),
+        });
+    let mut service = ReviewWorkflowCommandService::new(fixture.store.clone());
+
+    assert_eq!(service.execute(command).await?, expected);
+    assert_eq!(
+        fixture
+            .store
+            .load_run_with_pass(fixture.run.reference().run())
+            .await?,
+        Some((fixture.run, Some(fixture.pass))),
+    );
+    Ok(())
+}
+
+/// INV-012: a rejected fresh admission cannot leave a run-only aggregate.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_start_run_rolls_back_run_when_pass_admission_fails() -> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x778;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = review_command_admission_fixture(&pool).await;
+    fixture
+        .store
+        .insert_run_and_pass(&fixture.run, &fixture.pass)
+        .await?;
+    let run_reference = ReviewRunRef::new(fixture.target, ReviewRunId::from_uuid(uuid(0x779)));
+    let pass_reference = ReviewPassRef::new(run_reference, ReviewPassId::from_uuid(uuid(0x77a)));
+    let mut rejected_run = ReviewRun::new(
+        run_reference,
+        ReviewWorkflowKind::ReadOnlyReview,
+        ReviewPolicy::version_one(),
+    );
+    let rejected_pass = ReviewPass::try_new(
+        pass_reference,
+        ReviewPassKind::ReadOnlyReview,
+        &mut rejected_run,
+        fixture.session,
+        ReviewPassAcceptedInputEvidence::new(
+            fixture.accepted_input,
+            fixture.session,
+            Some(fixture.origin_turn),
+        ),
+    )
+    .expect("the conflicting pass fixture is domain-valid");
+    let command = ReviewWorkflowCommand::new(
+        DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY)),
+        [14; 32],
+        ReviewWorkflowOperation::StartRun {
+            run: rejected_run,
+            pass: rejected_pass,
+        },
+    );
+    let mut service = ReviewWorkflowCommandService::new(fixture.store.clone());
+
+    assert!(service.execute(command).await.is_err());
+    assert_eq!(fixture.store.load_run(run_reference.run()).await?, None);
+    assert_eq!(fixture.store.load_pass(pass_reference.pass()).await?, None);
+    Ok(())
+}
+
+/// INV-040: atomic admission rejects a pass owned by another run root.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_atomic_run_pass_admission_rejects_cross_wired_roots() -> Result<(), Box<dyn Error>>
+{
+    const STORED_RUN_IDENTITY: u128 = 0x77b;
+    const STORED_PASS_IDENTITY: u128 = 0x77c;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = review_command_admission_fixture(&pool).await;
+    let stored_run_reference = ReviewRunRef::new(
+        fixture.target,
+        ReviewRunId::from_uuid(uuid(STORED_RUN_IDENTITY)),
+    );
+    let stored_pass_reference = ReviewPassRef::new(
+        stored_run_reference,
+        ReviewPassId::from_uuid(uuid(STORED_PASS_IDENTITY)),
+    );
+    let mut stored_run = ReviewRun::new(
+        stored_run_reference,
+        ReviewWorkflowKind::ReadOnlyReview,
+        ReviewPolicy::version_one(),
+    );
+    let stored_pass = ReviewPass::try_new(
+        stored_pass_reference,
+        ReviewPassKind::ReadOnlyReview,
+        &mut stored_run,
+        fixture.session,
+        ReviewPassAcceptedInputEvidence::new(
+            fixture.accepted_input,
+            fixture.session,
+            Some(fixture.origin_turn),
+        ),
+    )
+    .expect("the stored-run pass fixture is domain-valid");
+    fixture.store.insert_run(&stored_run).await?;
+
+    let error = fixture
+        .store
+        .insert_run_and_pass(&fixture.run, &stored_pass)
+        .await
+        .expect_err("cross-wired roots must fail before insertion");
+
+    assert!(matches!(
+        error,
+        ReviewWorkflowStoreError::InvalidInsertion(ReviewWorkflowInsertionError::RunPassMismatch)
+    ));
+    assert_eq!(
+        fixture
+            .store
+            .load_run(fixture.run.reference().run())
+            .await?,
+        None
+    );
+    assert_eq!(
+        fixture
+            .store
+            .load_pass(stored_pass.reference().pass())
+            .await?,
+        None
+    );
+    assert!(
+        fixture
+            .store
+            .load_run(stored_run.reference().run())
+            .await?
+            .is_some()
+    );
+    Ok(())
+}
+
+/// INV-012: run admission recovery ignores later lifecycle advancement.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_start_run_receipt_recovers_after_lifecycle_advancement()
+-> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x764;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let queued_run = fixture
+        .store
+        .load_run(fixture.run.run())
+        .await?
+        .expect("queued fixture run exists");
+    let queued_pass = fixture
+        .store
+        .load_pass(fixture.pass.pass())
+        .await?
+        .expect("queued fixture pass exists");
+    let command_id = DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY));
+    let command = ReviewWorkflowCommand::new(
+        command_id,
+        [10; 32],
+        ReviewWorkflowOperation::StartRun {
+            run: queued_run.clone(),
+            pass: queued_pass.clone(),
+        },
+    );
+    let expected =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::RunStarted {
+            run: fixture.run.run(),
+            pass: fixture.pass.pass(),
+        });
+
+    let (running_pass, _turn) = start_review_pass(&fixture.store, fixture.pass).await;
+    let running_run = fixture
+        .store
+        .load_run(fixture.run.run())
+        .await?
+        .expect("running fixture run exists");
+    assert_ne!(running_run.state(), queued_run.state());
+    assert_ne!(running_pass.state(), queued_pass.state());
+
+    let mut service = ReviewWorkflowCommandService::new(fixture.store);
+    assert_eq!(service.execute(command.clone()).await?, expected);
+    assert_eq!(service.execute(command).await?, expected);
+    Ok(())
+}
+
+/// INV-012: a findings receipt cannot omit its stable result count.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_findings_receipt_rejects_missing_count() -> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x765;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let error = sqlx::query(
+        "INSERT INTO review_workflow_command
+            (command_id, command_kind, storage_version, semantic_digest,
+             operation_kind, result_kind, result_run_id, result_pass_id)
+         VALUES ($1, 'review_workflow', 1, $2, 'record_findings',
+                 'findings_recorded', $3, $4)",
+    )
+    .bind(uuid(COMMAND_IDENTITY))
+    .bind([11_u8; 32].as_slice())
+    .bind(uuid(0x766))
+    .bind(uuid(0x767))
+    .execute(&pool)
+    .await
+    .expect_err("the receipt shape requires a stable finding count");
+
+    assert_sqlstate(&error, "23514");
+    Ok(())
+}
+
+/// INV-012: activation recovery recognizes the same pass after completion.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_activation_receipt_recovers_after_pass_completion() -> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x768;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let (running_pass, turn) = start_review_pass(&fixture.store, fixture.pass).await;
+    let running_run = fixture
+        .store
+        .load_run(fixture.run.run())
+        .await?
+        .expect("running fixture run exists");
+    let command = ReviewWorkflowCommand::new(
+        DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY)),
+        [12; 32],
+        ReviewWorkflowOperation::ActivatePass {
+            run: running_run,
+            pass: running_pass,
+        },
+    );
+    let expected =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::PassActivated {
+            run: fixture.run.run(),
+            pass: fixture.pass.pass(),
+        });
+
+    synthetically_terminalize_turn(&pool, turn, "failed").await;
+    conclude_review_pass(
+        &fixture.store,
+        fixture.pass,
+        ReviewPassState::Failed { turn },
+    )
+    .await;
+
+    let mut service = ReviewWorkflowCommandService::new(fixture.store);
+    assert_eq!(service.execute(command.clone()).await?, expected);
+    assert_eq!(service.execute(command).await?, expected);
+    Ok(())
+}
+
+/// INV-012: findings recovery compares immutable proposals after disposition.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_findings_receipt_recovers_after_later_disposition() -> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x769;
+    const JUDGE_PASS_IDENTITY: u128 = 0x76a;
+    const FINDING_IDENTITY: u128 = 0x76b;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let judge_pass =
+        insert_fixture_pass(&fixture, JUDGE_PASS_IDENTITY, ReviewPassKind::Judge).await;
+    let evidence = succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass, judge_pass]).await;
+    let finding_ref = ReviewFindingRef::new(
+        fixture.pass,
+        ReviewFindingId::from_uuid(uuid(FINDING_IDENTITY)),
+    );
+    let producing_pass = pass_with_produced_findings(vec![finding_ref], evidence[0].clone());
+    let recorded_finding = finding(
+        finding_ref,
+        producing_pass.clone(),
+        &fixture.target_snapshot,
+    );
+    let recorded_findings = vec![recorded_finding];
+    let finding_count = recorded_findings.len();
+    fixture
+        .store
+        .insert_findings(&producing_pass, &recorded_findings)
+        .await?;
+    fixture
+        .store
+        .append_finding_event(
+            finding_ref.finding(),
+            finding_event(
+                finding_ref,
+                ReviewEventOrdinal::one(),
+                evidence[1].clone(),
+                ReviewFindingEventKind::Accepted,
+            ),
+        )
+        .await?
+        .expect("the canonical finding accepts its disposition");
+    let command = ReviewWorkflowCommand::new(
+        DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY)),
+        [13; 32],
+        ReviewWorkflowOperation::RecordFindings {
+            pass: producing_pass,
+            findings: recorded_findings,
+        },
+    );
+    let expected =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::FindingsRecorded {
+            run: fixture.run.run(),
+            pass: fixture.pass.pass(),
+            finding_count,
+        });
+
+    let mut service = ReviewWorkflowCommandService::new(fixture.store);
+    assert_eq!(service.execute(command.clone()).await?, expected);
+    assert_eq!(service.execute(command).await?, expected);
     Ok(())
 }
