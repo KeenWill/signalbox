@@ -141,7 +141,11 @@ impl<C: Clone> EventDecoder<C> {
                 let event: ItemEvent = decode(value)?;
                 match event.item.details {
                     ItemDetails::AgentMessage { text } => {
-                        self.message_id = Some(redact_text(&event.item.id));
+                        // The id is retained raw and sanitized against the
+                        // held stream state in `completed`, so a value that
+                        // extends a credential marker from earlier reasoning
+                        // cannot reach `ProviderMessageId` unredacted.
+                        self.message_id = Some(event.item.id.clone());
                         self.agent_message = Some(text);
                     }
                     ItemDetails::Reasoning { text } => {
@@ -284,6 +288,13 @@ impl<C: Clone> EventDecoder<C> {
                 );
             }
         };
+        // Sanitized against the held lookbehind before the usage barrier below
+        // flushes it, so a message id extending a credential marker held from
+        // reasoning is suppressed instead of surfacing as `ProviderMessageId`.
+        let message_id = self
+            .message_id
+            .take()
+            .map(|id| sink.redact_terminal_failure_text(&id));
         let reported_finish = match envelope.outcome {
             EnvelopeOutcome::Refused => FinishReason::Refusal,
             EnvelopeOutcome::Completed if envelope.tool_calls.is_empty() => FinishReason::EndTurn,
@@ -323,7 +334,7 @@ impl<C: Clone> EventDecoder<C> {
         match envelope.outcome {
             EnvelopeOutcome::Refused => TerminalEvidence::Refused(RefusalEvidence {
                 exchange: self.exchange,
-                message_id: self.message_id.map(ProviderMessageId::new),
+                message_id: message_id.map(ProviderMessageId::new),
                 reported_model: None,
                 content,
                 usage: self.usage,
@@ -336,7 +347,7 @@ impl<C: Clone> EventDecoder<C> {
                 };
                 TerminalEvidence::Completed(CompletionEvidence {
                     exchange: self.exchange,
-                    message_id: self.message_id.map(ProviderMessageId::new),
+                    message_id: message_id.map(ProviderMessageId::new),
                     reported_model: None,
                     finish,
                     content,
@@ -384,7 +395,7 @@ impl<C: Clone> EventDecoder<C> {
             if !allowed {
                 return Err(format!(
                     "response proposed undeclared tool `{}`",
-                    redact_text(&call.name)
+                    sink.redact_terminal_failure_text(&call.name)
                 ));
             }
             // The envelope carries the argument object as JSON text inside a

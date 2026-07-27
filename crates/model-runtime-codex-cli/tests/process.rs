@@ -232,6 +232,41 @@ async fn inv_035_split_authorization_value_before_tool_id_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a credential marker held from streamed reasoning also governs the
+/// agent-message item id, so an id extending the marker never surfaces as
+/// `ProviderMessageId` in terminal evidence.
+#[tokio::test]
+async fn inv_035_split_authorization_value_before_message_id_is_redacted() {
+    let result = execute_scenario(
+        "split_stream_authorization_before_message_id",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: an undeclared tool name that extends a held credential marker is
+/// redacted in the resulting boundary-loss detail, not left verbatim.
+#[tokio::test]
+async fn inv_035_split_authorization_value_before_tool_name_is_redacted() {
+    let result = execute_scenario(
+        "split_stream_authorization_before_tool_name",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
 /// INV-035: a decode-failure detail that quotes provider-controlled bytes
 /// consults the held lookbehind state, so a credential split between
 /// streamed reasoning and a malformed event's quoted value is suppressed

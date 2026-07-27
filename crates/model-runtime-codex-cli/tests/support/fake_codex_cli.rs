@@ -128,6 +128,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "split_stream_authorization_before_message_id" => {
+            reasoning("reason-split-message-id", "Authorization:");
+            agent_message(
+                &format!(" {}", fixtures::SENSITIVE_SPLIT_AUTHORIZATION),
+                r#"{"outcome":"completed","text":"safe","tool_calls":[]}"#,
+            );
+            completed();
+        }
+        "split_stream_authorization_before_tool_name" => {
+            reasoning("reason-split-tool-name", "Authorization:");
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-name","name":" {}","arguments":"{{}}"}}]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
         "reasoning_then_malformed_usage" => {
             reasoning("reason-held-marker", "Authorization:");
             emit(&format!(
