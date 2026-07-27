@@ -748,25 +748,14 @@ async fn terminalize_physical_attempt(
     Ok(())
 }
 
+/// Stores one retryable loss; the loss leaves the in-flight source attempt
+/// untouched, so no fixture trigger accommodation is needed.
 async fn store_fixture_retryable_loss(
     store: &RunnerProtocolStore,
-    pool: &PgPool,
+    _pool: &PgPool,
     loss: &signalbox_domain::RunnerLeaseLoss,
 ) -> Result<(), Box<dyn Error>> {
-    sqlx::query(
-        "ALTER TABLE tool_attempt
-         DISABLE TRIGGER tool_attempt_requires_approval",
-    )
-    .execute(pool)
-    .await?;
-    let stored = store.store_lease_loss(loss).await;
-    sqlx::query(
-        "ALTER TABLE tool_attempt
-         ENABLE TRIGGER tool_attempt_requires_approval",
-    )
-    .execute(pool)
-    .await?;
-    stored?;
+    store.store_lease_loss(loss).await?;
     Ok(())
 }
 
@@ -3561,7 +3550,7 @@ async fn s31_inv004_inv043_replacement_attempt_commits_only_with_successor_lease
         .lose()
         .expect("claimed pure work may enter durable retry classification");
     store_fixture_retryable_loss(&store, &pool, &loss).await?;
-    let retired_facts: (String, Option<String>, Option<String>) = sqlx::query_as(
+    let lost_source_facts: (String, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT state_kind, terminal_disposition_kind, error_kind
            FROM tool_attempt
           WHERE attempt_id = $1",
@@ -3569,7 +3558,7 @@ async fn s31_inv004_inv043_replacement_attempt_commits_only_with_successor_lease
     .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
     .fetch_one(&pool)
     .await?;
-    let retired_attempts: Vec<Uuid> = sqlx::query_scalar(
+    let lost_source_current: Vec<Uuid> = sqlx::query_scalar(
         "SELECT attempt_id
            FROM runner_current_tool_attempt
           WHERE request_id = $1",
@@ -3595,6 +3584,16 @@ async fn s31_inv004_inv043_replacement_attempt_commits_only_with_successor_lease
     .execute(&pool)
     .await?;
     let mut stranded_replacement = pool.begin().await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'known_failed',
+                error_kind = 'crash_lost'
+          WHERE attempt_id = $1",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
+    .execute(&mut *stranded_replacement)
+    .await?;
     sqlx::query(
         "INSERT INTO tool_attempt
             (attempt_id, request_id, session_id, turn_id,
@@ -3628,6 +3627,14 @@ async fn s31_inv004_inv043_replacement_attempt_commits_only_with_successor_lease
         )
         .expect("claimed pure work re-leases at the successor generation");
     store_fixture_claimed_retry_replacement(&store, &pool, &retired, &retry).await?;
+    let retired_source_facts: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, error_kind
+           FROM tool_attempt
+          WHERE attempt_id = $1",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
+    .fetch_one(&pool)
+    .await?;
     let fresh_attempts: Vec<Uuid> = sqlx::query_scalar(
         "SELECT attempt_id
            FROM runner_current_tool_attempt
@@ -3638,15 +3645,19 @@ async fn s31_inv004_inv043_replacement_attempt_commits_only_with_successor_lease
     .await?;
 
     assert_check_violation(stranded);
+    assert_eq!(lost_source_facts, ("in_flight".to_owned(), None, None));
     assert_eq!(
-        retired_facts,
+        lost_source_current,
+        vec![uuid(INITIAL_PHYSICAL_ATTEMPT.attempt)]
+    );
+    assert_eq!(
+        retired_source_facts,
         (
             "terminal".to_owned(),
             Some("known_failed".to_owned()),
             Some("crash_lost".to_owned())
         )
     );
-    assert!(retired_attempts.is_empty());
     assert_eq!(fresh_attempts, vec![uuid(RETRY_PHYSICAL_ATTEMPT.attempt)]);
     drop(pool);
     Ok(())
@@ -3695,14 +3706,6 @@ async fn s31_inv004_inv043_idempotent_claimed_loss_retires_physical_attempt()
         .lose()
         .expect("claimed idempotent work admits a checked retry");
     store_fixture_retryable_loss(&store, &pool, &loss).await?;
-    let retired_facts: (String, Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT state_kind, terminal_disposition_kind, error_kind
-           FROM tool_attempt
-          WHERE attempt_id = $1",
-    )
-    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
-    .fetch_one(&pool)
-    .await?;
     let replacement =
         authorize_fixture_claimed_retry(&store, &loss, ToolEffectClass::ExternalEffect).await?;
     let (_batch, retired, retry_authorization) = replacement.into_parts();
@@ -3717,6 +3720,14 @@ async fn s31_inv004_inv043_idempotent_claimed_loss_retires_physical_attempt()
         )
         .expect("claimed idempotent work re-leases at the successor generation");
     store_fixture_claimed_retry_replacement(&store, &pool, &retired, &retry).await?;
+    let retired_facts: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, error_kind
+           FROM tool_attempt
+          WHERE attempt_id = $1",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
+    .fetch_one(&pool)
+    .await?;
     let fresh_attempt: Uuid = sqlx::query_scalar(
         "SELECT attempt_id
            FROM runner_current_tool_attempt
@@ -4095,6 +4106,7 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
     assert_check_violation(error);
     let _replacement =
         authorize_fixture_claimed_retry(&store, &loss, ToolEffectClass::EffectFree).await?;
+    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
     sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
         .execute(&pool)
@@ -4275,6 +4287,7 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
     )
     .execute(&pool)
     .await?;
+    terminalize_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
     sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;

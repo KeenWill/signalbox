@@ -177,22 +177,25 @@ authority already issued. Its in-memory clones share the exact atomic guard for
 each physical attempt. The persistence loader derives the active batch's
 consumed inventory from exact current physical attempts already bound by durable
 runner lease generations, and complete reconstitution restores every consumed
-guard from that inventory. The same loader restores the batch's retired-identity
-inventory from the physical attempts its current-attempt view hides as claimed
-pure or idempotent loss predecessors, so a reloaded batch keeps rejecting
-retired attempt-identity reuse in the domain rather than at the retained row's
-key. Atomic runner authorization marks that exact attempt issued in the batch; a
-later clone or reconstitution from the updated facts cannot mint a second runner
-lease capability. Current active enrollment, pinned placement, its exact
-validated registration, and any selected active credential grant jointly
-authorize every offer after the first. The initial offer instead creates that
-pinned placement, any selected grant, and generation-one lease in one checked
-transition from `Unpinned`; it does not require those products to exist
-beforehand. The request, attempt, session, and two-way crash class must match
-the selected tool, placement, and declaration-derived effect class (`Pure` to
-`EffectFree`; `Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked
-enrollment, lost placement, or a mismatched runner, request, tool, attempt,
-effect, profile, or grant cannot create a lease.
+guard from that inventory. A stored retryable claimed loss leaves its source
+attempt in flight, so a reloaded batch still carries the exact live source the
+checked claimed replacement transition requires; the predecessor leaves the
+current-attempt view, and enters the batch's restored retired-identity
+inventory, only once the atomic replacement commit retires it to terminal
+history. A reloaded batch therefore keeps rejecting retired attempt-identity
+reuse in the domain rather than at the retained row's key. Atomic runner
+authorization marks that exact attempt issued in the batch; a later clone or
+reconstitution from the updated facts cannot mint a second runner lease
+capability. Current active enrollment, pinned placement, its exact validated
+registration, and any selected active credential grant jointly authorize every
+offer after the first. The initial offer instead creates that pinned placement,
+any selected grant, and generation-one lease in one checked transition from
+`Unpinned`; it does not require those products to exist beforehand. The request,
+attempt, session, and two-way crash class must match the selected tool,
+placement, and declaration-derived effect class (`Pure` to `EffectFree`;
+`Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked enrollment, lost
+placement, or a mismatched runner, request, tool, attempt, effect, profile, or
+grant cannot create a lease.
 
 When a credential profile is selected, the lease also retains the exact
 immutable `CredentialDispatchAuthorization`: session, runner, profile, grant
@@ -228,16 +231,18 @@ retry instead requires a durable record binding the complete lost lease
 correlation to the exact fresh physical-attempt dispatch. That record is an
 idempotent reservation: if a process exits before the replacement attempt is
 stored, recovery loads the exact reserved dispatch and may replay only that
-replacement. The replacement attempt and its successor lease generation commit
-in one transaction, and the Postgres representation rejects a reserved
-replacement attempt committed without that successor generation, so the durable
-claimed-retry states are exactly the replayable reservation and the complete
-consumed retry whose successor lease is already offered; a crash cannot strand a
-durably consumed one-shot preparation fence without its successor lease, and a
-different replacement cannot overwrite the reservation. Without the proof,
-losing even an `Offered` lease conservatively follows the execution-possible
-law: pure or idempotent work requires a fresh physical attempt, while
-side-effecting work requires crash classification.
+replacement. One transaction retires the in-flight source attempt to its
+effect-correct terminal history and commits the fresh replacement attempt with
+its successor lease generation, and the Postgres representation rejects a
+reserved replacement attempt committed without that successor generation, so the
+durable claimed-retry states are exactly the loss over its still-in-flight
+source — with or without the replayable reservation — and the complete consumed
+retry whose successor lease is already offered; a crash can strand neither a
+consumed one-shot preparation fence without its successor lease nor a retired
+source without its replacement, and a different replacement cannot overwrite the
+reservation. Without the proof, losing even an `Offered` lease conservatively
+follows the execution-possible law: pure or idempotent work requires a fresh
+physical attempt, while side-effecting work requires crash classification.
 
 With that proof, loss before claim permits every effect class to be re-leased at
 the checked successor lease-lineage generation. Loss after claim follows the

@@ -2736,22 +2736,29 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_runner_physical_attempt_lease_binding_complete();
 
+-- A lost pure or idempotent predecessor leaves the current view only once the
+-- atomic replacement commit retires it to terminal history; until then the
+-- in-flight source remains the request's current attempt so a reloaded batch
+-- can still drive the checked claimed replacement.
 CREATE VIEW runner_current_tool_attempt AS
 SELECT attempt.*
   FROM tool_attempt AS attempt
- WHERE NOT EXISTS (
-        SELECT 1
-          FROM runner_lease_generation AS generation
-          JOIN runner_current_lease_event AS current_event
-            ON current_event.lease_id = generation.lease_id
-           AND current_event.generation = generation.generation
-          JOIN runner_lease_event AS event
-            ON event.lease_id = current_event.lease_id
-           AND event.generation = current_event.generation
-           AND event.event_ordinal = current_event.event_ordinal
-         WHERE generation.attempt_id = attempt.attempt_id
-           AND generation.effect_class IN ('pure', 'idempotent')
-           AND event.state_kind IN ('lost_execution_possible', 'lost_claimed')
+ WHERE NOT (
+        attempt.state_kind = 'terminal'
+        AND EXISTS (
+            SELECT 1
+              FROM runner_lease_generation AS generation
+              JOIN runner_current_lease_event AS current_event
+                ON current_event.lease_id = generation.lease_id
+               AND current_event.generation = generation.generation
+              JOIN runner_lease_event AS event
+                ON event.lease_id = current_event.lease_id
+               AND event.generation = current_event.generation
+               AND event.event_ordinal = current_event.event_ordinal
+             WHERE generation.attempt_id = attempt.attempt_id
+               AND generation.effect_class IN ('pure', 'idempotent')
+               AND event.state_kind IN ('lost_execution_possible', 'lost_claimed')
+        )
  );
 
 CREATE FUNCTION require_runner_initial_pin_has_lease()
@@ -3176,7 +3183,13 @@ BEFORE INSERT ON runner_lease_event
 FOR EACH ROW
 EXECUTE FUNCTION guard_runner_lease_event();
 
-CREATE FUNCTION retire_runner_claimed_retry_attempt()
+-- A retryable claimed loss requires its live dispatched physical attempt but
+-- does not retire it: the source attempt stays in flight so a reloaded batch
+-- still carries the exact in-flight source the checked claimed replacement
+-- transition requires. The atomic replacement commit retires it to its
+-- effect-correct terminal history together with the fresh attempt and
+-- successor lease generation.
+CREATE FUNCTION require_runner_retryable_loss_live_attempt()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -3197,27 +3210,19 @@ BEGIN
     IF lease.effect_class = 'side_effecting' THEN
         RETURN NULL;
     END IF;
-    UPDATE tool_attempt
-       SET state_kind = 'terminal',
-           terminal_disposition_kind =
+    IF NOT EXISTS (
+        SELECT 1
+          FROM tool_attempt
+         WHERE attempt_id = lease.attempt_id
+           AND session_id = lease.session_id
+           AND state_kind = 'in_flight'
+           AND effect_class =
                 CASE lease.effect_class
-                    WHEN 'pure' THEN 'known_failed'
-                    ELSE 'ambiguous'
-                END,
-           error_kind =
-                CASE lease.effect_class
-                    WHEN 'pure' THEN 'crash_lost'
-                    ELSE NULL
+                    WHEN 'pure' THEN 'effect_free'
+                    ELSE 'external_effect'
                 END
-     WHERE attempt_id = lease.attempt_id
-       AND session_id = lease.session_id
-       AND state_kind = 'in_flight'
-       AND effect_class =
-            CASE lease.effect_class
-                WHEN 'pure' THEN 'effect_free'
-                ELSE 'external_effect'
-            END;
-    IF NOT FOUND THEN
+    )
+    THEN
         RAISE EXCEPTION 'runner retryable loss lacks its live physical attempt'
             USING ERRCODE = '23514';
     END IF;
@@ -3225,7 +3230,7 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER runner_claimed_retry_retires_physical_attempt
+CREATE TRIGGER runner_retryable_loss_requires_live_attempt
 AFTER INSERT ON runner_lease_event
 FOR EACH ROW
-EXECUTE FUNCTION retire_runner_claimed_retry_attempt();
+EXECUTE FUNCTION require_runner_retryable_loss_live_attempt();

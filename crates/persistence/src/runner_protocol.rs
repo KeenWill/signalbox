@@ -26,10 +26,11 @@ use signalbox_domain::{
     RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
     SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
     SessionRunnerPlacementState, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId, ToolDispatchGeneration,
-    ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
-    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
-    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptEnd, ToolAttemptId,
+    ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind, ToolName,
+    ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
+    ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceCapability,
+    WorkspaceRepositoryKey, WorkspaceRequirement,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -830,16 +831,20 @@ impl RunnerProtocolStore {
         .transpose()
     }
 
-    /// Atomically persists the exact replacement attempt together with its
-    /// successor lease generation after `offer_retry` validated the private
-    /// claimed-retry evidence. Committing them in one transaction leaves only
-    /// two durable claimed-retry states: the reservation alone, whose exact
-    /// dispatch remains replayable, or the complete consumed retry, whose
-    /// successor lease is already offered. The schema rejects a replacement
-    /// attempt committed without its successor generation, so a crash can no
-    /// longer strand the retry between them. The retired attempt is the exact
-    /// predecessor the claimed replacement produced; the reservation and
-    /// lease-generation triggers independently reject any other pairing.
+    /// Atomically retires the in-flight source attempt to its effect-correct
+    /// terminal history and persists the exact replacement attempt together
+    /// with its successor lease generation, after `offer_retry` validated the
+    /// private claimed-retry evidence. Committing all three in one
+    /// transaction leaves only two durable claimed-retry states: the loss
+    /// with its still-in-flight source (with or without the replayable
+    /// reservation), or the complete consumed retry, whose successor lease is
+    /// already offered. The schema rejects a replacement attempt committed
+    /// without its successor generation, so a crash can no longer strand the
+    /// retry between them, and a reloaded batch always carries either the
+    /// live source the checked replacement requires or the retired identity
+    /// inventory. The retired attempt is the exact predecessor the claimed
+    /// replacement produced; the reservation and lease-generation triggers
+    /// independently reject any other pairing.
     pub async fn store_claimed_retry_replacement(
         &self,
         retired: &EndedToolAttempt,
@@ -872,7 +877,50 @@ impl RunnerProtocolStore {
                 RunnerDomainError::CorrelationMismatch,
             ));
         }
+        let (retired_disposition, retired_error) = match (retired.effect_class(), retired.end()) {
+            (ToolEffectClass::EffectFree, ToolAttemptEnd::KnownFailed { error })
+                if error.kind() == ToolExecutionErrorKind::CrashLost
+                    && error.detail().is_none() =>
+            {
+                ("known_failed", Some("crash_lost"))
+            }
+            (ToolEffectClass::ExternalEffect, ToolAttemptEnd::Ambiguous) => ("ambiguous", None),
+            _ => {
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::CorrelationMismatch,
+                ));
+            }
+        };
         let mut transaction = self.pool.begin().await?;
+        let retired_rows = sqlx::query(
+            "UPDATE tool_attempt
+                SET state_kind = 'terminal',
+                    terminal_disposition_kind = $1,
+                    error_kind = $2
+              WHERE attempt_id = $3
+                AND request_id = $4
+                AND session_id = $5
+                AND turn_id = $6
+                AND issuing_turn_attempt_id = $7
+                AND state_kind = 'in_flight'
+                AND terminal_disposition_kind IS NULL",
+        )
+        .bind(retired_disposition)
+        .bind(retired_error)
+        .bind(retired.attempt().into_uuid())
+        .bind(retired.request().into_uuid())
+        .bind(retired.session().into_uuid())
+        .bind(retired.turn().into_uuid())
+        .bind(retired.issuing_attempt().into_uuid())
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if retired_rows != 1 {
+            transaction.rollback().await?;
+            return Err(RunnerProtocolStoreError::Corruption(
+                RunnerProtocolCorruption::CrossWiredReference,
+            ));
+        }
         sqlx::query(
             "INSERT INTO tool_attempt
                 (attempt_id, request_id, session_id, turn_id,
