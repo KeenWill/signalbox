@@ -369,7 +369,10 @@ impl<C: Clone> EventDecoder<C> {
             if call.id.is_empty() || !raw_ids.insert(call.id.as_str()) {
                 return Err("tool call ids must be nonempty and distinct".to_string());
             }
-            let sanitized = redact_text(&call.id);
+            // An id is clean only if neither the stateless scan nor the held
+            // cross-fragment lookbehind would redact it, so a marker held from
+            // streamed reasoning cannot leave a matching id in the clean set.
+            let sanitized = sink.redact_terminal_failure_text(&call.id);
             if sanitized == call.id {
                 clean_ids.insert(sanitized);
             }
@@ -390,7 +393,10 @@ impl<C: Clone> EventDecoder<C> {
             // the trait contract: the contained JSON object reaches the
             // caller byte-verbatim when it is credential-shape clean.
             validate_tool_arguments(&call.arguments, &call.name)?;
-            let sanitized = redact_text(&call.id);
+            // The id consults the same held lookbehind the arguments do, so a
+            // provider-controlled id extending a held credential marker gets a
+            // safe surrogate instead of leaking through the proposal.
+            let sanitized = sink.redact_terminal_failure_text(&call.id);
             let id = if sanitized == call.id {
                 sanitized
             } else {

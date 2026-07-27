@@ -214,6 +214,24 @@ async fn inv_035_split_authorization_value_before_tool_arguments_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a credential marker held from streamed reasoning also governs a
+/// tool-call id, so an id that extends the marker is replaced with a safe
+/// surrogate instead of leaking through the proposal or terminal content.
+#[tokio::test]
+async fn inv_035_split_authorization_value_before_tool_id_is_redacted() {
+    let result = execute_scenario(
+        "split_stream_authorization_before_tool_id",
+        DeliveryMode::Streamed,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
 /// INV-035: a decode-failure detail that quotes provider-controlled bytes
 /// consults the held lookbehind state, so a credential split between
 /// streamed reasoning and a malformed event's quoted value is suppressed

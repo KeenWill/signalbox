@@ -45,8 +45,27 @@ const VALUE_CREDENTIAL_MARKERS: &[&str] = &[
 const TOKEN_PREFIXES: &[&str] = &["sk-", "eyJ"];
 
 pub(crate) fn redact_text(text: &str) -> String {
-    let text = decode_unicode_escapes(text);
-    let mut sanitized = redact_json_credential_values(&text);
+    let sanitized = redact_text_literal(text);
+    // Detection also runs on the form a JSON consumer would reconstruct, so a
+    // credential spelled with `\uXXXX` escapes cannot ride escaped bytes past
+    // the literal scanners. The decoded form only decides: when it is
+    // credential-clean the original bytes are returned verbatim, so a benign
+    // literal escape is never rewritten; only when the decoded form reveals a
+    // credential shape the literal scan missed is the redacted decoded form
+    // returned, failing closed.
+    let decoded = decode_unicode_escapes(text);
+    if decoded == text {
+        return sanitized;
+    }
+    let sanitized_decoded = redact_text_literal(&decoded);
+    if sanitized_decoded == decoded {
+        return sanitized;
+    }
+    sanitized_decoded
+}
+
+fn redact_text_literal(text: &str) -> String {
+    let mut sanitized = redact_json_credential_values(text);
     for marker in LINE_CREDENTIAL_MARKERS {
         sanitized = redact_line_value(&sanitized, marker);
     }
@@ -56,7 +75,61 @@ pub(crate) fn redact_text(text: &str) -> String {
     for prefix in TOKEN_PREFIXES {
         sanitized = redact_prefixed_token(&sanitized, prefix);
     }
+    for name in LINE_CREDENTIAL_NAMES {
+        sanitized = redact_spaced_credential(&sanitized, name, ValueTermination::Line);
+    }
+    for name in VALUE_CREDENTIAL_NAMES {
+        sanitized = redact_spaced_credential(&sanitized, name, ValueTermination::Token);
+    }
     sanitized
+}
+
+/// Credential names whose spaced `name = value` / `name : value` form the
+/// exact markers cannot catch; the separator may carry surrounding spaces or
+/// tabs, as ordinary configuration and error output often print.
+const LINE_CREDENTIAL_NAMES: &[&str] = &["authorization", "cookie"];
+const VALUE_CREDENTIAL_NAMES: &[&str] = &[
+    "api_key",
+    "api-key",
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "session_token",
+    "password",
+    "secret",
+    "credential",
+];
+
+/// Redacts a `name` credential whose separator (`=` or `:`) carries optional
+/// surrounding horizontal whitespace, so `api_key = opaque` is caught exactly
+/// as `api_key=opaque` already is. Only a name immediately followed — after
+/// spaces or tabs — by a separator matches, so prose mentioning the name
+/// without assigning it is untouched.
+fn redact_spaced_credential(text: &str, name: &str, termination: ValueTermination) -> String {
+    let mut remaining = text;
+    let mut output = String::with_capacity(text.len());
+    while let Some(index) = find_ascii_case_insensitive(remaining, name) {
+        let after_name = index + name.len();
+        let whitespace = remaining[after_name..]
+            .bytes()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        let separator = after_name + whitespace;
+        if matches!(remaining.as_bytes().get(separator), Some(b'=' | b':')) {
+            let value_start = separator + 1;
+            output.push_str(&remaining[..value_start]);
+            let (prefix, token_start, value_end) =
+                credential_value_bounds(remaining, value_start, termination);
+            output.push_str(prefix);
+            output.push_str(REDACTED);
+            remaining = &remaining[value_end.max(token_start)..];
+        } else {
+            output.push_str(&remaining[..after_name]);
+            remaining = &remaining[after_name..];
+        }
+    }
+    output.push_str(remaining);
+    output
 }
 
 /// Rewrites `\uXXXX` escape sequences (including surrogate pairs) to the
@@ -65,13 +138,12 @@ pub(crate) fn redact_text(text: &str) -> String {
 /// would reconstruct. Quote and backslash escapes are left alone: they carry
 /// the quoted-value semantics the scanners already honor. Escapes can nest
 /// (`\u005cu0073…` decodes into a new escape), so decoding repeats to a
-/// fixed point within a small bound that alone caps the work.
+/// fixed point; each changing pass replaces a six-byte escape with at most
+/// four bytes, so the string strictly shrinks and the loop is bounded by the
+/// input length rather than a fixed ceiling.
 fn decode_unicode_escapes(text: &str) -> String {
     let mut current = text.to_string();
-    for _ in 0..4 {
-        if !current.contains("\\u") {
-            break;
-        }
+    while current.contains("\\u") {
         let decoded = decode_unicode_escape_pass(&current);
         if decoded == current {
             break;
@@ -740,6 +812,13 @@ fn stream_candidate_starts_at_zero(text: &str) -> bool {
         || json_credential_value_at_start(text).is_some()
         || unterminated_json_key_start(text) == Some(0)
         || json_credential_key_awaiting_colon(text) == Some(0)
+        || {
+            // A candidate spelled with `\uXXXX` escapes still starts at zero
+            // in the form a JSON consumer reconstructs.
+            let decoded = decode_unicode_escapes(text);
+            decoded != text && stream_candidate_starts_at_zero(&decoded)
+        }
+        || trailing_partial_unicode_escape(text) == Some(0)
 }
 
 fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
@@ -790,7 +869,67 @@ fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
     if let Some(start) = json_credential_key_awaiting_colon(text) {
         earliest = Some(earliest.map_or(start, |current| current.min(start)));
     }
+    if let Some(start) = escaped_unsafe_suffix_start(text) {
+        earliest = Some(earliest.map_or(start, |current| current.min(start)));
+    }
     earliest
+}
+
+/// Holds credential shapes that only appear once `\uXXXX` escapes are decoded,
+/// and holds a trailing partial escape so a sequence split across deltas
+/// (`sk\u00` then `2d…`) is not emitted before it can be completed. A
+/// decoded form whose credential shape the literal suffix scan missed is held
+/// from the first escape in the original — conservative but bounded by the
+/// pending-byte cap, which suppresses an oversized hold.
+fn escaped_unsafe_suffix_start(text: &str) -> Option<usize> {
+    if let Some(start) = trailing_partial_unicode_escape(text) {
+        return Some(start);
+    }
+    let decoded = decode_unicode_escapes(text);
+    if decoded == text {
+        return None;
+    }
+    if unsafe_stream_suffix_start(&decoded).is_some() || stream_candidate_starts_at_zero(&decoded) {
+        // The decoded credential's start cannot be mapped back through the
+        // escapes precisely, so the whole fragment is held — fail closed,
+        // bounded by the pending-byte cap that suppresses an oversized hold.
+        return Some(0);
+    }
+    None
+}
+
+/// Byte offset from which a trailing, still-incomplete `\uXXXX` escape must be
+/// held: the escape is a final lone backslash, or a `\u` followed only by
+/// fewer than four hexadecimal digits with nothing after them. The held span
+/// backs up over the contiguous non-separator run ending at the escape, so a
+/// token split mid-escape (`sk\u00`) is held whole rather than emitting its
+/// clean-looking head. A complete or clearly non-hex sequence is not partial
+/// and returns `None`.
+fn trailing_partial_unicode_escape(text: &str) -> Option<usize> {
+    let escape_position = if text.ends_with('\\') {
+        Some(text.len() - 1)
+    } else if let Some(position) = text.rfind("\\u") {
+        let digits = &text[position + 2..];
+        (digits.len() < 4 && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then_some(position)
+    } else {
+        None
+    }?;
+    let token_start = text[..escape_position]
+        .char_indices()
+        .rev()
+        .take_while(|(_, character)| !is_stream_token_boundary(*character))
+        .last()
+        .map_or(escape_position, |(offset, _)| offset);
+    Some(token_start)
+}
+
+fn is_stream_token_boundary(character: char) -> bool {
+    character.is_whitespace()
+        || matches!(
+            character,
+            '"' | '\'' | ',' | '{' | '}' | '[' | ']' | ';' | ':' | '='
+        )
 }
 
 fn unterminated_json_credential_start(text: &str) -> Option<usize> {
@@ -1115,6 +1254,92 @@ mod tests {
 
         assert!(!output.contains(QUOTED_CREDENTIAL_VALUE));
         assert!(output.contains("[redacted]"));
+    }
+
+    /// INV-035: a benign literal `\uXXXX` escape in credential-clean text is
+    /// preserved byte-for-byte, not rewritten to the character it names.
+    #[test]
+    fn inv_035_preserves_benign_unicode_escapes_in_clean_text() {
+        let fixture = r#"{"note":"smile \u263A done"}"#;
+
+        assert_eq!(redact_text(fixture), fixture);
+        assert_eq!(redact_json(fixture), fixture);
+    }
+
+    /// INV-035: a token shape hidden behind more nesting than any fixed pass
+    /// ceiling is still decoded to a fixed point and redacted.
+    #[test]
+    fn inv_035_redacts_deeply_nested_escaped_token_shapes() {
+        let fixture = r"sk\u005cu005cu005cu005cu002dsensitive-nested-value";
+        let output = redact_text(fixture);
+
+        assert!(!output.contains("sensitive-nested-value"));
+        assert!(output.contains("[redacted]"));
+    }
+
+    /// INV-035: a spaced `name = value` credential is redacted exactly as the
+    /// separator-adjacent form is.
+    #[test]
+    fn inv_035_redacts_spaced_credential_separators() {
+        let output = redact_text("api_key = spaced-secret-value and safe-tail");
+
+        assert!(!output.contains("spaced-secret-value"));
+        assert!(output.contains("[redacted]"));
+        assert!(output.contains("safe-tail"));
+    }
+
+    /// INV-035: a spaced authorization header consumes its whole line value.
+    #[test]
+    fn inv_035_redacts_a_spaced_authorization_line() {
+        let output = redact_text("authorization : opaque header value\nsafe-after");
+
+        assert!(!output.contains("opaque header value"));
+        assert!(output.contains("[redacted]"));
+        assert!(output.contains("safe-after"));
+    }
+
+    /// INV-035: a trailing partial Unicode escape holds its whole token so a
+    /// credential split mid-escape across deltas is never emitted piecewise.
+    #[test]
+    fn inv_035_stream_redaction_holds_a_partial_unicode_escape() {
+        assert_eq!(unsafe_stream_suffix_start(r"safe sk\u00"), Some(5));
+        assert!(stream_candidate_starts_at_zero(r"sk-"));
+    }
+
+    /// INV-035: a credential token split across a Unicode escape boundary is
+    /// redacted whole once the escape completes.
+    #[test]
+    fn inv_035_stream_redaction_redacts_a_split_escaped_token() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: r"sk\u00".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: "2dsensitive-escaped-stream".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted: String = observed
+            .iter()
+            .filter_map(|observation| match &observation.fact {
+                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!emitted.contains("sensitive-escaped-stream"));
+        assert!(!emitted.contains("sk"));
+        assert!(emitted.contains("[redacted]"));
     }
 
     #[test]
