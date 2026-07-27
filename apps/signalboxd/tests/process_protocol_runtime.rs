@@ -50,8 +50,8 @@ use signalbox_process_protocol::{
     ConversationImportSource, CurrentModelCallState, ErrorCode, ImportedContentKind,
     ImportedSourceSpeaker, ImportedSpeaker, InputContent, InputDelivery, MetadataActor,
     ModelSelection, ProtocolVersion, RejectionDetail, RequestId, ServerFrame, ServerMessage,
-    SessionEvent, SessionMetadata, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-    decode_server_line, encode_client_line,
+    SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText, ToolDecision,
+    TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
     HubModelConfiguration, LocalProcessListener, ProcessRuntime, ProcessRuntimeError,
@@ -411,6 +411,7 @@ async fn create_alias_session(
                 initial_model_selection: ModelSelection::Alias {
                     alias_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
                 },
+                system_prompt: SystemPromptMember::absent(),
             },
         )
         .await?;
@@ -823,6 +824,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
             selection_id: replacement_selection,
         },
         dangerous_tool_auto_approval: false,
+        system_prompt: SystemPromptMember::absent(),
     };
 
     connection
@@ -837,6 +839,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
                 selection_id: replacement_selection,
             },
             dangerous_tool_auto_approval: false,
+            system_prompt: SystemPromptMember::absent(),
         }
     );
 
@@ -852,6 +855,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
                 selection_id: replacement_selection,
             },
             dangerous_tool_auto_approval: false,
+            system_prompt: SystemPromptMember::absent(),
         }
     );
 
@@ -868,6 +872,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
                     selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(999)),
                 },
                 dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::absent(),
             },
         )
         .await?;
@@ -934,6 +939,7 @@ async fn s33_inv012_inv033_inv046_submit_replay_precedes_mutable_history_gate()
                     selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
                 },
                 dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::absent(),
             },
         )
         .await?;
@@ -3395,5 +3401,211 @@ async fn s03_queued_input_survives_process_restart_and_startup_scan() -> Result<
     assert_eq!(runtime.restart().await?, 1);
     activate_expected_turn(&runtime.pool, session, queued_turn_id).await?;
 
+    runtime.stop().await
+}
+
+/// S34 / INV-012 / INV-033 / INV-046: version nine creates a
+/// prompted session, reads exact current and named defaults epochs, replaces
+/// the prompt forward-only with the complete installed echo, and gates a
+/// pre-nine replacement while the current epoch carries a prompt without
+/// claiming its command identity.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_prompt()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let prompt = SystemPromptText::try_new(String::from("exact review instructions"))
+        .expect("test prompt is admissible");
+    let selection = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+
+    connection
+        .request_version(
+            ProtocolVersion::Nine,
+            1,
+            ClientRequest::CreateSession {
+                command_id: command()?,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: selection,
+                },
+                system_prompt: SystemPromptMember::present(Some(prompt.clone())),
+            },
+        )
+        .await?;
+    let ServerMessage::SessionCreated { session_id } =
+        *response_within(&mut connection).await?.message()
+    else {
+        panic!("prompted creation must return its session");
+    };
+
+    connection
+        .request_version(
+            ProtocolVersion::Nine,
+            2,
+            ClientRequest::ReadSessionDefaults {
+                session_id,
+                defaults_version: None,
+            },
+        )
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::SessionDefaults {
+            session_id,
+            defaults_version: CanonicalU64::new(1),
+            model_selection: ModelSelection::Direct {
+                selection_id: selection,
+            },
+            dangerous_tool_auto_approval: false,
+            system_prompt: Some(prompt.clone()),
+        }
+    );
+
+    // A version-six replacement cannot represent the present prompt it would
+    // silently clear; the gate refuses it before any command is recorded.
+    let gated_command = command()?;
+    connection
+        .request_version(
+            ProtocolVersion::Six,
+            3,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id: gated_command,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: selection,
+                },
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::absent(),
+            },
+        )
+        .await?;
+    let gated = response_within(&mut connection).await?;
+    let ServerMessage::Error {
+        code: gated_code,
+        message: gated_message,
+        ..
+    } = gated.message()
+    else {
+        panic!("the pre-nine replacement on a prompted session must be refused");
+    };
+    assert_eq!(*gated_code, ErrorCode::UnsupportedVersion);
+    assert_eq!(
+        gated_message,
+        "the selected session requires protocol version 9"
+    );
+    let gated_claim_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+            .bind(gated_command.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(gated_claim_count, 0);
+
+    // A version-nine replacement states the complete successor explicitly,
+    // clearing the prompt, and its receipt echoes the complete install.
+    connection
+        .request_version(
+            ProtocolVersion::Nine,
+            4,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id: command()?,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: selection,
+                },
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::SessionDefaultsReplaced {
+            session_id,
+            defaults_version: CanonicalU64::new(2),
+            model_selection: ModelSelection::Direct {
+                selection_id: selection,
+            },
+            dangerous_tool_auto_approval: false,
+            system_prompt: SystemPromptMember::present(None),
+        }
+    );
+
+    // With no prompt on the current epoch, the older vocabulary is admitted
+    // again and the prompted history stays readable at its exact epoch.
+    connection
+        .request_version(
+            ProtocolVersion::Six,
+            5,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id: command()?,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(2),
+                model_selection: ModelSelection::Direct {
+                    selection_id: selection,
+                },
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::absent(),
+            },
+        )
+        .await?;
+    assert_eq!(
+        replaced_defaults(response_within(&mut connection).await?.message()),
+        (session_id, 3)
+    );
+    connection
+        .request_version(
+            ProtocolVersion::Nine,
+            6,
+            ClientRequest::ReadSessionDefaults {
+                session_id,
+                defaults_version: Some(CanonicalU64::new(1)),
+            },
+        )
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::SessionDefaults {
+            session_id,
+            defaults_version: CanonicalU64::new(1),
+            model_selection: ModelSelection::Direct {
+                selection_id: selection,
+            },
+            dangerous_tool_auto_approval: false,
+            system_prompt: Some(prompt),
+        }
+    );
+
+    connection
+        .request_version(
+            ProtocolVersion::Nine,
+            7,
+            ClientRequest::ReadSessionDefaults {
+                session_id,
+                defaults_version: Some(CanonicalU64::new(99)),
+            },
+        )
+        .await?;
+    assert_eq!(
+        protocol_error_code(response_within(&mut connection).await?.message()),
+        ErrorCode::NotFound
+    );
+    connection
+        .request_version(
+            ProtocolVersion::Nine,
+            8,
+            ClientRequest::ReadSessionDefaults {
+                session_id: CanonicalUuid::from_uuid(Uuid::from_u128(0xdead)),
+                defaults_version: None,
+            },
+        )
+        .await?;
+    assert_eq!(
+        protocol_error_code(response_within(&mut connection).await?.message()),
+        ErrorCode::NotFound
+    );
+
+    drop(connection);
     runtime.stop().await
 }

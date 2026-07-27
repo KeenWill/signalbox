@@ -22,7 +22,9 @@ were verified through PR #258 (`agent/signalboxd-rename`); the
 model-call cause codes were verified through PR #280
 (`agent/provider-identity-normalization`). The complete frontier-payload
 projection and identity-before-terminal-evidence precedence were verified
-through PR #288 (`agent/audit-fix-docs-coherence`). Invariant tags cite
+through PR #288 (`agent/audit-fix-docs-coherence`); the session system prompt on
+the prepared operation was verified through PR #286
+(`agent/session-system-prompt`). Invariant tags cite
 [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
@@ -563,7 +565,11 @@ prints the semantic transcript; it is deliberately not the client protocol.
 - Same-incarnation retained-evidence reconciliation gets exactly one production
   pass (`reconcile_retained_once`) before fatal escalation; repeated
   same-incarnation drains are exercised only by tests.
-- No system prompt is composed or sent: the bridge always leaves the runtime
-  operation's own `ModelOperation::system` field `None`
-  (`crates/model-runtime/src/operation.rs`; `ModelSettings` carries no such
-  field); system-prompt projection from session configuration remains deferred.
+- The one system-prompt source is the calling turn's frozen defaults epoch: the
+  prepare transaction loads that epoch's optional bounded prompt, rendering
+  binds it onto the prepared operation, and the bridge sets the runtime
+  operation's `ModelOperation::system` field from it on every call
+  (`crates/model-runtime/src/operation.rs`), exactly or `None`
+  ([sessions-and-transcript](sessions-and-transcript.md)). Composition from
+  additional sources remains deferred under the open
+  [configuration categories](../open-questions.md#configuration-categories).
