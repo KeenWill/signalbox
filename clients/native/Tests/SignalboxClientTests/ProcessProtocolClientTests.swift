@@ -133,6 +133,25 @@ final class ProcessProtocolClientTests: XCTestCase {
     )
   }
 
+  func testCancellationBeforeSendNeverWritesRequest() async {
+    let connection = ScriptedProcessConnection(chunks: [], suspendsStart: true)
+    let client = SignalboxProcessClient(
+      connectionFactory: ScriptedProcessConnectionFactory(connection: connection)
+    )
+    let opening = Task { await capturedCancellation(client) }
+    await connection.waitUntilStartStarted()
+
+    opening.cancel()
+    await connection.completeStart()
+    let wasCancelled = await opening.value
+    let sentData = await connection.sentData
+    let closeCount = await connection.closeCount
+
+    XCTAssertTrue(wasCancelled)
+    XCTAssertTrue(sentData.isEmpty)
+    XCTAssertEqual(closeCount, 1)
+  }
+
   func testCancellingSuspendedSendClosesConnection() async {
     let connection = ScriptedProcessConnection(chunks: [], suspendsSend: true)
     let client = SignalboxProcessClient(
@@ -193,6 +212,19 @@ final class ProcessProtocolClientTests: XCTestCase {
       return nil
     }
   }
+
+  private func capturedCancellation(
+    _ client: SignalboxProcessClient
+  ) async -> Bool {
+    do {
+      _ = try await client.open(.listSessions)
+      return false
+    } catch is CancellationError {
+      return true
+    } catch {
+      return false
+    }
+  }
 }
 
 private struct ScriptedProcessConnectionFactory: SignalboxProcessConnectionFactory {
@@ -207,11 +239,14 @@ private actor ScriptedProcessConnection: SignalboxProcessConnection {
   private var chunks: [Data]
   private let startError: (any Error)?
   private let sendError: (any Error)?
+  private let suspendsStart: Bool
   private let suspendsSend: Bool
   private let suspendsReceive: Bool
   private(set) var sentData = Data()
   private(set) var receiveCount = 0
   private(set) var closeCount = 0
+  private var startContinuation: CheckedContinuation<Void, Never>?
+  private var startStartedContinuation: CheckedContinuation<Void, Never>?
   private var sendContinuation: CheckedContinuation<Void, Error>?
   private var sendStartedContinuation: CheckedContinuation<Void, Never>?
   private var receiveContinuation: CheckedContinuation<Data?, Error>?
@@ -221,12 +256,14 @@ private actor ScriptedProcessConnection: SignalboxProcessConnection {
     chunks: [Data],
     startError: (any Error)? = nil,
     sendError: (any Error)? = nil,
+    suspendsStart: Bool = false,
     suspendsSend: Bool = false,
     suspendsReceive: Bool = false
   ) {
     self.chunks = chunks
     self.startError = startError
     self.sendError = sendError
+    self.suspendsStart = suspendsStart
     self.suspendsSend = suspendsSend
     self.suspendsReceive = suspendsReceive
   }
@@ -235,6 +272,27 @@ private actor ScriptedProcessConnection: SignalboxProcessConnection {
     if let startError {
       throw startError
     }
+    if suspendsStart {
+      await withCheckedContinuation { continuation in
+        startContinuation = continuation
+        startStartedContinuation?.resume()
+        startStartedContinuation = nil
+      }
+    }
+  }
+
+  func waitUntilStartStarted() async {
+    guard startContinuation == nil else {
+      return
+    }
+    await withCheckedContinuation { continuation in
+      startStartedContinuation = continuation
+    }
+  }
+
+  func completeStart() {
+    startContinuation?.resume()
+    startContinuation = nil
   }
 
   func send(_ data: Data) async throws {
