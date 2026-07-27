@@ -531,7 +531,15 @@ async fn execute_process<C: Clone + Send + Sync>(
         match next {
             ProcessStep::Line(Ok(Some(line))) => {
                 if let Err(error) = decoder.push(&line, &mut redacting_sink) {
-                    let detail = format!("undecodable Codex event: {}", error.into_detail());
+                    // Serde details can quote provider-controlled bytes, so
+                    // the detail consults the held lookbehind state before
+                    // the sink flushes, exactly as failure messages do: a
+                    // detail that extends a held credential marker is
+                    // suppressed whole.
+                    let detail = redacting_sink.redact_terminal_failure_text(&format!(
+                        "undecodable Codex event: {}",
+                        error.into_detail()
+                    ));
                     force_kill(&mut child).await;
                     abort_stderr_task(&mut stderr_task).await;
                     redacting_sink.finish();

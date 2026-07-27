@@ -417,6 +417,26 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         redact_text(message)
     }
 
+    /// Redacts tool-argument JSON against the held lookbehind state:
+    /// arguments that extend a held credential candidate — or that arrive
+    /// while the sink is suppressing an oversized one — are replaced whole,
+    /// exactly as the streamed fragments they continue are; otherwise the
+    /// stateless JSON-aware redaction applies and clean arguments stay
+    /// byte-verbatim.
+    pub(crate) fn redact_tool_arguments(&self, arguments: &str) -> String {
+        if self.suppressing {
+            return REDACTED.to_string();
+        }
+        if let Some(pending) = &self.pending {
+            let mut joined = pending.text.clone();
+            joined.push_str(arguments);
+            if redact_text(&joined) != joined {
+                return REDACTED.to_string();
+            }
+        }
+        redact_json(arguments)
+    }
+
     fn flush_boundary(&mut self) {
         if let Some(pending) = self.pending.take() {
             if stream_candidate_starts_at_zero(&pending.text) {
@@ -1230,6 +1250,36 @@ mod tests {
             sink.redact_terminal_failure_text("harmless failure detail"),
             REDACTED
         );
+    }
+
+    /// INV-035: tool arguments that extend a credential marker held from
+    /// streamed text are suppressed whole, never returned piecewise.
+    #[test]
+    fn inv_035_tool_arguments_consult_held_redaction_state() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "Authorization:".to_string(),
+            },
+        });
+
+        assert_eq!(
+            sink.redact_tool_arguments(&format!(r#"{{"city":" {AUTHORIZATION_VALUE}"}}"#)),
+            REDACTED
+        );
+    }
+
+    /// Harmless tool arguments stay byte-exact with no held redaction state.
+    #[test]
+    fn tool_arguments_without_held_state_stay_byte_exact() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let sink = RedactingSink::new(&mut observed);
+        let arguments = r#"{ "city" : "Oslo", "limit": 3 }"#;
+
+        assert_eq!(sink.redact_tool_arguments(arguments), arguments);
     }
 
     /// A failure message with no held redaction state keeps its stateless

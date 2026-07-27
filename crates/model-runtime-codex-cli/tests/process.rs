@@ -194,6 +194,45 @@ async fn inv_035_split_authorization_value_before_final_text_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a credential header split between streamed reasoning and the
+/// final envelope's tool arguments keeps redacting through the value: the
+/// argument bytes consult the held lookbehind state before the streamed
+/// argument delta and the terminal proposal are built.
+#[tokio::test]
+async fn inv_035_split_authorization_value_before_tool_arguments_is_redacted() {
+    let result = execute_scenario(
+        "split_stream_authorization_before_tool_arguments",
+        DeliveryMode::Streamed,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a decode-failure detail that quotes provider-controlled bytes
+/// consults the held lookbehind state, so a credential split between
+/// streamed reasoning and a malformed event's quoted value is suppressed
+/// whole instead of surviving in the provider-error message.
+#[tokio::test]
+async fn inv_035_decode_failure_detail_consults_held_redaction_state() {
+    let result = execute_scenario(
+        "reasoning_then_malformed_usage",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let error = provider_error(&result.evidence);
+
+    assert!(!format!("{:?}", result.evidence).contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(error.native.message.as_deref(), Some("[redacted]"));
+}
+
 /// INV-035: a credential header split between streamed reasoning and a
 /// provider failure message keeps redacting through the value, not just
 /// through the marker: terminal failure evidence carries the stateful

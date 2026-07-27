@@ -12,7 +12,7 @@ use signalbox_model_runtime::{
     validate_provider_json_nesting,
 };
 
-use crate::redaction::{RedactingSink, redact_json, redact_text};
+use crate::redaction::{RedactingSink, redact_text};
 use crate::status::classify_error;
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{
@@ -265,7 +265,7 @@ impl<C: Clone> EventDecoder<C> {
                 );
             }
         };
-        let mut content = match self.decode_content(&envelope) {
+        let mut content = match self.decode_content(&envelope, sink) {
             Ok(content) => content,
             Err(detail) => {
                 return boundary_loss(
@@ -337,7 +337,11 @@ impl<C: Clone> EventDecoder<C> {
         }
     }
 
-    fn decode_content(&self, envelope: &ModelEnvelope) -> Result<Vec<AssistantPart>, String> {
+    fn decode_content(
+        &self,
+        envelope: &ModelEnvelope,
+        sink: &RedactingSink<'_, C>,
+    ) -> Result<Vec<AssistantPart>, String> {
         if envelope.outcome == EnvelopeOutcome::Refused && !envelope.tool_calls.is_empty() {
             return Err("a refusal envelope also proposed tools".to_string());
         }
@@ -387,7 +391,12 @@ impl<C: Clone> EventDecoder<C> {
             content.push(AssistantPart::ToolCall(ToolCallProposal {
                 id: ToolCallId::new(id),
                 name: ToolName::new(call.name.clone()),
-                arguments_json: redact_json(&call.arguments),
+                // The arguments consult the held cross-fragment lookbehind
+                // before the stateless JSON-aware redaction, and this same
+                // sanitized value feeds the streamed argument delta and the
+                // terminal proposal, so a credential whose marker arrived in
+                // an earlier fragment cannot escape through tool arguments.
+                arguments_json: sink.redact_tool_arguments(&call.arguments),
             }));
         }
         if let Some(contract_name) = &self.output_contract_name {

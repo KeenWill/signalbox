@@ -107,6 +107,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "split_stream_authorization_before_tool_arguments" => {
+            reasoning("reason-split-tool-arguments", "Authorization:");
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-split-tool","name":"{}","arguments":"{}"}}]}}"#,
+                fixtures::TOOL_NAME,
+                json_escape(&format!(
+                    r#"{{"city":" {}"}}"#,
+                    fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+                ))
+            ));
+            completed();
+        }
+        "reasoning_then_malformed_usage" => {
+            reasoning("reason-held-marker", "Authorization:");
+            emit(&format!(
+                r#"{{"type":"turn.completed","usage":{{"input_tokens":" {}","cached_input_tokens":2,"cache_write_input_tokens":1,"output_tokens":7,"reasoning_output_tokens":3}}}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+        }
         "split_stream_authorization_before_failure" => {
             reasoning("reason-split-authorization-failed", "Authorization:");
             unrecoverable(&format!(" {}", fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
