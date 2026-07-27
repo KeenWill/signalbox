@@ -32,6 +32,7 @@ public enum SignalboxProcessClientError: LocalizedError, Equatable {
   case oversizedFrame
   case unterminatedFrame
   case connectionClosed
+  case concurrentRead
   case responseVersionMismatch
   case responseIdentityMismatch
 
@@ -45,6 +46,8 @@ public enum SignalboxProcessClientError: LocalizedError, Equatable {
       return "The process-protocol frame reached 8 MiB without a newline."
     case .connectionClosed:
       return "The daemon closed the connection before a complete frame."
+    case .concurrentRead:
+      return "The process exchange does not admit concurrent reads."
     case .responseVersionMismatch:
       return "The daemon responded with a mismatched protocol version."
     case .responseIdentityMismatch:
@@ -114,6 +117,10 @@ public actor SignalboxProcessClient: SignalboxProcessRequesting {
         await connection.close()
         throw SignalboxProcessRequestOpenError.sendOutcomeUnknown(error.localizedDescription)
       }
+      guard !Task.isCancelled else {
+        await connection.close()
+        throw CancellationError()
+      }
       return SignalboxPullProcessExchange(
         connection: connection,
         requestedVersion: version,
@@ -158,6 +165,7 @@ private actor SignalboxPullProcessExchange: SignalboxProcessExchange {
   private let requestedVersion: SignalboxProcessProtocolVersion
   private let requestID: SignalboxRequestID
   private var isClosed = false
+  private var isReading = false
 
   init(
     connection: any SignalboxProcessConnection,
@@ -173,6 +181,13 @@ private actor SignalboxPullProcessExchange: SignalboxProcessExchange {
   func next() async throws -> SignalboxProcessServerFrame? {
     guard !isClosed else {
       return nil
+    }
+    guard !isReading else {
+      throw SignalboxProcessClientError.concurrentRead
+    }
+    isReading = true
+    defer {
+      isReading = false
     }
     do {
       let line = try await reader.nextLine()
@@ -302,21 +317,25 @@ private final class SignalboxLocalSocketConnection: SignalboxProcessConnection, 
   }
 
   func receive() async throws -> Data? {
-    try await withCheckedThrowingContinuation { continuation in
-      connection.receive(
-        minimumIncompleteLength: 1,
-        maximumLength: 64 * 1024
-      ) { data, _, complete, error in
-        if let error {
-          continuation.resume(throwing: error)
-        } else if let data, !data.isEmpty {
-          continuation.resume(returning: data)
-        } else if complete {
-          continuation.resume(returning: nil)
-        } else {
-          continuation.resume(returning: Data())
+    try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        connection.receive(
+          minimumIncompleteLength: 1,
+          maximumLength: 64 * 1024
+        ) { data, _, complete, error in
+          if let error {
+            continuation.resume(throwing: error)
+          } else if let data, !data.isEmpty {
+            continuation.resume(returning: data)
+          } else if complete {
+            continuation.resume(returning: nil)
+          } else {
+            continuation.resume(returning: Data())
+          }
         }
       }
+    } onCancel: {
+      connection.cancel()
     }
   }
 

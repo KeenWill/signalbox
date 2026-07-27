@@ -158,6 +158,22 @@ final class ProcessProtocolClientTests: XCTestCase {
     XCTAssertEqual(closeCount, 1)
   }
 
+  func testConcurrentExchangeReadIsRejectedBeforeSecondReceive() async throws {
+    let connection = ScriptedProcessConnection(chunks: [], suspendsReceive: true)
+    let client = SignalboxProcessClient(
+      connectionFactory: ScriptedProcessConnectionFactory(connection: connection)
+    )
+    let exchange = try await client.open(.listSessions)
+    let first = Task { try await exchange.next() }
+    await connection.waitUntilReceiveStarted()
+
+    let secondError = await capturedNextError(exchange)
+    await exchange.close()
+    _ = try? await first.value
+
+    XCTAssertEqual(secondError, .concurrentRead)
+  }
+
   private func capturedOpenError(
     _ client: SignalboxProcessClient
   ) async -> SignalboxProcessRequestOpenError? {
@@ -165,6 +181,19 @@ final class ProcessProtocolClientTests: XCTestCase {
       _ = try await client.open(.listSessions)
       return nil
     } catch let error as SignalboxProcessRequestOpenError {
+      return error
+    } catch {
+      return nil
+    }
+  }
+
+  private func capturedNextError(
+    _ exchange: any SignalboxProcessExchange
+  ) async -> SignalboxProcessClientError? {
+    do {
+      _ = try await exchange.next()
+      return nil
+    } catch let error as SignalboxProcessClientError {
       return error
     } catch {
       return nil
@@ -185,22 +214,27 @@ private actor ScriptedProcessConnection: SignalboxProcessConnection {
   private let startError: (any Error)?
   private let sendError: (any Error)?
   private let suspendsSend: Bool
+  private let suspendsReceive: Bool
   private(set) var sentData = Data()
   private(set) var receiveCount = 0
   private(set) var closeCount = 0
   private var sendContinuation: CheckedContinuation<Void, Error>?
   private var sendStartedContinuation: CheckedContinuation<Void, Never>?
+  private var receiveContinuation: CheckedContinuation<Data?, Error>?
+  private var receiveStartedContinuation: CheckedContinuation<Void, Never>?
 
   init(
     chunks: [Data],
     startError: (any Error)? = nil,
     sendError: (any Error)? = nil,
-    suspendsSend: Bool = false
+    suspendsSend: Bool = false,
+    suspendsReceive: Bool = false
   ) {
     self.chunks = chunks
     self.startError = startError
     self.sendError = sendError
     self.suspendsSend = suspendsSend
+    self.suspendsReceive = suspendsReceive
   }
 
   func start() async throws {
@@ -235,10 +269,26 @@ private actor ScriptedProcessConnection: SignalboxProcessConnection {
 
   func receive() async throws -> Data? {
     receiveCount += 1
+    if suspendsReceive {
+      return try await withCheckedThrowingContinuation { continuation in
+        receiveContinuation = continuation
+        receiveStartedContinuation?.resume()
+        receiveStartedContinuation = nil
+      }
+    }
     guard !chunks.isEmpty else {
       return nil
     }
     return chunks.removeFirst()
+  }
+
+  func waitUntilReceiveStarted() async {
+    guard receiveContinuation == nil else {
+      return
+    }
+    await withCheckedContinuation { continuation in
+      receiveStartedContinuation = continuation
+    }
   }
 
   func close() async {
@@ -248,6 +298,8 @@ private actor ScriptedProcessConnection: SignalboxProcessConnection {
     closeCount = 1
     sendContinuation?.resume(throwing: CancellationError())
     sendContinuation = nil
+    receiveContinuation?.resume(throwing: CancellationError())
+    receiveContinuation = nil
   }
 }
 
