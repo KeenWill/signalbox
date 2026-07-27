@@ -4,9 +4,10 @@ use clap::{
     ArgGroup, Args as ClapArgs, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind,
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, CommandId, ConversationImportFormat,
+    CanonicalU64, CanonicalUuid, CommandId, ConversationImportFormat, ImportedSessionRelationship,
     MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
-    MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, ModelSelection,
+    MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, ModelSelection, ReviewDiffSide, ReviewFindingInput,
+    ReviewSeverity, ReviewTargetSubject, ReviewWorkflow,
 };
 use uuid::Uuid;
 
@@ -28,6 +29,13 @@ pub(crate) enum Command {
         selection: ModelSelection,
         command_id: Option<CommandId>,
         system_prompt_file: Option<PathBuf>,
+    },
+    Continue {
+        imported_conversation_id: CanonicalUuid,
+        through_position: CanonicalU64,
+        relationship: ImportedSessionRelationship,
+        selection: ModelSelection,
+        command_id: Option<CommandId>,
     },
     List,
     Search(SessionMetadataPageRequest),
@@ -60,6 +68,7 @@ pub(crate) enum Command {
         command_id: Option<CommandId>,
         defaults_version: Option<CanonicalU64>,
     },
+    Review(Box<ReviewCommand>),
     Stop {
         session_id: CanonicalUuid,
         turn_id: Option<CanonicalUuid>,
@@ -76,6 +85,55 @@ pub(crate) enum Command {
         tool_request_id: CanonicalUuid,
         reason: String,
         command_id: Option<CommandId>,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum ReviewCommand {
+    CreateTarget {
+        command_id: Option<CommandId>,
+        target_id: CanonicalUuid,
+        provider: String,
+        repository: String,
+        subject: ReviewTargetSubject,
+        head_revision: String,
+        base_revision: Option<String>,
+        stack_parent_target_id: Option<CanonicalUuid>,
+    },
+    StartRun {
+        command_id: Option<CommandId>,
+        target_id: CanonicalUuid,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        workflow: ReviewWorkflow,
+        session_id: CanonicalUuid,
+        accepted_input_id: CanonicalUuid,
+    },
+    ActivatePass {
+        command_id: Option<CommandId>,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+    },
+    RecordFinding {
+        command_id: Option<CommandId>,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        output_frontier_id: CanonicalUuid,
+        finding: ReviewFindingInput,
+    },
+    ListFindings {
+        run_id: CanonicalUuid,
+    },
+    ReadTarget {
+        target_id: CanonicalUuid,
+    },
+    ReadRun {
+        run_id: CanonicalUuid,
+    },
+    ReadFinding {
+        finding_id: CanonicalUuid,
     },
 }
 
@@ -124,6 +182,8 @@ struct Cli {
 enum CliCommand {
     /// Create a session.
     Create(CreateArguments),
+    /// Create a live session from an imported conversation boundary.
+    Continue(ContinueArguments),
     /// List current sessions.
     List,
     /// Read one filtered page of current session metadata.
@@ -141,12 +201,170 @@ enum CliCommand {
     /// Reconcile a turn parked on an ambiguous model call and continue with
     /// standard-input content.
     Reconcile(ReconcileArguments),
+    /// Drive and inspect headless review workflows.
+    Review(ReviewArguments),
     /// Stop the active turn and continue with standard-input content.
     Stop(StopArguments),
     /// Approve one pending tool request.
     Approve(DecideArguments),
     /// Deny one pending tool request with an explicit reason.
     Deny(DenyArguments),
+}
+
+#[derive(Debug, ClapArgs)]
+struct ReviewArguments {
+    #[command(subcommand)]
+    command: ReviewSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ReviewSubcommand {
+    /// Register one immutable external change-request snapshot.
+    CreateTarget(CreateReviewTargetArguments),
+    /// Admit one queued run and its sole session-backed pass.
+    StartRun(StartReviewRunArguments),
+    /// Bind a queued pass to its canonical active turn.
+    ActivatePass(ActivateReviewPassArguments),
+    /// Conclude one read-only pass with exactly one finding.
+    RecordFinding(RecordReviewFindingArguments),
+    /// List findings for one exact run.
+    ListFindings(ReviewRunArguments),
+    /// Read one target snapshot.
+    ReadTarget(ReviewTargetArguments),
+    /// Read one run and pass projection.
+    ReadRun(ReviewRunArguments),
+    /// Read one finding aggregate.
+    ReadFinding(ReviewFindingArguments),
+}
+
+#[derive(Debug, ClapArgs)]
+struct CreateReviewTargetArguments {
+    #[arg(value_name = "TARGET", value_parser = canonical_uuid)]
+    target_id: CanonicalUuid,
+    #[arg(long)]
+    provider: String,
+    #[arg(long)]
+    repository: String,
+    #[arg(long, value_name = "DECIMAL", value_parser = positive_canonical_u64)]
+    change_request: CanonicalU64,
+    #[arg(long)]
+    head_revision: String,
+    #[arg(long)]
+    base_revision: String,
+    #[arg(long, value_name = "TARGET", value_parser = canonical_uuid)]
+    stack_parent_target_id: Option<CanonicalUuid>,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct StartReviewRunArguments {
+    #[arg(value_name = "TARGET", value_parser = canonical_uuid)]
+    target_id: CanonicalUuid,
+    #[arg(value_name = "RUN", value_parser = canonical_uuid)]
+    run_id: CanonicalUuid,
+    #[arg(value_name = "PASS", value_parser = canonical_uuid)]
+    pass_id: CanonicalUuid,
+    #[arg(long, value_enum)]
+    workflow: ReviewWorkflowArgument,
+    #[arg(long, value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    #[arg(long, value_name = "INPUT", value_parser = canonical_uuid)]
+    accepted_input_id: CanonicalUuid,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ActivateReviewPassArguments {
+    #[arg(value_name = "RUN", value_parser = canonical_uuid)]
+    run_id: CanonicalUuid,
+    #[arg(value_name = "PASS", value_parser = canonical_uuid)]
+    pass_id: CanonicalUuid,
+    #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
+    turn_id: CanonicalUuid,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct RecordReviewFindingArguments {
+    #[arg(value_name = "RUN", value_parser = canonical_uuid)]
+    run_id: CanonicalUuid,
+    #[arg(value_name = "PASS", value_parser = canonical_uuid)]
+    pass_id: CanonicalUuid,
+    #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
+    turn_id: CanonicalUuid,
+    #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
+    output_frontier_id: CanonicalUuid,
+    #[arg(long, value_name = "FINDING", value_parser = canonical_uuid)]
+    finding_id: CanonicalUuid,
+    #[arg(long)]
+    file_path: String,
+    #[arg(long, requires = "line_end", value_parser = review_line_number)]
+    line_start: Option<CanonicalU64>,
+    #[arg(long, requires = "line_start", value_parser = review_line_number)]
+    line_end: Option<CanonicalU64>,
+    #[arg(long, value_enum)]
+    diff_side: Option<ReviewDiffSideArgument>,
+    #[arg(long)]
+    title: String,
+    #[arg(long)]
+    body: String,
+    #[arg(long, value_enum)]
+    severity: ReviewSeverityArgument,
+    #[arg(long, value_parser = review_confidence)]
+    confidence: CanonicalU64,
+    #[arg(long)]
+    category: String,
+    #[arg(long)]
+    recommended_fix: Option<String>,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ReviewTargetArguments {
+    #[arg(value_name = "TARGET", value_parser = canonical_uuid)]
+    target_id: CanonicalUuid,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ReviewRunArguments {
+    #[arg(value_name = "RUN", value_parser = canonical_uuid)]
+    run_id: CanonicalUuid,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ReviewFindingArguments {
+    #[arg(value_name = "FINDING", value_parser = canonical_uuid)]
+    finding_id: CanonicalUuid,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ReviewWorkflowArgument {
+    ImportExternalContext,
+    ReadOnlyReview,
+    JudgeFindings,
+    DedupeFindings,
+    PublishReview,
+    FixFindings,
+    PropagateStack,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ReviewDiffSideArgument {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ReviewSeverityArgument {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -169,6 +387,40 @@ struct CreateArguments {
     /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+#[command(group(
+    ArgGroup::new("selection")
+        .required(true)
+        .multiple(false)
+        .args(["model", "alias"])
+))]
+struct ContinueArguments {
+    /// Imported conversation to continue from.
+    #[arg(value_name = "IMPORTED_CONVERSATION", value_parser = canonical_uuid)]
+    imported_conversation_id: CanonicalUuid,
+    /// Inclusive positive imported entry position.
+    #[arg(long, value_name = "DECIMAL", value_parser = positive_canonical_u64)]
+    through_position: CanonicalU64,
+    /// Record whether this session resumes or forks the imported boundary.
+    #[arg(long, value_enum)]
+    relationship: ImportedRelationshipArgument,
+    /// Select a model configuration directly.
+    #[arg(long, value_name = "UUID", value_parser = canonical_uuid)]
+    model: Option<CanonicalUuid>,
+    /// Select a configured model alias.
+    #[arg(long, value_name = "UUID", value_parser = canonical_uuid)]
+    alias: Option<CanonicalUuid>,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ImportedRelationshipArgument {
+    Resume,
+    Fork,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -433,6 +685,25 @@ pub(crate) fn parse(
             command_id: arguments.command_id,
             system_prompt_file: arguments.system_prompt_file,
         },
+        CliCommand::Continue(arguments) => Command::Continue {
+            imported_conversation_id: arguments.imported_conversation_id,
+            through_position: arguments.through_position,
+            relationship: match arguments.relationship {
+                ImportedRelationshipArgument::Resume => ImportedSessionRelationship::Resume,
+                ImportedRelationshipArgument::Fork => ImportedSessionRelationship::Fork,
+            },
+            selection: match (arguments.model, arguments.alias) {
+                (Some(selection_id), None) => ModelSelection::Direct { selection_id },
+                (None, Some(alias_id)) => ModelSelection::Alias { alias_id },
+                (None, None) | (Some(_), Some(_)) => {
+                    return Err(UsageError(Cli::command().error(
+                        ErrorKind::ArgumentConflict,
+                        "continue requires exactly one of --model or --alias",
+                    )));
+                }
+            },
+            command_id: arguments.command_id,
+        },
         CliCommand::List => Command::List,
         CliCommand::Search(arguments) => {
             let mut distinct = arguments.tags.clone();
@@ -548,6 +819,98 @@ pub(crate) fn parse(
             command_id: arguments.command_id,
             defaults_version: arguments.defaults_version,
         },
+        CliCommand::Review(arguments) => Command::Review(Box::new(match arguments.command {
+            ReviewSubcommand::CreateTarget(arguments) => ReviewCommand::CreateTarget {
+                command_id: arguments.command_id,
+                target_id: arguments.target_id,
+                provider: arguments.provider,
+                repository: arguments.repository,
+                subject: ReviewTargetSubject::ChangeRequest {
+                    number: arguments.change_request,
+                },
+                head_revision: arguments.head_revision,
+                base_revision: Some(arguments.base_revision),
+                stack_parent_target_id: arguments.stack_parent_target_id,
+            },
+            ReviewSubcommand::StartRun(arguments) => ReviewCommand::StartRun {
+                command_id: arguments.command_id,
+                target_id: arguments.target_id,
+                run_id: arguments.run_id,
+                pass_id: arguments.pass_id,
+                workflow: match arguments.workflow {
+                    ReviewWorkflowArgument::ImportExternalContext => {
+                        ReviewWorkflow::ImportExternalContext
+                    }
+                    ReviewWorkflowArgument::ReadOnlyReview => ReviewWorkflow::ReadOnlyReview,
+                    ReviewWorkflowArgument::JudgeFindings => ReviewWorkflow::JudgeFindings,
+                    ReviewWorkflowArgument::DedupeFindings => ReviewWorkflow::DedupeFindings,
+                    ReviewWorkflowArgument::PublishReview => ReviewWorkflow::PublishReview,
+                    ReviewWorkflowArgument::FixFindings => ReviewWorkflow::FixFindings,
+                    ReviewWorkflowArgument::PropagateStack => ReviewWorkflow::PropagateStack,
+                },
+                session_id: arguments.session_id,
+                accepted_input_id: arguments.accepted_input_id,
+            },
+            ReviewSubcommand::ActivatePass(arguments) => ReviewCommand::ActivatePass {
+                command_id: arguments.command_id,
+                run_id: arguments.run_id,
+                pass_id: arguments.pass_id,
+                turn_id: arguments.turn_id,
+            },
+            ReviewSubcommand::RecordFinding(arguments) => {
+                if arguments
+                    .line_start
+                    .zip(arguments.line_end)
+                    .is_some_and(|(start, end)| end.value() < start.value())
+                {
+                    return Err(UsageError(Cli::command().error(
+                        ErrorKind::ArgumentConflict,
+                        "--line-end must not precede --line-start",
+                    )));
+                }
+                ReviewCommand::RecordFinding {
+                    command_id: arguments.command_id,
+                    run_id: arguments.run_id,
+                    pass_id: arguments.pass_id,
+                    turn_id: arguments.turn_id,
+                    output_frontier_id: arguments.output_frontier_id,
+                    finding: ReviewFindingInput {
+                        finding_id: arguments.finding_id,
+                        file_path: arguments.file_path,
+                        line_start: arguments.line_start,
+                        line_end: arguments.line_end,
+                        diff_side: arguments.diff_side.map(|side| match side {
+                            ReviewDiffSideArgument::Left => ReviewDiffSide::Left,
+                            ReviewDiffSideArgument::Right => ReviewDiffSide::Right,
+                        }),
+                        title: arguments.title,
+                        body: arguments.body,
+                        severity: match arguments.severity {
+                            ReviewSeverityArgument::Info => ReviewSeverity::Info,
+                            ReviewSeverityArgument::Low => ReviewSeverity::Low,
+                            ReviewSeverityArgument::Medium => ReviewSeverity::Medium,
+                            ReviewSeverityArgument::High => ReviewSeverity::High,
+                            ReviewSeverityArgument::Critical => ReviewSeverity::Critical,
+                        },
+                        confidence: arguments.confidence,
+                        category: arguments.category,
+                        recommended_fix: arguments.recommended_fix,
+                    },
+                }
+            }
+            ReviewSubcommand::ListFindings(arguments) => ReviewCommand::ListFindings {
+                run_id: arguments.run_id,
+            },
+            ReviewSubcommand::ReadTarget(arguments) => ReviewCommand::ReadTarget {
+                target_id: arguments.target_id,
+            },
+            ReviewSubcommand::ReadRun(arguments) => ReviewCommand::ReadRun {
+                run_id: arguments.run_id,
+            },
+            ReviewSubcommand::ReadFinding(arguments) => ReviewCommand::ReadFinding {
+                finding_id: arguments.finding_id,
+            },
+        })),
         CliCommand::Stop(arguments) => Command::Stop {
             session_id: arguments.session_id,
             turn_id: arguments.turn,
@@ -620,12 +983,41 @@ fn canonical_u64(value: &str) -> Result<CanonicalU64, String> {
     Ok(CanonicalU64::new(parsed))
 }
 
+fn positive_canonical_u64(value: &str) -> Result<CanonicalU64, String> {
+    let parsed = canonical_u64(value)?;
+    if parsed.value() == 0 {
+        return Err("decimal value must be positive".to_owned());
+    }
+    Ok(parsed)
+}
+
+fn review_line_number(value: &str) -> Result<CanonicalU64, String> {
+    let parsed = positive_canonical_u64(value)?;
+    if parsed.value() > u64::from(u32::MAX) {
+        return Err("review line number exceeds the unsigned 32-bit range".to_owned());
+    }
+    Ok(parsed)
+}
+
+fn review_confidence(value: &str) -> Result<CanonicalU64, String> {
+    const MAXIMUM_REVIEW_CONFIDENCE_BASIS_POINTS: u64 = 10_000;
+
+    let parsed = canonical_u64(value)?;
+    if parsed.value() > MAXIMUM_REVIEW_CONFIDENCE_BASIS_POINTS {
+        return Err(format!(
+            "review confidence must not exceed \
+             {MAXIMUM_REVIEW_CONFIDENCE_BASIS_POINTS} basis points"
+        ));
+    }
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{ffi::OsString, path::Path};
 
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, ConversationImportFormat,
+        CanonicalU64, CanonicalUuid, ConversationImportFormat, ImportedSessionRelationship,
         MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
         MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
     };
@@ -633,8 +1025,110 @@ mod tests {
 
     use super::{
         Arguments, Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome,
-        SessionMetadataPageRequest, parse,
+        SessionMetadataPageRequest, UsageError, parse,
     };
+
+    #[derive(Clone, Copy)]
+    struct ReviewFindingArgumentFixture {
+        line_start: &'static str,
+        line_end: &'static str,
+        confidence: &'static str,
+    }
+
+    fn review_finding_arguments(fixture: ReviewFindingArgumentFixture) -> Vec<OsString> {
+        const RUN_ID: &str = "00000000-0000-0000-0000-000000000001";
+        const PASS_ID: &str = "00000000-0000-0000-0000-000000000002";
+        const TURN_ID: &str = "00000000-0000-0000-0000-000000000003";
+        const FRONTIER_ID: &str = "00000000-0000-0000-0000-000000000004";
+        const FINDING_ID: &str = "00000000-0000-0000-0000-000000000005";
+
+        vec![
+            "review",
+            "record-finding",
+            RUN_ID,
+            PASS_ID,
+            "--turn-id",
+            TURN_ID,
+            "--output-frontier-id",
+            FRONTIER_ID,
+            "--finding-id",
+            FINDING_ID,
+            "--file-path",
+            "src/lib.rs",
+            "--line-start",
+            fixture.line_start,
+            "--line-end",
+            fixture.line_end,
+            "--title",
+            "fixture finding",
+            "--body",
+            "fixture body",
+            "--severity",
+            "high",
+            "--confidence",
+            fixture.confidence,
+            "--category",
+            "correctness",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
+    }
+
+    #[test]
+    fn review_finding_rejects_domain_scalar_bounds_locally() {
+        let zero_line = parse(review_finding_arguments(ReviewFindingArgumentFixture {
+            line_start: "0",
+            line_end: "1",
+            confidence: "9000",
+        }));
+        let oversized_line = parse(review_finding_arguments(ReviewFindingArgumentFixture {
+            line_start: "1",
+            line_end: "4294967296",
+            confidence: "9000",
+        }));
+        let reversed_line = parse(review_finding_arguments(ReviewFindingArgumentFixture {
+            line_start: "9",
+            line_end: "7",
+            confidence: "9000",
+        }));
+        let oversized_confidence = parse(review_finding_arguments(ReviewFindingArgumentFixture {
+            line_start: "1",
+            line_end: "1",
+            confidence: "10001",
+        }));
+
+        assert!(zero_line.is_err());
+        assert!(oversized_line.is_err());
+        assert!(reversed_line.is_err());
+        assert!(oversized_confidence.is_err());
+    }
+
+    #[test]
+    fn review_target_rejects_zero_change_request_number() {
+        const TARGET_ID: &str = "00000000-0000-0000-0000-000000000001";
+
+        let result = parse(
+            [
+                "review",
+                "create-target",
+                TARGET_ID,
+                "--provider",
+                "example-host",
+                "--repository",
+                "owner/repository",
+                "--change-request",
+                "0",
+                "--head-revision",
+                "head",
+                "--base-revision",
+                "base",
+            ]
+            .map(Into::into),
+        );
+
+        assert!(result.is_err());
+    }
 
     #[test]
     fn send_recovery_flags_are_an_exact_pair() {
@@ -1026,6 +1520,67 @@ mod tests {
     }
 
     #[test]
+    fn continue_maps_an_explicit_imported_frontier_and_relationship() {
+        let parsed = parse(
+            [
+                "continue",
+                "00000000-0000-0000-0000-000000000001",
+                "--through-position",
+                "2",
+                "--relationship",
+                "resume",
+                "--model",
+                "00000000-0000-0000-0000-000000000002",
+            ]
+            .map(Into::into),
+        );
+
+        assert_continue_parse(parsed, 2);
+    }
+
+    #[test]
+    fn continue_rejects_zero_position() {
+        let conversation = "00000000-0000-0000-0000-000000000001";
+        let model = "00000000-0000-0000-0000-000000000002";
+        assert!(
+            parse(
+                [
+                    "continue",
+                    conversation,
+                    "--through-position",
+                    "0",
+                    "--relationship",
+                    "resume",
+                    "--model",
+                    model,
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn continue_requires_explicit_relationship() {
+        let conversation = "00000000-0000-0000-0000-000000000001";
+        let model = "00000000-0000-0000-0000-000000000002";
+        assert!(
+            parse(
+                [
+                    "continue",
+                    conversation,
+                    "--through-position",
+                    "1",
+                    "--model",
+                    model,
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn import_maps_one_explicit_supported_format_and_file() {
         let parsed = parse(["import", "--format", "codex", "rollout.jsonl"].map(Into::into))
             .expect("the explicit supported format and one path parse");
@@ -1079,6 +1634,23 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[track_caller]
+    fn assert_continue_parse(parsed: Result<ParseOutcome, UsageError>, expected_position: u64) {
+        let Ok(ParseOutcome::Run(arguments)) = parsed else {
+            panic!("the successful continue parse runs the client");
+        };
+        let Command::Continue {
+            through_position,
+            relationship,
+            ..
+        } = arguments.command
+        else {
+            panic!("the successful continue parse selects continue");
+        };
+        assert_eq!(through_position.value(), expected_position);
+        assert_eq!(relationship, ImportedSessionRelationship::Resume);
     }
 
     #[track_caller]

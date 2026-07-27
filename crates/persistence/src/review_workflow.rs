@@ -3,6 +3,7 @@
 //! SQL rows remain adapter-private. Complete values are reconstructed through
 //! the domain API defined by `docs/spec/review-workflows.md`.
 
+use signalbox_application::ReviewWorkflowReader;
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
@@ -37,6 +38,11 @@ impl ReviewWorkflowStore {
     /// Binds the store to the guarded application pool.
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Borrows the guarded pool for the sibling durable-command adapter.
+    pub(crate) const fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     /// Inserts one immutable target snapshot.
@@ -127,6 +133,14 @@ impl ReviewWorkflowStore {
         &self,
         run: ReviewRunId,
     ) -> Result<Option<ReviewRun>, ReviewWorkflowStoreError> {
+        Ok(self.load_run_with_pass(run).await?.map(|(run, _pass)| run))
+    }
+
+    /// Loads and validates one run and its recorded pass from one snapshot.
+    pub async fn load_run_with_pass(
+        &self,
+        run: ReviewRunId,
+    ) -> Result<Option<(ReviewRun, Option<ReviewPass>)>, ReviewWorkflowStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
         let row = sqlx::query(
             "SELECT workflow_run.run_id, workflow_run.target_id,
@@ -206,8 +220,9 @@ impl ReviewWorkflowStore {
             None => None,
         };
         let run = decode_run(&row, loaded_pass.as_ref())?;
+        let pass = loaded_pass.map(|loaded| loaded.pass);
         transaction.commit().await?;
-        Ok(Some(run))
+        Ok(Some((run, pass)))
     }
 
     /// Applies one domain-validated run transition under row lock.
@@ -288,6 +303,82 @@ impl ReviewWorkflowStore {
         .bind(state.kind)
         .bind(state.turn.map(TurnId::into_uuid))
         .bind(state.frontier.map(ContextFrontierId::into_uuid))
+        .execute(&mut *transaction)
+        .await?;
+        commit_mutation(transaction).await?;
+        Ok(())
+    }
+
+    /// Inserts one queued run and its first queued pass atomically.
+    pub async fn insert_run_and_pass(
+        &self,
+        run: &ReviewRun,
+        pass: &ReviewPass,
+    ) -> Result<(), ReviewWorkflowStoreError> {
+        if run.state() != ReviewRunState::Queued {
+            return Err(ReviewWorkflowStoreError::InvalidInsertion(
+                ReviewWorkflowInsertionError::RunNotQueued {
+                    state: Box::new(run.state()),
+                },
+            ));
+        }
+        if pass.state() != &ReviewPassState::Queued {
+            return Err(ReviewWorkflowStoreError::InvalidInsertion(
+                ReviewWorkflowInsertionError::PassNotQueued {
+                    state: Box::new(pass.state().clone()),
+                },
+            ));
+        }
+        if pass.reference().run() != run.reference()
+            || run.recorded_pass() != Some(pass.reference())
+            || !workflow_matches_pass_kind(run.workflow(), pass.kind())
+        {
+            return Err(ReviewWorkflowStoreError::InvalidInsertion(
+                ReviewWorkflowInsertionError::RunPassMismatch,
+            ));
+        }
+        let (run_state_kind, run_state_pass_id) = encode_run_state(run.state());
+        let policy = run.policy();
+        let pass_state = encode_pass_state(pass.state());
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO review_run
+                (run_id, target_id, workflow_kind, policy_version,
+                 minimum_judge_confidence, minimum_publication_confidence,
+                 state_kind, state_pass_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(run.reference().run().into_uuid())
+        .bind(run.reference().target().into_uuid())
+        .bind(encode_workflow_kind(run.workflow()))
+        .bind(i64::from(policy.version().get()))
+        .bind(i32::from(policy.minimum_judge_confidence().basis_points()))
+        .bind(i32::from(
+            policy.minimum_publication_confidence().basis_points(),
+        ))
+        .bind(run_state_kind)
+        .bind(run_state_pass_id.map(ReviewPassId::into_uuid))
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO review_pass
+                (pass_id, run_id, target_id, pass_kind, session_id,
+                 accepted_input_id, origin_turn_id, state_kind, turn_id,
+                 output_frontier_id)
+             VALUES (
+                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+             )",
+        )
+        .bind(pass.reference().pass().into_uuid())
+        .bind(pass.reference().run().run().into_uuid())
+        .bind(pass.reference().target().into_uuid())
+        .bind(encode_pass_kind(pass.kind()))
+        .bind(pass.session().into_uuid())
+        .bind(pass.accepted_input().into_uuid())
+        .bind(pass.origin_turn().into_uuid())
+        .bind(pass_state.kind)
+        .bind(pass_state.turn.map(TurnId::into_uuid))
+        .bind(pass_state.frontier.map(ContextFrontierId::into_uuid))
         .execute(&mut *transaction)
         .await?;
         commit_mutation(transaction).await?;
@@ -584,6 +675,35 @@ impl ReviewWorkflowStore {
             .await?;
         transaction.commit().await?;
         Ok(finding)
+    }
+
+    /// Lists and validates complete findings for one run in identity order.
+    pub async fn list_findings(
+        &self,
+        run: ReviewRunId,
+    ) -> Result<Vec<ReviewFinding>, ReviewWorkflowStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let identifiers = sqlx::query_scalar::<_, Uuid>(
+            "SELECT finding_id
+               FROM review_finding
+              WHERE run_id = $1
+              ORDER BY finding_id",
+        )
+        .bind(run.into_uuid())
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut findings = Vec::with_capacity(identifiers.len());
+        for identifier in identifiers {
+            let finding = self
+                .load_finding_on_connection(&mut transaction, finding_id(identifier))
+                .await?
+                .ok_or_else(|| {
+                    corruption("review_finding", String::from("listed finding disappeared"))
+                })?;
+            findings.push(finding);
+        }
+        transaction.commit().await?;
+        Ok(findings)
     }
 
     async fn load_finding_on_connection(
@@ -4177,6 +4297,26 @@ fn encode_pass_kind(kind: ReviewPassKind) -> &'static str {
     }
 }
 
+const fn workflow_matches_pass_kind(workflow: ReviewWorkflowKind, pass: ReviewPassKind) -> bool {
+    matches!(
+        (workflow, pass),
+        (
+            ReviewWorkflowKind::ImportExternalContext,
+            ReviewPassKind::ImportExternalContext
+        ) | (
+            ReviewWorkflowKind::ReadOnlyReview,
+            ReviewPassKind::ReadOnlyReview
+        ) | (ReviewWorkflowKind::JudgeFindings, ReviewPassKind::Judge)
+            | (ReviewWorkflowKind::DedupeFindings, ReviewPassKind::Dedupe)
+            | (ReviewWorkflowKind::PublishReview, ReviewPassKind::Publish)
+            | (ReviewWorkflowKind::FixFindings, ReviewPassKind::Fix)
+            | (
+                ReviewWorkflowKind::PropagateStack,
+                ReviewPassKind::PropagateStack
+            )
+    )
+}
+
 fn decode_pass_kind(kind: &str) -> Result<ReviewPassKind, ReviewWorkflowStoreError> {
     match kind {
         "import_external_context" => Ok(ReviewPassKind::ImportExternalContext),
@@ -4358,23 +4498,23 @@ fn decimal_u64(value: Decimal, aggregate: &'static str) -> Result<u64, ReviewWor
         .map_err(|_| corruption(aggregate, format!("invalid u64 decimal {value}")))
 }
 
-fn target_id(value: Uuid) -> ReviewTargetId {
+pub(crate) fn target_id(value: Uuid) -> ReviewTargetId {
     ReviewTargetId::from_uuid(value)
 }
 
-fn run_id(value: Uuid) -> ReviewRunId {
+pub(crate) fn run_id(value: Uuid) -> ReviewRunId {
     ReviewRunId::from_uuid(value)
 }
 
-fn pass_id(value: Uuid) -> ReviewPassId {
+pub(crate) fn pass_id(value: Uuid) -> ReviewPassId {
     ReviewPassId::from_uuid(value)
 }
 
-fn finding_id(value: Uuid) -> ReviewFindingId {
+pub(crate) fn finding_id(value: Uuid) -> ReviewFindingId {
     ReviewFindingId::from_uuid(value)
 }
 
-fn external_link_id(value: Uuid) -> ReviewExternalLinkId {
+pub(crate) fn external_link_id(value: Uuid) -> ReviewExternalLinkId {
     ReviewExternalLinkId::from_uuid(value)
 }
 
@@ -4394,7 +4534,7 @@ fn context_frontier_id(value: Uuid) -> ContextFrontierId {
     ContextFrontierId::from_uuid(value)
 }
 
-fn corruption(aggregate: &'static str, detail: String) -> ReviewWorkflowStoreError {
+pub(crate) fn corruption(aggregate: &'static str, detail: String) -> ReviewWorkflowStoreError {
     ReviewWorkflowStoreError::Corruption(ReviewWorkflowCorruption { aggregate, detail })
 }
 
@@ -4454,6 +4594,8 @@ pub enum ReviewWorkflowInsertionError {
         /// Rejected current state.
         state: Box<ReviewPassState>,
     },
+    /// A paired run and pass do not describe one domain-coherent admission.
+    RunPassMismatch,
     /// A finding insertion already carried lifecycle history.
     FindingNotOpen {
         /// Rejected current status.
@@ -4471,6 +4613,9 @@ impl fmt::Display for ReviewWorkflowInsertionError {
             }
             Self::PassNotQueued { state } => {
                 write!(formatter, "new review pass is not queued: {state:?}")
+            }
+            Self::RunPassMismatch => {
+                formatter.write_str("new review run and pass are not one coherent admission")
             }
             Self::FindingNotOpen { status } => {
                 write!(formatter, "new review finding is not open: {status:?}")
@@ -4619,6 +4764,43 @@ impl Error for ReviewWorkflowStoreError {
 impl From<sqlx::Error> for ReviewWorkflowStoreError {
     fn from(error: sqlx::Error) -> Self {
         Self::Database(error)
+    }
+}
+
+impl ReviewWorkflowReader for ReviewWorkflowStore {
+    type Error = ReviewWorkflowStoreError;
+
+    async fn load_target(
+        &self,
+        target: ReviewTargetId,
+    ) -> Result<Option<ReviewTarget>, Self::Error> {
+        ReviewWorkflowStore::load_target(self, target).await
+    }
+
+    async fn load_run(&self, run: ReviewRunId) -> Result<Option<ReviewRun>, Self::Error> {
+        ReviewWorkflowStore::load_run(self, run).await
+    }
+
+    async fn load_run_with_pass(
+        &self,
+        run: ReviewRunId,
+    ) -> Result<Option<(ReviewRun, Option<ReviewPass>)>, Self::Error> {
+        ReviewWorkflowStore::load_run_with_pass(self, run).await
+    }
+
+    async fn load_pass(&self, pass: ReviewPassId) -> Result<Option<ReviewPass>, Self::Error> {
+        ReviewWorkflowStore::load_pass(self, pass).await
+    }
+
+    async fn load_finding(
+        &self,
+        finding: ReviewFindingId,
+    ) -> Result<Option<ReviewFinding>, Self::Error> {
+        ReviewWorkflowStore::load_finding(self, finding).await
+    }
+
+    async fn list_findings(&self, run: ReviewRunId) -> Result<Vec<ReviewFinding>, Self::Error> {
+        ReviewWorkflowStore::list_findings(self, run).await
     }
 }
 

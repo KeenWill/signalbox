@@ -12,6 +12,7 @@ pub(crate) const REPLACE_SESSION_DEFAULTS_KIND: &str = "replace_session_defaults
 pub(crate) const REPLACE_SESSION_METADATA_KIND: &str = "replace_session_metadata";
 pub(crate) const SUBMIT_INPUT_KIND: &str = "submit_input";
 pub(crate) const DECIDE_TOOL_REQUEST_KIND: &str = "decide_tool_request";
+pub(crate) const REVIEW_WORKFLOW_KIND: &str = "review_workflow";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CommandKind {
@@ -21,6 +22,7 @@ pub(crate) enum CommandKind {
     ReplaceSessionMetadata,
     SubmitInput,
     DecideToolRequest,
+    ReviewWorkflow,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,7 +53,8 @@ pub(crate) async fn inspect(
             defaults_command.command_id IS NOT NULL AS has_replace_session_defaults,
             metadata_command.command_id IS NOT NULL AS has_replace_session_metadata,
             input_command.command_id IS NOT NULL AS has_submit_input,
-            tool_command.command_id IS NOT NULL AS has_decide_tool_request
+            tool_command.command_id IS NOT NULL AS has_decide_tool_request,
+            review_command.command_id IS NOT NULL AS has_review_workflow
          FROM durable_command AS command
          LEFT JOIN create_session_command AS create_command
            ON create_command.command_id = command.command_id
@@ -66,6 +69,8 @@ pub(crate) async fn inspect(
            ON input_command.command_id = command.command_id
          LEFT JOIN decide_tool_request_command AS tool_command
            ON tool_command.command_id = command.command_id
+         LEFT JOIN review_workflow_command AS review_command
+           ON review_command.command_id = command.command_id
          WHERE command.command_id = $1",
     )
     .bind(durable_command_id_to_uuid(command_id))
@@ -89,6 +94,7 @@ pub(crate) async fn inspect(
             REPLACE_SESSION_METADATA_KIND => CommandKind::ReplaceSessionMetadata,
             SUBMIT_INPUT_KIND => CommandKind::SubmitInput,
             DECIDE_TOOL_REQUEST_KIND => CommandKind::DecideToolRequest,
+            REVIEW_WORKFLOW_KIND => CommandKind::ReviewWorkflow,
             _ => {
                 return Err(RegistryInspectionError::Corruption(
                     RegistryCorruption::UnsupportedKind(spelling),
@@ -101,7 +107,8 @@ pub(crate) async fn inspect(
             | CommandKind::ReplaceSessionDefaults => matches!(version, 1..=3),
             CommandKind::ReplaceSessionMetadata
             | CommandKind::SubmitInput
-            | CommandKind::DecideToolRequest => version == 1,
+            | CommandKind::DecideToolRequest
+            | CommandKind::ReviewWorkflow => version == 1,
         };
         if !version_supported {
             return Err(RegistryInspectionError::Corruption(
@@ -126,6 +133,9 @@ pub(crate) async fn inspect(
         let has_tool: bool = row
             .try_get("has_decide_tool_request")
             .map_err(RegistryInspectionError::Database)?;
+        let has_review: bool = row
+            .try_get("has_review_workflow")
+            .map_err(RegistryInspectionError::Database)?;
 
         let present: Vec<CommandKind> = [
             (CommandKind::CreateSession, has_create),
@@ -137,6 +147,7 @@ pub(crate) async fn inspect(
             (CommandKind::ReplaceSessionMetadata, has_metadata),
             (CommandKind::SubmitInput, has_input),
             (CommandKind::DecideToolRequest, has_tool),
+            (CommandKind::ReviewWorkflow, has_review),
         ]
         .into_iter()
         .filter_map(|(candidate, is_present)| is_present.then_some(candidate))

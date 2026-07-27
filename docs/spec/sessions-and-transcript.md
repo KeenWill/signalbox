@@ -7,10 +7,12 @@ long-lived session aggregate, semantic transcript entries, accepted-input user
 content, and actor attribution. It was verified against the implementing stack
 through PR #265 (`agent/tool-batch-tier0`); the defaults-epoch and
 model-identity boundary were additionally verified through PR #272
-(`agent/mid-session-model`), and the session system prompt through PR #286
-(`agent/session-system-prompt`). The imported-conversation record and converter
-are owned by [conversation-import](conversation-import.md). Where a law is cited
-as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
+(`agent/mid-session-model`); the imported-frontier process surface was verified
+through PR #294 (`agent/continue-imported-conversation`); and the session system
+prompt was verified through PR #286 (`agent/session-system-prompt`). The
+imported-conversation record and converter are owned by
+[conversation-import](conversation-import.md). Where a law is cited as
+`INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
 mechanics owned by another decision are summarized, the owning sibling page is
 linked inline.
 
@@ -132,6 +134,15 @@ Import never chooses this relationship or a frontier. At any later time, and
 more than once, a client may invoke this session-creation command against any
 entry boundary of any imported conversation.
 
+Protocol version ten exposes that command as
+`create_session_from_imported_frontier`. Its wire address is the imported
+conversation identity plus a positive inclusive imported position; the daemon
+resolves the immutable aggregate to the canonical sealed frontier before
+application construction. The terminal `continue` verb requires that position,
+`Resume` or `Fork`, and the initial model selection explicitly, prints its
+recovery command identity before socket I/O, and returns the created live
+session identity.
+
 The application uses `UuidV7CreateSessionFromImportedFrontierIdGenerator` for
 the session, imported-provenance semantic entries, and seed context frontier. It
 supplies the fixed session and frontier candidates and an application-owned
@@ -243,7 +254,7 @@ template, or named profile; the
 records the capacity and epoch-placement choice. Matching
 `octet_length(convert_to(system_prompt, 'UTF8'))` CHECK constraints protect the
 durable epoch and command columns (migration
-`202607280301_session_system_prompt.sql`), and command/defaults schema agreement
+`202607280303_session_system_prompt.sql`), and command/defaults schema agreement
 extends through a generated exact-encoding SHA-256 digest column because
 megabyte text cannot join a btree key.
 

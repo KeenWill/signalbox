@@ -2798,6 +2798,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "signalbox-application",
  "signalbox-conversation-import-claude-code",
  "signalbox-conversation-import-codex",

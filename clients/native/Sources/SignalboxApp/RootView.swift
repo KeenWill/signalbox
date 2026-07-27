@@ -21,13 +21,19 @@ struct RootView: View {
 
     private var compactLayout: some View {
         TabView(selection: $coordinator.selectedSection) {
-            SessionsScreen()
+            ProcessSessionsScreen()
                 .tabItem { Label("Sessions", systemImage: AppSection.sessions.systemImage) }
                 .tag(AppSection.sessions)
-            MonitorScreen()
+            UnavailableProcessCapabilityView(
+                title: "Monitor unavailable",
+                detail: "The version 5 process protocol exposes session following, not a monitor catalog."
+            )
                 .tabItem { Label("Monitor", systemImage: AppSection.monitor.systemImage) }
                 .tag(AppSection.monitor)
-            RunnersScreen()
+            UnavailableProcessCapabilityView(
+                title: "Runners unavailable",
+                detail: "The version 5 process protocol exposes no runner catalog."
+            )
                 .tabItem { Label("Runners", systemImage: AppSection.runners.systemImage) }
                 .tag(AppSection.runners)
             SettingsScreen()
@@ -62,13 +68,22 @@ struct RootView: View {
             Group {
                 switch coordinator.selectedSection {
                 case .sessions:
-                    SessionsScreen()
+                    ProcessSessionsScreen()
                 case .monitor:
-                    MonitorScreen()
+                    UnavailableProcessCapabilityView(
+                        title: "Monitor unavailable",
+                        detail: "The version 5 process protocol exposes session following, not a monitor catalog."
+                    )
                 case .runners:
-                    RunnersScreen()
+                    UnavailableProcessCapabilityView(
+                        title: "Runners unavailable",
+                        detail: "The version 5 process protocol exposes no runner catalog."
+                    )
                 case .templates:
-                    TemplatesScreen()
+                    UnavailableProcessCapabilityView(
+                        title: "Templates unavailable",
+                        detail: "The version 5 process protocol exposes no template catalog."
+                    )
                 case .settings:
                     SettingsScreen()
                 }
@@ -119,13 +134,22 @@ struct RootView: View {
         } detail: {
             switch coordinator.selectedSection {
             case .sessions:
-                SessionsScreen()
+                ProcessSessionsScreen()
             case .monitor:
-                MonitorScreen()
+                UnavailableProcessCapabilityView(
+                    title: "Monitor unavailable",
+                    detail: "The version 5 process protocol exposes session following, not a monitor catalog."
+                )
             case .runners:
-                RunnersScreen()
+                UnavailableProcessCapabilityView(
+                    title: "Runners unavailable",
+                    detail: "The version 5 process protocol exposes no runner catalog."
+                )
             case .templates:
-                TemplatesScreen()
+                UnavailableProcessCapabilityView(
+                    title: "Templates unavailable",
+                    detail: "The version 5 process protocol exposes no template catalog."
+                )
             case .settings:
                 SettingsScreen()
             }
@@ -139,7 +163,7 @@ struct UnconfiguredSignalboxView: View {
         ContentUnavailableView {
             Label("Connect to Signalbox", systemImage: "link.badge.plus")
         } description: {
-            Text("Configure the server URL and API key in Settings.")
+            Text(remoteTransportGateMessage)
         }
         .accessibilityIdentifier("setup-no-connection")
     }

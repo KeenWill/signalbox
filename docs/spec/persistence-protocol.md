@@ -58,8 +58,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — thirty-one files, `202607180001` through
-`202607280301` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — thirty-three files, `202607180001` through
+`202607280303` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -130,7 +130,7 @@ Implemented table families (across the forward-only migrations):
 
 Representation rules, all enforced in the schema:
 
-- Migration `202607280301` adds the optional bounded `system_prompt` column to
+- Migration `202607280303` adds the optional bounded `system_prompt` column to
   `session_defaults_version` and the three defaults-bearing command tables, each
   guarded by the 1,048,576-UTF-8-byte and nonempty CHECK constraints and, on
   command tables, a version-three gate. A generated exact-encoding SHA-256
