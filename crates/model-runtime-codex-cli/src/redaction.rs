@@ -115,6 +115,8 @@ const VALUE_CREDENTIAL_NAMES: &[&str] = &[
     "refresh_token",
     "id_token",
     "session_token",
+    "private_key",
+    "private-key",
 ];
 
 /// Redacts a `name` credential whose separator (`=` or `:`) carries optional
@@ -353,6 +355,7 @@ fn credential_key(key: &str) -> bool {
         "sessiontoken",
         "authtoken",
         "bearertoken",
+        "privatekey",
         "credential",
         "password",
         "secret",
@@ -1491,6 +1494,20 @@ mod tests {
 
         assert_eq!(redact_json(&auth), r#"{"auth_token":"[redacted]"}"#);
         assert_eq!(redact_json(&bearer), r#"{"bearer_token":"[redacted]"}"#);
+    }
+
+    /// INV-035: private-key members and their plaintext assignments are
+    /// redacted even with an opaque value lacking a token prefix.
+    #[test]
+    fn inv_035_redacts_private_key_credentials() {
+        let member = format!(r#"{{"private_key":"{QUOTED_CREDENTIAL_VALUE}"}}"#);
+        let camel = format!(r#"{{"privateKey":"{JSON_CREDENTIAL_VALUE}"}}"#);
+        let plaintext = redact_text("private_key = opaque-private-key-value tail");
+
+        assert_eq!(redact_json(&member), r#"{"private_key":"[redacted]"}"#);
+        assert_eq!(redact_json(&camel), r#"{"privateKey":"[redacted]"}"#);
+        assert!(!plaintext.contains("opaque-private-key-value"));
+        assert!(plaintext.contains("[redacted]"));
     }
 
     /// INV-035: plaintext `auth_token` / `bearer_token` assignments are
