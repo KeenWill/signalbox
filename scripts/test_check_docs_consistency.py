@@ -939,6 +939,80 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("`git` is not available", failures[0].message)
 
+    def test_disabled_inline_module_declares_no_test(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[cfg(any())]\n"
+            "mod dead {\n"
+            "    #[test]\n"
+            "    fn s01_inv_001_never_built() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_enabled_inline_module_still_declares_its_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[cfg(all())]\n"
+            "mod live {\n"
+            "    #[test]\n"
+            "    fn s01_inv_001_built() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_test_alias_does_not_escape_its_module(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "mod first {\n"
+            "    use tokio::test as scoped;\n"
+            "    #[scoped]\n"
+            "    async fn ordinary_alias_test() {}\n"
+            "}\n"
+            "mod second {\n"
+            "    use crate::support::marker as scoped;\n"
+            "    #[scoped]\n"
+            "    fn s01_inv_001_not_a_test() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_same_line_attribute_declares_a_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test] fn s01_inv_001_same_line() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_raw_identifier_test_attribute_declares_a_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[r#test]\nfn s01_inv_001_raw_attribute() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
     def test_reference_style_citation_keeps_occurrence_order(self) -> None:
         (self.root / "src/tagged.rs").write_text(
             "#[test]\nfn s01_inv_001_tagged_test() {}\n",

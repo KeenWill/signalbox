@@ -282,16 +282,20 @@ RUST_TEST_DECLARATION = re.compile(
     r"|^[ \t]*//(?!/)[^\n]*(?:\n|$)"
     r"|^[ \t]*/\*(?!\*)(?:[^*]|\*(?!/))*\*/[ \t]*(?:\n|$)"
     r"|^[ \t]*(?:\n|$)"
+    # An attribute may also share the declaration's line, so this last
+    # alternative ends the prefix without consuming a line break.
+    rf"|^[ \t]*{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t]*"
     r")+)"
-    r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?"
+    r"[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?"
     r"(?:(?:const|async|unsafe)[ \t]+)*"
     r'(?:extern(?:[ \t]+"[^"\n]*")?[ \t]+)?'
     rf"fn[ \t]+(?P<name>{RUST_IDENTIFIER_PATTERN})",
     re.MULTILINE,
 )
 RUST_TEST_ATTRIBUTE = re.compile(
-    rf"{RUST_ATTRIBUTE_OPEN}[ \t\r\n]*(?:::)?(?:[A-Za-z_][A-Za-z0-9_]*::)*"
-    r"test(?=[ \t\r\n(\]])[^\]]*\]",
+    rf"{RUST_ATTRIBUTE_OPEN}[ \t\r\n]*(?:::)?"
+    r"(?:(?:r#)?[A-Za-z_][A-Za-z0-9_]*::)*"
+    r"(?:r#)?test(?=[ \t\r\n(\]])[^\]]*\]",
     re.IGNORECASE,
 )
 RUST_ATTRIBUTE = re.compile(
@@ -309,8 +313,8 @@ RUST_CFG_PREDICATE = re.compile(
     re.DOTALL,
 )
 RUST_TEST_META = re.compile(
-    r"^(?:::)?(?:[A-Za-z_][A-Za-z0-9_]*::)*"
-    r"test(?=[ \t\r\n(]|$)",
+    r"^(?:::)?(?:(?:r#)?[A-Za-z_][A-Za-z0-9_]*::)*"
+    r"(?:r#)?test(?=[ \t\r\n(]|$)",
     re.IGNORECASE,
 )
 RUST_META_NAME = re.compile(
@@ -327,7 +331,9 @@ RUST_TEST_ALIAS = re.compile(
 )
 RUST_RAW_STRING_OPEN = re.compile(r'(?:br|rb|cr|r)(?P<hashes>#{0,255})"')
 RUST_INLINE_MODULE = re.compile(
-    rf"\bmod[ \t\r\n]+(?P<name>{RUST_IDENTIFIER_PATTERN})[ \t\r\n]*\{{"
+    rf"(?P<attributes>(?:{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t\r\n]*)*)"
+    rf"\b(?:pub(?:\([^)]*\))?[ \t\r\n]+)?"
+    rf"mod[ \t\r\n]+(?P<name>{RUST_IDENTIFIER_PATTERN})[ \t\r\n]*\{{"
 )
 RUST_OUT_OF_LINE_MODULE = re.compile(
     rf"(?P<attributes>(?:{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t\r\n]*)*)"
@@ -375,6 +381,25 @@ class Violation:
 
     def render(self) -> str:
         return f"{self.path}:{self.line}: {self.category}: {self.message}"
+
+
+@dataclass(frozen=True)
+class InlineModule:
+    """One brace-delimited `mod name { ... }` and its build state."""
+
+    opening: int
+    closing: int
+    name: str
+    disabled: bool
+
+
+@dataclass(frozen=True)
+class ScopedTestAlias:
+    """One local `test` attribute name and the block that can see it."""
+
+    opening: int
+    closing: int
+    name: str
 
 
 @dataclass(frozen=True)
@@ -568,17 +593,46 @@ def rust_cfg_truth(meta: str) -> bool | None:
     return None
 
 
-def rust_test_attribute_aliases(code: str) -> frozenset[str]:
-    """Return the local names a `use` item gives an imported `test` attribute.
+def rust_test_attribute_aliases(code: str) -> list[ScopedTestAlias]:
+    """Return each local name a `use` item gives an imported `test` attribute.
 
-    ``use tokio::test as async_test;`` registers tests under `#[async_test]`,
-    so the alias is a test attribute wherever that file uses it.
+    ``use tokio::test as async_test;`` registers tests under `#[async_test]`.
+    An alias reaches only the block its `use` item sits in, and everything
+    nested inside it, so a sibling module may bind the same local name to
+    something else without being read as a test.
     """
-    aliases: set[str] = set()
+    delimiters = rust_matching_delimiters(code)
+    blocks = sorted(
+        (opening, closing)
+        for opening, closing in delimiters.items()
+        if code[opening] == "{"
+    )
+    aliases: list[ScopedTestAlias] = []
     for item in RUST_USE_ITEM.finditer(code):
+        enclosing = [
+            (opening, closing)
+            for opening, closing in blocks
+            if opening < item.start() < closing
+        ]
+        opening, closing = (
+            max(enclosing) if enclosing else (-1, len(code))
+        )
         for alias in RUST_TEST_ALIAS.finditer(item.group("body")):
-            aliases.add(alias.group("alias"))
-    return frozenset(aliases)
+            aliases.append(
+                ScopedTestAlias(opening, closing, alias.group("alias"))
+            )
+    return aliases
+
+
+def rust_visible_test_aliases(
+    aliases: list[ScopedTestAlias], offset: int
+) -> frozenset[str]:
+    """Return the alias names in scope at one declaration offset."""
+    return frozenset(
+        alias.name
+        for alias in aliases
+        if alias.opening < offset < alias.closing
+    )
 
 
 def rust_meta_names_test(meta: str, aliases: frozenset[str]) -> bool:
@@ -671,7 +725,7 @@ def rust_item_is_disabled(prefix: str) -> bool:
     return False
 
 
-def rust_inline_module_spans(code: str) -> list[tuple[int, int, str]]:
+def rust_inline_module_spans(code: str) -> list[InlineModule]:
     """Return brace-delimited inline module spans from masked Rust code."""
     stack: list[int] = []
     closing_brace: dict[int, int] = {}
@@ -681,12 +735,19 @@ def rust_inline_module_spans(code: str) -> list[tuple[int, int, str]]:
         elif character == "}" and stack:
             closing_brace[stack.pop()] = index
 
-    spans: list[tuple[int, int, str]] = []
+    spans: list[InlineModule] = []
     for module in RUST_INLINE_MODULE.finditer(code):
         opening = code.rfind("{", module.start(), module.end())
         closing = closing_brace.get(opening)
         if closing is not None:
-            spans.append((opening, closing, module.group("name")))
+            spans.append(
+                InlineModule(
+                    opening,
+                    closing,
+                    module.group("name"),
+                    rust_item_is_disabled(module.group("attributes")),
+                )
+            )
     return spans
 
 
@@ -853,16 +914,14 @@ def rust_macro_invocation_applies_test(
     return False
 
 
-def rust_enclosing_module_names(
-    spans: list[tuple[int, int, str]], offset: int
-) -> list[str]:
-    """Return outer-to-inner module names enclosing one declaration."""
-    enclosing = [
-        (opening, name)
-        for opening, closing, name in spans
-        if opening < offset < closing
-    ]
-    return [name for _, name in sorted(enclosing)]
+def rust_enclosing_modules(
+    spans: list[InlineModule], offset: int
+) -> list[InlineModule]:
+    """Return outer-to-inner inline modules enclosing one declaration."""
+    return sorted(
+        (span for span in spans if span.opening < offset < span.closing),
+        key=lambda span: span.opening,
+    )
 
 
 def strip_block_quote_containers(line: str) -> str:
@@ -1925,17 +1984,19 @@ def rust_test_invariant_tags(
             declaration.start("prefix") : declaration.end("prefix")
         ]
         code_prefix = declaration.group("prefix")
+        visible = rust_visible_test_aliases(aliases, declaration.start())
         if (
             RUST_TEST_ATTRIBUTE.search(code_prefix) is None
-            and not rust_attributes_apply_test(code_prefix, aliases)
+            and not rust_attributes_apply_test(code_prefix, visible)
         ):
             continue
         if rust_item_is_disabled(code_prefix):
             continue
+        enclosing = rust_enclosing_modules(module_spans, declaration.start())
+        if any(module.disabled for module in enclosing):
+            continue
         doc_comments = "\n".join(rust_doc_comments(raw_prefix))
-        module_names = rust_enclosing_module_names(
-            module_spans, declaration.start()
-        )
+        module_names = [module.name for module in enclosing]
         declaration_line = line_number(text, declaration.start("name"))
         for module_prefix in module_prefixes:
             material = "\n".join(
@@ -2064,12 +2125,13 @@ def check_rust_test_generation(root: Path) -> list[Violation]:
         text = source.read_text(encoding="utf-8", errors="replace")
         code = mask_rust_non_code(text)
         delimiters = rust_matching_delimiters(code)
-        aliases = rust_test_attribute_aliases(code)
+        scoped_aliases = rust_test_attribute_aliases(code)
         for macro in RUST_MACRO_RULES.finditer(code):
             opening = macro.start("opening")
             closing = delimiters.get(opening)
             if closing is None:
                 continue
+            aliases = rust_visible_test_aliases(scoped_aliases, opening)
             # A matcher may consume a test attribute the expansion never
             # emits, so only what each rule expands to is read directly; an
             # unparsed rule list falls back to the whole definition body.
