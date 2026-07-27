@@ -4735,11 +4735,13 @@ impl SessionMetadataListItem {
     pub fn new(
         snapshot: &SessionMetadataSnapshot,
         defaults_version: SessionConfigurationDefaultsVersion,
-        defaults: SessionConfigurationDefaults,
+        model_selection: ModelSelectionRequest,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
     ) -> Self;
     pub fn title(&self) -> Option<&str>;
     pub fn tags(&self) -> impl ExactSizeIterator<Item = &str>;
-    // accessors: session(), defaults_version(), defaults(), archived(), last_writer()
+    // accessors: session(), defaults_version(), model_selection(),
+    // dangerous_tool_auto_approval(), archived(), last_writer()
 }
 
 pub trait SessionMetadataPageReader {

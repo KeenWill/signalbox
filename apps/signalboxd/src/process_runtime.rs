@@ -1141,9 +1141,9 @@ async fn spool_session_metadata_page(
             ServerMessage::SessionMetadataSummary {
                 session_id: wire_uuid(item.session().into_uuid()),
                 defaults_version: CanonicalU64::new(item.defaults_version().as_u64()),
-                model_selection: wire_domain_model_selection(item.defaults().model()),
+                model_selection: wire_domain_model_selection(item.model_selection()),
                 dangerous_tool_auto_approval: matches!(
-                    item.defaults().dangerous_tool_auto_approval(),
+                    item.dangerous_tool_auto_approval(),
                     DangerousToolAutoApproval::ApproveAll
                 ),
                 title,
@@ -1263,7 +1263,7 @@ where
                 Some(system_prompt) => system_prompt,
                 None => return Err(ProcessConnectionError::EncodeInvariant),
             };
-            write_message(
+            write_message_via_spool(
                 writer,
                 version,
                 request_id,
@@ -1280,15 +1280,21 @@ where
             )
             .await
         }
-        Ok(
-            ProcessSessionDefaultsRead::SessionNotFound
-            | ProcessSessionDefaultsRead::VersionNotFound,
-        ) => {
+        Ok(ProcessSessionDefaultsRead::SessionNotFound) => {
             write_error(
                 writer,
                 version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::NotFound),
+            )
+            .await
+        }
+        Ok(ProcessSessionDefaultsRead::VersionNotFound) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::defaults_epoch_not_found(),
             )
             .await
         }
@@ -1567,7 +1573,7 @@ where
                         .ok_or(ProcessConnectionError::EncodeInvariant)?,
                 )
             };
-            write_message(
+            write_message_via_spool(
                 writer,
                 version,
                 request_id,
@@ -3222,6 +3228,34 @@ where
     Ok(())
 }
 
+/// Writes one system-prompt-bearing message through a temporary-file spool.
+///
+/// A prompt response can approach the frame cap, so the direct
+/// `write_message` path would retain the complete encoded frame while a peer
+/// that stops reading blocks the write. Spooling first keeps per-connection
+/// heap at fixed I/O buffers, mirroring the snapshot paths
+/// (docs/spec/process-protocol.md).
+async fn write_message_via_spool<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    message: ServerMessage,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let standard_file = tempfile::tempfile().map_err(ProcessConnectionError::SpoolIo)?;
+    let mut file = tokio::fs::File::from_std(standard_file);
+    write_message(&mut file, version, request_id, message).await?;
+    file.flush()
+        .await
+        .map_err(ProcessConnectionError::SpoolIo)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(ProcessConnectionError::SpoolIo)?;
+    write_spooled_file(writer, &mut file).await
+}
+
 async fn write_spool_message(
     writer: &mut tokio::fs::File,
     version: ProtocolVersion,
@@ -3340,6 +3374,16 @@ impl ProtocolError {
                 9 => "the selected session requires protocol version 9",
                 _ => "the protocol version is unsupported",
             },
+            detail: ErrorDetail::none(),
+        }
+    }
+
+    /// The selected session exists but the named immutable defaults epoch
+    /// was never installed; the wire code remains the shared `not_found`.
+    const fn defaults_epoch_not_found() -> Self {
+        Self {
+            code: ErrorCode::NotFound,
+            message: "the requested defaults epoch was not found on the selected session",
             detail: ErrorDetail::none(),
         }
     }
