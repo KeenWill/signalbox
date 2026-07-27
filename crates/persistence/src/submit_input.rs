@@ -2443,6 +2443,13 @@ pub(crate) async fn load_scheduling_projection(
     .bind(&required_model_call_ids)
     .fetch_all(&mut *connection)
     .await?;
+    /// One steering-consuming call whose round evidence must be looked up.
+    struct ConsumingCallFacts {
+        call: Uuid,
+        turn: TurnId,
+        call_frontier: Uuid,
+        consumed_count: u64,
+    }
     let mut model_calls = Vec::with_capacity(model_call_rows.len());
     let mut pinned_targets = Vec::with_capacity(model_call_rows.len());
     let mut loaded_pinned_turns = BTreeSet::new();
@@ -2488,7 +2495,12 @@ pub(crate) async fn load_scheduling_projection(
             }
         };
         if let Some(consumed_count) = consumed_counts_by_call.get(&call_uuid).copied() {
-            consuming_call_facts.push((call_uuid, turn, frontier_uuid, consumed_count));
+            consuming_call_facts.push(ConsumingCallFacts {
+                call: call_uuid,
+                turn,
+                call_frontier: frontier_uuid,
+                consumed_count,
+            });
         }
         model_calls.push(ModelCallReconstitutionInput::new(
             ModelCallId::from_uuid(call_uuid),
@@ -2517,14 +2529,14 @@ pub(crate) async fn load_scheduling_projection(
     // evidence; a call prepared against its turn's starting frontier has no
     // continuing round window and carries none.
     let mut steering_continuation_rounds = Vec::new();
-    for (call_uuid, call_turn, call_frontier, consumed_count) in consuming_call_facts {
+    for facts in consuming_call_facts {
         let Some((round_tool_attempts, round_tool_denials)) =
             load_steering_continuation_round_evidence(
                 connection,
                 session_id,
-                call_turn,
-                ContextFrontierId::from_uuid(call_frontier),
-                consumed_count,
+                facts.turn,
+                ContextFrontierId::from_uuid(facts.call_frontier),
+                facts.consumed_count,
             )
             .await
             .map_err(map_tool_loop_error)?
@@ -2532,7 +2544,7 @@ pub(crate) async fn load_scheduling_projection(
             continue;
         };
         steering_continuation_rounds.push(SteeringContinuationRoundReconstitutionInput::new(
-            ModelCallId::from_uuid(call_uuid),
+            ModelCallId::from_uuid(facts.call),
             round_tool_attempts,
             round_tool_denials,
         ));

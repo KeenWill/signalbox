@@ -3242,7 +3242,24 @@ fn reconstitute_inner(
                 .get(call)
                 .zip(source_record)
                 .is_some_and(|(model_call, record)| {
-                    let lifecycle_matches = match &record.state {
+                    // A steering-consuming call that completed by proposing a
+                    // tool round becomes model-visible history while its turn
+                    // continues: later safe points, waits, and every terminal
+                    // shape keep the consumed rows of earlier rounds. Such a
+                    // consumer is correlated through its assistant entries
+                    // (validated by the assistant-content law) and its exact
+                    // frontier window (validated below), not through the
+                    // current phase or the turn's terminal call.
+                    let completed_history_consumer = !matches!(
+                        &record.state,
+                        AcceptedInputTurnSchedulingRecordState::Queued
+                    ) && model_call.state()
+                        == crate::ModelCallReconstitutionState::Terminal(
+                            ModelCallDisposition::Completed,
+                        )
+                        && assistant_by_call.contains_key(&model_call.id());
+                    let lifecycle_matches = completed_history_consumer
+                        || match &record.state {
                     AcceptedInputTurnSchedulingRecordState::Queued => false,
                     AcceptedInputTurnSchedulingRecordState::Active { phase, .. } => {
                         Some(model_call.attempt()) == phase.current_attempt
@@ -5642,7 +5659,7 @@ fn tool_round_terminal_producing_call(
         turn,
         terminal,
         terminal.entry_count().saturating_sub(1),
-        true,
+        ToolRoundResultWindow::TerminalClosure,
         terminal_tool_attempts,
         terminal_tool_denials,
         model_calls,
@@ -5675,7 +5692,7 @@ fn tool_round_continuation_producing_call(
         turn,
         snapshot,
         results_end,
-        false,
+        ToolRoundResultWindow::Continuation,
         round_tool_attempts,
         round_tool_denials,
         model_calls,
@@ -5683,6 +5700,18 @@ fn tool_round_continuation_producing_call(
         snapshots,
         semantic_entries,
     )
+}
+
+/// Which materialization owns a checked tool-round result window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolRoundResultWindow {
+    /// Turn-end materialization: requests that did not complete ordinary
+    /// execution close as `ToolClosed`, and a crash-lost known-failed attempt
+    /// projects its result directly.
+    TerminalClosure,
+    /// The continuation transaction: every request executed or denied, so
+    /// closure stand-ins and non-projectable attempt ends are forbidden.
+    Continuation,
 }
 
 /// Returns the one completed call whose proposals and correlated result
@@ -5693,7 +5722,7 @@ fn tool_round_producing_call_in_window(
     turn: TurnId,
     terminal: &ResolvedContextFrontierSnapshot,
     before_marker_end: usize,
-    closed_requests_permitted: bool,
+    window: ToolRoundResultWindow,
     terminal_tool_attempts: &[crate::EndedToolAttempt],
     terminal_tool_denials: &[ToolApprovalResolution],
     model_calls: &BTreeMap<crate::ModelCallId, ReconstitutedModelCall>,
@@ -5706,7 +5735,7 @@ fn tool_round_producing_call_in_window(
     // crash-lost end is a turn-level failure that can never reach a
     // continuation, while terminal materialization projects the crash-lost
     // known-failed attempt directly.
-    if !closed_requests_permitted
+    if window == ToolRoundResultWindow::Continuation
         && terminal_tool_attempts
             .iter()
             .any(|attempt| match attempt.end() {
@@ -5809,7 +5838,7 @@ fn tool_round_producing_call_in_window(
                                 && observed_denials.insert(*actual)
                         }
                         Some(SemanticTranscriptEntryPayload::ToolClosed { request: actual }) => {
-                            closed_requests_permitted && *actual == request
+                            window == ToolRoundResultWindow::TerminalClosure && *actual == request
                         }
                         _ => false,
                     }
@@ -9317,6 +9346,95 @@ mod tests {
             },
             "a crash-lost attempt end is a turn-level failure and never continues"
         );
+    }
+
+    /// S02 / S08 / S10 / INV-016 / INV-036: a steering-consuming call that
+    /// completed by proposing a tool round stays reconstitutable while the
+    /// round is parked awaiting approval — the consumer is correlated through
+    /// its assistant history and exact frontier window, not the current
+    /// phase's attempt.
+    #[test]
+    fn s02_s08_s10_inv016_inv036_parked_tool_round_retains_consumed_steering() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let consumed = accepted_origin(2);
+        let origin_entry = ActiveReconstitutionFacts::matching_origin_entry();
+        let steering_entry = semantic_entry(31);
+        let tool_use_entry = semantic_entry(34);
+        let call_frontier = frontier(41);
+        let yielded_frontier = frontier(42);
+        let consuming_call = ConsumedSteeringReconstitutionFacts::matching_continuation_call();
+        let request_id = ConsumedSteeringReconstitutionFacts::matching_continuation_request();
+        let request = ToolRequestReconstitutionInput::new(
+            request_id,
+            session.id(),
+            active.turn(),
+            consuming_call,
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from("current_time")).expect("fixture name is canonical"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments are canonical"),
+        )
+        .into_request();
+        let yielded = ResolvedContextFrontierSnapshot::try_from_candidate(
+            session.id(),
+            yielded_frontier.id(),
+            vec![
+                origin_entry.reference(&session),
+                steering_entry.reference(&session),
+                tool_use_entry.reference(&session),
+            ],
+        )
+        .expect("the tool response extends the steering-bearing call frontier");
+        let batch = ToolBatchReconstitutionInput::new(
+            session.id(),
+            active.turn(),
+            consuming_call,
+            yielded,
+            vec![request],
+            vec![],
+            vec![],
+            ToolBatchPhaseReconstitutionInput::AwaitingApproval {
+                request: request_id,
+            },
+        )
+        .reconstitute()
+        .expect("the undecided batch is awaiting approval");
+        let mut facts = ConsumedSteeringReconstitutionFacts::matching(&session, active, consumed);
+        let AcceptedInputTurnSchedulingRecordState::Active { phase, .. } =
+            &mut facts.turns[0].state
+        else {
+            panic!("matching consumed-steering facts retain an active scheduling record");
+        };
+        *phase = ActiveTurnSchedulingReconstitutionInput::awaiting_approval(active.turn(), &batch)
+            .expect("the approval wait names the parked batch");
+        facts
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                tool_use_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                    producing_call: consuming_call,
+                    request: request_id,
+                },
+            ));
+        facts.snapshots.push(
+            yielded_frontier.snapshot(&session, &[origin_entry, steering_entry, tool_use_entry]),
+        );
+        facts.model_calls = vec![ModelCallReconstitutionInput::new(
+            consuming_call,
+            active.turn(),
+            matching_active_attempt(),
+            FrozenModelSelection::Direct(direct(1)),
+            ResolvedProviderTarget::naming(provider_model_identity(51)),
+            call_frontier.id(),
+            ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
+        )];
+
+        facts
+            .input()
+            .reconstitute()
+            .expect("a parked tool round retains its consumed steering");
     }
 
     /// S02 / S10 / S11 / INV-006: a failed terminal turn naming its

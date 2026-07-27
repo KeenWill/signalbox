@@ -531,7 +531,11 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   consumed steering entries in acceptance order. The same evidence is what
   admits the durable continuation pair of a `Running` continuation attempt
   owning a `Prepared` steering-consuming call ([tool-loop](tool-loop.md) owns
-  the continuation transaction that commits it).
+  the continuation transaction that commits it). A consumer that completed by
+  proposing a tool round stays correlated through its validated assistant
+  history for the rest of the turn — later safe points, parked waits, and every
+  terminal shape included — rather than through the current phase's attempt or
+  the turn's terminal call.
 - Every active turn's projection must carry a session-scoped acceptance tail
   anchored at the turn's exact origin and extending gap-free through the
   observed last acceptance position, with unique identities, same- session

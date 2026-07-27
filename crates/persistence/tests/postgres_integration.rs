@@ -2545,10 +2545,16 @@ async fn s02_s07_s10_inv006_inv037_interrupted_continuation_call_reloads_and_act
         interrupt_outcome,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
     ));
-    let cancelled_shape: (String, Option<Uuid>, String) = sqlx::query_as(
-        "SELECT lifecycle.terminal_disposition_kind,
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct CancelledContinuationShape {
+        turn_disposition: String,
+        terminal_model_call_id: Option<Uuid>,
+        call_disposition: String,
+    }
+    let cancelled_shape: CancelledContinuationShape = sqlx::query_as(
+        "SELECT lifecycle.terminal_disposition_kind AS turn_disposition,
                 lifecycle.terminal_model_call_id,
-                continuation.terminal_disposition_kind
+                continuation.terminal_disposition_kind AS call_disposition
            FROM turn_lifecycle AS lifecycle
            JOIN model_call AS continuation
              ON continuation.session_id = lifecycle.session_id
@@ -2562,11 +2568,11 @@ async fn s02_s07_s10_inv006_inv037_interrupted_continuation_call_reloads_and_act
     .await?;
     assert_eq!(
         cancelled_shape,
-        (
-            String::from("cancelled"),
-            Some(continuation_call.into_uuid()),
-            String::from("cancelled"),
-        ),
+        CancelledContinuationShape {
+            turn_disposition: String::from("cancelled"),
+            terminal_model_call_id: Some(continuation_call.into_uuid()),
+            call_disposition: String::from("cancelled"),
+        },
         "the interrupt terminalizes the turn naming its unsent continuation call"
     );
 
