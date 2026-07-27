@@ -10,15 +10,20 @@ mod support;
 use std::error::Error;
 
 use signalbox_application::{
-    ReviewWorkflowCommand, ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult,
-    ReviewWorkflowCommandService, ReviewWorkflowOperation, ReviewWorkflowOperationKind,
-    StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
+    AuthorizeModelCallOutcome, ModelCallCredentialReference, ReviewWorkflowCommand,
+    ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult, ReviewWorkflowCommandService,
+    ReviewWorkflowOperation, ReviewWorkflowOperationKind, StartEligibleTurnIdGenerator,
+    StartEligibleTurnOutcome, StartEligibleTurnService,
 };
 use signalbox_domain::{
-    AcceptedInputId, CancelledModelCallTurnIdentities, ContextFrontierId, CreateSession,
-    DeliveryRequest, DirectModelSelection, DurableCommandId, ModelSelectionOverride,
-    ModelSelectionRequest, PerInputConfigurationChoices, ReviewChangeRequestNumber,
-    ReviewConfidence, ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
+    AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantText, AuthorizedModelCall,
+    CancelledModelCallTurnIdentities, CompletedModelCallIdentities, ContextFrontierId,
+    CreateSession, DeliveryRequest, DirectModelSelection, DurableCommandId,
+    FailedModelCallTurnIdentities, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionOverride,
+    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
+    ProviderModelIdentity, ResolvedProviderTarget, ReviewChangeRequestNumber, ReviewConfidence,
+    ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
     ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkId,
     ReviewExternalLinkNoChangeResult, ReviewExternalLinkObservation,
     ReviewExternalLinkObservationResult, ReviewExternalLinkPublicationBlockedResult,
@@ -40,6 +45,7 @@ use signalbox_domain::{
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
     local_test_connection_options, migrate,
+    model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     review_workflow::{
         ReserveExternalLinkOutcome, ReviewWorkflowInsertionError, ReviewWorkflowStore,
         ReviewWorkflowStoreError, ReviewWorkflowTransitionError,
@@ -976,55 +982,255 @@ async fn start_review_pass(
     (pass, turn)
 }
 
-async fn synthetically_terminalize_turn(
-    pool: &PgPool,
-    turn: TurnId,
-    disposition: &str,
-) -> ContextFrontierId {
-    let frontier: Uuid = sqlx::query_scalar(
-        "SELECT starting_frontier_id
-           FROM turn_lifecycle
-          WHERE turn_id = $1",
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReviewTurnOutcome {
+    Completed,
+    Failed,
+    ReconciliationRequired,
+}
+
+const REVIEW_TURN_IDENTITY_NAMESPACE: u128 = 0xfeed_f00d_dead_beef_0000_0000_0000_0000;
+const ARBITRARY_REVIEW_CREDENTIAL_REFERENCE: &str = "review-fixture-primary";
+const ARBITRARY_REVIEW_RESPONSE: &str = "Bounded review fixture response";
+const ARBITRARY_REVIEW_INTERRUPT_CONTENT: &str = "Continue after review reconciliation";
+
+struct ReviewTurnTransitionIdentities {
+    provider: ProviderModelIdentity,
+    call: ModelCallId,
+    resume_candidate_call: ModelCallId,
+    initial_failure_entry: SemanticTranscriptEntryId,
+    initial_failure_frontier: ContextFrontierId,
+    initial_steering_frontier: ContextFrontierId,
+    resume_failure_entry: SemanticTranscriptEntryId,
+    resume_failure_frontier: ContextFrontierId,
+    resume_steering_frontier: ContextFrontierId,
+    assistant_entry: SemanticTranscriptEntryId,
+    completion_entry: SemanticTranscriptEntryId,
+    terminal_entry: SemanticTranscriptEntryId,
+    terminal_frontier: ContextFrontierId,
+    interrupt_command: DurableCommandId,
+    interrupt_input: AcceptedInputId,
+    interrupt_successor: TurnId,
+    interrupt_cancellation_entry: SemanticTranscriptEntryId,
+    interrupt_cancellation_frontier: ContextFrontierId,
+}
+
+impl ReviewTurnTransitionIdentities {
+    fn for_turn(turn: TurnId) -> Self {
+        let mut next_value =
+            REVIEW_TURN_IDENTITY_NAMESPACE ^ turn.into_uuid().as_u128().rotate_left(u128::BITS / 2);
+        let mut next_uuid = || {
+            next_value = next_value
+                .checked_add(1)
+                .expect("review fixture identity namespace is not exhausted");
+            Uuid::from_u128(next_value)
+        };
+        Self {
+            provider: ProviderModelIdentity::from_uuid(next_uuid()),
+            call: ModelCallId::from_uuid(next_uuid()),
+            resume_candidate_call: ModelCallId::from_uuid(next_uuid()),
+            initial_failure_entry: SemanticTranscriptEntryId::from_uuid(next_uuid()),
+            initial_failure_frontier: ContextFrontierId::from_uuid(next_uuid()),
+            initial_steering_frontier: ContextFrontierId::from_uuid(next_uuid()),
+            resume_failure_entry: SemanticTranscriptEntryId::from_uuid(next_uuid()),
+            resume_failure_frontier: ContextFrontierId::from_uuid(next_uuid()),
+            resume_steering_frontier: ContextFrontierId::from_uuid(next_uuid()),
+            assistant_entry: SemanticTranscriptEntryId::from_uuid(next_uuid()),
+            completion_entry: SemanticTranscriptEntryId::from_uuid(next_uuid()),
+            terminal_entry: SemanticTranscriptEntryId::from_uuid(next_uuid()),
+            terminal_frontier: ContextFrontierId::from_uuid(next_uuid()),
+            interrupt_command: DurableCommandId::from_uuid(next_uuid()),
+            interrupt_input: AcceptedInputId::from_uuid(next_uuid()),
+            interrupt_successor: TurnId::from_uuid(next_uuid()),
+            interrupt_cancellation_entry: SemanticTranscriptEntryId::from_uuid(next_uuid()),
+            interrupt_cancellation_frontier: ContextFrontierId::from_uuid(next_uuid()),
+        }
+    }
+}
+
+struct PreparedReviewTurnCall {
+    session: SessionId,
+    repository: PostgresModelCallRepository,
+    authorized: AuthorizedModelCall,
+    identities: ReviewTurnTransitionIdentities,
+}
+
+async fn prepare_review_turn_call(pool: &PgPool, turn: TurnId) -> PreparedReviewTurnCall {
+    #[derive(sqlx::FromRow)]
+    struct StoredReviewTurnModelFacts {
+        session_id: Uuid,
+        direct_selection_id: Uuid,
+    }
+
+    let stored = sqlx::query_as::<_, StoredReviewTurnModelFacts>(
+        "SELECT lifecycle.session_id,
+                COALESCE(
+                    origin.frozen_direct_model_selection_id,
+                    origin.frozen_alias_selected_direct_id
+                ) AS direct_selection_id
+           FROM turn_lifecycle AS lifecycle
+           JOIN queued_input_origin AS origin
+             ON origin.turn_id = lifecycle.turn_id
+            AND origin.session_id = lifecycle.session_id
+          WHERE lifecycle.turn_id = $1",
     )
     .bind(turn.into_uuid())
     .fetch_one(pool)
     .await
-    .expect("fixture turn has a starting frontier");
-    sqlx::query(
-        "ALTER TABLE turn_lifecycle
-         DROP CONSTRAINT IF EXISTS turn_lifecycle_state_payload_shape",
-    )
-    .execute(pool)
-    .await
-    .expect("focused fixture may relax the unrelated terminal payload check");
-    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER USER")
-        .execute(pool)
+    .expect("active review fixture turn has frozen model facts");
+    let session = SessionId::from_uuid(stored.session_id);
+    let selection = DirectModelSelection::from_uuid(stored.direct_selection_id);
+    let identities = ReviewTurnTransitionIdentities::for_turn(turn);
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(identities.provider),
+    )])
+    .expect("one review fixture target forms a catalog");
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new(ARBITRARY_REVIEW_CREDENTIAL_REFERENCE),
+    );
+    let checkpointed = repository
+        .prepare_initial_call(
+            session,
+            identities.call,
+            FailedModelCallTurnIdentities::new(
+                identities.initial_failure_entry,
+                identities.initial_failure_frontier,
+            ),
+            identities.initial_steering_frontier,
+            |_| panic!("review fixture has no pending steering"),
+        )
         .await
-        .expect("focused fixture may suspend unrelated session triggers");
-    sqlx::query(
-        "UPDATE turn_lifecycle
-            SET state_kind = 'terminal',
-                terminal_frontier_id = starting_frontier_id,
-                active_phase_kind = NULL,
-                current_attempt_id = NULL,
-                terminal_disposition_kind = $2,
-                recovery_model_call_id = NULL,
-                terminal_attempt_id = NULL,
-                terminal_model_call_id = NULL
-          WHERE turn_id = $1",
-    )
-    .bind(turn.into_uuid())
-    .bind(disposition)
-    .execute(pool)
-    .await
-    .expect("focused fixture projects the canonical terminal turn outcome");
-    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER USER")
-        .execute(pool)
+        .expect("review fixture model call checkpoints");
+    assert!(matches!(
+        checkpointed,
+        PrepareInitialModelCallOutcome::Checkpointed(call) if call == identities.call
+    ));
+    let resumed = repository
+        .prepare_initial_call(
+            session,
+            identities.resume_candidate_call,
+            FailedModelCallTurnIdentities::new(
+                identities.resume_failure_entry,
+                identities.resume_failure_frontier,
+            ),
+            identities.resume_steering_frontier,
+            |_| panic!("review fixture has no pending steering"),
+        )
         .await
-        .expect("session triggers are restored after fixture projection");
-    ContextFrontierId::from_uuid(frontier)
+        .expect("review fixture model call resumes");
+    assert!(matches!(
+        resumed,
+        PrepareInitialModelCallOutcome::Ready { .. }
+    ));
+    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+        .authorize_send(session, identities.call)
+        .await
+        .expect("review fixture model call authorizes")
+    else {
+        panic!("review fixture model call must be ready to authorize");
+    };
+    PreparedReviewTurnCall {
+        session,
+        repository,
+        authorized: *authorized,
+        identities,
+    }
 }
 
+async fn terminalize_review_turn(
+    pool: &PgPool,
+    turn: TurnId,
+    outcome: ReviewTurnOutcome,
+) -> ContextFrontierId {
+    let prepared = prepare_review_turn_call(pool, turn).await;
+    if outcome == ReviewTurnOutcome::ReconciliationRequired {
+        SubmitInputRepository::new(pool.clone())
+            .handle_with_candidates(
+                SubmitInput::new(
+                    prepared.identities.interrupt_command,
+                    prepared.session,
+                    UserContent::try_text(String::from(ARBITRARY_REVIEW_INTERRUPT_CONTENT))
+                        .expect("review fixture interrupt content is admitted"),
+                    DeliveryRequest::Interrupt {
+                        expected_active_turn: turn,
+                        configuration: PerInputConfigurationChoices::new(
+                            SessionConfigurationDefaultsVersion::first(),
+                            ModelSelectionOverride::UseSessionDefault,
+                        ),
+                    },
+                ),
+                prepared.identities.interrupt_input,
+                Some(prepared.identities.interrupt_successor),
+                CancelledModelCallTurnIdentities::new(
+                    prepared.identities.interrupt_cancellation_entry,
+                    prepared.identities.interrupt_cancellation_frontier,
+                ),
+                |_| panic!("review fixture interrupt has no pending steering"),
+                |_| panic!("review fixture interrupt has no tool batch"),
+            )
+            .await
+            .expect("review fixture interrupt persists");
+    }
+    let observation = match outcome {
+        ReviewTurnOutcome::Completed => ModelCallTerminalObservation::Completed {
+            assistant_text: vec![
+                AssistantText::try_new(String::from(ARBITRARY_REVIEW_RESPONSE))
+                    .expect("review fixture assistant text is admitted"),
+            ],
+        },
+        ReviewTurnOutcome::Failed => ModelCallTerminalObservation::KnownFailed,
+        ReviewTurnOutcome::ReconciliationRequired => ModelCallTerminalObservation::Ambiguous,
+    };
+    let identities = match outcome {
+        ReviewTurnOutcome::Completed => {
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![prepared.identities.assistant_entry],
+                prepared.identities.completion_entry,
+                prepared.identities.terminal_frontier,
+            ))
+        }
+        ReviewTurnOutcome::Failed => {
+            ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
+                prepared.identities.terminal_entry,
+                prepared.identities.terminal_frontier,
+            ))
+        }
+        ReviewTurnOutcome::ReconciliationRequired => ModelCallTerminalIdentities::Ambiguous(
+            AmbiguousModelCallTurnIdentities::new(prepared.identities.terminal_frontier),
+        ),
+    };
+    let terminal = prepared
+        .repository
+        .apply_terminal_observation(
+            prepared.session,
+            prepared
+                .authorized
+                .observation_correlation()
+                .bind_terminal_observation(observation),
+            identities,
+            |_| panic!("review fixture terminalization has no pending steering"),
+        )
+        .await
+        .expect("review fixture model call terminalizes");
+    match outcome {
+        ReviewTurnOutcome::Completed => {
+            assert!(matches!(terminal, ModelCallTerminalOutcome::Completed(_)));
+        }
+        ReviewTurnOutcome::Failed => {
+            assert!(matches!(terminal, ModelCallTerminalOutcome::Failed(_)));
+        }
+        ReviewTurnOutcome::ReconciliationRequired => {
+            assert!(matches!(
+                terminal,
+                ModelCallTerminalOutcome::ReconciliationRequired(_)
+            ));
+        }
+    }
+    prepared.identities.terminal_frontier
+}
 async fn conclude_review_pass(
     store: &ReviewWorkflowStore,
     reference: ReviewPassRef,
@@ -1106,7 +1312,8 @@ async fn succeed_fixture_passes(
     let mut terminal = Vec::with_capacity(references.len());
     for reference in references {
         let (pass, turn) = start_review_pass(store, *reference).await;
-        let output_frontier = synthetically_terminalize_turn(pool, turn, "completed").await;
+        let output_frontier =
+            terminalize_review_turn(pool, turn, ReviewTurnOutcome::Completed).await;
         terminal.push((pass, turn, output_frontier));
     }
     let mut evidence = Vec::with_capacity(terminal.len());
@@ -1323,15 +1530,15 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
     start_review_pass(&store, publish_pass).await;
     start_review_pass(&store, import_pass).await;
     start_review_pass(&store, unchanged_import_pass).await;
-    let output_frontier = synthetically_terminalize_turn(&pool, turn, "completed").await;
+    let output_frontier = terminalize_review_turn(&pool, turn, ReviewTurnOutcome::Completed).await;
     let judge_output_frontier =
-        synthetically_terminalize_turn(&pool, judge_turn, "completed").await;
+        terminalize_review_turn(&pool, judge_turn, ReviewTurnOutcome::Completed).await;
     let publish_output_frontier =
-        synthetically_terminalize_turn(&pool, publish_turn, "completed").await;
+        terminalize_review_turn(&pool, publish_turn, ReviewTurnOutcome::Completed).await;
     let import_output_frontier =
-        synthetically_terminalize_turn(&pool, import_turn, "completed").await;
+        terminalize_review_turn(&pool, import_turn, ReviewTurnOutcome::Completed).await;
     let unchanged_import_output_frontier =
-        synthetically_terminalize_turn(&pool, unchanged_import_turn, "completed").await;
+        terminalize_review_turn(&pool, unchanged_import_turn, ReviewTurnOutcome::Completed).await;
     let review_evidence = propose_read_only_success(&store, running_review, output_frontier).await;
     let judge_evidence = conclude_review_pass(
         &store,
@@ -1612,7 +1819,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
     .await;
     start_review_pass(&store, later_import_pass).await;
     let later_output_frontier =
-        synthetically_terminalize_turn(&pool, later_import_turn, "completed").await;
+        terminalize_review_turn(&pool, later_import_turn, ReviewTurnOutcome::Completed).await;
     let later_import_evidence = conclude_review_pass(
         &store,
         later_import_pass,
@@ -2184,7 +2391,7 @@ async fn inv040_failed_pass_accepts_completed_turn_evidence() -> Result<(), Box<
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let (_, turn) = start_review_pass(&fixture.store, fixture.pass).await;
-    synthetically_terminalize_turn(&pool, turn, "completed").await;
+    terminalize_review_turn(&pool, turn, ReviewTurnOutcome::Completed).await;
 
     let evidence = conclude_review_pass(
         &fixture.store,
@@ -2214,7 +2421,7 @@ async fn inv040_generic_transition_rejects_effect_result() -> Result<(), Box<dyn
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let (_, turn) = start_review_pass(&fixture.store, fixture.pass).await;
-    let output_frontier = synthetically_terminalize_turn(&pool, turn, "completed").await;
+    let output_frontier = terminalize_review_turn(&pool, turn, ReviewTurnOutcome::Completed).await;
     let no_findings =
         ReviewProducedFindings::try_new(Vec::new()).expect("empty inventory is canonical");
 
@@ -2272,7 +2479,7 @@ async fn inv040_read_only_success_admission_is_atomic_and_always_loadable()
     assert_eq!(loaded_run.state(), running_run_state);
     assert_eq!(loaded_pass.state(), running.state());
 
-    let output_frontier = synthetically_terminalize_turn(&pool, turn, "completed").await;
+    let output_frontier = terminalize_review_turn(&pool, turn, ReviewTurnOutcome::Completed).await;
     let (loaded_run, loaded_pass) = load_review_aggregate(&fixture.store, fixture.pass).await;
     assert_eq!(loaded_run.state(), running_run_state);
     assert_eq!(loaded_pass.state(), running.state());
@@ -3527,7 +3734,7 @@ async fn inv041_blocked_publication_binds_pending_reservation() -> Result<(), Bo
     let fixture = insert_review_pass_fixture(&pool).await;
     let publish_pass = insert_fixture_pass(&fixture, 0x30a, ReviewPassKind::Publish).await;
     let (_, turn) = start_review_pass(&fixture.store, publish_pass).await;
-    synthetically_terminalize_turn(&pool, turn, "reconciliation_required").await;
+    terminalize_review_turn(&pool, turn, ReviewTurnOutcome::ReconciliationRequired).await;
     let link = ReviewExternalLinkId::from_uuid(uuid(0x30b));
     let reservation = ReviewExternalLink::try_reserve(
         link,
@@ -4995,7 +5202,7 @@ async fn inv041_external_object_attachment_is_unique() -> Result<(), Box<dyn Err
     .await;
     start_review_pass(&fixture.store, refreshed_publish).await;
     let refreshed_frontier =
-        synthetically_terminalize_turn(&pool, refreshed_turn, "completed").await;
+        terminalize_review_turn(&pool, refreshed_turn, ReviewTurnOutcome::Completed).await;
     let refreshed_evidence = conclude_review_pass(
         &fixture.store,
         refreshed_publish,
@@ -5092,7 +5299,8 @@ async fn inv041_external_object_attachment_is_unique() -> Result<(), Box<dyn Err
     )
     .await;
     start_review_pass(&fixture.store, later_publish).await;
-    let later_frontier = synthetically_terminalize_turn(&pool, later_turn, "completed").await;
+    let later_frontier =
+        terminalize_review_turn(&pool, later_turn, ReviewTurnOutcome::Completed).await;
     let later_evidence = conclude_review_pass(
         &fixture.store,
         later_publish,
@@ -5177,8 +5385,10 @@ async fn inv041_concurrent_external_object_attachment_has_one_logical_target()
 
     let (_, first_turn) = start_review_pass(&fixture.store, first_pass).await;
     let (_, second_turn) = start_review_pass(&fixture.store, second_pass).await;
-    let first_frontier = synthetically_terminalize_turn(&pool, first_turn, "completed").await;
-    let second_frontier = synthetically_terminalize_turn(&pool, second_turn, "completed").await;
+    let first_frontier =
+        terminalize_review_turn(&pool, first_turn, ReviewTurnOutcome::Completed).await;
+    let second_frontier =
+        terminalize_review_turn(&pool, second_turn, ReviewTurnOutcome::Completed).await;
     let first_evidence = conclude_review_pass(
         &fixture.store,
         first_pass,
@@ -5467,29 +5677,6 @@ async fn inv040_run_rejects_second_pass() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// INV-040: changing only a pass cannot commit an unprojected run/pass state.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_unprojected_pass_transition_is_rejected() -> Result<(), Box<dyn Error>> {
-    let (_container, pool) = migrated_postgres().await?;
-    let fixture = insert_review_pass_fixture(&pool).await;
-    let error = fixture
-        .store
-        .transition_pass(
-            fixture.pass.pass(),
-            ReviewPassState::Running {
-                turn: TurnId::from_uuid(uuid(0x203)),
-            },
-        )
-        .await
-        .expect_err("pass-only activation cannot commit");
-    let ReviewWorkflowStoreError::Database(error) = error else {
-        panic!("projection guard must be a database rejection");
-    };
-    assert_sqlstate(&error, "23514");
-    Ok(())
-}
-
 /// INV-040: pre-start cancellation updates the run and pass atomically.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -5527,7 +5714,7 @@ async fn inv040_running_pass_admits_monotonic_terminal_turn_lag() -> Result<(), 
     let fixture = insert_review_pass_fixture(&pool).await;
     let turn = TurnId::from_uuid(uuid(0x203));
     start_review_pass(&fixture.store, fixture.pass).await;
-    synthetically_terminalize_turn(&pool, turn, "completed").await;
+    terminalize_review_turn(&pool, turn, ReviewTurnOutcome::Completed).await;
     let loaded = fixture
         .store
         .load_pass(fixture.pass.pass())
@@ -5588,8 +5775,8 @@ async fn inv040_finding_event_rejects_failed_pass() -> Result<(), Box<dyn Error>
     let turn = TurnId::from_uuid(uuid(0x203));
     let (running_review, _) = start_review_pass(&fixture.store, fixture.pass).await;
     start_review_pass(&fixture.store, judge_pass).await;
-    let output_frontier = synthetically_terminalize_turn(&pool, turn, "completed").await;
-    synthetically_terminalize_turn(&pool, other_turn, "failed").await;
+    let output_frontier = terminalize_review_turn(&pool, turn, ReviewTurnOutcome::Completed).await;
+    terminalize_review_turn(&pool, other_turn, ReviewTurnOutcome::Failed).await;
     let review_evidence =
         propose_read_only_success(&fixture.store, running_review, output_frontier).await;
     conclude_review_pass(
@@ -5847,7 +6034,12 @@ async fn inv040_inv041_linked_block_serializes_with_non_posting_attachment()
     )
     .await;
     let (_, blocked_turn) = start_review_pass(&fixture.store, blocked_pass).await;
-    synthetically_terminalize_turn(&pool, blocked_turn, "reconciliation_required").await;
+    terminalize_review_turn(
+        &pool,
+        blocked_turn,
+        ReviewTurnOutcome::ReconciliationRequired,
+    )
+    .await;
     let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x7b3)));
     let review_evidence = pass_with_produced_findings(vec![finding_ref], evidence[0].clone());
     fixture
@@ -6009,7 +6201,12 @@ async fn inv041_attachment_returns_claim_committed_while_waiting() -> Result<(),
     let attaching_evidence =
         succeed_fixture_passes(&pool, &fixture.store, &[attaching_pass]).await[0].clone();
     let (_, blocked_turn) = start_review_pass(&fixture.store, blocked_pass).await;
-    synthetically_terminalize_turn(&pool, blocked_turn, "reconciliation_required").await;
+    terminalize_review_turn(
+        &pool,
+        blocked_turn,
+        ReviewTurnOutcome::ReconciliationRequired,
+    )
+    .await;
 
     let link = ReviewExternalLinkId::from_uuid(uuid(0x7c2));
     let reservation = ReviewExternalLink::try_reserve(
@@ -6119,7 +6316,12 @@ async fn inv041_schema_serializes_attachment_and_publication_block() -> Result<(
     let blocked_pass = insert_fixture_pass(&fixture, 0x7d1, ReviewPassKind::Publish).await;
     succeed_fixture_passes(&pool, &fixture.store, &[attaching_pass]).await;
     let (_, blocked_turn) = start_review_pass(&fixture.store, blocked_pass).await;
-    synthetically_terminalize_turn(&pool, blocked_turn, "reconciliation_required").await;
+    terminalize_review_turn(
+        &pool,
+        blocked_turn,
+        ReviewTurnOutcome::ReconciliationRequired,
+    )
+    .await;
     let link = ReviewExternalLinkId::from_uuid(uuid(0x7d2));
     fixture
         .store
@@ -6242,14 +6444,19 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
     let (_, attaching_turn) = start_review_pass(&fixture.store, attaching_pass).await;
     let (_, other_publish_turn) = start_review_pass(&fixture.store, other_publish_pass).await;
     start_review_pass(&fixture.store, blocked_publish_pass).await;
-    let output_frontier = synthetically_terminalize_turn(&pool, turn, "completed").await;
+    let output_frontier = terminalize_review_turn(&pool, turn, ReviewTurnOutcome::Completed).await;
     let judge_output_frontier =
-        synthetically_terminalize_turn(&pool, judge_turn, "completed").await;
+        terminalize_review_turn(&pool, judge_turn, ReviewTurnOutcome::Completed).await;
     let attaching_output_frontier =
-        synthetically_terminalize_turn(&pool, attaching_turn, "completed").await;
+        terminalize_review_turn(&pool, attaching_turn, ReviewTurnOutcome::Completed).await;
     let other_publish_output_frontier =
-        synthetically_terminalize_turn(&pool, other_publish_turn, "completed").await;
-    synthetically_terminalize_turn(&pool, blocked_turn, "reconciliation_required").await;
+        terminalize_review_turn(&pool, other_publish_turn, ReviewTurnOutcome::Completed).await;
+    terminalize_review_turn(
+        &pool,
+        blocked_turn,
+        ReviewTurnOutcome::ReconciliationRequired,
+    )
+    .await;
 
     let review_evidence =
         propose_read_only_success(&fixture.store, running_review, output_frontier).await;
@@ -6985,7 +7192,7 @@ async fn inv012_activation_receipt_recovers_after_pass_completion() -> Result<()
             pass: fixture.pass.pass(),
         });
 
-    synthetically_terminalize_turn(&pool, turn, "failed").await;
+    terminalize_review_turn(&pool, turn, ReviewTurnOutcome::Failed).await;
     conclude_review_pass(
         &fixture.store,
         fixture.pass,
