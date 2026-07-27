@@ -194,6 +194,45 @@ async fn inv_035_split_authorization_value_before_final_text_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a credential header split between streamed reasoning and the
+/// final envelope's tool arguments keeps redacting through the value: the
+/// argument bytes consult the held lookbehind state before the streamed
+/// argument delta and the terminal proposal are built.
+#[tokio::test]
+async fn inv_035_split_authorization_value_before_tool_arguments_is_redacted() {
+    let result = execute_scenario(
+        "split_stream_authorization_before_tool_arguments",
+        DeliveryMode::Streamed,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a decode-failure detail that quotes provider-controlled bytes
+/// consults the held lookbehind state, so a credential split between
+/// streamed reasoning and a malformed event's quoted value is suppressed
+/// whole instead of surviving in the provider-error message.
+#[tokio::test]
+async fn inv_035_decode_failure_detail_consults_held_redaction_state() {
+    let result = execute_scenario(
+        "reasoning_then_malformed_usage",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let error = provider_error(&result.evidence);
+
+    assert!(!format!("{:?}", result.evidence).contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(error.native.message.as_deref(), Some("[redacted]"));
+}
+
 /// INV-035: a credential header split between streamed reasoning and a
 /// provider failure message keeps redacting through the value, not just
 /// through the marker: terminal failure evidence carries the stateful
@@ -669,6 +708,42 @@ async fn a_contradictory_turn_failed_trailer_still_fails_closed() {
         ProviderErrorKind::Unrecognized,
     )
     .await;
+}
+
+/// Completion without the thread that establishes the exchange is protocol
+/// drift, not success: it fails closed instead of returning completion
+/// evidence with empty exchange facts.
+#[cfg(unix)]
+#[tokio::test]
+async fn completion_without_an_established_thread_fails_closed() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = threadless_completed_cli(temporary.path());
+    let runtime = runtime(temporary.path(), executable);
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let error = provider_error(&report.evidence);
+
+    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+    assert!(
+        error
+            .native
+            .message
+            .as_deref()
+            .expect("the failure names the missing thread")
+            .contains("before thread.started")
+    );
 }
 
 #[tokio::test]
@@ -2265,6 +2340,28 @@ sleep 60
         lines = completed_exchange_script_lines()
     );
     script_cli(directory, "pipes-closing-codex", &script)
+}
+
+/// Scripts a CLI that completes a turn without ever establishing a thread.
+#[cfg(unix)]
+fn threadless_completed_cli(directory: &Path) -> std::path::PathBuf {
+    let envelope_text = format!(
+        r#"{{\"outcome\":\"completed\",\"text\":\"{}\",\"tool_calls\":[]}}"#,
+        fixtures::BUFFERED_ANSWER
+    );
+    let script = format!(
+        r#"#!/bin/sh
+printf '%s\n' '{{"type":"turn.started"}}'
+printf '%s\n' '{{"type":"item.completed","item":{{"id":"message-offline-1","type":"agent_message","text":"{envelope_text}"}}}}'
+printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cached_input_tokens":{cache_read},"cache_write_input_tokens":{cache_write},"output_tokens":{output},"reasoning_output_tokens":3}}}}'
+"#,
+        envelope_text = envelope_text,
+        input = fixtures::INPUT_TOKENS,
+        cache_read = fixtures::CACHE_READ_INPUT_TOKENS,
+        cache_write = fixtures::CACHE_CREATION_INPUT_TOKENS,
+        output = fixtures::OUTPUT_TOKENS,
+    );
+    script_cli(directory, "threadless-codex", &script)
 }
 
 fn rendered_request(prompt: &str) -> serde_json::Value {

@@ -433,7 +433,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         .kill_on_drop(true);
     for name in CODEX_ENVIRONMENT_ALLOWLIST {
         if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
+            command.env(name, spawn_environment_value(name, value));
         }
     }
     #[cfg(unix)]
@@ -531,7 +531,15 @@ async fn execute_process<C: Clone + Send + Sync>(
         match next {
             ProcessStep::Line(Ok(Some(line))) => {
                 if let Err(error) = decoder.push(&line, &mut redacting_sink) {
-                    let detail = format!("undecodable Codex event: {}", error.into_detail());
+                    // Serde details can quote provider-controlled bytes, so
+                    // the detail consults the held lookbehind state before
+                    // the sink flushes, exactly as failure messages do: a
+                    // detail that extends a held credential marker is
+                    // suppressed whole.
+                    let detail = redacting_sink.redact_terminal_failure_text(&format!(
+                        "undecodable Codex event: {}",
+                        error.into_detail()
+                    ));
                     force_kill(&mut child).await;
                     abort_stderr_task(&mut stderr_task).await;
                     redacting_sink.finish();
@@ -804,6 +812,23 @@ async fn execute_process<C: Clone + Send + Sync>(
     }
 }
 
+/// `CODEX_HOME` names the CLI's login store and the child interprets it
+/// after `current_dir` moves it to the configured working root, so a
+/// relative operator value would silently re-root the credential store
+/// beneath the working directory. Absolutize it against the parent's own
+/// current directory; every other allowlisted value passes through
+/// unchanged, and an unabsolutizable value (for example an empty one) is
+/// passed verbatim for the CLI itself to reject.
+fn spawn_environment_value(name: &str, value: std::ffi::OsString) -> std::ffi::OsString {
+    if name != "CODEX_HOME" {
+        return value;
+    }
+    match std::path::absolute(std::path::Path::new(&value)) {
+        Ok(path) => path.into_os_string(),
+        Err(_) => value,
+    }
+}
+
 fn incomplete_upload_cause(error: &std::io::Error) -> LossCause {
     LossCause::TransportFailed(TransportFacts::new(format!(
         "Codex stdin closed before the full request upload completed: {error}"
@@ -1070,7 +1095,22 @@ fn already_fired(signal: &mut CancellationSignal) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::read_bounded_line;
+    use super::{read_bounded_line, spawn_environment_value};
+
+    #[test]
+    fn codex_home_is_absolutized_for_the_child() {
+        let value =
+            spawn_environment_value("CODEX_HOME", std::ffi::OsString::from("relative-home"));
+
+        assert!(std::path::Path::new(&value).is_absolute());
+    }
+
+    #[test]
+    fn other_allowlisted_environment_values_pass_through_unchanged() {
+        let value = spawn_environment_value("PATH", std::ffi::OsString::from("relative:paths"));
+
+        assert_eq!(value, std::ffi::OsString::from("relative:paths"));
+    }
 
     #[tokio::test]
     async fn bounded_line_rejects_an_unterminated_oversize_event() {

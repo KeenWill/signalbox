@@ -5,17 +5,20 @@ against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
 verified through PR #258 (`agent/signalboxd-rename`), and the Tier 0 catalog
 extension through PR #265 (`agent/tool-batch-tier0`). The Tier 1 code-host
-catalog extension is verified through PR #270 (`agent/tool-batch-tier1`). It
-owns logical tool requests, approval policy and decisions, physical tool
-attempts, result admission, intra-turn continuation, crash classification, the
-compiled registry, and the daemon-local catalog. Turn and attempt lifecycle law
-lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
-semantic entry vocabulary in
-[sessions-and-transcript](sessions-and-transcript.md); model-call staging and
-provider translation in [model-call-execution](model-call-execution.md);
-durable-command identity in [identity-and-commands](identity-and-commands.md);
-and relational mechanics in [persistence-protocol](persistence-protocol.md).
-Invariant tags cite [the invariant catalog](../invariants.md).
+catalog extension is verified through PR #270 (`agent/tool-batch-tier1`), and
+the failed-attempt operator event together with the credential-shaped code-host
+detail through PR #285 (`agent/dev-instance-code-host-credential`), and the
+client decision surface through PR #291 (`agent/turn-control-verbs`). It owns
+logical tool requests, approval policy and decisions, physical tool attempts,
+result admission, intra-turn continuation, crash classification, the compiled
+registry, and the daemon-local catalog. Turn and attempt lifecycle law lives in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
+entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
+model-call staging and provider translation in
+[model-call-execution](model-call-execution.md); durable-command identity in
+[identity-and-commands](identity-and-commands.md); and relational mechanics in
+[persistence-protocol](persistence-protocol.md). Invariant tags cite
+[the invariant catalog](../invariants.md).
 
 ## Intra-turn rounds and request batches
 
@@ -115,10 +118,13 @@ An owner decision is the canonical `DecideToolRequest` command: owner-global
 `Deny { reason }`. A denial reason is absent or 1–1024 bytes of non-control
 Unicode with no leading/trailing POSIX whitespace; it is therefore safe to
 render without copying unbounded or terminal-control content. Equality excludes
-only the command identifier. Registry lookup precedes current-state validation;
-equal replay returns the recorded applied-or-rejected result, cross-kind or
-different-payload reuse conflicts, and a pre-commit failure claims no identity
-(INV-012).
+only the command identifier. The version-eight `decide_tool_request` request in
+[process-protocol](process-protocol.md#client-requests) is the client surface
+that issues this command; its wire posture requires a denial reason even though
+the command admits an absent one. Registry lookup precedes current-state
+validation; equal replay returns the recorded applied-or-rejected result,
+cross-kind or different-payload reuse conflicts, and a pre-commit failure claims
+no identity (INV-012).
 
 The consume-and-proceed transaction locks the owning session, validates that the
 request is the turn's earliest undecided request, records the command and
@@ -139,7 +145,12 @@ approval wait is not a denial and does not bypass the decision command. A
 terminal stop materializes the denial result before its terminal marker. This is
 two independently durable commands, not one atomic deny-and-end command; after
 decision progression opens execution, the ordinary dispatch-gate race between
-remaining tool work and the interrupt applies.
+remaining tool work and the interrupt applies. On the wire this composition is
+`decide_tool_request` followed by `stop_turn`
+([process-protocol](process-protocol.md#client-requests)); a `stop_turn` against
+the parked wait records the typed
+`interrupt_unavailable_while_awaiting_approval` rejection and leaves the wait
+intact.
 
 ## Registry, placement, and effect metadata
 
@@ -295,6 +306,20 @@ failure becomes `ExecutionFailed`. These typed errors resolve the logical
 request and are visible to the next model round; they do not by themselves fail
 the turn. Physical ambiguity remains a turn-level recovery wait and does not
 become an ordinary error result.
+
+Because a resolved request is otherwise a conversation between the daemon and
+the model, admitting a `KnownFailed` observation also emits one operator
+telemetry event carrying the dispatched catalog name, the closed error kind, and
+the session and turn identities — never the bounded error detail, tool
+arguments, or any response content. Admission is the single site: it covers
+every executor behind the one dispatch trait and the failures admission itself
+substitutes for oversized or null-bearing results. Completed and ambiguous
+observations emit nothing here; ambiguity is carried by the recovery wait above.
+Preflight failures that never reach admission — unknown names and
+argument-decode failures — are likewise silent, being model-authored rather than
+deployment facts. Telemetry field discipline is
+[identity-and-commands](identity-and-commands.md#durable-command-telemetry-correlation)
+scope.
 
 An interrupt against a tool recovery wait does not reinterpret or erase the
 ambiguous attempt. It materializes exactly one reference-only result per request
@@ -580,12 +605,16 @@ delivery and redaction are owned by
 [configuration-and-credentials](configuration-and-credentials.md).
 
 A missing or unusable credential and a definitive client rejection produce only
-fixed known-failure detail. A read transport or server failure is an executor
-infrastructure failure. A mutation transport loss, server failure, oversized or
-malformed success response, or malformed GraphQL acknowledgement is
-commit-ambiguous; the durable tool attempt's `ExternalEffect` classification
-parks crash-lost execution for recovery rather than silently retrying it. The
-adapter never returns code-host response bodies as error detail.
+fixed known-failure detail, and the two are told apart: credential bytes that
+cannot form the authentication header never reach the code host, so they present
+the credential-unavailable detail that a failed resolution already presents,
+while a definitive rejection presents the code-host detail. A read transport or
+server failure is an executor infrastructure failure. A mutation transport loss,
+server failure, oversized or malformed success response, or malformed GraphQL
+acknowledgement is commit-ambiguous; the durable tool attempt's `ExternalEffect`
+classification parks crash-lost execution for recovery rather than silently
+retrying it. The adapter never returns code-host response bodies as error
+detail.
 
 The merged catalog sorts declarations by checked tool name and rejects
 duplicates during construction. Its executor dispatches only those same four

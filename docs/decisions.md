@@ -10,6 +10,113 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Surface turn control as the interrupt treatment and the canonical decision command
+
+**Context.** A client could observe a runaway or tool-parked turn but could not
+act on it: no wire request stopped the active turn or decided a pending tool
+request. The domain and persistence spine for both actions already exists — the
+applied-interrupt stop path with its durable cancellation requests, and the
+`DecideToolRequest` command with replay-equality — with no client surface.
+
+**Decision.** Protocol version eight adds two additive requests. `stop_turn` is
+the accepted `Interrupt` delivery on the wire: it names the observed active
+turn, carries the immediate-successor content the interrupt algebra requires,
+and projects the previously daemon-internal interrupt refusals as typed wire
+rejections. `decide_tool_request` issues the canonical decision command; its
+wire posture requires a denial reason, and the named session is a routing
+precondition refused before command recording rather than part of the canonical
+payload. Version eight was taken while version seven was still reserved by the
+then-open owner turn-reconciliation stack; that stack has since landed, so the
+admitted chain is complete. The tool-loop repository's replay-payload mismatch
+became the typed `ConflictingCommandReuse` error so the wire reports
+`conflicting_reuse` without string matching.
+
+**Rejected alternatives.** A standalone content-free cancellation command is the
+obvious verb shape, but the accepted algebra makes an applied interrupt — with
+its immediate successor — the only cancellation authority (INV-029), and the
+recorded open question reserves the standalone command for a future foundation
+decision with its own proof and disposition rules and a migration; fabricating
+synthetic successor content daemon-side would launder a stop into owner speech.
+An optional wire denial reason would mirror the domain, but every
+client-recorded denial is rendered to the model, and an unexplained denial
+invites a retry loop. Separate approve and deny wire requests would split one
+canonical command into two vocabularies.
+
+**Affects.** `crates/process-protocol` (version eight, two requests, one
+receipt, eight rejection details), the daemon request adapter and its
+session-correlation precondition read, `crates/persistence`
+(`ConflictingCommandReuse`, the `tool_request_session` read, the public
+recorded-decision probe), the terminal client's `stop`, `approve`, and `deny`
+verbs and version selection, the terminal-client CI suite filter, and the
+process-protocol, turn-lifecycle-and-scheduling, and tool-loop specification
+pages.
+
+## 2026-07-26 — Narrow a credential file to its value, and name credential faults
+
+**Context.** The first live dogfood run of the dev instance could not use a
+code-host tool at all. Two separate faults compounded. The tools that write a
+credential file — `gh auth token`, `op read`, `pass`, a shell redirect —
+terminate the line they print, and the file channel read those bytes verbatim,
+so `Bearer <token>\n` could not form an `Authorization` header. The resulting
+`InvalidCredential` then shared an error detail with a definitive code-host
+rejection, so the one visible symptom was the model being told the code host had
+rejected a request the daemon never sent.
+
+**Decision.** The file channel narrows what it reads: trailing `\n` and `\r`
+bytes are dropped, every other byte is retained exactly. The narrowing lives at
+the read rather than at each adapter's header formation, so all adapters, the
+durable-record boundary, and the credential scrub agree on one value. Credential
+bytes that cannot form the authentication header now present the
+credential-unavailable detail a failed resolution already presents, leaving the
+code-host detail to mean the code host answered.
+
+**Rejected alternatives.** Trimming at header formation would leave each adapter
+narrowing separately and would hand the scrubber a value that no longer matches
+the token a provider might reflect. Trimming all ASCII whitespace would silently
+accept a credential a deployment never meant to install. Rejecting a terminated
+file outright would keep the honest contract and fail every standard
+provisioning step, which is what the smoke run did. Treating an all-termination
+file as a resolution failure would add a fourth typed failure for a case the
+adapter boundary already refuses.
+
+**Affects.** `FileCredentialAccess`, the code-host executor's known-failure
+detail selection, and the credential-lifecycle and code-host sections of the
+configuration-and-credentials and tool-loop pages. The same run found the dev
+instance never passed `GITHUB_TOKEN_FILE`, which the daemon requires at startup;
+`devenv.nix` now passes it with a `SIGNALBOX_DEV_GITHUB_TOKEN_FILE` override,
+mirroring the Anthropic key file.
+
+## 2026-07-26 — Report a failed tool attempt once, at admission
+
+**Context.** A failed tool attempt was operator-invisible. The typed error
+resolves the logical request and reaches the next model round, and nothing else;
+the same dogfood run showed a credential fault only as a model complaining about
+a code host. The daemon has no metrics or trace export, so the log line is the
+whole operator surface.
+
+**Decision.** Admitting a `KnownFailed` observation emits one `tracing` warning
+carrying the dispatched catalog tool name, the closed error kind, and the
+session and turn identities. Admission in `crates/application` is the single
+site: the executors sit behind one dispatch trait, that layer already holds
+every typed fact the event carries, and it also covers the failures admission
+itself substitutes for oversized or null-bearing results. Completed and
+ambiguous observations stay silent, as do preflight failures, which are
+model-authored rather than deployment facts.
+
+**Rejected alternatives.** Emitting from each executor would repeat the site
+five times and still miss admission-substituted failures — the same argument
+that put the provider bridge, not the adapters, in charge of runtime
+diagnostics. Carrying an `OperatorFailureClass` would be dishonest: a known tool
+failure is a resolved request, not a runtime failure, and the taxonomy grades
+how bad a failure is. Including the bounded error detail would put executor-
+chosen text in telemetry, which the redaction rules keep out. A new closed
+cause-code vocabulary for tools would duplicate the error kind that already
+exists.
+
+**Affects.** `crates/application/src/tool_loop.rs`, the staged-execution section
+of the tool-loop page, and the telemetry field inventory in the
+identity-and-commands and configuration-and-credentials pages.
+
 ## 2026-07-26 — Derive daemon tool schemas from their argument types
 
 **Context.** Each daemon tool declared its model-facing JSON Schema as a
