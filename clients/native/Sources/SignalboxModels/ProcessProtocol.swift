@@ -318,6 +318,10 @@ public struct SignalboxProcessClientFrame: Encodable, Equatable, Sendable {
   }
 }
 
+public enum SignalboxProcessFrameDecodingError: Error, Equatable {
+  case oversizedFrame
+}
+
 public struct SignalboxProcessServerFrame: Equatable, Sendable {
   public let version: SignalboxProcessProtocolVersion
   public let requestID: SignalboxCanonicalUInt64
@@ -334,6 +338,9 @@ public struct SignalboxProcessServerFrame: Equatable, Sendable {
   }
 
   public static func decode(from data: Data) throws -> Self {
+    guard data.count <= SignalboxProcessProtocol.maximumFrameBytes else {
+      throw SignalboxProcessFrameDecodingError.oversizedFrame
+    }
     var scanner = SignalboxJSONDuplicateMemberScanner(data: data)
     let duplicateObjectPaths = try scanner.scan()
     let decoder = SignalboxJSONCoding.decoder()
@@ -1341,7 +1348,20 @@ public struct SignalboxProcessError: Decodable, Equatable, Sendable {
           )
         )
       }
-      detail = try container.decode(SignalboxRejectionDetail.self, forKey: .detail)
+      let rejectionDetail = try container.decode(
+        SignalboxRejectionDetail.self,
+        forKey: .detail
+      )
+      guard case .unknown(let kind, _) = rejectionDetail else {
+        detail = rejectionDetail
+        return
+      }
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath + [CodingKeys.detail],
+          debugDescription: "Unrecognized rejection detail type: \(kind)."
+        )
+      )
     default:
       guard !container.contains(.detail) else {
         throw DecodingError.dataCorrupted(

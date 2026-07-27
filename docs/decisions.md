@@ -10,6 +10,28 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Retry only transient native synchronization failures
+
+**Context.** A followed session can fail because its snapshot is stale, its
+transport or deadline failed, the daemon requires resynchronization, or the
+daemon returned a definitive request/protocol error. The protocol fixes the
+error vocabulary but does not choose a native-client reconnect lifecycle.
+
+**Decision.** Route transport, deadline, stale-snapshot, malformed-projection,
+`resync_required`, `unavailable`, and `internal` failures through the one typed,
+bounded reconnect schedule. Treat `malformed_frame`, `unsupported_version`,
+`invalid_request`, `not_found`, `conflicting_reuse`, `rejected`, and
+`commit_ambiguous` as terminal for that synchronization. Every path preserves
+its diagnostic and closes active transports before retry or termination.
+
+**Rejected alternatives.** Retrying every server error can repeat requests that
+the daemon has definitively rejected. Retrying nothing makes ordinary transport
+loss and explicit resynchronization terminal. Separate implicit retry loops
+would bypass the typed cap and deadline policy.
+
+**Affects.** Native session synchronization error classification, recovery
+effects, and scripted reducer tests.
+
 ## 2026-07-26 — Bound retained native metadata-list text at 32 MiB
 
 **Context.** Each metadata page and summary has a row and UTF-8 bound, and the

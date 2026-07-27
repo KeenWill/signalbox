@@ -272,6 +272,30 @@ final class ProcessProtocolTests: XCTestCase {
       ProcessProtocolFixture.forbiddenErrorDetailDiagnostic
     )
   }
+
+  func testUnknownRejectionDetailDegradesKnownError() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.unknownRejectionDetailFrame()
+    )
+
+    XCTAssertEqual(
+      ProcessProtocolFixture.decodingDiagnostic(in: frame.message),
+      ProcessProtocolFixture.unknownRejectionDetailDiagnostic
+    )
+  }
+
+  func testPublicFrameDecoderRejectsOversizedInputBeforeScanning() {
+    XCTAssertThrowsError(
+      try SignalboxProcessServerFrame.decode(
+        from: ProcessProtocolFixture.oversizedFrame()
+      )
+    ) {
+      XCTAssertEqual(
+        $0 as? SignalboxProcessFrameDecodingError,
+        .oversizedFrame
+      )
+    }
+  }
 }
 
 private enum ProcessProtocolFixture {
@@ -288,6 +312,9 @@ private enum ProcessProtocolFixture {
     message: "Missing required value at message.detail."
   )
   static let forbiddenErrorDetailDiagnostic = SignalboxDecodingDiagnostic(
+    message: "Invalid field value at message.detail."
+  )
+  static let unknownRejectionDetailDiagnostic = SignalboxDecodingDiagnostic(
     message: "Invalid field value at message.detail."
   )
 
@@ -420,6 +447,30 @@ private enum ProcessProtocolFixture {
         }
       }
       """.utf8
+    )
+  }
+
+  static func unknownRejectionDetailFrame() -> Data {
+    Data(
+      """
+      {
+        "version":5,
+        "request_id":"9",
+        "message":{
+          "type":"error",
+          "code":"rejected",
+          "message":"fixture rejection",
+          "detail":{"type":"future_rejection"}
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func oversizedFrame() -> Data {
+    Data(
+      repeating: 0x20,
+      count: SignalboxProcessProtocol.maximumFrameBytes + 1
     )
   }
 
