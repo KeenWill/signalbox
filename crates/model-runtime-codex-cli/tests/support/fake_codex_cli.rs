@@ -392,6 +392,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 completed();
             }
         }
+        "stderr_credential_continuation" => {
+            reasoning("reason-stderr-continuation", "Authoriz");
+            eprintln!("ation: {}", fixtures::SENSITIVE_STDERR_CONTINUATION);
+            std::process::exit(7);
+        }
         "stderr_redaction" => {
             eprintln!(
                 "authentication failed API_KEY=\"{}\"",

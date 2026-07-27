@@ -776,8 +776,14 @@ async fn execute_process<C: Clone + Send + Sync>(
             evidence
         }
         Ok(status) => {
-            let message = if !stderr.trim().is_empty() {
-                format!("Codex CLI exited with status {status}: {stderr}")
+            // The stderr text consults the held lookbehind state on its own,
+            // before any adapter-owned status prose is prefixed: inserted
+            // prose between a held credential-marker fragment and its stderr
+            // continuation would otherwise keep the pair from rejoining, and
+            // the continuation would survive the stateless stderr redaction.
+            let stderr_detail = redacting_sink.redact_terminal_failure_text(&stderr);
+            let message = if !stderr_detail.trim().is_empty() {
+                format!("Codex CLI exited with status {status}: {stderr_detail}")
             } else if let Some(error) = input_error {
                 format!("Codex CLI exited with status {status} after stdin failed: {error}")
             } else {

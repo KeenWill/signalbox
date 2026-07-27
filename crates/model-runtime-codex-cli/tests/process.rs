@@ -1303,6 +1303,32 @@ async fn cancellation_after_terminal_with_closed_pipes_preserves_completion_evid
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-pipes-close-group"));
 }
 
+/// INV-035: stderr appended to exit-status detail consults the held
+/// lookbehind state before adapter-owned prose is prefixed, so a credential
+/// split between streamed text and stderr cannot reassemble in
+/// provider-error evidence.
+#[tokio::test]
+async fn inv_035_stderr_exit_detail_consults_held_redaction_state() {
+    let result = execute_scenario(
+        "stderr_credential_continuation",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let error = provider_error(&result.evidence);
+
+    assert!(!format!("{:?}", result.evidence).contains(fixtures::SENSITIVE_STDERR_CONTINUATION));
+    assert!(
+        error
+            .native
+            .message
+            .as_deref()
+            .expect("the failure carries redacted stderr detail")
+            .contains("[redacted]")
+    );
+}
+
 /// Cancellation that lands after the provider terminal marker, while an open
 /// stdout handle still blocks end-of-stream, drives immediate group cleanup
 /// and returns the definitive completion instead of discarding it.
