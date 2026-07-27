@@ -5,6 +5,7 @@ use clap::{
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, CommandId, ConversationImportFormat, ModelSelection,
+    ReviewDiffSide, ReviewFindingInput, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow,
 };
 use uuid::Uuid;
 
@@ -49,6 +50,56 @@ pub(crate) enum Command {
         turn_id: CanonicalUuid,
         command_id: Option<CommandId>,
         defaults_version: Option<CanonicalU64>,
+    },
+    Review(Box<ReviewCommand>),
+}
+
+#[derive(Debug)]
+pub(crate) enum ReviewCommand {
+    CreateTarget {
+        command_id: Option<CommandId>,
+        target_id: CanonicalUuid,
+        provider: String,
+        repository: String,
+        subject: ReviewTargetSubject,
+        head_revision: String,
+        base_revision: Option<String>,
+        stack_parent_target_id: Option<CanonicalUuid>,
+    },
+    StartRun {
+        command_id: Option<CommandId>,
+        target_id: CanonicalUuid,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        workflow: ReviewWorkflow,
+        session_id: CanonicalUuid,
+        accepted_input_id: CanonicalUuid,
+    },
+    ActivatePass {
+        command_id: Option<CommandId>,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+    },
+    RecordFinding {
+        command_id: Option<CommandId>,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        output_frontier_id: CanonicalUuid,
+        finding: ReviewFindingInput,
+    },
+    ListFindings {
+        run_id: CanonicalUuid,
+    },
+    ReadTarget {
+        target_id: CanonicalUuid,
+    },
+    ReadRun {
+        run_id: CanonicalUuid,
+    },
+    ReadFinding {
+        finding_id: CanonicalUuid,
     },
 }
 
@@ -106,6 +157,164 @@ enum CliCommand {
     /// Reconcile a turn parked on an ambiguous model call and continue with
     /// standard-input content.
     Reconcile(ReconcileArguments),
+    /// Drive and inspect headless review workflows.
+    Review(ReviewArguments),
+}
+
+#[derive(Debug, ClapArgs)]
+struct ReviewArguments {
+    #[command(subcommand)]
+    command: ReviewSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ReviewSubcommand {
+    /// Register one immutable external change-request snapshot.
+    CreateTarget(CreateReviewTargetArguments),
+    /// Admit one queued run and its sole session-backed pass.
+    StartRun(StartReviewRunArguments),
+    /// Bind a queued pass to its canonical active turn.
+    ActivatePass(ActivateReviewPassArguments),
+    /// Conclude one read-only pass with exactly one finding.
+    RecordFinding(RecordReviewFindingArguments),
+    /// List findings for one exact run.
+    ListFindings(ReviewRunArguments),
+    /// Read one target snapshot.
+    ReadTarget(ReviewTargetArguments),
+    /// Read one run and pass projection.
+    ReadRun(ReviewRunArguments),
+    /// Read one finding aggregate.
+    ReadFinding(ReviewFindingArguments),
+}
+
+#[derive(Debug, ClapArgs)]
+struct CreateReviewTargetArguments {
+    #[arg(value_name = "TARGET", value_parser = canonical_uuid)]
+    target_id: CanonicalUuid,
+    #[arg(long)]
+    provider: String,
+    #[arg(long)]
+    repository: String,
+    #[arg(long, value_name = "DECIMAL", value_parser = canonical_u64)]
+    change_request: CanonicalU64,
+    #[arg(long)]
+    head_revision: String,
+    #[arg(long)]
+    base_revision: String,
+    #[arg(long, value_name = "TARGET", value_parser = canonical_uuid)]
+    stack_parent_target_id: Option<CanonicalUuid>,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct StartReviewRunArguments {
+    #[arg(value_name = "TARGET", value_parser = canonical_uuid)]
+    target_id: CanonicalUuid,
+    #[arg(value_name = "RUN", value_parser = canonical_uuid)]
+    run_id: CanonicalUuid,
+    #[arg(value_name = "PASS", value_parser = canonical_uuid)]
+    pass_id: CanonicalUuid,
+    #[arg(long, value_enum)]
+    workflow: ReviewWorkflowArgument,
+    #[arg(long, value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    #[arg(long, value_name = "INPUT", value_parser = canonical_uuid)]
+    accepted_input_id: CanonicalUuid,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ActivateReviewPassArguments {
+    #[arg(value_name = "RUN", value_parser = canonical_uuid)]
+    run_id: CanonicalUuid,
+    #[arg(value_name = "PASS", value_parser = canonical_uuid)]
+    pass_id: CanonicalUuid,
+    #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
+    turn_id: CanonicalUuid,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct RecordReviewFindingArguments {
+    #[arg(value_name = "RUN", value_parser = canonical_uuid)]
+    run_id: CanonicalUuid,
+    #[arg(value_name = "PASS", value_parser = canonical_uuid)]
+    pass_id: CanonicalUuid,
+    #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
+    turn_id: CanonicalUuid,
+    #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
+    output_frontier_id: CanonicalUuid,
+    #[arg(long, value_name = "FINDING", value_parser = canonical_uuid)]
+    finding_id: CanonicalUuid,
+    #[arg(long)]
+    file_path: String,
+    #[arg(long, requires = "line_end", value_parser = canonical_u64)]
+    line_start: Option<CanonicalU64>,
+    #[arg(long, requires = "line_start", value_parser = canonical_u64)]
+    line_end: Option<CanonicalU64>,
+    #[arg(long, value_enum)]
+    diff_side: Option<ReviewDiffSideArgument>,
+    #[arg(long)]
+    title: String,
+    #[arg(long)]
+    body: String,
+    #[arg(long, value_enum)]
+    severity: ReviewSeverityArgument,
+    #[arg(long, value_parser = canonical_u64)]
+    confidence: CanonicalU64,
+    #[arg(long)]
+    category: String,
+    #[arg(long)]
+    recommended_fix: Option<String>,
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ReviewTargetArguments {
+    #[arg(value_name = "TARGET", value_parser = canonical_uuid)]
+    target_id: CanonicalUuid,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ReviewRunArguments {
+    #[arg(value_name = "RUN", value_parser = canonical_uuid)]
+    run_id: CanonicalUuid,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ReviewFindingArguments {
+    #[arg(value_name = "FINDING", value_parser = canonical_uuid)]
+    finding_id: CanonicalUuid,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ReviewWorkflowArgument {
+    ImportExternalContext,
+    ReadOnlyReview,
+    JudgeFindings,
+    DedupeFindings,
+    PublishReview,
+    FixFindings,
+    PropagateStack,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ReviewDiffSideArgument {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ReviewSeverityArgument {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -315,6 +524,86 @@ pub(crate) fn parse(
             command_id: arguments.command_id,
             defaults_version: arguments.defaults_version,
         },
+        CliCommand::Review(arguments) => Command::Review(Box::new(match arguments.command {
+            ReviewSubcommand::CreateTarget(arguments) => ReviewCommand::CreateTarget {
+                command_id: arguments.command_id,
+                target_id: arguments.target_id,
+                provider: arguments.provider,
+                repository: arguments.repository,
+                subject: ReviewTargetSubject::ChangeRequest {
+                    number: arguments.change_request,
+                },
+                head_revision: arguments.head_revision,
+                base_revision: Some(arguments.base_revision),
+                stack_parent_target_id: arguments.stack_parent_target_id,
+            },
+            ReviewSubcommand::StartRun(arguments) => ReviewCommand::StartRun {
+                command_id: arguments.command_id,
+                target_id: arguments.target_id,
+                run_id: arguments.run_id,
+                pass_id: arguments.pass_id,
+                workflow: match arguments.workflow {
+                    ReviewWorkflowArgument::ImportExternalContext => {
+                        ReviewWorkflow::ImportExternalContext
+                    }
+                    ReviewWorkflowArgument::ReadOnlyReview => ReviewWorkflow::ReadOnlyReview,
+                    ReviewWorkflowArgument::JudgeFindings => ReviewWorkflow::JudgeFindings,
+                    ReviewWorkflowArgument::DedupeFindings => ReviewWorkflow::DedupeFindings,
+                    ReviewWorkflowArgument::PublishReview => ReviewWorkflow::PublishReview,
+                    ReviewWorkflowArgument::FixFindings => ReviewWorkflow::FixFindings,
+                    ReviewWorkflowArgument::PropagateStack => ReviewWorkflow::PropagateStack,
+                },
+                session_id: arguments.session_id,
+                accepted_input_id: arguments.accepted_input_id,
+            },
+            ReviewSubcommand::ActivatePass(arguments) => ReviewCommand::ActivatePass {
+                command_id: arguments.command_id,
+                run_id: arguments.run_id,
+                pass_id: arguments.pass_id,
+                turn_id: arguments.turn_id,
+            },
+            ReviewSubcommand::RecordFinding(arguments) => ReviewCommand::RecordFinding {
+                command_id: arguments.command_id,
+                run_id: arguments.run_id,
+                pass_id: arguments.pass_id,
+                turn_id: arguments.turn_id,
+                output_frontier_id: arguments.output_frontier_id,
+                finding: ReviewFindingInput {
+                    finding_id: arguments.finding_id,
+                    file_path: arguments.file_path,
+                    line_start: arguments.line_start,
+                    line_end: arguments.line_end,
+                    diff_side: arguments.diff_side.map(|side| match side {
+                        ReviewDiffSideArgument::Left => ReviewDiffSide::Left,
+                        ReviewDiffSideArgument::Right => ReviewDiffSide::Right,
+                    }),
+                    title: arguments.title,
+                    body: arguments.body,
+                    severity: match arguments.severity {
+                        ReviewSeverityArgument::Info => ReviewSeverity::Info,
+                        ReviewSeverityArgument::Low => ReviewSeverity::Low,
+                        ReviewSeverityArgument::Medium => ReviewSeverity::Medium,
+                        ReviewSeverityArgument::High => ReviewSeverity::High,
+                        ReviewSeverityArgument::Critical => ReviewSeverity::Critical,
+                    },
+                    confidence: arguments.confidence,
+                    category: arguments.category,
+                    recommended_fix: arguments.recommended_fix,
+                },
+            },
+            ReviewSubcommand::ListFindings(arguments) => ReviewCommand::ListFindings {
+                run_id: arguments.run_id,
+            },
+            ReviewSubcommand::ReadTarget(arguments) => ReviewCommand::ReadTarget {
+                target_id: arguments.target_id,
+            },
+            ReviewSubcommand::ReadRun(arguments) => ReviewCommand::ReadRun {
+                run_id: arguments.run_id,
+            },
+            ReviewSubcommand::ReadFinding(arguments) => ReviewCommand::ReadFinding {
+                finding_id: arguments.finding_id,
+            },
+        })),
     };
     Ok(ParseOutcome::Run(Arguments {
         socket: parsed.socket,

@@ -19,11 +19,13 @@ five remain unchanged, verified through PR #272 (`agent/mid-session-model`). The
 owner turn-reconciliation stack adds protocol version seven for the single
 `reconcile_turn` request; versions one through six retain their closed request
 and message vocabularies unchanged, verified through PR #281
-(`agent/turn-reconciliation-recovery`). The implementation in this stack speaks
-versions one through seven, and its terminal client selects version seven. This
-page is the normative boundary between a local client process and `signalboxd`;
-domain values, PostgreSQL records, and wire messages remain distinct
-representations.
+(`agent/turn-reconciliation-recovery`). Protocol versions eight through ten are
+reserved by preceding stacks; in this branch they retain version seven's closed
+vocabulary. The review-workflow surface adds protocol version eleven. The
+implementation speaks versions one through eleven, and its terminal client
+selects version eleven. This page is the normative boundary between a local
+client process and `signalboxd`; domain values, PostgreSQL records, and wire
+messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -31,7 +33,7 @@ tag. Durable update storage and the delivered-through cursor are owned by
 
 ## Transport and trust boundary
 
-All seven versions use one Unix domain stream socket. The daemon requires its
+All eleven versions use one Unix domain stream socket. The daemon requires its
 path in `SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>`
 override when present and otherwise requires that environment value.
 `signalboxd` binds the socket with owner-only `0600` permissions. The configured
@@ -134,7 +136,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1`, `2`, `3`, `4`, `5`, `6`, or `7`;
+- `version`: JSON integer from `1` through `11`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -146,11 +148,11 @@ and members with the wrong JSON type fail explicitly (INV-033). A frame may
 contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
-spellings decode to the same name. A version other than one through seven
+spellings decode to the same name. A version other than one through eleven
 produces an `unsupported_version` error naming the supported versions, then the
 server closes the connection. Every response uses the request's admitted
 version; when no version can be admitted, the server error uses version one as
-the pre-admission fallback. A client speaking version two through seven admits
+the pre-admission fallback. A client speaking version two through eleven admits
 that version-one fallback only for `malformed_frame` or `unsupported_version`,
 then applies the ordinary request-identity check; every other response-version
 mismatch fails locally. A server error uses `request_id = "0"` only when the
@@ -184,6 +186,31 @@ that variant.
 | `replace_session_defaults` | 6       | `command_id` and `session_id` (canonical UUID strings), `expected_defaults_version` (canonical decimal string), `model_selection` (selection object), `dangerous_tool_auto_approval` (boolean) | Install one complete immutable defaults epoch as the owner actor, conditional on the exact current epoch.                                                          |
 | `reconcile_turn`           | 7       | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                 | Supply the owner reconciliation decision for the named turn parked on an ambiguous model call, accepting `content` as its immediate successor origin.              |
 
+Version eleven adds these review-workflow requests. Every `*_id` is a canonical
+UUID string, ordinal and count values are canonical decimal strings, and every
+nullable member is required with either its value or JSON `null`.
+
+| Type                                | Additional required members                                                                                                | Meaning                                                                  |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `create_review_target`              | `command_id`, `target_id`, `provider`, `repository`, `subject`, `head_revision`, `base_revision`, `stack_parent_target_id` | Register one immutable external target snapshot.                         |
+| `start_review_run`                  | `command_id`, `target_id`, `run_id`, `pass_id`, `workflow`, `session_id`, `accepted_input_id`                              | Admit one run and its sole session-backed pass.                          |
+| `activate_review_pass`              | `command_id`, `run_id`, `pass_id`, `turn_id`                                                                               | Bind the queued run and pass to their canonical active turn.             |
+| `record_review_findings`            | `command_id`, `run_id`, `pass_id`, `turn_id`, `output_frontier_id`, `findings`                                             | Atomically succeed a read-only pass with its complete finding inventory. |
+| `record_review_finding_disposition` | `command_id`, `run_id`, `pass_id`, `turn_id`, `output_frontier_id`, `finding_id`, `event_ordinal`, `disposition`           | Atomically conclude a judgment pass and append its finding event.        |
+| `reserve_review_external_link`      | `command_id`, `external_link_id`, `finding_id`, `provider`, `object_kind`                                                  | Reserve one provider object identity before an external write.           |
+| `attach_review_external_link`       | `command_id`, `external_link_id`, `run_id`, `pass_id`, `turn_id`, `output_frontier_id`, `external_object`, `event_ordinal` | Atomically bind an external object and its exact publication result.     |
+| `read_review_target`                | `target_id`                                                                                                                | Read one immutable target snapshot.                                      |
+| `read_review_run`                   | `run_id`                                                                                                                   | Read one run and its optional admitted pass.                             |
+| `read_review_finding`               | `finding_id`                                                                                                               | Read one complete finding aggregate.                                     |
+| `list_review_findings`              | `run_id`                                                                                                                   | List one run's findings in finding-identity order.                       |
+
+Target subjects, workflows, pass and finding state, finding content,
+disposition, and external-link vocabularies are the distinct wire
+representations of the [review-workflow domain](review-workflows.md). The daemon
+constructs domain values before mutation and rejects an incompatible target
+shape, workflow/pass pair, session/input/turn binding, terminal frontier,
+finding inventory, event, or attachment without normalizing it.
+
 A selection object is exactly one of:
 
 - `{"kind":"direct","selection_id":"<canonical UUID>"}`;
@@ -200,6 +227,20 @@ version, and treatment; changing any of them is a conflicting reuse, not
 recovery. The expected defaults version is likewise part of a replacement's
 canonical payload; exact recovery preserves it together with the complete model
 selection and dangerous-tool auto-approval posture.
+
+Review mutations use the same owner-global command namespace. Equality is the
+closed operation kind plus SHA-256 of the validated semantic request object;
+frame version and request identity are excluded. The typed append-only receipt
+stores the complete stable success response. A recorded receipt is inspected
+before mutable aggregate-state preconditions, so an equal retry returns that
+response even after the operation changed the aggregate state. Each aggregate
+effect uses its owning store transaction. If that effect commits before the
+receipt and the process exits, an equal retry recognizes the exact complete
+effect, records the missing receipt, and returns the stable result. Reusing the
+command identity for a different digest, operation kind, aggregate payload,
+complete inventory, event, or attachment fails closed. The
+[durable review-command decision](../decisions.md#2026-07-26--recover-review-commands-from-their-exact-aggregate-effects)
+owns this representation choice.
 
 Before application construction, `replace_session_defaults` validates the
 requested direct selection or alias against the process's immutable model
@@ -240,7 +281,7 @@ value cannot construct the corresponding application input; no currently valid
 metadata frame is intended to reach that mapping error.
 
 `submit_input` deliberately exposes only the daily sequential-conversation
-treatment in all seven versions. If a turn is already active, the normal typed
+treatment in all eleven versions. If a turn is already active, the normal typed
 application result is returned as a rejection; the protocol does not guess an
 interrupt, steering, or after-current treatment.
 
@@ -267,20 +308,23 @@ no new mutation authority. Version four retains that vocabulary and adds only
 the three metadata requests. Version five retains all earlier requests and adds
 only `import_conversation`. Version six retains all earlier requests and adds
 only `replace_session_defaults`. Version seven retains all earlier requests and
-adds only `reconcile_turn`. A metadata request carried under version one, two,
-or three, an import request carried under version one through four, a
+adds only `reconcile_turn`. Versions eight through ten retain that vocabulary in
+this branch. Version eleven retains every earlier request and adds only the
+review-workflow requests above. A metadata request carried under version one,
+two, or three, an import request carried under version one through four, a
 defaults-replacement request carried under version one through five, or a
-reconciliation request carried under version one through six, is classified as
+reconciliation request carried under version one through six, or a review
+request carried under version one through ten, is classified as
 `malformed_frame` because its supported version does not admit that request
 variant; it never reaches application construction. A version-one
 `submit_input`, `read_transcript`, or `follow_session` request that selects
 imported ancestry returns a version-one `unsupported_version` error naming
 version two before mutation or snapshot construction.
 
-Versions four through seven also inherit every transcript, turn-state, entry,
+Versions four through eleven also inherit every transcript, turn-state, entry,
 and event shape admitted by version three, including the imported
 representations introduced by version two and the tool-bearing representations
-introduced by version three. A version-four through version-seven
+introduced by version three. A version-four through version-eleven
 `read_transcript`, `follow_session`, or `submit_input` therefore never requires
 a downgrade or a newer version for a representation already admitted by version
 three.
@@ -331,7 +375,7 @@ request.
 ## Server messages
 
 Message objects carry a required string `type` and reject fields not admitted by
-that variant. Every accepted mutation request — `create_session`,
+that variant. Every accepted non-review mutation request — `create_session`,
 `submit_input`, `reconcile_turn`, `replace_session_metadata`,
 `replace_session_defaults`, or `import_conversation` — produces exactly one of:
 
@@ -346,6 +390,31 @@ that variant. Every accepted mutation request — `create_session`,
 - `conversation_import_inserted` with `imported_conversation_id`;
 - `conversation_import_already_imported` with `imported_conversation_id`; or
 - `error` with a stable `code` and a non-sensitive `message`.
+
+Version-eleven review mutations return exactly one stable acknowledgement:
+
+- `review_target_created { target_id }`;
+- `review_run_started { run_id, pass_id }`;
+- `review_pass_activated { run_id, pass_id }`;
+- `review_findings_recorded { run_id, pass_id, finding_count }`;
+- `review_finding_disposition_recorded { finding_id, status }`;
+- `review_external_link_reserved { external_link_id }`; or
+- `review_external_link_attached { external_link_id, external_object }`.
+
+Single-aggregate reads return `review_target { target }`,
+`review_run { run, pass }`, or `review_finding { finding }`; an absent identity
+returns `not_found`. Target snapshots carry the immutable subject and revisions.
+Run snapshots carry frozen workflow, policy values, lifecycle, and optional pass
+identity; the nullable `pass` carries its exact session/input/origin-turn,
+lifecycle, optional turn, and optional successful frontier. Finding snapshots
+carry immutable content, derived status, and event count.
+
+A successful `list_review_findings` response is
+`review_findings_start { run_id }`, zero or more
+`review_finding_item { finding }` messages in strictly increasing
+finding-identity order, then `review_findings_end { finding_count }`. The client
+validates the selected run, ordering, and terminal count before presenting the
+list.
 
 A replayed metadata receipt remains the exact snapshot installed by its original
 handling even if a later command has replaced the current metadata. A caller
@@ -428,14 +497,14 @@ observes the current state, not a recorded outcome. Other error codes have no
 `detail`. An equal replay returns the same success or rejection projection as
 the first handling.
 
-The error-code set in all seven versions is:
+The error-code set in all eleven versions is:
 
 | Code                  | Meaning                                                                                                                                |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `malformed_frame`     | JSON, UTF-8, framing, field, or size validation failed.                                                                                |
 | `unsupported_version` | The frame version is unsupported, or the selected representation requires a newer supported version.                                   |
 | `invalid_request`     | A boundary value cannot construct the requested application input.                                                                     |
-| `not_found`           | The selected session does not exist.                                                                                                   |
+| `not_found`           | The selected session or review aggregate does not exist.                                                                               |
 | `conflicting_reuse`   | A durable command identity already names different intent.                                                                             |
 | `rejected`            | The canonical command was durably rejected by current typed state, or a request-specific precondition refused it before recording one. |
 | `resync_required`     | A follower fell behind the bounded process-local event fan-out.                                                                        |
@@ -444,12 +513,12 @@ The error-code set in all seven versions is:
 | `internal`            | Fail-closed corruption or a daemon defect stopped the request.                                                                         |
 
 For `create_session`, `submit_input`, `replace_session_metadata`,
-`replace_session_defaults`, and `reconcile_turn`, a lost commit response maps to
-`commit_ambiguous`; the client retries the exact command identity and payload to
-discover the recorded outcome. A `reconcile_turn` retry reaches that recorded
-outcome unconditionally, because a claimed command identity bypasses the
-precondition the first handling already satisfied. A definitely pre-commit
-infrastructure failure maps to `unavailable`.
+`replace_session_defaults`, `reconcile_turn`, and every review mutation, a lost
+commit response maps to `commit_ambiguous`; the client retries the exact command
+identity and payload to discover the recorded outcome. A `reconcile_turn` retry
+reaches that recorded outcome unconditionally, because a claimed command
+identity bypasses the precondition the first handling already satisfied. A
+definitely pre-commit infrastructure failure maps to `unavailable`.
 
 Conversation import carries no durable command identity because exact
 format-and-source replay already resolves through the import digest. A selected
@@ -725,14 +794,14 @@ is therefore terminal in the initial snapshot and cannot leave `send` waiting
 for an event at or below the snapshot cursor. Previously seen transient display
 state may always be replaced by the new snapshot (INV-032).
 
-All seven versions forward durable transition events only. Provider token deltas
-remain transient inside the model-runtime boundary and are not added to the
-outbox. The terminal `send` command follows the submitted turn, accepts terminal
-state from the initial snapshot or waits for its durable terminal event, rereads
-the authoritative transcript, and prints the committed assistant text. Every
-version exits with a typed nonzero recovery-required diagnostic after observing
-`active_awaiting_model_call_recovery` or a live terminal `ambiguous` model-call
-transition followed by that authoritative state.
+All eleven versions forward durable transition events only. Provider token
+deltas remain transient inside the model-runtime boundary and are not added to
+the outbox. The terminal `send` command follows the submitted turn, accepts
+terminal state from the initial snapshot or waits for its durable terminal
+event, rereads the authoritative transcript, and prints the committed assistant
+text. Every version exits with a typed nonzero recovery-required diagnostic
+after observing `active_awaiting_model_call_recovery` or a live terminal
+`ambiguous` model-call transition followed by that authoritative state.
 
 Version three applies the same behavior to `active_awaiting_tool_recovery` and
 to `tool_batch_transition { recovery_required }` followed by that state. A
@@ -769,8 +838,8 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack uses version seven; version four's metadata
-operations remain core protocol and daemon capabilities without new
+The `signalbox` binary in this stack uses version eleven; version four's
+metadata operations remain core protocol and daemon capabilities without new
 terminal-client UX. Older clients remain supported for representations admitted
 by their declared version as described above. The client accepts a global
 `--socket <path>` override or reads `SIGNALBOX_SOCKET_PATH`, and provides:
@@ -783,6 +852,21 @@ by their declared version as described above. The client accepts a global
 - `follow <session-uuid>`;
 - `import --format <claude-code|codex> <file>`;
 - `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`.
+
+The `review` command adds these headless workflow verbs:
+
+- `create-target <target> --provider <key> --repository <key> --change-request <decimal> --head-revision <revision> --base-revision <revision>`;
+- `start-run <target> <run> <pass> --workflow <kind> --session-id <session> --accepted-input-id <input>`;
+- `activate-pass <run> <pass> --turn-id <turn>`;
+- `record-finding <run> <pass> --turn-id <turn> --output-frontier-id <frontier> --finding-id <finding> --file-path <path> --title <text> --body <text> --severity <severity> --confidence <basis-points> --category <key>`;
+- `list-findings <run>`;
+- `read-target <target>`;
+- `read-run <run>`; and
+- `read-finding <finding>`.
+
+Each review mutation also accepts `--command-id <uuid>`. Target creation accepts
+an optional `--stack-parent-target-id`; finding recording accepts an optional
+paired line range, diff side, and recommended fix.
 
 `send` reads the exact input text from standard input through EOF and never
 accepts conversation content in process arguments. Empty or oversized input
@@ -819,10 +903,17 @@ command identity, defaults version, and dangerous-tool posture. Each recovery
 set is all-or-none. The client never silently substitutes a new command identity
 for an ambiguous attempt. It uses a fresh nonzero request identity per
 connection, validates that a defaults receipt is the exact successor carrying
-the requested selection and copied posture, renders only known version-seven
+the requested selection and copied posture, renders only known version-eleven
 messages, and exits nonzero on protocol or application errors other than the
 follow-specific `resync_required` control case, which reconnects for a fresh
 snapshot.
+
+Review mutations print a generated command identity before socket I/O and an
+ambiguous diagnostic directs the operator to repeat the same verb, identifiers,
+and content with that identity. Review reads validate selected identities;
+finding lists additionally validate their start marker, strict identity order,
+terminal count, and end marker before success. Every process-derived review text
+field follows the same terminal-safe escaping and `--raw-output` opt-in below.
 
 The client validates each complete snapshot and its terminal counts into an
 owner-private anonymous temporary-file spool before replay or presentation. Turn

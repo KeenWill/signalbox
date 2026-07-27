@@ -18,12 +18,12 @@ use std::{
 
 use signalbox_application::{
     InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
-    ModelCallCredentialReference, SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService,
-    UuidV7StartEligibleTurnIdGenerator,
+    ModelCallCredentialReference, SchedulerLoop, SchedulerLoopExit, StartEligibleTurnOutcome,
+    StartEligibleTurnService, UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
-    DirectModelSelection, ModelTargetCatalog, ModelTargetDefinition, ProviderModelIdentity,
-    ResolvedProviderTarget,
+    ActivatedAcceptedInputTurn, DirectModelSelection, ModelTargetCatalog, ModelTargetDefinition,
+    ProviderModelIdentity, ResolvedProviderTarget, SessionId,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -38,8 +38,8 @@ use signalbox_persistence::{
     scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
 };
 use signalboxd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSupervisor,
-    FileCredentialAccess, HubModelConfiguration, LocalProcessListener,
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnExecution, ActivatedTurnPass,
+    FatalExecutionSupervisor, FileCredentialAccess, HubModelConfiguration, LocalProcessListener,
     PostgresProviderModelExecution, ProcessRuntime,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -129,6 +129,17 @@ async fn run_client(
     arguments: Vec<String>,
     input: Option<String>,
 ) -> Result<Output, Box<dyn Error>> {
+    Ok(spawn_client(socket, arguments, input)
+        .await?
+        .wait_with_output()
+        .await?)
+}
+
+async fn spawn_client(
+    socket: PathBuf,
+    arguments: Vec<String>,
+    input: Option<String>,
+) -> Result<tokio::process::Child, Box<dyn Error>> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_signalbox"));
     command
         .kill_on_drop(true)
@@ -151,7 +162,18 @@ async fn run_client(
             .ok_or_else(|| io::Error::new(ErrorKind::BrokenPipe, "client stdin was not piped"))?;
         child_input.write_all(input.as_bytes()).await?;
     }
-    Ok(child.wait_with_output().await?)
+    Ok(child)
+}
+
+fn require_activated_turn(
+    outcome: StartEligibleTurnOutcome,
+) -> Result<Box<ActivatedAcceptedInputTurn>, io::Error> {
+    match outcome {
+        StartEligibleTurnOutcome::Activated(activated) => Ok(activated),
+        StartEligibleTurnOutcome::NoEligibleTurn => Err(io::Error::other(
+            "the accepted input did not produce an eligible turn",
+        )),
+    }
 }
 
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
@@ -489,6 +511,384 @@ max_output_tokens = 64
         SchedulerLoopExit::Shutdown
     );
     timeout(Duration::from_secs(10), process_task).await???;
+    pool.close().await;
+    socket_directory.cleanup()?;
+    drop(container);
+    Ok(())
+}
+/// The terminal and real daemon drive an external target through one
+/// session-backed read-only pass, atomically bind a finding, and read it back.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn terminal_client_drives_review_target_to_finding() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = postgres().await?;
+    let socket_directory = SocketDirectory::create()?;
+    let selection_uuid = Uuid::from_u128(0x9201);
+    let model_target_uuid = Uuid::from_u128(0x9202);
+    let selection = DirectModelSelection::from_uuid(selection_uuid);
+    let model_target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(model_target_uuid));
+    let model_configuration = HubModelConfiguration::parse(&format!(
+        r#"
+version = 1
+
+[[models]]
+selection_id = "{selection_uuid}"
+target_id = "{model_target_uuid}"
+provider = "anthropic"
+provider_model = "scripted-review"
+max_output_tokens = 64
+"#
+    ))?;
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        model_target,
+    )])
+    .expect("the fixture target definition is unique");
+    let runtime_models =
+        RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
+            model_target,
+            String::from("scripted-review"),
+            64,
+        )
+        .expect("the fixture runtime definition is valid")])
+        .expect("the fixture runtime target is unique");
+    let runtime = ScriptedModel::single(Script::delivering(TerminalEvidence::Completed(
+        CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("scripted-review")),
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::Text(String::from(
+                "review analysis complete",
+            ))],
+            usage: TokenUsage::unreported(),
+        },
+    )));
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let listener = LocalProcessListener::bind(socket_directory.socket())?;
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        InProcessToolDispatchGate::default(),
+        model_configuration,
+    );
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
+
+    let create = run_client(
+        socket_directory.socket().to_owned(),
+        vec![
+            String::from("create"),
+            String::from("--model"),
+            selection_uuid.hyphenated().to_string(),
+        ],
+        None,
+    )
+    .await?;
+    assert!(create.status.success());
+    let session_text = String::from_utf8(create.stdout)?.trim().to_owned();
+    let session_uuid = Uuid::parse_str(&session_text)?;
+
+    let send_child = spawn_client(
+        socket_directory.socket().to_owned(),
+        vec![String::from("send"), session_text.clone()],
+        Some(String::from("inspect the frozen change request")),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let (accepted_input_uuid, turn_uuid): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT origin_accepted_input_id, turn_id
+           FROM turn_lifecycle
+          WHERE session_id = $1",
+    )
+    .bind(session_uuid)
+    .fetch_one(&pool)
+    .await?;
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let activated = require_activated_turn(
+        activation
+            .execute(SessionId::from_uuid(session_uuid))
+            .await?,
+    )?;
+
+    let target_uuid = Uuid::from_u128(0x9210);
+    let run_uuid = Uuid::from_u128(0x9211);
+    let pass_uuid = Uuid::from_u128(0x9212);
+    let finding_uuid = Uuid::from_u128(0x9213);
+    let activation_command_uuid = Uuid::from_u128(0x9214);
+    let finding_command_uuid = Uuid::from_u128(0x9215);
+    let target_text = target_uuid.hyphenated().to_string();
+    let activation_recovery_command_uuid = Uuid::from_u128(0x9216);
+    let finding_recovery_command_uuid = Uuid::from_u128(0x9217);
+    let run_text = run_uuid.hyphenated().to_string();
+    let pass_text = pass_uuid.hyphenated().to_string();
+    let finding_text = finding_uuid.hyphenated().to_string();
+
+    let target_created = run_client(
+        socket_directory.socket().to_owned(),
+        vec![
+            String::from("review"),
+            String::from("create-target"),
+            target_text.clone(),
+            String::from("--provider"),
+            String::from("example-host"),
+            String::from("--repository"),
+            String::from("owner/repository"),
+            String::from("--change-request"),
+            String::from("42"),
+            String::from("--head-revision"),
+            String::from("head-revision"),
+            String::from("--base-revision"),
+            String::from("base-revision"),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        target_created.status.success(),
+        "target creation failed: {}",
+        String::from_utf8_lossy(&target_created.stderr),
+    );
+
+    let run_started = run_client(
+        socket_directory.socket().to_owned(),
+        vec![
+            String::from("review"),
+            String::from("start-run"),
+            target_text.clone(),
+            run_text.clone(),
+            pass_text.clone(),
+            String::from("--workflow"),
+            String::from("read-only-review"),
+            String::from("--session-id"),
+            session_text.clone(),
+            String::from("--accepted-input-id"),
+            accepted_input_uuid.hyphenated().to_string(),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        run_started.status.success(),
+        "run creation failed: {}",
+        String::from_utf8_lossy(&run_started.stderr),
+    );
+
+    let activate_arguments = vec![
+        String::from("review"),
+        String::from("activate-pass"),
+        run_text.clone(),
+        pass_text.clone(),
+        String::from("--turn-id"),
+        turn_uuid.hyphenated().to_string(),
+        String::from("--command-id"),
+        activation_command_uuid.hyphenated().to_string(),
+    ];
+    let pass_activated = run_client(
+        socket_directory.socket().to_owned(),
+        activate_arguments.clone(),
+        None,
+    )
+    .await?;
+    assert!(
+        pass_activated.status.success(),
+        "pass activation failed: {}",
+        String::from_utf8_lossy(&pass_activated.stderr),
+    );
+    let activation_replay = run_client(
+        socket_directory.socket().to_owned(),
+        activate_arguments,
+        None,
+    )
+    .await?;
+    assert_eq!(activation_replay.status, pass_activated.status);
+    assert_eq!(activation_replay.stdout, pass_activated.stdout);
+    assert_eq!(activation_replay.stderr, pass_activated.stderr);
+    let activation_recovery = run_client(
+        socket_directory.socket().to_owned(),
+        vec![
+            String::from("review"),
+            String::from("activate-pass"),
+            run_text.clone(),
+            pass_text.clone(),
+            String::from("--turn-id"),
+            turn_uuid.hyphenated().to_string(),
+            String::from("--command-id"),
+            activation_recovery_command_uuid.hyphenated().to_string(),
+        ],
+        None,
+    )
+    .await?;
+    assert_eq!(activation_recovery.status, pass_activated.status);
+    assert_eq!(activation_recovery.stdout, pass_activated.stdout);
+    assert_eq!(activation_recovery.stderr, pass_activated.stderr);
+
+    let (execution, fatal_execution) =
+        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+            PostgresModelCallRepository::new(
+                pool.clone(),
+                targets,
+                ModelCallCredentialReference::new("scripted-review"),
+            ),
+            InProcessAttemptDispatchGate::default(),
+            provider,
+        ));
+    execution.execute(activated).await?;
+    assert!(!fatal_execution.is_triggered());
+    let send = timeout(Duration::from_secs(10), send_child.wait_with_output())
+        .await
+        .map_err(|_| io::Error::new(ErrorKind::TimedOut, "review send client did not finish"))??;
+    assert!(send.status.success());
+    assert_eq!(
+        String::from_utf8(send.stdout)?,
+        "review analysis complete\n"
+    );
+    let terminal_frontier: Uuid = sqlx::query_scalar(
+        "SELECT terminal_frontier_id
+           FROM turn_lifecycle
+          WHERE turn_id = $1",
+    )
+    .bind(turn_uuid)
+    .fetch_one(&pool)
+    .await?;
+
+    let record_arguments = vec![
+        String::from("review"),
+        String::from("record-finding"),
+        run_text.clone(),
+        pass_text.clone(),
+        String::from("--turn-id"),
+        turn_uuid.hyphenated().to_string(),
+        String::from("--output-frontier-id"),
+        terminal_frontier.hyphenated().to_string(),
+        String::from("--finding-id"),
+        finding_text.clone(),
+        String::from("--file-path"),
+        String::from("src/lib.rs"),
+        String::from("--line-start"),
+        String::from("7"),
+        String::from("--line-end"),
+        String::from("7"),
+        String::from("--diff-side"),
+        String::from("right"),
+        String::from("--title"),
+        String::from("Unsafe terminal text"),
+        String::from("--body"),
+        String::from("body\u{1b}[31m"),
+        String::from("--severity"),
+        String::from("high"),
+        String::from("--confidence"),
+        String::from("9000"),
+        String::from("--category"),
+        String::from("correctness"),
+        String::from("--command-id"),
+        finding_command_uuid.hyphenated().to_string(),
+    ];
+    let recorded = run_client(
+        socket_directory.socket().to_owned(),
+        record_arguments.clone(),
+        None,
+    )
+    .await?;
+    assert!(
+        recorded.status.success(),
+        "finding admission failed: {}",
+        String::from_utf8_lossy(&recorded.stderr),
+    );
+    let finding_replay =
+        run_client(socket_directory.socket().to_owned(), record_arguments, None).await?;
+    assert_eq!(finding_replay.status, recorded.status);
+    assert_eq!(finding_replay.stdout, recorded.stdout);
+    assert_eq!(finding_replay.stderr, recorded.stderr);
+    let finding_recovery = run_client(
+        socket_directory.socket().to_owned(),
+        vec![
+            String::from("review"),
+            String::from("record-finding"),
+            run_text.clone(),
+            pass_text.clone(),
+            String::from("--turn-id"),
+            turn_uuid.hyphenated().to_string(),
+            String::from("--output-frontier-id"),
+            terminal_frontier.hyphenated().to_string(),
+            String::from("--finding-id"),
+            finding_text.clone(),
+            String::from("--file-path"),
+            String::from("src/lib.rs"),
+            String::from("--line-start"),
+            String::from("7"),
+            String::from("--line-end"),
+            String::from("7"),
+            String::from("--diff-side"),
+            String::from("right"),
+            String::from("--title"),
+            String::from("Unsafe terminal text"),
+            String::from("--body"),
+            String::from("body\u{1b}[31m"),
+            String::from("--severity"),
+            String::from("high"),
+            String::from("--confidence"),
+            String::from("9000"),
+            String::from("--category"),
+            String::from("correctness"),
+            String::from("--command-id"),
+            finding_recovery_command_uuid.hyphenated().to_string(),
+        ],
+        None,
+    )
+    .await?;
+    assert_eq!(finding_recovery.status, recorded.status);
+    assert_eq!(finding_recovery.stdout, recorded.stdout);
+    assert_eq!(finding_recovery.stderr, recorded.stderr);
+
+    let read_run = run_client(
+        socket_directory.socket().to_owned(),
+        vec![String::from("review"), String::from("read-run"), run_text],
+        None,
+    )
+    .await?;
+    assert!(read_run.status.success());
+    assert!(String::from_utf8(read_run.stdout)?.contains("state=succeeded"));
+    let read_finding = run_client(
+        socket_directory.socket().to_owned(),
+        vec![
+            String::from("review"),
+            String::from("read-finding"),
+            finding_text,
+        ],
+        None,
+    )
+    .await?;
+    assert!(read_finding.status.success());
+    let finding_output = String::from_utf8(read_finding.stdout)?;
+    assert!(finding_output.contains("status=open"));
+    assert!(finding_output.contains("body=body\\u{1b}[31m"));
+    assert!(!finding_output.contains('\u{1b}'));
+    let listed = run_client(
+        socket_directory.socket().to_owned(),
+        vec![
+            String::from("review"),
+            String::from("list-findings"),
+            run_uuid.hyphenated().to_string(),
+        ],
+        None,
+    )
+    .await?;
+    assert!(listed.status.success());
+    assert!(String::from_utf8(listed.stdout)?.contains(&finding_uuid.hyphenated().to_string()));
+
+    shutdown.send(true)?;
+    timeout(Duration::from_secs(10), process_task)
+        .await
+        .map_err(|_| io::Error::new(ErrorKind::TimedOut, "review process did not stop"))???;
     pool.close().await;
     socket_directory.cleanup()?;
     drop(container);

@@ -513,7 +513,8 @@ impl SubmitInputRepository {
                 | CommandKind::CreateSessionFromImportedFrontier
                 | CommandKind::ReplaceSessionDefaults
                 | CommandKind::ReplaceSessionMetadata
-                | CommandKind::DecideToolRequest,
+                | CommandKind::DecideToolRequest
+                | CommandKind::ReviewWorkflow,
             ) => Err(Self::wrong_kind(command_id)),
         }
     }
@@ -597,7 +598,8 @@ where
             | CommandKind::CreateSessionFromImportedFrontier
             | CommandKind::ReplaceSessionDefaults
             | CommandKind::ReplaceSessionMetadata
-            | CommandKind::DecideToolRequest,
+            | CommandKind::DecideToolRequest
+            | CommandKind::ReviewWorkflow,
         ) => {
             return Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
@@ -631,7 +633,8 @@ where
                 | CommandKind::CreateSessionFromImportedFrontier
                 | CommandKind::ReplaceSessionDefaults
                 | CommandKind::ReplaceSessionMetadata
-                | CommandKind::DecideToolRequest,
+                | CommandKind::DecideToolRequest
+                | CommandKind::ReviewWorkflow,
             ) => Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
             )),

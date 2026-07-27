@@ -7,7 +7,7 @@ use std::{
     process::ExitCode,
 };
 
-use arguments::{Command, DangerousToolAutoApprovalArgument, ParseOutcome};
+use arguments::{Command, DangerousToolAutoApprovalArgument, ParseOutcome, ReviewCommand};
 use connection::ProcessClient;
 use error::ClientError;
 use presentation::{Output, SnapshotSelection};
@@ -87,7 +87,8 @@ async fn execute(
         | Command::Model { .. }
         | Command::Transcript { .. }
         | Command::Follow { .. }
-        | Command::Reconcile { .. } => None,
+        | Command::Reconcile { .. }
+        | Command::Review(_) => None,
     };
     let socket = socket_path(arguments.socket, socket_environment)?;
     let mut client = ProcessClient::new(socket);
@@ -161,6 +162,7 @@ async fn execute(
             )
             .await
         }
+        Command::Review(command) => review(&mut client, &mut output, *command).await,
     }
 }
 
@@ -1088,6 +1090,309 @@ async fn read_session_summaries(
             }
         }
     }
+}
+
+async fn review(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    command: ReviewCommand,
+) -> Result<(), ClientError> {
+    match command {
+        ReviewCommand::CreateTarget {
+            command_id,
+            target_id,
+            provider,
+            repository,
+            subject,
+            head_revision,
+            base_revision,
+            stack_parent_target_id,
+        } => {
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::CreateReviewTarget {
+                    command_id,
+                    target_id,
+                    provider,
+                    repository,
+                    subject,
+                    head_revision,
+                    base_revision,
+                    stack_parent_target_id,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewTargetCreated {
+                    target_id: recorded,
+                } if recorded == target_id => {
+                    output.review_acknowledgement(&format!("target={recorded} created"))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review target creation returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::StartRun {
+            command_id,
+            target_id,
+            run_id,
+            pass_id,
+            workflow,
+            session_id,
+            accepted_input_id,
+        } => {
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::StartReviewRun {
+                    command_id,
+                    target_id,
+                    run_id,
+                    pass_id,
+                    workflow,
+                    session_id,
+                    accepted_input_id,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewRunStarted {
+                    run_id: recorded_run,
+                    pass_id: recorded_pass,
+                } if recorded_run == run_id && recorded_pass == pass_id => {
+                    output.review_acknowledgement(&format!(
+                        "run={recorded_run} pass={recorded_pass} started"
+                    ))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review run creation returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::ActivatePass {
+            command_id,
+            run_id,
+            pass_id,
+            turn_id,
+        } => {
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::ActivateReviewPass {
+                    command_id,
+                    run_id,
+                    pass_id,
+                    turn_id,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewPassActivated {
+                    run_id: recorded_run,
+                    pass_id: recorded_pass,
+                } if recorded_run == run_id && recorded_pass == pass_id => {
+                    output.review_acknowledgement(&format!(
+                        "run={recorded_run} pass={recorded_pass} activated"
+                    ))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review pass activation returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::RecordFinding {
+            command_id,
+            run_id,
+            pass_id,
+            turn_id,
+            output_frontier_id,
+            finding,
+        } => {
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::RecordReviewFindings {
+                    command_id,
+                    run_id,
+                    pass_id,
+                    turn_id,
+                    output_frontier_id,
+                    findings: vec![finding],
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewFindingsRecorded {
+                    run_id: recorded_run,
+                    pass_id: recorded_pass,
+                    finding_count,
+                } if recorded_run == run_id
+                    && recorded_pass == pass_id
+                    && finding_count.value() == 1 =>
+                {
+                    output.review_acknowledgement(&format!(
+                        "run={recorded_run} pass={recorded_pass} findings=1 recorded"
+                    ))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review finding admission returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::ReadTarget { target_id } => {
+            let mut connection = client
+                .request(ClientRequest::ReadReviewTarget { target_id })
+                .await?;
+            match connection.message().await? {
+                ServerMessage::ReviewTarget { target } if target.target_id == target_id => {
+                    output.review_target(&target)?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail)),
+                _ => Err(ClientError::Protocol(
+                    "review target read returned an unexpected response",
+                )),
+            }
+        }
+        ReviewCommand::ReadRun { run_id } => {
+            let mut connection = client
+                .request(ClientRequest::ReadReviewRun { run_id })
+                .await?;
+            match connection.message().await? {
+                ServerMessage::ReviewRun { run, pass } if run.run_id == run_id => {
+                    output.review_run(&run, pass.as_ref())?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail)),
+                _ => Err(ClientError::Protocol(
+                    "review run read returned an unexpected response",
+                )),
+            }
+        }
+        ReviewCommand::ReadFinding { finding_id } => {
+            let mut connection = client
+                .request(ClientRequest::ReadReviewFinding { finding_id })
+                .await?;
+            match connection.message().await? {
+                ServerMessage::ReviewFinding { finding }
+                    if finding.finding.finding_id == finding_id =>
+                {
+                    output.review_finding(&finding)?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail)),
+                _ => Err(ClientError::Protocol(
+                    "review finding read returned an unexpected response",
+                )),
+            }
+        }
+        ReviewCommand::ListFindings { run_id } => {
+            let mut connection = client
+                .request(ClientRequest::ListReviewFindings { run_id })
+                .await?;
+            match connection.message().await? {
+                ServerMessage::ReviewFindingsStart { run_id: selected } if selected == run_id => {}
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => {
+                    return Err(ClientError::remote(code, message, detail));
+                }
+                _ => {
+                    return Err(ClientError::Protocol(
+                        "review finding list did not start correctly",
+                    ));
+                }
+            }
+            let mut count = 0_u64;
+            let mut previous_finding_id: Option<CanonicalUuid> = None;
+            loop {
+                match connection.message().await? {
+                    ServerMessage::ReviewFindingItem { finding } if finding.run_id == run_id => {
+                        let finding_id = finding.finding.finding_id;
+                        if previous_finding_id
+                            .is_some_and(|previous| finding_id.into_uuid() <= previous.into_uuid())
+                        {
+                            return Err(ClientError::Protocol(
+                                "review finding list identity order was invalid",
+                            ));
+                        }
+                        previous_finding_id = Some(finding_id);
+                        count = count.checked_add(1).ok_or(ClientError::Protocol(
+                            "review finding list count overflowed",
+                        ))?;
+                        output.review_finding(&finding)?;
+                    }
+                    ServerMessage::ReviewFindingsEnd { finding_count }
+                        if finding_count.value() == count =>
+                    {
+                        return Ok(());
+                    }
+                    ServerMessage::Error {
+                        code,
+                        message,
+                        detail,
+                    } => {
+                        return Err(ClientError::remote(code, message, detail));
+                    }
+                    _ => {
+                        return Err(ClientError::Protocol(
+                            "review finding list sequence or count was invalid",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn review_command_identity(
+    output: &mut Output<'_>,
+    supplied: Option<CommandId>,
+) -> Result<CommandId, ClientError> {
+    let (command_id, generated) = command_identity(supplied)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    Ok(command_id)
 }
 
 fn command_identity(supplied: Option<CommandId>) -> Result<(CommandId, bool), ClientError> {

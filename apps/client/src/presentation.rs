@@ -5,8 +5,10 @@ use std::{
 
 use signalbox_process_protocol::{
     CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ImportedContentKind,
-    ImportedSourceSpeaker, ImportedSpeaker, ModelCallDisposition, ModelCallState, SessionEvent,
-    ToolBatchState, TranscriptEntry, TranscriptTextEntry, TurnState,
+    ImportedSourceSpeaker, ImportedSpeaker, ModelCallDisposition, ModelCallState,
+    ReviewFindingSnapshot, ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle,
+    ReviewRunLifecycle, ReviewRunSnapshot, ReviewTargetSnapshot, ReviewTargetSubject,
+    ReviewWorkflow, SessionEvent, ToolBatchState, TranscriptEntry, TranscriptTextEntry, TurnState,
 };
 
 use crate::{
@@ -125,6 +127,91 @@ impl<'a> Output<'a> {
             self.stdout,
             "{session_id} defaults_version={defaults_version} {selection}"
         )
+    }
+
+    pub(crate) fn review_acknowledgement(&mut self, line: &str) -> io::Result<()> {
+        self.stdout.write_all(self.render(line).as_bytes())?;
+        self.stdout.write_all(b"\n")
+    }
+
+    pub(crate) fn review_target(&mut self, target: &ReviewTargetSnapshot) -> io::Result<()> {
+        let subject = match target.subject {
+            ReviewTargetSubject::ChangeRequest { number } => {
+                format!("change_request:{}", number.value())
+            }
+            ReviewTargetSubject::Commit {} => String::from("commit"),
+        };
+        writeln!(
+            self.stdout,
+            "target={} subject={} parent={}",
+            target.target_id,
+            subject,
+            target
+                .stack_parent_target_id
+                .map_or_else(|| String::from("-"), |id| id.to_string()),
+        )?;
+        self.review_text_field("provider", &target.provider)?;
+        self.review_text_field("repository", &target.repository)?;
+        self.review_text_field("head_revision", &target.head_revision)?;
+        self.review_text_field(
+            "base_revision",
+            target.base_revision.as_deref().unwrap_or("-"),
+        )
+    }
+
+    pub(crate) fn review_run(
+        &mut self,
+        run: &ReviewRunSnapshot,
+        pass: Option<&signalbox_process_protocol::ReviewPassSnapshot>,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "run={} target={} workflow={} state={} pass={}",
+            run.run_id,
+            run.target_id,
+            review_workflow_label(run.workflow),
+            review_run_state_label(run.state),
+            run.pass_id
+                .map_or_else(|| String::from("-"), |id| id.to_string()),
+        )?;
+        if let Some(pass) = pass {
+            writeln!(
+                self.stdout,
+                "pass={} kind={} state={} session={} input={} origin_turn={} turn={} frontier={}",
+                pass.pass_id,
+                review_pass_kind_label(pass.kind),
+                review_pass_state_label(pass.state),
+                pass.session_id,
+                pass.accepted_input_id,
+                pass.origin_turn_id,
+                pass.turn_id
+                    .map_or_else(|| String::from("-"), |id| id.to_string()),
+                pass.output_frontier_id
+                    .map_or_else(|| String::from("-"), |id| id.to_string()),
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn review_finding(&mut self, finding: &ReviewFindingSnapshot) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "finding={} run={} pass={} status={} events={}",
+            finding.finding.finding_id,
+            finding.run_id,
+            finding.producing_pass_id,
+            review_finding_status_label(finding.status),
+            finding.event_count.value(),
+        )?;
+        self.review_text_field("file_path", &finding.finding.file_path)?;
+        self.review_text_field("title", &finding.finding.title)?;
+        self.review_text_field("body", &finding.finding.body)
+    }
+
+    fn review_text_field(&mut self, name: &str, value: &str) -> io::Result<()> {
+        write!(self.stdout, "{name}=")?;
+        self.stdout.write_all(self.render(value).as_bytes())?;
+        self.stdout.write_all(b"\n")
     }
 
     pub(crate) fn snapshot(
@@ -964,6 +1051,66 @@ const fn failed_model_call_disposition(disposition: FailedModelCallDisposition) 
     match disposition {
         FailedModelCallDisposition::KnownFailed => "known_failed",
         FailedModelCallDisposition::Cancelled => "cancelled",
+    }
+}
+
+const fn review_workflow_label(workflow: ReviewWorkflow) -> &'static str {
+    match workflow {
+        ReviewWorkflow::ImportExternalContext => "import_external_context",
+        ReviewWorkflow::ReadOnlyReview => "read_only_review",
+        ReviewWorkflow::JudgeFindings => "judge_findings",
+        ReviewWorkflow::DedupeFindings => "dedupe_findings",
+        ReviewWorkflow::PublishReview => "publish_review",
+        ReviewWorkflow::FixFindings => "fix_findings",
+        ReviewWorkflow::PropagateStack => "propagate_stack",
+    }
+}
+
+const fn review_run_state_label(state: ReviewRunLifecycle) -> &'static str {
+    match state {
+        ReviewRunLifecycle::Queued => "queued",
+        ReviewRunLifecycle::Running => "running",
+        ReviewRunLifecycle::Succeeded => "succeeded",
+        ReviewRunLifecycle::Failed => "failed",
+        ReviewRunLifecycle::Blocked => "blocked",
+        ReviewRunLifecycle::Cancelled => "cancelled",
+    }
+}
+
+const fn review_pass_kind_label(kind: ReviewPassKind) -> &'static str {
+    match kind {
+        ReviewPassKind::ImportExternalContext => "import_external_context",
+        ReviewPassKind::ReadOnlyReview => "read_only_review",
+        ReviewPassKind::Judge => "judge",
+        ReviewPassKind::Dedupe => "dedupe",
+        ReviewPassKind::Publish => "publish",
+        ReviewPassKind::Fix => "fix",
+        ReviewPassKind::PropagateStack => "propagate_stack",
+    }
+}
+
+const fn review_pass_state_label(state: ReviewPassLifecycle) -> &'static str {
+    match state {
+        ReviewPassLifecycle::Queued => "queued",
+        ReviewPassLifecycle::Running => "running",
+        ReviewPassLifecycle::Succeeded => "succeeded",
+        ReviewPassLifecycle::Failed => "failed",
+        ReviewPassLifecycle::Blocked => "blocked",
+        ReviewPassLifecycle::Cancelled => "cancelled",
+    }
+}
+
+const fn review_finding_status_label(status: ReviewFindingStatus) -> &'static str {
+    match status {
+        ReviewFindingStatus::Open => "open",
+        ReviewFindingStatus::Accepted => "accepted",
+        ReviewFindingStatus::Rejected => "rejected",
+        ReviewFindingStatus::Duplicate => "duplicate",
+        ReviewFindingStatus::Superseded => "superseded",
+        ReviewFindingStatus::Stale => "stale",
+        ReviewFindingStatus::Posted => "posted",
+        ReviewFindingStatus::Fixed => "fixed",
+        ReviewFindingStatus::BlockedWithReason => "blocked_with_reason",
     }
 }
 

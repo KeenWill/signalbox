@@ -10,6 +10,40 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Recover review commands from their exact aggregate effects
+
+**Context.** Protocol-driven review operations can commit their aggregate effect
+before a client observes the response. Several effects already own focused
+transactions, and run admission intentionally spans the independently valid run
+and pass roots. Requiring one new transaction to enclose every operation would
+duplicate those store boundaries, while recording only a command claim before
+the effect would strand retries after a process crash.
+
+**Decision.** Version-eleven review mutations bind each owner-global command
+identity to SHA-256 of the validated semantic request object and its closed
+operation kind. An append-only typed receipt stores the stable result. Handling
+claims the registry identity, applies the existing aggregate transaction or
+transactions, then records the receipt. If a crash leaves the exact requested
+aggregate effect without its receipt, an equal retry recognizes that complete
+effect, records the missing receipt, and returns the same result. Once present,
+the receipt is inspected before mutable-state validation and stores every fact
+needed to reproduce the original response. A different digest, operation kind,
+identity payload, inventory, event, or attachment fails closed as conflicting
+reuse or corruption; recovery never invents a compensating mutation. Frame
+version and request identity are transport facts and do not enter the semantic
+digest.
+
+**Rejected alternatives.** A receipt-only transaction cannot make the aggregate
+effect atomic and loses crash recovery. A pre-effect committed claim needs a
+durable in-progress state and takeover protocol. Rebuilding every store
+operation inside one command transaction would replace already-tested aggregate
+boundaries and still would not make an external provider write atomic with
+PostgreSQL.
+
+**Affects.** Review-workflow application commands, the PostgreSQL
+durable-command registry and typed receipt, protocol-version-eleven daemon
+handling, and exact retry diagnostics.
+
 ## 2026-07-26 — Derive daemon tool schemas from their argument types
 
 **Context.** Each daemon tool declared its model-facing JSON Schema as a

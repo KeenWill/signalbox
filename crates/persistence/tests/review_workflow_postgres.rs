@@ -10,6 +10,8 @@ mod support;
 use std::error::Error;
 
 use signalbox_application::{
+    ReviewWorkflowCommand, ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult,
+    ReviewWorkflowCommandService, ReviewWorkflowOperation, ReviewWorkflowOperationKind,
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
 };
 use signalbox_domain::{
@@ -6521,6 +6523,12 @@ async fn inv040_inv041_review_workflow_tables_reject_truncate() -> Result<(), Bo
         "TRUNCATE TABLE review_external_link_observation CASCADE",
     )
     .await;
+    assert_review_workflow_truncate_rejected(
+        &pool,
+        "review_workflow_command",
+        "TRUNCATE TABLE review_workflow_command CASCADE",
+    )
+    .await;
     Ok(())
 }
 
@@ -6546,5 +6554,106 @@ async fn inv040_maximum_target_keys_do_not_overflow_indexes() -> Result<(), Box<
 
     store.insert_target(&target).await?;
     assert_eq!(store.load_target(target.id()).await?, Some(target));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_workflow_command_receipts_replay_and_recover() -> Result<(), Box<dyn Error>> {
+    const TARGET_IDENTITY: u128 = 0x760;
+    const RECOVERED_TARGET_IDENTITY: u128 = 0x761;
+    const COMMAND_IDENTITY: u128 = 0x762;
+    const RECOVERY_COMMAND_IDENTITY: u128 = 0x763;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let store = ReviewWorkflowStore::new(pool);
+    let target = ReviewTarget::try_new(
+        ReviewTargetId::from_uuid(uuid(TARGET_IDENTITY)),
+        key("provider"),
+        key("repository"),
+        ReviewTargetSubject::ChangeRequest(
+            ReviewChangeRequestNumber::try_new(42).expect("fixture number is positive"),
+        ),
+        key("head"),
+        Some(key("base")),
+        None,
+    )
+    .expect("target fixture is admitted");
+    let command_id = DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY));
+    let command = ReviewWorkflowCommand::new(
+        command_id,
+        [7; 32],
+        ReviewWorkflowOperation::CreateTarget(target.clone()),
+    );
+    let mut service = ReviewWorkflowCommandService::new(store.clone());
+    let expected =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::TargetCreated {
+            target: target.id(),
+        });
+
+    assert_eq!(service.execute(command.clone()).await?, expected);
+    assert_eq!(service.execute(command).await?, expected);
+    assert_eq!(
+        store
+            .load_command_outcome(
+                command_id,
+                [7; 32],
+                ReviewWorkflowOperationKind::CreateTarget,
+            )
+            .await?,
+        Some(expected.clone()),
+    );
+    assert_eq!(store.load_target(target.id()).await?, Some(target.clone()));
+    assert_eq!(
+        store
+            .load_command_outcome(
+                command_id,
+                [8; 32],
+                ReviewWorkflowOperationKind::CreateTarget,
+            )
+            .await?,
+        Some(ReviewWorkflowCommandOutcome::ConflictingReuse { command_id }),
+    );
+    assert_eq!(
+        service
+            .execute(ReviewWorkflowCommand::new(
+                command_id,
+                [8; 32],
+                ReviewWorkflowOperation::CreateTarget(target),
+            ))
+            .await?,
+        ReviewWorkflowCommandOutcome::ConflictingReuse { command_id },
+    );
+
+    let recovered_target = ReviewTarget::try_new(
+        ReviewTargetId::from_uuid(uuid(RECOVERED_TARGET_IDENTITY)),
+        key("provider"),
+        key("repository"),
+        ReviewTargetSubject::ChangeRequest(
+            ReviewChangeRequestNumber::try_new(43).expect("fixture number is positive"),
+        ),
+        key("later-head"),
+        Some(key("later-base")),
+        None,
+    )
+    .expect("recovery target fixture is admitted");
+    store.insert_target(&recovered_target).await?;
+    let recovery_command_id = DurableCommandId::from_uuid(uuid(RECOVERY_COMMAND_IDENTITY));
+    let recovery_command = ReviewWorkflowCommand::new(
+        recovery_command_id,
+        [9; 32],
+        ReviewWorkflowOperation::CreateTarget(recovered_target.clone()),
+    );
+    let recovered =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::TargetCreated {
+            target: recovered_target.id(),
+        });
+
+    assert_eq!(service.execute(recovery_command.clone()).await?, recovered);
+    assert_eq!(service.execute(recovery_command).await?, recovered);
+    assert_eq!(
+        store.load_target(recovered_target.id()).await?,
+        Some(recovered_target),
+    );
     Ok(())
 }
