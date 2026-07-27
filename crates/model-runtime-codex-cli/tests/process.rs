@@ -710,6 +710,42 @@ async fn a_contradictory_turn_failed_trailer_still_fails_closed() {
     .await;
 }
 
+/// Completion without the thread that establishes the exchange is protocol
+/// drift, not success: it fails closed instead of returning completion
+/// evidence with empty exchange facts.
+#[cfg(unix)]
+#[tokio::test]
+async fn completion_without_an_established_thread_fails_closed() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = threadless_completed_cli(temporary.path());
+    let runtime = runtime(temporary.path(), executable);
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let error = provider_error(&report.evidence);
+
+    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+    assert!(
+        error
+            .native
+            .message
+            .as_deref()
+            .expect("the failure names the missing thread")
+            .contains("before thread.started")
+    );
+}
+
 #[tokio::test]
 async fn undecodable_event_fails_closed_as_unrecognized_provider_error() {
     assert_error_scenario("malformed_event", ProviderErrorKind::Unrecognized).await;
@@ -2304,6 +2340,28 @@ sleep 60
         lines = completed_exchange_script_lines()
     );
     script_cli(directory, "pipes-closing-codex", &script)
+}
+
+/// Scripts a CLI that completes a turn without ever establishing a thread.
+#[cfg(unix)]
+fn threadless_completed_cli(directory: &Path) -> std::path::PathBuf {
+    let envelope_text = format!(
+        r#"{{\"outcome\":\"completed\",\"text\":\"{}\",\"tool_calls\":[]}}"#,
+        fixtures::BUFFERED_ANSWER
+    );
+    let script = format!(
+        r#"#!/bin/sh
+printf '%s\n' '{{"type":"turn.started"}}'
+printf '%s\n' '{{"type":"item.completed","item":{{"id":"message-offline-1","type":"agent_message","text":"{envelope_text}"}}}}'
+printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cached_input_tokens":{cache_read},"cache_write_input_tokens":{cache_write},"output_tokens":{output},"reasoning_output_tokens":3}}}}'
+"#,
+        envelope_text = envelope_text,
+        input = fixtures::INPUT_TOKENS,
+        cache_read = fixtures::CACHE_READ_INPUT_TOKENS,
+        cache_write = fixtures::CACHE_CREATION_INPUT_TOKENS,
+        output = fixtures::OUTPUT_TOKENS,
+    );
+    script_cli(directory, "threadless-codex", &script)
 }
 
 fn rendered_request(prompt: &str) -> serde_json::Value {

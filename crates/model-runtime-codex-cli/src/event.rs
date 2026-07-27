@@ -160,6 +160,15 @@ impl<C: Clone> EventDecoder<C> {
                 }
             }
             "turn.completed" => {
+                // Completion claims a complete correlated response; without
+                // the thread that establishes the exchange there is nothing
+                // the evidence can be correlated to, so drifted streams fail
+                // closed instead of completing with empty exchange facts.
+                if self.exchange.provider_request_id.is_none() {
+                    return Err(DecodeFailure::new(
+                        "turn.completed arrived before thread.started established the exchange",
+                    ));
+                }
                 let event: TurnCompleted = decode(value)?;
                 self.usage = usage(event.usage)?;
                 self.terminal = Some(CliTerminal::Completed);
