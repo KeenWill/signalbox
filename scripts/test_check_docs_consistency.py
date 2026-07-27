@@ -1052,6 +1052,99 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("outer.rs", failures[0].message)
 
+    def test_macro_invoked_from_another_file_is_rejected(self) -> None:
+        (self.root / "src/macros.rs").write_text(
+            "macro_rules! generate {\n"
+            "    ($attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        fn s01_inv_001_generated() {}\n"
+            "    };\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/caller.rs").write_text(
+            "#[macro_use]\nmod macros;\ngenerate!(test);\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "`macro_rules! generate` emits or forwards a test attribute",
+            failures[0].message,
+        )
+
+    def test_non_test_macro_invoked_from_another_file_is_allowed(self) -> None:
+        (self.root / "src/macros.rs").write_text(
+            "macro_rules! documented {\n"
+            "    ($attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        struct Item;\n"
+            "    };\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/caller.rs").write_text(
+            "#[macro_use]\nmod macros;\ndocumented!(derive(Clone));\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_out_of_line_module_under_an_inline_module_resolves(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            "mod inv_001 {\n    mod cases;\n}\n", encoding="utf-8"
+        )
+        (self.root / "src/uncited_root/inv_001").mkdir(parents=True)
+        (self.root / "src/uncited_root/inv_001/cases.rs").write_text(
+            "#[test]\nfn generic() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn(
+            "src/uncited_root/inv_001/cases.rs", failures[0].message
+        )
+
+    def test_reexported_test_alias_reaches_the_importing_file(self) -> None:
+        (self.root / "src/exporter.rs").write_text(
+            "pub use tokio::test as async_test;\n", encoding="utf-8"
+        )
+        (self.root / "src/uncited.rs").write_text(
+            "use crate::async_test;\n\n"
+            "#[async_test]\n"
+            "async fn s01_inv_001_reexported_attribute() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_renaming_to_an_alias_name_declares_no_test(self) -> None:
+        (self.root / "src/exporter.rs").write_text(
+            "pub use tokio::test as async_test;\n", encoding="utf-8"
+        )
+        (self.root / "src/context.rs").write_text(
+            "use crate::support::marker as async_test;\n\n"
+            "#[async_test]\n"
+            "fn s01_inv_001_not_a_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_reference_style_citation_keeps_occurrence_order(self) -> None:
         (self.root / "src/tagged.rs").write_text(
             "#[test]\nfn s01_inv_001_tagged_test() {}\n",

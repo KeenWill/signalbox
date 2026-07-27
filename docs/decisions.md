@@ -20,10 +20,11 @@ and uncited tagged files, while local Git records exact merge provenance.
 and every Rust test file tagged in its harness test name — the declaration name
 qualified by every inline and out-of-line module path reaching it — or in an
 attached doc comment must be cited by that row; a `test` attribute a `use` item
-renames counts as a test attribute in the file that renames it. Every historical
-subsystem-page verification token must match its exact PR and source branch in a
-two-parent merge on the first-parent history of the protected integration branch
-— `refs/remotes/origin/main`, or the local `main` when no remote-tracking ref
+renames counts as a test attribute where that rename is visible and in any file
+that imports the renamed name. Every historical subsystem-page verification
+token must match its exact PR and source branch in a two-parent merge on the
+first-parent history of the protected integration branch —
+`refs/remotes/origin/main`, or the local `main` when no remote-tracking ref
 resolves — which only an owner merge extends. Tokens for one unmerged PR may
 instead match the local checkout branch or, in GitHub Actions, the pull-request
 event's exact number and branch. Verification identities already present on the
@@ -35,7 +36,8 @@ declarations: macros that emit or forward test attributes are rejected so
 reverse registration never depends on expanding arbitrary macros, and a
 forwarded attribute is read from the invocation argument its matcher binds
 whenever that binding is determinable, from every top-level metadata item of the
-invocation when it is not.
+invocation when it is not, and from invocations anywhere in the repository
+rather than only in the defining file.
 
 **Rejected alternatives.** Reviewer-only checks repeat deterministic work.
 GitHub calls or per-token fetches add mutable network state and do not inspect

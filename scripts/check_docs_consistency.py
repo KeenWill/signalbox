@@ -329,6 +329,9 @@ RUST_TEST_ALIAS = re.compile(
     rf"\btest[ \t\r\n]+as[ \t\r\n]+(?P<alias>{RUST_IDENTIFIER_PATTERN})",
     re.IGNORECASE,
 )
+RUST_USE_RENAME = re.compile(
+    rf"\bas[ \t\r\n]+(?P<alias>{RUST_IDENTIFIER_PATTERN})"
+)
 RUST_RAW_STRING_OPEN = re.compile(r'(?:br|rb|cr|r)(?P<hashes>#{0,255})"')
 RUST_INLINE_MODULE = re.compile(
     rf"(?P<attributes>(?:{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t\r\n]*)*)"
@@ -348,6 +351,9 @@ RUST_CRATE_ROOT_NAMES = ("mod.rs", "lib.rs", "main.rs")
 RUST_MACRO_RULES = re.compile(
     rf"\bmacro_rules![ \t\r\n]*(?P<name>{RUST_IDENTIFIER_PATTERN})"
     r"[ \t\r\n]*(?P<opening>[\(\[\{])"
+)
+RUST_MACRO_INVOCATION = re.compile(
+    rf"\b(?P<name>{RUST_IDENTIFIER_PATTERN})![ \t\r\n]*(?P<opening>[\(\[\{{])"
 )
 RUST_FORWARDED_ATTRIBUTE = re.compile(
     rf"{RUST_ATTRIBUTE_OPEN}[^\]]*\$[^\]]*\]", re.DOTALL
@@ -400,6 +406,19 @@ class ScopedTestAlias:
     opening: int
     closing: int
     name: str
+
+
+@dataclass(eq=False)
+class RustSource:
+    """One repository Rust file, read and lexically prepared once."""
+
+    path: Path
+    label: str
+    text: str
+    code: str
+    delimiters: dict[int, int]
+    invocations: dict[str, list[int]]
+    aliases: list[ScopedTestAlias]
 
 
 @dataclass(frozen=True)
@@ -593,13 +612,39 @@ def rust_cfg_truth(meta: str) -> bool | None:
     return None
 
 
-def rust_test_attribute_aliases(code: str) -> list[ScopedTestAlias]:
+def rust_renamed_test_aliases(code: str) -> frozenset[str]:
+    """Return the local names this file renames a `test` attribute to."""
+    return frozenset(
+        alias.group("alias")
+        for item in RUST_USE_ITEM.finditer(code)
+        for alias in RUST_TEST_ALIAS.finditer(item.group("body"))
+    )
+
+
+def rust_imported_alias_pattern(names: frozenset[str]) -> re.Pattern[str] | None:
+    """Return a pattern matching a `use` of one repository test alias.
+
+    A name is read as imported only where it terminates a path, so
+    ``use crate::async_test;`` counts while a module qualifier of the same
+    spelling does not.
+    """
+    if not names:
+        return None
+    alternation = "|".join(re.escape(name) for name in sorted(names))
+    return re.compile(rf"\b(?:{alternation})\b(?![ \t\r\n]*::)")
+
+
+def rust_test_attribute_aliases(
+    code: str, imported: re.Pattern[str] | None = None
+) -> list[ScopedTestAlias]:
     """Return each local name a `use` item gives an imported `test` attribute.
 
     ``use tokio::test as async_test;`` registers tests under `#[async_test]`.
     An alias reaches only the block its `use` item sits in, and everything
     nested inside it, so a sibling module may bind the same local name to
-    something else without being read as a test.
+    something else without being read as a test. A `use` item that imports a
+    name some file in the repository renames a `test` attribute to carries
+    that reading into this file, which is how a re-exported alias arrives.
     """
     delimiters = rust_matching_delimiters(code)
     blocks = sorted(
@@ -617,10 +662,25 @@ def rust_test_attribute_aliases(code: str) -> list[ScopedTestAlias]:
         opening, closing = (
             max(enclosing) if enclosing else (-1, len(code))
         )
-        for alias in RUST_TEST_ALIAS.finditer(item.group("body")):
-            aliases.append(
-                ScopedTestAlias(opening, closing, alias.group("alias"))
+        body = item.group("body")
+        names = {
+            alias.group("alias")
+            for alias in RUST_TEST_ALIAS.finditer(body)
+        }
+        if imported is not None:
+            # A name this item binds by rename means whatever it renames, so
+            # only a name imported as itself carries a repository reading in.
+            renamed = {
+                rename.group("alias")
+                for rename in RUST_USE_RENAME.finditer(body)
+            }
+            names.update(
+                match.group(0)
+                for match in imported.finditer(body)
+                if match.group(0) not in renamed
             )
+        for name in sorted(names):
+            aliases.append(ScopedTestAlias(opening, closing, name))
     return aliases
 
 
@@ -869,48 +929,52 @@ def rust_forwarded_argument_positions(
 
 
 def rust_macro_invocation_applies_test(
-    code: str,
+    definition: RustSource,
     name: str,
     definition_start: int,
     body_opening: int,
-    delimiters: dict[int, int],
-    aliases: frozenset[str] = frozenset(),
+    sites: list[RustSource],
 ) -> bool:
-    """Return whether a forwarding macro is invoked with test metadata."""
-    definition_end = delimiters.get(body_opening)
+    """Return whether a forwarding macro is invoked with test metadata.
+
+    A macro is invocable from any file that can name it, so every repository
+    source is a candidate call site, not only the one that defines it.
+    """
+    code = definition.code
+    definition_end = definition.delimiters.get(body_opening)
     if definition_end is None:
         return False
     definition_body = code[definition_start:definition_end]
     if RUST_FORWARDED_ATTRIBUTE.search(definition_body) is None:
         return False
     forwarded_positions = rust_forwarded_argument_positions(
-        code, body_opening + 1, definition_end, delimiters
+        code, body_opening + 1, definition_end, definition.delimiters
     )
-    invocation_pattern = re.compile(
-        rf"\b{re.escape(name)}![ \t\r\n]*(?P<opening>[\(\[\{{])"
-    )
-    for invocation in invocation_pattern.finditer(code):
-        if definition_start <= invocation.start() < definition_end:
-            continue
-        opening = invocation.start("opening")
-        closing = delimiters.get(opening)
-        if closing is None:
-            continue
-        body = code[opening + 1 : closing]
-        arguments = split_rust_meta_items(body)
-        if forwarded_positions is None:
-            candidates = rust_top_level_meta_items(body)
-        else:
-            candidates = [
-                arguments[position]
-                for position in sorted(forwarded_positions)
-                if position < len(arguments)
-            ]
-        if any(
-            rust_meta_applies_test(candidate, aliases)
-            for candidate in candidates
-        ):
-            return True
+    for site in sites:
+        for opening in site.invocations.get(name, ()):
+            if site is definition and (
+                definition_start <= opening < definition_end
+            ):
+                continue
+            closing = site.delimiters.get(opening)
+            if closing is None:
+                continue
+            body = site.code[opening + 1 : closing]
+            arguments = split_rust_meta_items(body)
+            if forwarded_positions is None:
+                candidates = rust_top_level_meta_items(body)
+            else:
+                candidates = [
+                    arguments[position]
+                    for position in sorted(forwarded_positions)
+                    if position < len(arguments)
+                ]
+            aliases = rust_visible_test_aliases(site.aliases, opening)
+            if any(
+                rust_meta_applies_test(candidate, aliases)
+                for candidate in candidates
+            ):
+                return True
     return False
 
 
@@ -1967,7 +2031,9 @@ def named_tests(
 
 
 def rust_test_invariant_tags(
-    text: str, module_prefixes: tuple[tuple[str, ...], ...] = ((),)
+    text: str,
+    module_prefixes: tuple[tuple[str, ...], ...] = ((),),
+    aliases: list[ScopedTestAlias] | None = None,
 ) -> list[tuple[str, int]]:
     """Return distinct INV tags and declaration lines from Rust tests.
 
@@ -1978,7 +2044,8 @@ def rust_test_invariant_tags(
     found: dict[str, int] = {}
     code = mask_rust_non_code(text)
     module_spans = rust_inline_module_spans(code)
-    aliases = rust_test_attribute_aliases(code)
+    if aliases is None:
+        aliases = rust_test_attribute_aliases(code)
     for declaration in RUST_TEST_DECLARATION.finditer(code):
         raw_prefix = text[
             declaration.start("prefix") : declaration.end("prefix")
@@ -2014,19 +2081,25 @@ def rust_test_invariant_tags(
 
 
 def rust_module_child(
-    declaring: Path, name: str, attributes: str
+    declaring: Path,
+    name: str,
+    attributes: str,
+    inline: tuple[str, ...] = (),
 ) -> Path | None:
     """Resolve one out-of-line `mod name;` declaration to its source file.
 
     Child modules of a crate root or a `mod.rs` live beside their declaring
     file; children of any other file live in a directory named for it. Both
     directories are offered in that order so the resolution needs no crate
-    metadata, and an explicit `#[path]` names its own file.
+    metadata, and an explicit `#[path]` names its own file. A declaration
+    nested in inline modules resolves under a directory named for each of
+    them, exactly as the compiler descends.
     """
     if declaring.name in RUST_CRATE_ROOT_NAMES:
         directories = [declaring.parent]
     else:
         directories = [declaring.parent / declaring.stem, declaring.parent]
+    directories = [directory.joinpath(*inline) for directory in directories]
     explicit = RUST_PATH_ATTRIBUTE.search(attributes)
     if explicit is not None:
         relatives = [explicit.group("path")]
@@ -2043,7 +2116,7 @@ def rust_module_child(
 
 
 def rust_module_prefixes(
-    sources: list[Path], text_cache: dict[Path, str]
+    sources: list[RustSource],
 ) -> dict[Path, tuple[tuple[str, ...], ...]]:
     """Return the out-of-line module paths that prefix each file's test names.
 
@@ -2054,98 +2127,125 @@ def rust_module_prefixes(
     a cyclic declaration terminates instead of growing forever. Recording each
     path once keeps the result independent of filesystem iteration order.
     """
-    children: dict[Path, list[tuple[str, Path]]] = {}
+    children: dict[Path, list[tuple[tuple[str, ...], Path]]] = {}
     declared: set[Path] = set()
     for source in sources:
-        text = text_cache[source]
-        code = mask_rust_non_code(text)
-        for module in RUST_OUT_OF_LINE_MODULE.finditer(code):
+        module_spans = rust_inline_module_spans(source.code)
+        for module in RUST_OUT_OF_LINE_MODULE.finditer(source.code):
             # Masking preserves offsets but blanks string literals, so the
             # `#[path]` destination is read back from the raw source.
-            attributes = text[
+            attributes = source.text[
                 module.start("attributes") : module.end("attributes")
             ]
             if rust_item_is_disabled(module.group("attributes")):
                 continue
-            child = rust_module_child(
-                source, module.group("name"), attributes
+            enclosing = rust_enclosing_modules(
+                module_spans, module.start("name")
             )
-            if child is None or child == source:
+            if any(item.disabled for item in enclosing):
                 continue
-            children.setdefault(source, []).append(
-                (module.group("name"), child)
+            inline = tuple(item.name for item in enclosing)
+            child = rust_module_child(
+                source.path, module.group("name"), attributes, inline
+            )
+            if child is None or child == source.path:
+                continue
+            children.setdefault(source.path, []).append(
+                ((*inline, module.group("name")), child)
             )
             declared.add(child)
 
     prefixes: dict[Path, list[tuple[str, ...]]] = {}
     pending: list[tuple[Path, tuple[str, ...], frozenset[Path]]] = [
-        (source, (), frozenset({source}))
+        (source.path, (), frozenset({source.path}))
         for source in sources
-        if source not in declared
+        if source.path not in declared
     ]
     while pending:
-        source, prefix, walked = pending.pop(0)
-        recorded = prefixes.setdefault(source, [])
+        path, prefix, walked = pending.pop(0)
+        recorded = prefixes.setdefault(path, [])
         if prefix in recorded:
             continue
         recorded.append(prefix)
-        for name, child in children.get(source, []):
+        for names, child in children.get(path, []):
             if child in walked:
                 continue
-            pending.append((child, (*prefix, name), walked | {child}))
-    return {source: tuple(paths) for source, paths in prefixes.items()}
+            pending.append((child, (*prefix, *names), walked | {child}))
+    return {path: tuple(paths) for path, paths in prefixes.items()}
+
+
+def rust_sources(root: Path) -> list[RustSource]:
+    """Read and lexically prepare every repository Rust file exactly once.
+
+    Test-attribute aliases are resolved in a second pass, because a rename in
+    one file names an attribute another file imports.
+    """
+    paths = [
+        path
+        for path in sorted(root.rglob("*.rs"))
+        if ".git" not in path.parts and "target" not in path.parts
+    ]
+    prepared: list[RustSource] = []
+    renamed: set[str] = set()
+    for path in paths:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        code = mask_rust_non_code(text)
+        invocations: dict[str, list[int]] = {}
+        for invocation in RUST_MACRO_INVOCATION.finditer(code):
+            invocations.setdefault(invocation.group("name"), []).append(
+                invocation.start("opening")
+            )
+        renamed.update(rust_renamed_test_aliases(code))
+        prepared.append(
+            RustSource(
+                path=path,
+                label=repository_path(root, path),
+                text=text,
+                code=code,
+                delimiters=rust_matching_delimiters(code),
+                invocations=invocations,
+                aliases=[],
+            )
+        )
+    imported = rust_imported_alias_pattern(frozenset(renamed))
+    for source in prepared:
+        source.aliases = rust_test_attribute_aliases(source.code, imported)
+    return prepared
 
 
 def rust_invariant_test_files(
-    root: Path, text_cache: dict[Path, str] | None = None
+    sources: list[RustSource],
 ) -> dict[tuple[str, str], int]:
     """Discover every repository Rust test file carrying an INV tag."""
-    if text_cache is None:
-        text_cache = {}
-    sources = [
-        source
-        for source in sorted(root.rglob("*.rs"))
-        if ".git" not in source.parts and "target" not in source.parts
-    ]
-    for source in sources:
-        if source not in text_cache:
-            text_cache[source] = source.read_text(
-                encoding="utf-8", errors="replace"
-            )
-    prefixes = rust_module_prefixes(sources, text_cache)
+    prefixes = rust_module_prefixes(sources)
     found: dict[tuple[str, str], int] = {}
     for source in sources:
-        source_label = repository_path(root, source)
         tags = rust_test_invariant_tags(
-            text_cache[source], prefixes.get(source, ((),))
+            source.text,
+            prefixes.get(source.path, ((),)),
+            source.aliases,
         )
         for invariant, line in tags:
-            found[(invariant, source_label)] = line
+            found[(invariant, source.label)] = line
     return found
 
 
-def check_rust_test_generation(root: Path) -> list[Violation]:
+def check_rust_test_generation(sources: list[RustSource]) -> list[Violation]:
     """Reject macros whose expanded tests cannot be registered from source."""
     violations: list[Violation] = []
-    for source in sorted(root.rglob("*.rs")):
-        if ".git" in source.parts or "target" in source.parts:
-            continue
-        source_label = repository_path(root, source)
-        text = source.read_text(encoding="utf-8", errors="replace")
-        code = mask_rust_non_code(text)
-        delimiters = rust_matching_delimiters(code)
-        scoped_aliases = rust_test_attribute_aliases(code)
+    for source in sources:
+        code = source.code
         for macro in RUST_MACRO_RULES.finditer(code):
             opening = macro.start("opening")
-            closing = delimiters.get(opening)
+            closing = source.delimiters.get(opening)
             if closing is None:
                 continue
-            aliases = rust_visible_test_aliases(scoped_aliases, opening)
+            aliases = rust_visible_test_aliases(source.aliases, opening)
             # A matcher may consume a test attribute the expansion never
             # emits, so only what each rule expands to is read directly; an
             # unparsed rule list falls back to the whole definition body.
             rules = rust_macro_rule_spans(
-                code, opening + 1, closing, delimiters
+                code, opening + 1, closing, source.delimiters
             )
             body = code[opening + 1 : closing]
             emitted = (
@@ -2157,19 +2257,18 @@ def check_rust_test_generation(root: Path) -> list[Violation]:
                 RUST_TEST_ATTRIBUTE.search(emitted) is None
                 and not rust_attributes_apply_test(emitted, aliases)
                 and not rust_macro_invocation_applies_test(
-                    code,
+                    source,
                     macro.group("name"),
                     macro.start(),
                     opening,
-                    delimiters,
-                    aliases,
+                    sources,
                 )
             ):
                 continue
             violations.append(
                 Violation(
-                    source_label,
-                    line_number(text, macro.start()),
+                    source.label,
+                    line_number(source.text, macro.start()),
                     "invariant-test-generation",
                     f"`macro_rules! {macro.group('name')}` emits or forwards "
                     "a test attribute; write explicit test declarations so "
@@ -2180,7 +2279,7 @@ def check_rust_test_generation(root: Path) -> list[Violation]:
 
 
 def check_invariant_citations(
-    root: Path,
+    root: Path, sources: list[RustSource]
 ) -> tuple[list[Violation], set[tuple[int, str]]]:
     source = root / INVARIANTS
     text = mask_block_content(source.read_text(encoding="utf-8"))
@@ -2188,8 +2287,10 @@ def check_invariant_citations(
     violations: list[Violation] = []
     enforcement_links: set[tuple[int, str]] = set()
     catalog_pairs: set[tuple[str, str]] = set()
-    target_text_cache: dict[Path, str] = {}
-    rust_test_files = rust_invariant_test_files(root, target_text_cache)
+    target_text_cache: dict[Path, str] = {
+        entry.path: entry.text for entry in sources
+    }
+    rust_test_files = rust_invariant_test_files(sources)
     declared_tags_by_file: dict[str, set[str]] = {}
     for invariant_and_path in rust_test_files:
         invariant, source_label = invariant_and_path
@@ -2808,12 +2909,15 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
 def run_checks(root: Path = ROOT) -> list[Violation]:
     root = root.resolve()
     heading_anchors.cache_clear()
-    invariant_failures, enforcement_links = check_invariant_citations(root)
+    sources = rust_sources(root)
+    invariant_failures, enforcement_links = check_invariant_citations(
+        root, sources
+    )
     failures = invariant_failures
     failures.extend(check_relative_links(root, enforcement_links))
     failures.extend(check_decision_order(root))
     failures.extend(check_spec_verification_references(root))
-    failures.extend(check_rust_test_generation(root))
+    failures.extend(check_rust_test_generation(sources))
     return sorted(set(failures))
 
 
