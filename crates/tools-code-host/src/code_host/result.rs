@@ -1,6 +1,9 @@
 //! Typed, bounded results returned by the code-host transport.
 
+use std::borrow::Cow;
+
 use reqwest::Url;
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
 use super::arguments::{valid_opaque_id, valid_revision};
@@ -58,10 +61,45 @@ pub(super) fn absolute_https_url(url: &Url) -> bool {
         && url.password().is_none()
 }
 
-fn valid_url(value: &str) -> bool {
-    value.len() <= MAX_RESULT_URL_BYTES
-        && !value.chars().any(char::is_control)
-        && Url::parse(value).is_ok_and(|url| absolute_https_url(&url))
+/// One bounded absolute credential-free HTTPS result location.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodeHostUrl(String);
+
+impl CodeHostUrl {
+    fn try_new(value: String) -> Option<Self> {
+        (value.len() <= MAX_RESULT_URL_BYTES
+            && !value.chars().any(char::is_control)
+            && Url::parse(&value).is_ok_and(|url| absolute_https_url(&url)))
+        .then_some(Self(value))
+    }
+
+    /// Borrows the checked absolute HTTPS location.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl JsonSchema for CodeHostUrl {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CodeHostUrl")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "format": "uri",
+            "maxLength": MAX_RESULT_URL_BYTES,
+            "pattern": r"^https://[^/@\u0000-\u0020\u007F-\u009F]+(?:[/?#]|$)",
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
 }
 
 fn valid_path(value: &str) -> bool {
@@ -83,7 +121,7 @@ pub struct ChangeRequestSummaryResult {
     base_ref: String,
     head_ref: String,
     head_revision: String,
-    url: String,
+    url: CodeHostUrl,
 }
 
 /// Complete checked fields for one change-request summary.
@@ -114,6 +152,7 @@ pub struct ChangeRequestSummaryFields {
 impl ChangeRequestSummaryResult {
     /// Validates one complete summary result.
     pub fn try_new(fields: ChangeRequestSummaryFields) -> Option<Self> {
+        let url = CodeHostUrl::try_new(fields.url)?;
         (fields.number > 0
             && valid_required_text(&fields.title)
             && fields.body.as_deref().is_none_or(valid_text)
@@ -121,8 +160,7 @@ impl ChangeRequestSummaryResult {
             && fields.author.as_deref().is_none_or(valid_required_text)
             && valid_required_text(&fields.base_ref)
             && valid_required_text(&fields.head_ref)
-            && valid_revision(&fields.head_revision)
-            && valid_url(&fields.url))
+            && valid_revision(&fields.head_revision))
         .then_some(Self {
             number: fields.number,
             title: fields.title,
@@ -133,7 +171,7 @@ impl ChangeRequestSummaryResult {
             base_ref: fields.base_ref,
             head_ref: fields.head_ref,
             head_revision: fields.head_revision,
-            url: fields.url,
+            url,
         })
     }
 
@@ -148,7 +186,7 @@ impl ChangeRequestSummaryResult {
             "number": self.number,
             "state": self.state,
             "title": self.title,
-            "url": self.url,
+            "url": self.url.into_string(),
         })
     }
 }
@@ -246,7 +284,7 @@ pub struct CheckStatus {
     name: String,
     status: String,
     conclusion: Option<String>,
-    url: String,
+    url: CodeHostUrl,
 }
 
 impl CheckStatus {
@@ -258,11 +296,11 @@ impl CheckStatus {
         conclusion: Option<String>,
         url: String,
     ) -> Option<Self> {
+        let url = CodeHostUrl::try_new(url)?;
         (id > 0
             && valid_required_text(&name)
             && valid_required_text(&status)
-            && conclusion.as_deref().is_none_or(valid_required_text)
-            && valid_url(&url))
+            && conclusion.as_deref().is_none_or(valid_required_text))
         .then_some(Self {
             id,
             name,
@@ -278,7 +316,7 @@ impl CheckStatus {
             "id": self.id,
             "name": self.name,
             "status": self.status,
-            "url": self.url,
+            "url": self.url.into_string(),
         })
     }
 }
@@ -318,17 +356,18 @@ impl ChecksStatusResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChangeRequestCommentResult {
     id: u64,
-    url: String,
+    url: CodeHostUrl,
 }
 
 impl ChangeRequestCommentResult {
     /// Validates the created comment identity and URL.
     pub fn try_new(id: u64, url: String) -> Option<Self> {
-        (id > 0 && valid_url(&url)).then_some(Self { id, url })
+        let url = CodeHostUrl::try_new(url)?;
+        (id > 0).then_some(Self { id, url })
     }
 
     fn into_value(self) -> Value {
-        json!({"id": self.id, "url": self.url})
+        json!({"id": self.id, "url": self.url.into_string()})
     }
 }
 
@@ -338,16 +377,16 @@ pub struct ReviewThreadComment {
     id: String,
     author: Option<String>,
     body: String,
-    url: String,
+    url: CodeHostUrl,
 }
 
 impl ReviewThreadComment {
     /// Validates one review-thread comment.
     pub fn try_new(id: String, author: Option<String>, body: String, url: String) -> Option<Self> {
+        let url = CodeHostUrl::try_new(url)?;
         (valid_opaque_id(&id)
             && author.as_deref().is_none_or(valid_required_text)
-            && valid_text(&body)
-            && valid_url(&url))
+            && valid_text(&body))
         .then_some(Self {
             id,
             author,
@@ -361,7 +400,7 @@ impl ReviewThreadComment {
             "author": self.author,
             "body": self.body,
             "id": self.id,
-            "url": self.url,
+            "url": self.url.into_string(),
         })
     }
 }
@@ -458,17 +497,18 @@ impl ReviewThreadsResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThreadReplyResult {
     id: String,
-    url: String,
+    url: CodeHostUrl,
 }
 
 impl ThreadReplyResult {
     /// Validates the created reply identity and URL.
     pub fn try_new(id: String, url: String) -> Option<Self> {
-        (valid_opaque_id(&id) && valid_url(&url)).then_some(Self { id, url })
+        let url = CodeHostUrl::try_new(url)?;
+        valid_opaque_id(&id).then_some(Self { id, url })
     }
 
     fn into_value(self) -> Value {
-        json!({"id": self.id, "url": self.url})
+        json!({"id": self.id, "url": self.url.into_string()})
     }
 }
 
