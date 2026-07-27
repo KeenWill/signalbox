@@ -302,6 +302,7 @@ class MarkdownLink:
     label: str
     destination: str
     offset: int
+    definition_offset: int | None = None
 
 
 def repository_path(root: Path, path: Path) -> str:
@@ -1138,6 +1139,7 @@ def extract_reference_links(
                     label=label,
                     destination=definition.destination,
                     offset=index,
+                    definition_offset=definition.offset,
                 )
             )
         index = end
@@ -1579,9 +1581,13 @@ def check_invariant_citations(
                 continue
             target, _ = resolved
             enforcement_links.add((number, link.destination))
-            enforcement_links.add(
-                (line_number(text, link.offset), link.destination)
-            )
+            if link.definition_offset is not None:
+                enforcement_links.add(
+                    (
+                        line_number(text, link.definition_offset),
+                        link.destination,
+                    )
+                )
             if not is_inside(root, target):
                 violations.append(
                     Violation(

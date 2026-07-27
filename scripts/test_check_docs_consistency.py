@@ -495,6 +495,25 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("cited file does not exist", failures[0].message)
 
+    def test_missing_reference_invariant_file_is_not_double_reported(self) -> None:
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "[`src/missing.rs`][missing]. |\n\n"
+            "[missing]: ../src/missing.rs\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-citation"],
+        )
+        self.assertIn("cited file does not exist", failures[0].message)
+
     def test_missing_invariant_file_fragment_is_not_double_reported(self) -> None:
         (self.root / "docs/invariants.md").write_text(
             "# Invariants\n\n"
