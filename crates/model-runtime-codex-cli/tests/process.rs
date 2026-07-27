@@ -1270,6 +1270,65 @@ async fn stderr_cleanup_timeout_preserves_boundary_loss_evidence() {
     );
 }
 
+/// Cancellation that lands after the terminal marker, while the leader has
+/// closed both output pipes but keeps running, drives immediate group
+/// cleanup and returns the definitive completion instead of waiting out the
+/// exchange deadline.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancellation_after_terminal_with_closed_pipes_preserves_completion_evidence() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = pipes_closing_completed_cli(temporary.path());
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(5));
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let cancellation = cancel_after_record(temporary.path().join("fake-codex-pipes-close-ready"));
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, cancellation)
+        .await;
+
+    assert_eq!(
+        completed(&report.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_recorded_process_group_exited(temporary.path().join("fake-codex-pipes-close-group"));
+}
+
+/// INV-035: stderr appended to exit-status detail consults the held
+/// lookbehind state before adapter-owned prose is prefixed, so a credential
+/// split between streamed text and stderr cannot reassemble in
+/// provider-error evidence.
+#[tokio::test]
+async fn inv_035_stderr_exit_detail_consults_held_redaction_state() {
+    let result = execute_scenario(
+        "stderr_credential_continuation",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let error = provider_error(&result.evidence);
+
+    assert!(!format!("{:?}", result.evidence).contains(fixtures::SENSITIVE_STDERR_CONTINUATION));
+    assert!(
+        error
+            .native
+            .message
+            .as_deref()
+            .expect("the failure carries redacted stderr detail")
+            .contains("[redacted]")
+    );
+}
+
 /// Cancellation that lands after the provider terminal marker, while an open
 /// stdout handle still blocks end-of-stream, drives immediate group cleanup
 /// and returns the definitive completion instead of discarding it.
@@ -2187,6 +2246,25 @@ kill -KILL $$
         thread_id = fixtures::THREAD_ID
     );
     script_cli(directory, "stderr-killed-codex", &script)
+}
+
+/// Scripts a CLI that finishes a complete exchange, closes both output
+/// pipes, and keeps running. The readiness marker is written a settling
+/// second later so a marker-watching cancellation cannot fire before the
+/// adapter has consumed the terminal and parked in its exit wait.
+#[cfg(unix)]
+fn pipes_closing_completed_cli(directory: &Path) -> std::path::PathBuf {
+    let script = format!(
+        r#"#!/bin/sh
+{lines}printf 'process_group=%s\ndescendant=%s\n' "$$" "$$" > fake-codex-pipes-close-group
+exec 1>&- 2>&-
+sleep 1
+printf 'ready\n' > fake-codex-pipes-close-ready
+sleep 60
+"#,
+        lines = completed_exchange_script_lines()
+    );
+    script_cli(directory, "pipes-closing-codex", &script)
 }
 
 fn rendered_request(prompt: &str) -> serde_json::Value {

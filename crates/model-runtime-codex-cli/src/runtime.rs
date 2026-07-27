@@ -711,12 +711,28 @@ async fn execute_process<C: Clone + Send + Sync>(
                 tokio::select! {
                     biased;
                     result = &mut exit_wait => result,
-                    () = &mut *cancellation, if !terminal_observed => {
+                    () = &mut *cancellation => {
                         interrupt_then_kill(
                             &mut child,
                             remaining_interrupt_grace(prepared.interrupt_grace, deadline),
                         )
                         .await;
+                        // A cancellation that arrives after the terminal
+                        // marker drives cleanup but cannot replace the
+                        // definitive evidence, exactly as on the stdout and
+                        // stderr waits above.
+                        if terminal_observed {
+                            let evidence = if let Some(error) = input_error {
+                                decoder.boundary_loss_unless_provider_failure(
+                                    incomplete_upload_cause(&error),
+                                    &redacting_sink,
+                                )
+                            } else {
+                                decoder.finish(&mut redacting_sink)
+                            };
+                            redacting_sink.finish();
+                            return evidence;
+                        }
                         redacting_sink.finish();
                         return decoder.boundary_loss(LossCause::CancellationRequested);
                     },
@@ -760,8 +776,14 @@ async fn execute_process<C: Clone + Send + Sync>(
             evidence
         }
         Ok(status) => {
-            let message = if !stderr.trim().is_empty() {
-                format!("Codex CLI exited with status {status}: {stderr}")
+            // The stderr text consults the held lookbehind state on its own,
+            // before any adapter-owned status prose is prefixed: inserted
+            // prose between a held credential-marker fragment and its stderr
+            // continuation would otherwise keep the pair from rejoining, and
+            // the continuation would survive the stateless stderr redaction.
+            let stderr_detail = redacting_sink.redact_terminal_failure_text(&stderr);
+            let message = if !stderr_detail.trim().is_empty() {
+                format!("Codex CLI exited with status {status}: {stderr_detail}")
             } else if let Some(error) = input_error {
                 format!("Codex CLI exited with status {status} after stdin failed: {error}")
             } else {
