@@ -1013,7 +1013,10 @@ async fn interrupt_then_kill(child: &mut SupervisedChild, grace: Duration) {
             tokio::time::sleep(grace).await;
             kill_process_group(process_group_id);
             let _ = child.start_kill();
-            if child.wait().await.is_ok() {
+            // Bounded like `force_kill`: a leader stuck in uninterruptible
+            // kernel I/O after SIGKILL is left to its drop guard rather than
+            // hanging the exchange past its deadline.
+            if let Ok(Ok(_)) = tokio::time::timeout(POST_KILL_REAP_BOUND, child.wait()).await {
                 child.disarm();
             }
             return;
