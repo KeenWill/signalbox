@@ -154,15 +154,15 @@ pub use runner::{
     RunnerAdvertisement, RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
     RunnerCredentialGrantChange, RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment,
     RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerLease,
-    RunnerLeaseCorrelation, RunnerLeaseLoss, RunnerLeaseNoExecutionProof,
-    RunnerLeaseNoExecutionProofReconstitutionInput, RunnerLeaseOfferRequest,
+    RunnerLeaseCorrelation, RunnerLeaseLoss, RunnerLeaseNoExecutionProof, RunnerLeaseOfferRequest,
     RunnerLeaseReconstitutionInput, RunnerLeaseRetryAuthority, RunnerLeaseState,
     RunnerPlacementChange, RunnerPlacementReplacement, RunnerSelector,
     RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
-    RunnerToolModelDefinition, RunnerWorkingDirectory, SessionRunnerPin, SessionRunnerPlacement,
-    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
-    SessionRunnerPlacementState, ToolAdmissibleLoci, ValidatedRunnerRegistration,
-    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
+    RunnerToolModelDefinition, RunnerUnclaimedAttemptReauthorization, RunnerWorkingDirectory,
+    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
+    ValidatedRunnerRegistration, WorkingDirectorySelection, WorkspaceCapability,
+    WorkspaceRepositoryKey, WorkspaceRequirement,
 };
 pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{

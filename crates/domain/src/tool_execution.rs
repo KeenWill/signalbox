@@ -17,10 +17,11 @@ use crate::{
     ActiveTurnPhase, ApprovedToolRequest, AuthorizedToolAttempt, CurrentToolAttempt,
     CurrentToolAttemptState, DecideToolRequest, DecideToolRequestResult, EndedToolAttempt,
     PreparedDecideToolRequest, ReconstitutedToolAttempt, ResolvedContextFrontierSnapshot,
-    SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId,
-    ToolApprovalDecision, ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptEnd,
-    ToolAttemptId, ToolEffectClass, ToolExecutionErrorKind, ToolRequest, ToolRequestId,
-    TurnAttemptId, TurnId, tool::MAX_TOOL_REQUESTS_PER_RESPONSE,
+    RunnerToolAttemptAuthorization, SemanticTranscriptEntry, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision, ToolApprovalResolution,
+    ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolEffectClass,
+    ToolExecutionErrorKind, ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
+    tool::MAX_TOOL_REQUESTS_PER_RESPONSE,
 };
 
 /// Stored active phase for one complete logical tool batch.
@@ -654,6 +655,115 @@ impl ToolBatch {
             .map_err(|_| ToolBatchExecutionError {
                 failure: ToolBatchExecutionFailure::AttemptStageMismatch,
             })
+    }
+
+    /// Authorizes one runner dispatch while pairing it with this batch's
+    /// canonical immutable request and approval.
+    pub fn authorize_runner_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<RunnerToolAttemptAuthorization, ToolBatchExecutionError> {
+        let authorized = self.authorize_attempt(attempt)?;
+        self.bind_runner_authorization(authorized)
+    }
+
+    /// Restores one runner dispatch while pairing it with this batch's
+    /// canonical immutable request and approval.
+    pub fn resume_runner_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<RunnerToolAttemptAuthorization, ToolBatchExecutionError> {
+        let authorized = self.resume_in_flight_attempt(attempt)?;
+        self.bind_runner_authorization(authorized)
+    }
+
+    pub(crate) fn reauthorize_unclaimed_runner_attempt(
+        self,
+        attempt: ToolAttemptId,
+    ) -> Result<(Self, RunnerToolAttemptAuthorization), ToolBatchExecutionError> {
+        if !matches!(self.phase, ToolBatchPhase::Executing { .. }) {
+            return Err(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::NotExecuting,
+            });
+        }
+        let current = self
+            .attempts
+            .values()
+            .find_map(|candidate| match candidate {
+                ReconstitutedToolAttempt::Current(current)
+                    if current.attempt() == attempt
+                        && current.state() == CurrentToolAttemptState::InFlight =>
+                {
+                    Some(current.clone())
+                }
+                ReconstitutedToolAttempt::Current(_) | ReconstitutedToolAttempt::Ended(_) => None,
+            })
+            .ok_or(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptMissing,
+            })?;
+        let prior_issuance = Arc::clone(self.runner_issuance.get(&attempt).ok_or(
+            ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptMissing,
+            },
+        )?);
+        if prior_issuance
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptStageMismatch,
+            });
+        }
+        let authorized =
+            match current.resume_in_flight_with_runner_issuance(Arc::clone(&prior_issuance)) {
+                Ok(authorized) => authorized,
+                Err(_) => {
+                    prior_issuance.store(true, Ordering::Release);
+                    return Err(ToolBatchExecutionError {
+                        failure: ToolBatchExecutionFailure::AttemptStageMismatch,
+                    });
+                }
+            };
+        let authorization = match self.bind_runner_authorization(authorized) {
+            Ok(authorization) => authorization,
+            Err(error) => {
+                prior_issuance.store(true, Ordering::Release);
+                return Err(error);
+            }
+        };
+        Ok((self, authorization))
+    }
+
+    fn bind_runner_authorization(
+        &self,
+        authorized: AuthorizedToolAttempt,
+    ) -> Result<RunnerToolAttemptAuthorization, ToolBatchExecutionError> {
+        let request = self
+            .requests
+            .iter()
+            .find(|request| request.id() == authorized.correlation().request())
+            .cloned()
+            .ok_or(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptMissing,
+            })?;
+        let approval =
+            self.approvals
+                .get(&request.id())
+                .cloned()
+                .ok_or(ToolBatchExecutionError {
+                    failure: ToolBatchExecutionFailure::ApprovalMismatch,
+                })?;
+        let approved =
+            ApprovedToolRequest::try_from_resolution(request, approval).map_err(|_| {
+                ToolBatchExecutionError {
+                    failure: ToolBatchExecutionFailure::ApprovalMismatch,
+                }
+            })?;
+        RunnerToolAttemptAuthorization::try_new(approved, authorized).map_err(|_| {
+            ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptStageMismatch,
+            }
+        })
     }
 
     /// Builds one proposal-ordered reference-only result entry per request.
@@ -2324,28 +2434,17 @@ mod tests {
         .reconstitute()
         .expect("the prepared batch is complete");
         let duplicate = batch.clone();
-        let approval = batch
-            .approval(only.id())
-            .expect("the approved request has durable provenance")
-            .clone();
-        let first_approved =
-            ApprovedToolRequest::try_from_resolution(only.clone(), approval.clone())
-                .expect("the first approval matches its request");
-        let duplicate_approved = ApprovedToolRequest::try_from_resolution(only, approval)
-            .expect("the duplicate approval matches its request");
-        let first = batch
-            .authorize_attempt(attempt_id)
-            .expect("the checked batch exposes local authority");
-        let duplicate = duplicate
-            .authorize_attempt(attempt_id)
-            .expect("the clone exposes the same local authority");
 
-        crate::RunnerToolAttemptAuthorization::try_new(first_approved, first)
-            .expect("the shared runner capability is consumed once");
+        batch
+            .authorize_runner_attempt(attempt_id)
+            .expect("the batch atomically pairs canonical request authority once");
+        let duplicate = duplicate
+            .authorize_runner_attempt(attempt_id)
+            .expect_err("the shared runner authority cannot be paired twice");
 
         assert_eq!(
-            crate::RunnerToolAttemptAuthorization::try_new(duplicate_approved, duplicate),
-            Err(crate::RunnerDomainError::InvalidState)
+            duplicate.failure(),
+            ToolBatchExecutionFailure::AttemptStageMismatch
         );
     }
 
@@ -2355,6 +2454,7 @@ mod tests {
     fn s31_inv004_inv043_in_flight_runner_authorization_is_single_use_across_clones() {
         let only = request(10, 0);
         let attempt_id = tool_attempt_id(12);
+        let approval = approval(only.id(), ToolApprovalDecision::Approve);
         let attempt = ToolAttemptReconstitutionInput::new(
             attempt_id,
             only.id(),
@@ -2373,7 +2473,7 @@ mod tests {
             model_call_id(3),
             yielded_snapshot(),
             vec![only.clone()],
-            vec![approval(only.id(), ToolApprovalDecision::Approve)],
+            vec![approval.clone()],
             vec![attempt],
             ToolBatchPhaseReconstitutionInput::Executing {
                 turn_attempt: turn_attempt_id(13),
@@ -2382,25 +2482,10 @@ mod tests {
         .reconstitute()
         .expect("the in-flight batch is complete");
         let duplicate = batch.clone();
-        let approval = batch
-            .approval(only.id())
-            .expect("the approved request has durable provenance")
-            .clone();
-        let first_approved =
-            ApprovedToolRequest::try_from_resolution(only.clone(), approval.clone())
-                .expect("the first approval matches its request");
-        let duplicate_approved =
-            ApprovedToolRequest::try_from_resolution(only.clone(), approval.clone())
-                .expect("the duplicate approval matches its request");
-        let first = batch
-            .resume_in_flight_attempt(attempt_id)
-            .expect("the checked batch restores local authority");
-        let duplicate = duplicate
-            .resume_in_flight_attempt(attempt_id)
-            .expect("the clone restores the same local authority");
 
-        crate::RunnerToolAttemptAuthorization::try_new(first_approved, first)
-            .expect("the shared runner capability is consumed once");
+        batch
+            .resume_runner_attempt(attempt_id)
+            .expect("the batch atomically restores canonical runner authority once");
         let durable_issuance = batch.runner_authorized_attempts().collect::<Vec<_>>();
         let current = batch
             .attempt(only.id())
@@ -2411,8 +2496,8 @@ mod tests {
             batch.turn(),
             batch.producing_call(),
             batch.yielded_snapshot().clone(),
-            vec![only.clone()],
-            vec![approval.clone()],
+            vec![only],
+            vec![approval],
             vec![current],
             ToolBatchPhaseReconstitutionInput::Executing {
                 turn_attempt: turn_attempt_id(13),
@@ -2421,20 +2506,21 @@ mod tests {
         .with_runner_authorized_attempts(durable_issuance.clone())
         .reconstitute()
         .expect("durable runner issuance restores with the batch");
-        let restored_authority = restored
-            .resume_in_flight_attempt(attempt_id)
-            .expect("the local in-flight fence remains restorable");
-        let restored_approved = ApprovedToolRequest::try_from_resolution(only, approval)
-            .expect("the restored approval matches its request");
+        let duplicate = duplicate
+            .resume_runner_attempt(attempt_id)
+            .expect_err("the clone shares the consumed runner authority");
+        let restored = restored
+            .resume_runner_attempt(attempt_id)
+            .expect_err("durable reconstitution preserves consumed runner authority");
 
         assert_eq!(durable_issuance, vec![attempt_id]);
         assert_eq!(
-            crate::RunnerToolAttemptAuthorization::try_new(duplicate_approved, duplicate),
-            Err(crate::RunnerDomainError::InvalidState)
+            duplicate.failure(),
+            ToolBatchExecutionFailure::AttemptStageMismatch
         );
         assert_eq!(
-            crate::RunnerToolAttemptAuthorization::try_new(restored_approved, restored_authority,),
-            Err(crate::RunnerDomainError::InvalidState)
+            restored.failure(),
+            ToolBatchExecutionFailure::AttemptStageMismatch
         );
     }
 

@@ -143,21 +143,23 @@ A `RunnerLease` binds one lease identity, exact tool name, complete authorized
 physical-attempt dispatch correlation, session, runner, effect class, and
 positive lease-lineage generation. Lease creation is not a free constructor: it
 consumes one `RunnerToolAttemptAuthorization`, which binds the approved request
-and its exact tool name to the tool loop's `AuthorizedToolAttempt`. The latter
-exists only after the automatic or owner decision authorizes that exact attempt,
-and neither authority nor the resulting lease is cloneable. Every checked
-`ToolBatch` carries a durable per-attempt inventory of runner authority already
-issued. Its in-memory clones share the exact atomic guard for each physical
-attempt, and complete reconstitution restores every consumed guard from that
-inventory. Prepared authorization and in-flight restoration retain the
-daemon-local durable fence, but converting either result into
-`RunnerToolAttemptAuthorization` marks that exact attempt issued in the batch; a
-later clone or reconstitution from the updated facts cannot mint a second runner
-lease capability. Current active enrollment, pinned placement, its exact
-validated registration, and any selected active credential grant jointly
-authorize every offer after the first. The initial offer instead creates that
-pinned placement, any selected grant, and generation-one lease in one checked
-transition from `Unpinned`; it does not require those products to exist
+and its exact tool name to the tool loop's `AuthorizedToolAttempt`. Only
+`ToolBatch::authorize_runner_attempt` and `ToolBatch::resume_runner_attempt`
+publicly produce that pairing: each selects the batch's canonical immutable
+request and approval together with its physical-attempt authority.
+`RunnerToolAttemptAuthorization` has no public raw-parts constructor. The
+underlying attempt exists only after the automatic or owner decision authorizes
+that exact attempt, and neither authority nor the resulting lease is cloneable.
+Every checked `ToolBatch` carries a durable per-attempt inventory of runner
+authority already issued. Its in-memory clones share the exact atomic guard for
+each physical attempt, and complete reconstitution restores every consumed guard
+from that inventory. Atomic runner authorization marks that exact attempt issued
+in the batch; a later clone or reconstitution from the updated facts cannot mint
+a second runner lease capability. Current active enrollment, pinned placement,
+its exact validated registration, and any selected active credential grant
+jointly authorize every offer after the first. The initial offer instead creates
+that pinned placement, any selected grant, and generation-one lease in one
+checked transition from `Unpinned`; it does not require those products to exist
 beforehand. The request, attempt, session, and two-way crash class must match
 the selected tool, placement, and declaration-derived effect class (`Pure` to
 `EffectFree`; `Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked
@@ -177,36 +179,42 @@ aggregate. Complete reconstitution accepts only the closed state shapes and
 exact correlations.
 
 `LostUnclaimed` requires an opaque durable no-execution proof bound to the exact
-lease correlation; complete loss reconstitution requires the same proof. It does
-not mean merely absence of a claim frame after an offer was sent. A future
-transport must durably commit the exact claim and acknowledge it before the
-runner may execute. Channel loss after delivery but before that acknowledgement
-cannot be interpreted as proof either way by transport alone. Without the proof,
-losing even an `Offered` lease conservatively follows the execution-possible
-law: pure or idempotent work requires a fresh physical attempt, while
-side-effecting work requires crash classification.
+lease correlation; complete loss reconstitution requires the same proof. The
+proof exposes no public raw-parts or reconstitution constructor, so an offered
+lease and its public correlation cannot mint this authority. It does not mean
+merely absence of a claim frame after an offer was sent. A future transport must
+supply the independently authoritative producer, durably commit the exact claim,
+and acknowledge it before the runner may execute. Channel loss after delivery
+but before that acknowledgement cannot be interpreted as proof either way by
+transport alone. Without the proof, losing even an `Offered` lease
+conservatively follows the execution-possible law: pure or idempotent work
+requires a fresh physical attempt, while side-effecting work requires crash
+classification.
 
 With that proof, loss before claim permits every effect class to be re-leased at
 the checked successor lease-lineage generation. Loss after claim follows the
 required retry law:
 
 - `Pure` and `Idempotent` produce typed re-lease authority at the checked
-  successor generation; after claim that authority consumes the owning checked
+  successor generation. After claim, that authority consumes the owning checked
   `ToolBatch`, retires the prior in-flight attempt to its effect-correct
   terminal history, installs and authorizes a fresh physical `ToolAttemptId`,
   retains every retired attempt identity in the updated batch and its complete
-  reconstitution facts, and returns both attempt records; only the private
-  replacement evidence produced by that batch transition can authorize the
-  claimed re-lease, while authority lost before claim retains the never-executed
-  attempt identity; and
+  reconstitution facts, and returns both attempt records. Before claim, the
+  authority instead consumes the owning checked batch, verifies its complete
+  original dispatch, and reissues the never-executed attempt through a fresh
+  single-use durable runner-issuance guard. Only the private evidence produced
+  by the applicable batch transition can authorize the re-lease; and
 - `SideEffecting` produces typed crash-classification authority whose physical
   attempt is derived from the opaque lost lease and never produces re-lease
   authority.
 
 Generation exhaustion, reuse of any current or retired attempt identity for
 either claimed replacement or ordinary preparation, and a standalone
-same-request authorization for claimed retry all fail closed. `RunnerLeaseLoss`
-has sealed construction, so only `RunnerLease::lose` or
+same-request authorization for claimed retry all fail closed. A claimed
+replacement must retire the complete original session, turn, issuing turn
+attempt, request, physical attempt, dispatch generation, and effect fence.
+`RunnerLeaseLoss` has sealed construction, so only `RunnerLease::lose` or
 `RunnerLease::reconstitute_loss` over an already-lost checked projection can
 produce retry or crash-classification authority. Re-leasing continues one
 logical tool request and lease lineage. Its successor `RunnerGeneration` is
@@ -281,14 +289,15 @@ authority changes, the same result also carries complete before-and-after grant
 reconstitution facts, including the prior narrowed tool inventory and successor
 inventory. Reconstitution accepts a complete public raw-facts input and rejects
 an unpinned revision other than one, a pinned or lost state that does not match
-its current request and validated capabilities. Durable replacement-history
-verification belongs to the later persistence projection. Pinned or lost
-reconstitution validates against the exact registration snapshot that produced
-the pin and rejects any stored tool or runner-required-tool inventory that
-differs from that checked result. A current narrowed re-registration is
-reconciled separately and is not substituted for that historical snapshot. This
-domain aggregate accepts every positive revision because each is reachable
-through checked successor transitions.
+its current request and validated capabilities, and any stored credential-grant
+lineage whose revision is newer than the placement revision. Durable
+replacement-history verification belongs to the later persistence projection.
+Pinned or lost reconstitution validates against the exact registration snapshot
+that produced the pin and rejects any stored tool or runner-required-tool
+inventory that differs from that checked result. A current narrowed
+re-registration is reconciled separately and is not substituted for that
+historical snapshot. This domain aggregate accepts every positive placement
+revision because each is reachable through checked successor transitions.
 
 This stack proves that replacement must be explicit and produces the typed
 change facts. Application orchestration that appends the corresponding semantic

@@ -3317,6 +3317,14 @@ impl ToolBatch {
         &self,
         attempt: ToolAttemptId,
     ) -> Result<AuthorizedToolAttempt, ToolBatchExecutionError>;
+    pub fn authorize_runner_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<RunnerToolAttemptAuthorization, ToolBatchExecutionError>;
+    pub fn resume_runner_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<RunnerToolAttemptAuthorization, ToolBatchExecutionError>;
     pub fn prepare_result_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
@@ -5415,10 +5423,6 @@ pub struct RunnerLeaseOfferRequest {
 }
 pub struct RunnerToolAttemptAuthorization { /* private */ }
 impl RunnerToolAttemptAuthorization {
-    pub fn try_new(
-        approved: ApprovedToolRequest,
-        authorized: AuthorizedToolAttempt,
-    ) -> Result<Self, RunnerDomainError>;
     pub const fn tool(&self) -> &ToolName;
 }
 pub enum RunnerLeaseState {
@@ -5431,13 +5435,7 @@ pub enum RunnerLeaseState {
 }
 pub struct RunnerLeaseNoExecutionProof { /* private durable correlation */ }
 impl RunnerLeaseNoExecutionProof {
-    pub fn reconstitute(
-        input: RunnerLeaseNoExecutionProofReconstitutionInput,
-    ) -> Result<Self, RunnerDomainError>;
     pub const fn correlation(&self) -> &RunnerLeaseCorrelation;
-}
-pub struct RunnerLeaseNoExecutionProofReconstitutionInput {
-    /* public complete correlation and independent recorded correlation */
 }
 pub struct RunnerLease { /* private */ }
 impl RunnerLease {
@@ -5474,12 +5472,22 @@ impl RunnerLeaseLoss {
 pub struct RunnerLeaseRetryAuthority { /* private */ }
 impl RunnerLeaseRetryAuthority {
     // accessors: generation()
+    pub fn prepare_unclaimed_attempt(
+        &self,
+        batch: ToolBatch,
+    ) -> Result<RunnerUnclaimedAttemptReauthorization, RunnerDomainError>;
     pub fn prepare_claimed_attempt(
         &self,
         batch: ToolBatch,
         attempt: ToolAttemptId,
     ) -> Result<RunnerClaimedAttemptReplacement, RunnerDomainError>;
 }
+pub struct RunnerUnclaimedAttemptReauthorization { /* private */ }
+impl RunnerUnclaimedAttemptReauthorization {
+    // accessor: batch()
+    pub fn into_parts(self) -> (ToolBatch, RunnerToolAttemptAuthorization);
+}
+
 pub struct RunnerClaimedAttemptReplacement { /* private */ }
 impl RunnerClaimedAttemptReplacement {
     // accessors: batch(), retired()
