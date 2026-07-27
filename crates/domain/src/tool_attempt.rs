@@ -7,7 +7,7 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU8, Ordering},
 };
 
 use crate::{
@@ -15,6 +15,9 @@ use crate::{
     ToolRequest, ToolRequestId, ToolResultContent, TurnAttemptId, TurnId,
 };
 
+pub(crate) const RUNNER_ISSUANCE_AVAILABLE: u8 = 0;
+pub(crate) const RUNNER_ISSUANCE_ISSUED: u8 = 1;
+pub(crate) const RUNNER_ISSUANCE_RETIRED: u8 = 2;
 const MAX_TOOL_ERROR_DETAIL_BYTES: usize = 4096;
 
 /// A positive dispatch generation in one physical attempt's fence.
@@ -460,14 +463,14 @@ impl CurrentToolAttempt {
                 ..self
             },
             correlation,
-            runner_issuance: Arc::new(AtomicBool::new(false)),
+            runner_issuance: Arc::new(AtomicU8::new(RUNNER_ISSUANCE_AVAILABLE)),
         })
     }
 
     /// Authorizes while retaining one batch-shared runner conversion guard.
     pub(crate) fn authorize_with_runner_issuance(
         self,
-        runner_issuance: Arc<AtomicBool>,
+        runner_issuance: Arc<AtomicU8>,
     ) -> Result<AuthorizedToolAttempt, ToolAttemptTransitionError> {
         let mut authorized = self.authorize()?;
         authorized.runner_issuance = runner_issuance;
@@ -477,7 +480,7 @@ impl CurrentToolAttempt {
     /// Restores while retaining one batch-shared runner conversion guard.
     pub(crate) fn resume_in_flight_with_runner_issuance(
         self,
-        runner_issuance: Arc<AtomicBool>,
+        runner_issuance: Arc<AtomicU8>,
     ) -> Result<AuthorizedToolAttempt, ToolAttemptTransitionError> {
         let mut authorized = self.resume_in_flight()?;
         authorized.runner_issuance = runner_issuance;
@@ -499,7 +502,7 @@ impl CurrentToolAttempt {
         Ok(AuthorizedToolAttempt {
             attempt: self,
             correlation,
-            runner_issuance: Arc::new(AtomicBool::new(false)),
+            runner_issuance: Arc::new(AtomicU8::new(RUNNER_ISSUANCE_AVAILABLE)),
         })
     }
 
@@ -624,7 +627,7 @@ impl CurrentToolAttempt {
 pub struct AuthorizedToolAttempt {
     attempt: CurrentToolAttempt,
     correlation: ToolAttemptDispatchCorrelation,
-    runner_issuance: Arc<AtomicBool>,
+    runner_issuance: Arc<AtomicU8>,
 }
 
 // The process-local issuance guard is not part of durable authorization identity.
@@ -649,7 +652,12 @@ impl AuthorizedToolAttempt {
 
     pub(crate) fn claim_runner_issuance(&self) -> bool {
         self.runner_issuance
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(
+                RUNNER_ISSUANCE_AVAILABLE,
+                RUNNER_ISSUANCE_ISSUED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
             .is_ok()
     }
 

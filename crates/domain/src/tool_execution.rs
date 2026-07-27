@@ -9,7 +9,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU8, Ordering},
     },
 };
 
@@ -21,7 +21,8 @@ use crate::{
     SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision, ToolApprovalResolution,
     ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolEffectClass,
     ToolExecutionErrorKind, ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
-    tool::MAX_TOOL_REQUESTS_PER_RESPONSE,
+    tool::MAX_TOOL_REQUESTS_PER_RESPONSE, tool_attempt::RUNNER_ISSUANCE_AVAILABLE,
+    tool_attempt::RUNNER_ISSUANCE_ISSUED, tool_attempt::RUNNER_ISSUANCE_RETIRED,
 };
 
 /// Stored active phase for one complete logical tool batch.
@@ -193,7 +194,7 @@ pub struct ToolBatch {
     approvals: BTreeMap<ToolRequestId, ToolApprovalResolution>,
     attempts: BTreeMap<ToolRequestId, ReconstitutedToolAttempt>,
     retired_attempts: BTreeSet<ToolAttemptId>,
-    runner_issuance: BTreeMap<ToolAttemptId, Arc<AtomicBool>>,
+    runner_issuance: BTreeMap<ToolAttemptId, Arc<AtomicU8>>,
     phase: ToolBatchPhase,
 }
 
@@ -260,9 +261,9 @@ impl ToolBatch {
 
     /// Returns every physical attempt whose runner authority was durably issued.
     pub fn runner_authorized_attempts(&self) -> impl Iterator<Item = ToolAttemptId> + '_ {
-        self.runner_issuance
-            .iter()
-            .filter_map(|(attempt, issued)| issued.load(Ordering::Acquire).then_some(*attempt))
+        self.runner_issuance.iter().filter_map(|(attempt, issued)| {
+            (issued.load(Ordering::Acquire) != RUNNER_ISSUANCE_AVAILABLE).then_some(*attempt)
+        })
     }
 
     /// Returns the evidence-derived active phase.
@@ -559,7 +560,7 @@ impl ToolBatch {
             ToolAttemptCrashOutcome::KnownFailed(retired)
             | ToolAttemptCrashOutcome::Ambiguous(retired) => retired,
         };
-        let replacement_runner_issuance = Arc::new(AtomicBool::new(false));
+        let replacement_runner_issuance = Arc::new(AtomicU8::new(RUNNER_ISSUANCE_AVAILABLE));
         self.runner_issuance.insert(
             replacement_attempt,
             Arc::clone(&replacement_runner_issuance),
@@ -678,7 +679,7 @@ impl ToolBatch {
     }
 
     pub(crate) fn reauthorize_unclaimed_runner_attempt(
-        self,
+        mut self,
         attempt: ToolAttemptId,
     ) -> Result<(Self, RunnerToolAttemptAuthorization), ToolBatchExecutionError> {
         if !matches!(self.phase, ToolBatchPhase::Executing { .. }) {
@@ -707,30 +708,27 @@ impl ToolBatch {
             },
         )?);
         if prior_issuance
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(
+                RUNNER_ISSUANCE_ISSUED,
+                RUNNER_ISSUANCE_RETIRED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
             .is_err()
         {
             return Err(ToolBatchExecutionError {
                 failure: ToolBatchExecutionFailure::AttemptStageMismatch,
             });
         }
-        let authorized =
-            match current.resume_in_flight_with_runner_issuance(Arc::clone(&prior_issuance)) {
-                Ok(authorized) => authorized,
-                Err(_) => {
-                    prior_issuance.store(true, Ordering::Release);
-                    return Err(ToolBatchExecutionError {
-                        failure: ToolBatchExecutionFailure::AttemptStageMismatch,
-                    });
-                }
-            };
-        let authorization = match self.bind_runner_authorization(authorized) {
-            Ok(authorization) => authorization,
-            Err(error) => {
-                prior_issuance.store(true, Ordering::Release);
-                return Err(error);
-            }
-        };
+        let successor_issuance = Arc::new(AtomicU8::new(RUNNER_ISSUANCE_AVAILABLE));
+        self.runner_issuance
+            .insert(attempt, Arc::clone(&successor_issuance));
+        let authorized = current
+            .resume_in_flight_with_runner_issuance(successor_issuance)
+            .map_err(|_| ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptStageMismatch,
+            })?;
+        let authorization = self.bind_runner_authorization(authorized)?;
         Ok((self, authorization))
     }
 
@@ -1642,8 +1640,12 @@ fn reconstitute_batch(
         .map(|attempt| {
             (
                 *attempt,
-                Arc::new(AtomicBool::new(
-                    runner_authorized_attempts.contains(attempt),
+                Arc::new(AtomicU8::new(
+                    if runner_authorized_attempts.contains(attempt) {
+                        RUNNER_ISSUANCE_ISSUED
+                    } else {
+                        RUNNER_ISSUANCE_AVAILABLE
+                    },
                 )),
             )
         })

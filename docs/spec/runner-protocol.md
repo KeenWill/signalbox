@@ -208,7 +208,12 @@ required retry law:
   authority instead consumes the owning checked batch, verifies its complete
   original dispatch, and reissues the never-executed attempt through a fresh
   single-use durable runner-issuance guard. Only the private evidence produced
-  by the applicable batch transition can authorize the re-lease; and
+  by the applicable batch transition can authorize the re-lease. Preparing
+  either retry consumes the loss authority's one-shot preparation fence. For an
+  unclaimed retry, the predecessor guard moves one-way from issued to retired
+  while the returned batch installs a distinct successor guard; retained batch
+  copies cannot reopen the predecessor, and retry-marked authority is rejected
+  by the ordinary offer transition; and
 - `SideEffecting` produces typed crash-classification authority whose physical
   attempt is derived from the opaque lost lease and never produces re-lease
   authority.

@@ -7,7 +7,7 @@ use std::{
     num::NonZeroU64,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -754,6 +754,14 @@ struct ClaimedAttemptReplacementEvidence {
     request: ToolRequestId,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum RunnerRetryAttemptEvidence {
+    Unclaimed {
+        dispatch: ToolAttemptDispatchCorrelation,
+    },
+    Claimed(ClaimedAttemptReplacementEvidence),
+}
+
 /// Single-use tool-loop authority bound to its approved tool request.
 ///
 /// Canonical request pairing is owned by [`ToolBatch`], not by callers:
@@ -771,7 +779,7 @@ struct ClaimedAttemptReplacementEvidence {
 pub struct RunnerToolAttemptAuthorization {
     approved: ApprovedToolRequest,
     authorized: AuthorizedToolAttempt,
-    claimed_replacement: Option<ClaimedAttemptReplacementEvidence>,
+    retry_evidence: Option<RunnerRetryAttemptEvidence>,
 }
 
 impl RunnerToolAttemptAuthorization {
@@ -793,7 +801,7 @@ impl RunnerToolAttemptAuthorization {
         Ok(Self {
             approved,
             authorized,
-            claimed_replacement: None,
+            retry_evidence: None,
         })
     }
 
@@ -806,9 +814,9 @@ impl RunnerToolAttemptAuthorization {
     ) -> (
         ApprovedToolRequest,
         AuthorizedToolAttempt,
-        Option<ClaimedAttemptReplacementEvidence>,
+        Option<RunnerRetryAttemptEvidence>,
     ) {
-        (self.approved, self.authorized, self.claimed_replacement)
+        (self.approved, self.authorized, self.retry_evidence)
     }
 }
 
@@ -978,6 +986,7 @@ impl RunnerLease {
                     source,
                     generation,
                     claimed_attempt,
+                    preparation: RunnerRetryPreparationGuard::new(),
                 }),
             },
         })
@@ -1159,12 +1168,39 @@ impl RunnerClaimedAttemptReplacement {
 }
 
 /// Checked successor fence for one lost lease lineage.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
+struct RunnerRetryPreparationGuard(AtomicBool);
+
+impl RunnerRetryPreparationGuard {
+    const fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    fn claim(&self) -> bool {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
+
+#[derive(Debug)]
 pub struct RunnerLeaseRetryAuthority {
     source: RunnerLeaseRetrySource,
     generation: RunnerGeneration,
     claimed_attempt: Option<ToolAttemptId>,
+    preparation: RunnerRetryPreparationGuard,
 }
+
+// The process-local preparation guard is not part of durable retry identity.
+impl PartialEq for RunnerLeaseRetryAuthority {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.generation == other.generation
+            && self.claimed_attempt == other.claimed_attempt
+    }
+}
+
+impl Eq for RunnerLeaseRetryAuthority {}
 
 impl RunnerLeaseRetryAuthority {
     pub const fn generation(&self) -> RunnerGeneration {
@@ -1176,10 +1212,10 @@ impl RunnerLeaseRetryAuthority {
         &self,
         batch: ToolBatch,
     ) -> Result<RunnerUnclaimedAttemptReauthorization, RunnerDomainError> {
-        if self.claimed_attempt.is_some() {
+        if self.claimed_attempt.is_some() || !self.preparation.claim() {
             return Err(RunnerDomainError::InvalidState);
         }
-        let (batch, authorization) = batch
+        let (batch, mut authorization) = batch
             .reauthorize_unclaimed_runner_attempt(self.source.correlation.dispatch.attempt())
             .map_err(|_| RunnerDomainError::CorrelationMismatch)?;
         if authorization.approved.request().name() != &self.source.correlation.tool
@@ -1187,6 +1223,9 @@ impl RunnerLeaseRetryAuthority {
         {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
+        authorization.retry_evidence = Some(RunnerRetryAttemptEvidence::Unclaimed {
+            dispatch: self.source.correlation.dispatch,
+        });
         Ok(RunnerUnclaimedAttemptReauthorization {
             batch,
             authorization,
@@ -1204,6 +1243,9 @@ impl RunnerLeaseRetryAuthority {
             .ok_or(RunnerDomainError::InvalidState)?;
         if attempt == claimed {
             return Err(RunnerDomainError::AttemptIdentityReuse);
+        }
+        if !self.preparation.claim() {
+            return Err(RunnerDomainError::InvalidState);
         }
         let replacement = batch
             .replace_claimed_attempt(claimed, attempt)
@@ -1231,11 +1273,13 @@ impl RunnerLeaseRetryAuthority {
         }
         let mut authorization =
             RunnerToolAttemptAuthorization::try_new(replacement.approved, replacement.authorized)?;
-        authorization.claimed_replacement = Some(ClaimedAttemptReplacementEvidence {
-            retired: replacement.retired.attempt(),
-            replacement: authorization.authorized.correlation().attempt(),
-            request: authorization.approved.request().id(),
-        });
+        authorization.retry_evidence = Some(RunnerRetryAttemptEvidence::Claimed(
+            ClaimedAttemptReplacementEvidence {
+                retired: replacement.retired.attempt(),
+                replacement: authorization.authorized.correlation().attempt(),
+                request: authorization.approved.request().id(),
+            },
+        ));
         Ok(RunnerClaimedAttemptReplacement {
             batch: replacement.batch,
             retired: replacement.retired,
@@ -1410,7 +1454,7 @@ impl SessionRunnerPlacement {
         offer: RunnerLeaseOfferRequest,
     ) -> Result<RunnerLease, RunnerDomainError> {
         let dispatch = validate_dispatch(self, enrollment, registration, grant, &offer.tool)?;
-        let (attempt, claimed_replacement) = validate_authorized_attempt(
+        let (attempt, retry_evidence) = validate_authorized_attempt(
             self.session,
             &offer.tool,
             dispatch.effect,
@@ -1418,7 +1462,7 @@ impl SessionRunnerPlacement {
             dispatch.credential_authorization.as_ref(),
             authorization,
         )?;
-        if claimed_replacement.is_some() {
+        if retry_evidence.is_some() {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
         Ok(RunnerLease::offer_validated(ValidatedRunnerLeaseOffer {
@@ -1454,7 +1498,7 @@ impl SessionRunnerPlacement {
         {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
-        let (attempt, claimed_replacement) = validate_authorized_attempt(
+        let (attempt, retry_evidence) = validate_authorized_attempt(
             self.session,
             &lost.tool,
             dispatch.effect,
@@ -1462,17 +1506,18 @@ impl SessionRunnerPlacement {
             dispatch.credential_authorization.as_ref(),
             authorization,
         )?;
-        match (retry.claimed_attempt, claimed_replacement) {
+        match (retry.claimed_attempt, retry_evidence) {
             (Some(claimed), _) if attempt.attempt() == claimed => {
                 return Err(RunnerDomainError::AttemptIdentityReuse);
             }
-            (Some(claimed), Some(replacement))
+            (Some(claimed), Some(RunnerRetryAttemptEvidence::Claimed(replacement)))
                 if replacement.retired == claimed
                     && replacement.replacement == attempt.attempt()
                     && replacement.request == lost.dispatch.request()
                     && attempt.request() == lost.dispatch.request() => {}
             (Some(_), _) => return Err(RunnerDomainError::CorrelationMismatch),
-            (None, None) if attempt == lost.dispatch => {}
+            (None, Some(RunnerRetryAttemptEvidence::Unclaimed { dispatch: source }))
+                if attempt == lost.dispatch && source == lost.dispatch => {}
             (None, _) => return Err(RunnerDomainError::CorrelationMismatch),
         }
         Ok(RunnerLease::offer_validated(ValidatedRunnerLeaseOffer {
@@ -1736,11 +1781,11 @@ fn validate_authorized_attempt(
 ) -> Result<
     (
         ToolAttemptDispatchCorrelation,
-        Option<ClaimedAttemptReplacementEvidence>,
+        Option<RunnerRetryAttemptEvidence>,
     ),
     RunnerDomainError,
 > {
-    let (approved, authorized, claimed_replacement) = authorization.into_parts();
+    let (approved, authorized, retry_evidence) = authorization.into_parts();
     let (attempt, correlation) = authorized.into_parts();
     let expected_effect = tool_effect_class(effect);
     if approved.request().name() != tool
@@ -1766,7 +1811,7 @@ fn validate_authorized_attempt(
     {
         return Err(RunnerDomainError::CorrelationMismatch);
     }
-    Ok((correlation, claimed_replacement))
+    Ok((correlation, retry_evidence))
 }
 
 const fn tool_effect_class(effect: RunnerToolEffectClass) -> ToolEffectClass {
@@ -3196,12 +3241,16 @@ mod tests {
         let clone_duplicate = preexisting_clone
             .resume_runner_attempt(attempt)
             .expect_err("a preexisting clone shares the reissued single-use fence");
+        let retained_authorized_attempts = preexisting_clone
+            .runner_authorized_attempts()
+            .collect::<Vec<_>>();
 
         assert_eq!(
             replacement.generation(),
             RunnerGeneration::try_from_u64(2).expect("two is positive")
         );
         assert_eq!(replacement.attempt(), attempt);
+        assert_eq!(retained_authorized_attempts, vec![attempt]);
         assert_eq!(
             duplicate.failure(),
             ToolBatchExecutionFailure::AttemptStageMismatch
@@ -3209,6 +3258,54 @@ mod tests {
         assert_eq!(
             clone_duplicate.failure(),
             ToolBatchExecutionFailure::AttemptStageMismatch
+        );
+    }
+
+    #[test]
+    fn s31_inv043_unclaimed_retry_preparation_is_single_use_across_batch_copies() {
+        let (_, _, _, batch, lease) = offered_from_batch("deploy");
+        let retained_batch = batch.clone();
+        let proof = no_execution_proof(&lease);
+        let loss = lease
+            .lose_unclaimed(&proof)
+            .expect("proof-backed unclaimed loss is checked");
+        let _prepared = loss
+            .retry()
+            .expect("unclaimed loss carries retry authority")
+            .prepare_unclaimed_attempt(batch)
+            .expect("the first batch copy consumes retry preparation authority");
+
+        assert_eq!(
+            loss.retry()
+                .expect("the loss still exposes its checked lineage")
+                .prepare_unclaimed_attempt(retained_batch),
+            Err(RunnerDomainError::InvalidState)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_unclaimed_retry_authority_is_rejected_by_ordinary_offer() {
+        let (registration, placement, grant, batch, lease) = offered_from_batch("deploy");
+        let proof = no_execution_proof(&lease);
+        let loss = lease
+            .lose_unclaimed(&proof)
+            .expect("proof-backed unclaimed loss is checked");
+        let prepared = loss
+            .retry()
+            .expect("unclaimed loss carries retry authority")
+            .prepare_unclaimed_attempt(batch)
+            .expect("the owning batch reauthorizes the never-executed attempt");
+        let (_, authorization) = prepared.into_parts();
+
+        assert_eq!(
+            placement.offer_lease(
+                &enrollment_for_registration(&registration),
+                &registration,
+                grant.as_ref(),
+                authorization,
+                lease_offer_request("deploy"),
+            ),
+            Err(RunnerDomainError::CorrelationMismatch)
         );
     }
 
