@@ -262,6 +262,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             emit_error(fixtures::STREAM_ERROR_MESSAGE);
             completed();
         }
+        "error_then_contradictory_turn_failed" => {
+            emit_error(fixtures::STREAM_ERROR_MESSAGE);
+            failed("authentication failed instead of the stream error");
+        }
         "no_terminal" => {
             envelope(r#"{"outcome":"completed","text":"not terminal","tool_calls":[]}"#);
         }

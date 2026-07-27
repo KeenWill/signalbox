@@ -659,6 +659,18 @@ async fn a_completion_trailer_after_a_stream_error_still_fails_closed() {
     assert_error_scenario("error_then_turn_completed", ProviderErrorKind::Unrecognized).await;
 }
 
+/// A syntactically valid `turn.failed` trailer carrying a different failure
+/// than the stream error it follows is a contradiction, not the lifecycle
+/// echo, and fails closed instead of silently keeping either message.
+#[tokio::test]
+async fn a_contradictory_turn_failed_trailer_still_fails_closed() {
+    assert_error_scenario(
+        "error_then_contradictory_turn_failed",
+        ProviderErrorKind::Unrecognized,
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn undecodable_event_fails_closed_as_unrecognized_provider_error() {
     assert_error_scenario("malformed_event", ProviderErrorKind::Unrecognized).await;
