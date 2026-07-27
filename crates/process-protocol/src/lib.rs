@@ -4234,14 +4234,18 @@ mod tests {
             },
             system_prompt: SystemPromptMember::present(None),
         };
+        let promptless_frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::Nine, request_id, promptless_create)?;
+        let promptless_encoded = encode_client_line(&promptless_frame)?;
         assert_eq!(
-            ClientFrame::try_new_for_version(
-                ProtocolVersion::Nine,
-                request_id,
-                promptless_create.clone()
-            ),
-            ClientFrame::try_new_for_version(ProtocolVersion::Nine, request_id, promptless_create),
+            String::from_utf8(promptless_encoded.clone())?,
+            "{\"version\":9,\"request_id\":\"8\",\"request\":{\"type\":\"create_session\",\
+             \"command_id\":\"00000000-0000-0000-0000-000000000001\",\
+             \"initial_model_selection\":{\"kind\":\"direct\",\
+             \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"system_prompt\":null}}\n"
         );
+        assert_eq!(decode_client_line(&promptless_encoded)?, promptless_frame);
         let decoded_null = decode_client_line(&line(
             r#"{"version":9,"request_id":"8","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"system_prompt":null}}"#,
         ))?;

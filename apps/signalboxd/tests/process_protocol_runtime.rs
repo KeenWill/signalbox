@@ -2265,14 +2265,19 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
         )
         .await?;
     let gated = response_within(&mut connection).await?;
-    assert!(matches!(
-        gated.message(),
-        ServerMessage::Error {
-            code: ErrorCode::UnsupportedVersion,
-            message,
-            ..
-        } if message.contains("version 9")
-    ));
+    let ServerMessage::Error {
+        code: gated_code,
+        message: gated_message,
+        ..
+    } = gated.message()
+    else {
+        panic!("the pre-nine replacement on a prompted session must be refused");
+    };
+    assert_eq!(*gated_code, ErrorCode::UnsupportedVersion);
+    assert_eq!(
+        gated_message,
+        "the selected session requires protocol version 9"
+    );
     let gated_claim_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
             .bind(gated_command.into_uuid())

@@ -17993,7 +17993,7 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     else {
         panic!("the current defaults epoch must read");
     };
-    assert_eq!(current.version().as_u64(), 2);
+    assert_eq!(current.version(), applied.installed().version());
     assert_eq!(current.defaults(), &promptless_defaults);
     let ProcessSessionDefaultsRead::Read(named) = read
         .read_session_defaults(
@@ -18004,7 +18004,10 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     else {
         panic!("the named prompted epoch must read");
     };
-    assert_eq!(named.version().as_u64(), 1);
+    assert_eq!(
+        named.version(),
+        SessionConfigurationDefaultsVersion::first()
+    );
     assert_eq!(named.defaults(), &prompted_defaults);
     assert_eq!(
         read.read_session_defaults(
