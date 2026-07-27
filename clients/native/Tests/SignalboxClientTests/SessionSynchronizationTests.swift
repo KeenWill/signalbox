@@ -1530,6 +1530,28 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testProjectionRejectionUsesBoundedSteadyRecovery() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(cursor: 10)
+
+    let effects = transport.send(
+      .projectionRejected(message: "fixture projection rejected")
+    )
+
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .steady, failureCount: 1, nextGeneration: 2)
+    )
+    XCTAssertEqual(
+      SynchronizationFixture.reconnectDelay(in: effects),
+      SynchronizationFixture.policy.retry.delays.first
+    )
+    XCTAssertTrue(
+      effects.contains(
+        .closeFollow(generation: SynchronizationFixture.initialGeneration)
+      )
+    )
+  }
+
   func testInvalidSideSnapshotCancelsItsSeparateTransport() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor

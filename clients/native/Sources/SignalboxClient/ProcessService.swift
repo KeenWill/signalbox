@@ -27,6 +27,7 @@ public enum SignalboxProcessServiceError: LocalizedError, Equatable {
 public struct SignalboxProcessApplicationPolicy: Equatable, Sendable {
   public let metadataPageSize: SignalboxCanonicalUInt64
   public let maximumMetadataPages: UInt
+  public let maximumMetadataListUTF8Bytes: UInt
   public let ambiguousMutationRetryDelays: [Duration]
   public let oneShotResponseDeadline: Duration
   public let synchronization: SignalboxSessionSynchronizationPolicy
@@ -34,12 +35,14 @@ public struct SignalboxProcessApplicationPolicy: Equatable, Sendable {
   public init(
     metadataPageSize: SignalboxCanonicalUInt64,
     maximumMetadataPages: UInt,
+    maximumMetadataListUTF8Bytes: UInt = 32 * 1_024 * 1_024,
     ambiguousMutationRetryDelays: [Duration],
     oneShotResponseDeadline: Duration = .seconds(20),
     synchronization: SignalboxSessionSynchronizationPolicy
   ) {
     self.metadataPageSize = metadataPageSize
     self.maximumMetadataPages = maximumMetadataPages
+    self.maximumMetadataListUTF8Bytes = maximumMetadataListUTF8Bytes
     self.ambiguousMutationRetryDelays = ambiguousMutationRetryDelays
     self.oneShotResponseDeadline = oneShotResponseDeadline
     self.synchronization = synchronization
@@ -166,6 +169,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     var sessions: [SignalboxProcessSession] = []
     var cursor: SignalboxCanonicalUUID?
     var pageCount: UInt = 0
+    var retainedUTF8Bytes: UInt = 0
     while true {
       guard pageCount < policy.maximumMetadataPages else {
         throw SignalboxProcessServiceError.invalidPage(
@@ -177,6 +181,25 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         after: cursor,
         pageSize: policy.metadataPageSize
       )
+      for session in page.sessions {
+        let titleBytes = UInt(session.title?.utf8.count ?? 0)
+        let tagBytes = session.tags.reduce(UInt(0)) { partial, tag in
+          partial + UInt(tag.utf8.count)
+        }
+        let (summaryBytes, summaryOverflowed) = titleBytes.addingReportingOverflow(tagBytes)
+        let (nextBytes, listOverflowed) =
+          retainedUTF8Bytes.addingReportingOverflow(summaryBytes)
+        guard
+          !summaryOverflowed,
+          !listOverflowed,
+          nextBytes <= policy.maximumMetadataListUTF8Bytes
+        else {
+          throw SignalboxProcessServiceError.invalidPage(
+            "The native session list exceeded its retained UTF-8 byte limit."
+          )
+        }
+        retainedUTF8Bytes = nextBytes
+      }
       sessions.append(contentsOf: page.sessions)
       pageCount += 1
       guard let next = page.nextAfterSessionID else {

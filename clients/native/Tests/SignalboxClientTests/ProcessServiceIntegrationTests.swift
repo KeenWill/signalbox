@@ -689,6 +689,32 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testTerminalSideSnapshotKeepsAcceptedInputBeforeResponse() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    let completed = try ProcessProjectionFixture.completedEvent()
+    viewModel.apply(.event(try ProcessProjectionFixture.acceptedEvent()))
+    viewModel.apply(.event(completed))
+
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithTerminalResponseMissingUserEntry(),
+        trigger: completed
+      )
+    )
+
+    XCTAssertEqual(
+      viewModel.transcriptRows.map(\.id).first,
+      ProcessProjectionFixture.acceptedTranscriptRowID
+    )
+    XCTAssertEqual(
+      viewModel.transcriptRows.map(\.id).last,
+      ProcessProjectionFixture.completedAssistantTranscriptRowID
+    )
+  }
+
+  @MainActor
   func testLateReceiptKeepsTerminalInputOutOfPendingState() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -709,6 +735,28 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       try ProcessSubmissionFixture.singlePendingInput()
     )
     XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.completedActivity)
+  }
+
+  @MainActor
+  func testDefinitelyUnsentExactRetryPreservesAmbiguousCommandIdentity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenUnsentSubmissionService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.composerText = ProcessSubmissionFixture.content
+
+    await viewModel.send()
+    await viewModel.send()
+    await viewModel.send()
+    let submittedCommandIDs = await service.submittedCommandIDs
+    let prepareCallCount = await service.prepareCallCount
+
+    XCTAssertEqual(
+      submittedCommandIDs,
+      ProcessSubmissionFixture.threeIdenticalCommandIDs
+    )
+    XCTAssertEqual(prepareCallCount, ProcessSubmissionFixture.singleRequestCount)
   }
 
   @MainActor
@@ -1111,6 +1159,43 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(error, ProcessDriverFixture.metadataRequestCursorError)
   }
 
+  func testMetadataListRejectsCumulativeTextAboveTypedCapacity() async throws {
+    let requester = SequencedProcessRequester(
+      pages: [
+        [
+          try ProcessDriverFixture.metadataPageStart(),
+          try ProcessDriverFixture.metadataSummary(
+            sessionID: ProcessDriverFixture.metadataSessionA
+          ),
+          try ProcessDriverFixture.metadataPageEnd(
+            count: ProcessDriverFixture.singleMetadataCount,
+            nextSessionID: ProcessDriverFixture.metadataSessionA
+          ),
+        ],
+        [
+          try ProcessDriverFixture.metadataPageStart(),
+          try ProcessDriverFixture.metadataSummary(
+            sessionID: ProcessDriverFixture.metadataSessionB
+          ),
+          try ProcessDriverFixture.metadataPageEnd(
+            count: ProcessDriverFixture.singleMetadataCount,
+            nextSessionID: nil
+          ),
+        ],
+      ]
+    )
+    let service = SignalboxProcessService(
+      requester: requester,
+      policy: ProcessDriverFixture.oneSummaryTextMetadataPolicy
+    )
+
+    let error = await capturedServiceError {
+      _ = try await service.listSessions(includeArchived: false)
+    }
+
+    XCTAssertEqual(error, ProcessDriverFixture.metadataListTextCapacityError)
+  }
+
   func testMetadataPageSkipsSummaryWithNoncanonicalTagOrder() async throws {
     let requester = StaticProcessRequester(
       frames: [
@@ -1340,6 +1425,7 @@ private enum ProcessSubmissionFixture {
   static let acceptedInputID = "abababab-0000-4000-8000-000000000002"
   static let acceptedTurnID = "abababab-0000-4000-8000-000000000003"
   static let retriedCommandIDs = [commandID, commandID]
+  static let threeIdenticalCommandIDs = [commandID, commandID, commandID]
   static let editedComposerCommandIDs = [commandID, replacementCommandID]
   static let editedComposerContents = [content, replacementContent]
   static let canonicallyEditedContentBytes = [
@@ -1939,6 +2025,61 @@ private actor SuspendedSubmissionService: SignalboxProcessServiceProtocol {
   }
 }
 
+private actor AmbiguousThenUnsentSubmissionService: SignalboxProcessServiceProtocol {
+  private(set) var prepareCallCount = 0
+  private(set) var submittedCommandIDs: [String] = []
+
+  func testConnection() async {}
+
+  func listSessions(includeArchived: Bool) async -> [SignalboxProcessSession] {
+    []
+  }
+
+  func setArchived(
+    _ archived: Bool,
+    session: SignalboxProcessSession
+  ) async -> SignalboxProcessSession {
+    session
+  }
+
+  func prepareInputSubmission(
+    session: SignalboxProcessSession,
+    content: String
+  ) throws -> SignalboxPreparedInputSubmission {
+    prepareCallCount += 1
+    return SignalboxPreparedInputSubmission(
+      commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
+      sessionID: session.id,
+      content: content,
+      expectedDefaultsVersion: session.defaultsVersion
+    )
+  }
+
+  func submit(
+    _ submission: SignalboxPreparedInputSubmission
+  ) throws -> SignalboxInputSubmitted {
+    submittedCommandIDs.append(submission.commandID.rawValue.rawValue)
+    switch submittedCommandIDs.count {
+    case 1:
+      throw SignalboxProcessServiceError.mutationRetryExhausted(
+        code: .commitAmbiguous,
+        message: ProcessSubmissionFixture.failureMessage
+      )
+    case 2:
+      throw ProcessDriverFixture.definitelyUnsentError
+    default:
+      return try ProcessSubmissionFixture.submittedReceipt(sessionID: submission.sessionID)
+    }
+  }
+
+  func makeSynchronization(
+    sessionID: SignalboxCanonicalUUID,
+    updates: @escaping @Sendable (SignalboxSessionSynchronizationDriverUpdate) async -> Void
+  ) -> any SignalboxSessionSynchronizing {
+    NoopProcessSynchronization()
+  }
+}
+
 private enum ProcessSubmissionFixtureError: LocalizedError {
   case rejected
   case receiveFailed
@@ -2307,6 +2448,9 @@ private enum ProcessDriverFixture {
   static let metadataRegressingEndCursorError = SignalboxProcessServiceError.invalidPage(
     "The metadata page cursor regressed behind an admitted summary."
   )
+  static let metadataListTextCapacityError = SignalboxProcessServiceError.invalidPage(
+    "The native session list exceeded its retained UTF-8 byte limit."
+  )
   static let definitelyUnsentError = SignalboxProcessRequestOpenError.definitelyUnsent(
     "Fixture connection failed."
   )
@@ -2329,6 +2473,14 @@ private enum ProcessDriverFixture {
   static let oneRowMetadataPolicy = SignalboxProcessApplicationPolicy(
     metadataPageSize: SignalboxCanonicalUInt64(rawValue: 1),
     maximumMetadataPages: SignalboxProcessApplicationPolicy.nativeDefault.maximumMetadataPages,
+    ambiguousMutationRetryDelays:
+      SignalboxProcessApplicationPolicy.nativeDefault.ambiguousMutationRetryDelays,
+    synchronization: SignalboxProcessApplicationPolicy.nativeDefault.synchronization
+  )
+  static let oneSummaryTextMetadataPolicy = SignalboxProcessApplicationPolicy(
+    metadataPageSize: SignalboxCanonicalUInt64(rawValue: 1),
+    maximumMetadataPages: SignalboxProcessApplicationPolicy.nativeDefault.maximumMetadataPages,
+    maximumMetadataListUTF8Bytes: UInt("Fixture metadata session".utf8.count),
     ambiguousMutationRetryDelays:
       SignalboxProcessApplicationPolicy.nativeDefault.ambiguousMutationRetryDelays,
     synchronization: SignalboxProcessApplicationPolicy.nativeDefault.synchronization
@@ -2680,6 +2832,8 @@ private enum ProcessProjectionFixture {
   static let neutralToolCardStatus = SignalboxToolCardStatus.completed
   static let orderedPresentationIDs = [1, 2]
   static let orderedMessageRoles = [SignalboxMessageRole.user, .assistant]
+  static let acceptedTranscriptRowID = "accepted-\(ProcessSubmissionFixture.acceptedInputID)"
+  static let completedAssistantTranscriptRowID = "timeline-message-1"
 
   static func materializedAcceptedInputIDs() throws -> Set<SignalboxCanonicalUUID> {
     [try SignalboxCanonicalUUID(validating: ProcessSubmissionFixture.acceptedInputID)]
@@ -2940,6 +3094,65 @@ private enum ProcessProjectionFixture {
           "cursor":"1",
           "turn_count":"0",
           "entry_count":"1"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithTerminalResponseMissingUserEntry() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(completedAssistantEntry)",
+          "entry":{
+            "type":"assistant",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"0",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(completedAssistantText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(ProcessDriverFixture.completionEntry)",
+          "entry":{
+            "type":"turn_completed",
+            "turn_id":"\(ProcessDriverFixture.turn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"2"
         }
         """,
       ]

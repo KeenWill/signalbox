@@ -294,6 +294,20 @@ private struct ProcessSessionRow: View {
 
 @MainActor
 final class ProcessSessionDetailViewModel: ObservableObject {
+  enum TranscriptRow: Identifiable {
+    case timeline(SignalboxTimelineItem)
+    case accepted(SignalboxProcessPendingInput)
+
+    var id: String {
+      switch self {
+      case .timeline(let item):
+        "timeline-\(item.id)"
+      case .accepted(let input):
+        "accepted-\(input.id.rawValue)"
+      }
+    }
+  }
+
   @Published private(set) var timeline: [SignalboxTimelineItem] = []
   @Published private(set) var pendingInputs: [SignalboxProcessPendingInput] = []
   @Published private(set) var acceptedInputsAwaitingTranscript: [SignalboxProcessPendingInput] = []
@@ -313,6 +327,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private var unresolvedSubmission: SignalboxPreparedInputSubmission?
   private var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
   private var terminalTurnIDs: Set<SignalboxCanonicalUUID> = []
+  private var acceptedInputTimelineOffsets: [SignalboxCanonicalUUID: Int] = [:]
   private var projector = SignalboxProcessTranscriptProjector()
   private var normalizer = SignalboxIncrementalEventNormalizer()
 
@@ -388,12 +403,14 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       }
     }
     var preparedForAttempt: SignalboxPreparedInputSubmission?
+    var reusedUnresolvedSubmission = false
     do {
       let prepared: SignalboxPreparedInputSubmission
       if let unresolvedSubmission,
         hasExactUTF8(unresolvedSubmission.content, content)
       {
         prepared = unresolvedSubmission
+        reusedUnresolvedSubmission = true
       } else {
         unresolvedSubmission = nil
         prepared = try await service.prepareInputSubmission(
@@ -440,6 +457,11 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         case .mutationRetryExhausted = serviceError
       {
         unresolvedSubmission = preparedForAttempt
+      } else if let openError = error as? SignalboxProcessRequestOpenError,
+        case .definitelyUnsent = openError,
+        reusedUnresolvedSubmission
+      {
+        unresolvedSubmission = preparedForAttempt
       } else {
         unresolvedSubmission = nil
       }
@@ -470,6 +492,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         acceptedInputsAwaitingTranscript.removeAll {
           projection.materializedAcceptedInputIDs.contains($0.id)
         }
+        for id in projection.materializedAcceptedInputIDs {
+          acceptedInputTimelineOffsets[id] = nil
+        }
         materializedAcceptedInputIDs = projection.materializedAcceptedInputIDs
         terminalTurnIDs = terminalTurnIDs(in: snapshot)
         activity = projection.activity
@@ -490,6 +515,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         acceptedInputsAwaitingTranscript.removeAll {
           projection.materializedAcceptedInputIDs.contains($0.id)
         }
+        for id in projection.materializedAcceptedInputIDs {
+          acceptedInputTimelineOffsets[id] = nil
+        }
       case .event(let followed):
         applyLiveEvent(followed.event)
       case .diagnostic(let diagnostic):
@@ -501,7 +529,20 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       }
     } catch {
       errorMessage = error.localizedDescription
+      let synchronization = synchronization
+      Task {
+        await synchronization?.recoverFromProjectionFailure(error.localizedDescription)
+      }
     }
+  }
+
+  var transcriptRows: [TranscriptRow] {
+    var rows = timeline.map(TranscriptRow.timeline)
+    for input in acceptedInputsAwaitingTranscript.reversed() {
+      let offset = min(acceptedInputTimelineOffsets[input.id] ?? rows.count, rows.count)
+      rows.insert(.accepted(input), at: offset)
+    }
+    return rows
   }
 
   private func hasExactUTF8(_ lhs: String, _ rhs: String) -> Bool {
@@ -550,6 +591,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     timeline = []
     pendingInputs = []
     acceptedInputsAwaitingTranscript = []
+    acceptedInputTimelineOffsets = [:]
     activity = .unavailable
     phase = .stopped
     latestDiagnostic = nil
@@ -655,6 +697,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }) {
       acceptedInputsAwaitingTranscript[index] = acceptedInput
     } else {
+      acceptedInputTimelineOffsets[acceptedInput.id] = timeline.count
       acceptedInputsAwaitingTranscript.append(acceptedInput)
     }
     acceptedInputsAwaitingTranscript.sort {
@@ -735,20 +778,30 @@ struct ProcessSessionDetailScreen: View {
           .padding(.top, 6)
           .accessibilityIdentifier("synchronization-diagnostic")
       }
+      if viewModel.session.dangerousToolAutoApproval {
+        Label("Dangerous tools are auto-approved", systemImage: "exclamationmark.triangle.fill")
+          .font(.callout.weight(.semibold))
+          .foregroundStyle(.orange)
+          .padding(.horizontal)
+          .padding(.top, 8)
+          .accessibilityIdentifier("dangerous-tool-auto-approval-warning")
+      }
       ScrollView {
         LazyVStack(alignment: .leading, spacing: 12) {
-          ForEach(viewModel.timeline) { item in
-            processTimelineView(item)
-          }
-          ForEach(viewModel.acceptedInputsAwaitingTranscript) { acceptedInput in
-            VStack(alignment: .leading, spacing: 4) {
-              Text("Accepted input")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-              Text(acceptedInput.content)
+          ForEach(viewModel.transcriptRows) { row in
+            switch row {
+            case .timeline(let item):
+              processTimelineView(item)
+            case .accepted(let acceptedInput):
+              VStack(alignment: .leading, spacing: 4) {
+                Text("Accepted input")
+                  .font(.caption.weight(.semibold))
+                  .foregroundStyle(.secondary)
+                Text(acceptedInput.content)
+              }
+              .padding(12)
+              .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
             }
-            .padding(12)
-            .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
           }
           ForEach(viewModel.pendingInputs) { pending in
             VStack(alignment: .leading, spacing: 4) {

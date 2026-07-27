@@ -20,6 +20,11 @@ public enum SignalboxSessionSynchronizationDriverUpdate: Equatable, Sendable {
 public protocol SignalboxSessionSynchronizing: Sendable {
   func start() async
   func stop() async
+  func recoverFromProjectionFailure(_ message: String) async
+}
+
+extension SignalboxSessionSynchronizing {
+  public func recoverFromProjectionFailure(_ message: String) async {}
 }
 
 public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizing {
@@ -74,6 +79,13 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
     isStarted = false
     await process(.stop)
     await cancelAllWork()
+  }
+
+  public func recoverFromProjectionFailure(_ message: String) async {
+    guard isStarted else {
+      return
+    }
+    await process(.projectionRejected(message: message))
   }
 
   private func process(

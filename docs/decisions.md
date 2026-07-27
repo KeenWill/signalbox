@@ -10,6 +10,25 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Bound retained native metadata-list text at 32 MiB
+
+**Context.** Each metadata page and summary has a row and UTF-8 bound, and the
+number of pages is capped, but the native client retained every admitted title
+and tag until pagination completed. The product of those independent limits was
+larger than the client should retain for one list operation.
+
+**Decision.** Give metadata-list accumulation its own typed policy parameter and
+set the native default to 32 MiB of title and tag UTF-8. Reject the operation
+before appending a page that would exceed the cap or overflow its byte count.
+
+**Rejected alternatives.** Relying on page count alone leaves a much larger
+implicit memory budget. Truncating metadata silently changes authoritative
+values. Charging fixed-size identifiers does not materially improve the bound
+and obscures what this capacity controls.
+
+**Affects.** Native process-service metadata pagination and its integration
+tests.
+
 ## 2026-07-26 — Bound retained native diagnostic messages at 4 KiB
 
 **Context.** The native synchronization machine retains the latest 128
