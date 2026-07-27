@@ -53,7 +53,11 @@ pub(crate) fn redact_text(text: &str) -> String {
     // literal escape is never rewritten; only when the decoded form reveals a
     // credential shape the literal scan missed is the redacted decoded form
     // returned, failing closed.
-    let decoded = decode_unicode_escapes(text);
+    let Some(decoded) = decode_unicode_escapes(text) else {
+        // Pathological escape nesting exhausted the decode budget; a
+        // credential could hide behind the unresolved escapes, so fail closed.
+        return REDACTED.to_string();
+    };
     if decoded == text {
         return sanitized;
     }
@@ -141,16 +145,25 @@ fn redact_spaced_credential(text: &str, name: &str, termination: ValueTerminatio
 /// fixed point; each changing pass replaces a six-byte escape with at most
 /// four bytes, so the string strictly shrinks and the loop is bounded by the
 /// input length rather than a fixed ceiling.
-fn decode_unicode_escapes(text: &str) -> String {
+fn decode_unicode_escapes(text: &str) -> Option<String> {
+    // Cumulative scan work is capped at a small multiple of the input length,
+    // so a deeply nested escape spelling — which peels one level per whole-
+    // string pass and would otherwise be quadratic — cannot pin the decode
+    // (run synchronously while decoding a bounded-but-large provider event)
+    // past the exchange deadline. Legitimate content converges in one or two
+    // passes and stays well inside the budget; exhaustion means pathological
+    // nesting, and the caller fails closed.
+    let mut budget = text.len().saturating_mul(4).saturating_add(4096);
     let mut current = text.to_string();
     while current.contains("\\u") {
+        budget = budget.checked_sub(current.len())?;
         let decoded = decode_unicode_escape_pass(&current);
         if decoded == current {
             break;
         }
         current = decoded;
     }
-    current
+    Some(current)
 }
 
 fn decode_unicode_escape_pass(text: &str) -> String {
@@ -320,6 +333,8 @@ fn credential_key(key: &str) -> bool {
         "refreshtoken",
         "idtoken",
         "sessiontoken",
+        "authtoken",
+        "bearertoken",
         "credential",
         "password",
         "secret",
@@ -812,13 +827,40 @@ fn stream_candidate_starts_at_zero(text: &str) -> bool {
         || json_credential_value_at_start(text).is_some()
         || unterminated_json_key_start(text) == Some(0)
         || json_credential_key_awaiting_colon(text) == Some(0)
-        || {
+        || match decode_unicode_escapes(text) {
             // A candidate spelled with `\uXXXX` escapes still starts at zero
-            // in the form a JSON consumer reconstructs.
-            let decoded = decode_unicode_escapes(text);
-            decoded != text && stream_candidate_starts_at_zero(&decoded)
+            // in the form a JSON consumer reconstructs; an exhausted decode
+            // budget is treated as a candidate so the fragment is held.
+            Some(decoded) => decoded != text && stream_candidate_starts_at_zero(&decoded),
+            None => true,
         }
         || trailing_partial_unicode_escape(text) == Some(0)
+        || spaced_credential_starts_at_zero(text)
+}
+
+/// Whether `text` begins a spaced credential assignment — a recognized name
+/// (or a prefix of one) at index zero, optionally followed by whitespace and a
+/// separator — whether or not its value has terminated. A held candidate that
+/// has already reached its separator must still enter the redaction branch, so
+/// this is broader than the in-progress-only `spaced_credential_unsafe_start`.
+fn spaced_credential_starts_at_zero(text: &str) -> bool {
+    LINE_CREDENTIAL_NAMES
+        .iter()
+        .chain(VALUE_CREDENTIAL_NAMES)
+        .any(|name| {
+            if text.len() < name.len() {
+                return name.as_bytes()[..text.len()].eq_ignore_ascii_case(text.as_bytes());
+            }
+            if !text.as_bytes()[..name.len()].eq_ignore_ascii_case(name.as_bytes()) {
+                return false;
+            }
+            let whitespace = text[name.len()..]
+                .bytes()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            let separator = name.len() + whitespace;
+            separator == text.len() || matches!(text.as_bytes().get(separator), Some(b'=' | b':'))
+        })
 }
 
 fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
@@ -872,6 +914,60 @@ fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
     if let Some(start) = escaped_unsafe_suffix_start(text) {
         earliest = Some(earliest.map_or(start, |current| current.min(start)));
     }
+    if let Some(start) = spaced_credential_unsafe_start(text) {
+        earliest = Some(earliest.map_or(start, |current| current.min(start)));
+    }
+    earliest
+}
+
+/// Holds a spaced credential assignment (`api_key = value`, `authorization :
+/// value`) that the exact no-whitespace markers miss, when it is still in
+/// progress at the end of a fragment: a bare recognized name (its separator or
+/// value may arrive next), a name with a separator but an unterminated value,
+/// or a trailing partial name prefix. The contiguous form is redacted by the
+/// literal scanner; this only governs cross-delta holding.
+fn spaced_credential_unsafe_start(text: &str) -> Option<usize> {
+    let mut earliest: Option<usize> = None;
+    let mut fold = |start: usize| {
+        earliest = Some(earliest.map_or(start, |current: usize| current.min(start)));
+    };
+    let named = LINE_CREDENTIAL_NAMES
+        .iter()
+        .map(|name| (name, ValueTermination::Line))
+        .chain(
+            VALUE_CREDENTIAL_NAMES
+                .iter()
+                .map(|name| (name, ValueTermination::Token)),
+        );
+    for (name, termination) in named {
+        let prefix_length = trailing_marker_prefix(text, name, true);
+        if prefix_length > 0 {
+            fold(text.len() - prefix_length);
+        }
+        let mut offset = 0;
+        while let Some(relative) = find_ascii_case_insensitive(&text[offset..], name) {
+            let start = offset + relative;
+            let after_name = start + name.len();
+            let whitespace = text[after_name..]
+                .bytes()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            let separator = after_name + whitespace;
+            let in_progress = if separator == text.len() {
+                true
+            } else if matches!(text.as_bytes().get(separator), Some(b'=' | b':')) {
+                let (_, token_start, value_end) =
+                    credential_value_bounds(text, separator + 1, termination);
+                value_end.max(token_start) == text.len()
+            } else {
+                false
+            };
+            if in_progress {
+                fold(start);
+            }
+            offset = after_name;
+        }
+    }
     earliest
 }
 
@@ -885,7 +981,11 @@ fn escaped_unsafe_suffix_start(text: &str) -> Option<usize> {
     if let Some(start) = trailing_partial_unicode_escape(text) {
         return Some(start);
     }
-    let decoded = decode_unicode_escapes(text);
+    let Some(decoded) = decode_unicode_escapes(text) else {
+        // An exhausted decode budget means unresolved nested escapes; hold the
+        // whole fragment so a credential hidden behind them cannot be emitted.
+        return Some(0);
+    };
     if decoded == text {
         return None;
     }
@@ -1047,8 +1147,8 @@ mod tests {
     use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink};
 
     use super::{
-        MAX_PENDING_STREAM_BYTES, REDACTED, RedactingSink, redact_json, redact_text,
-        stream_candidate_starts_at_zero, unsafe_stream_suffix_start,
+        MAX_PENDING_STREAM_BYTES, REDACTED, RedactingSink, decode_unicode_escapes, redact_json,
+        redact_text, stream_candidate_starts_at_zero, unsafe_stream_suffix_start,
     };
 
     const CREDENTIAL_SHAPED_VALUE: &str = "sk-sensitive-value";
@@ -1066,6 +1166,14 @@ mod tests {
     const ESCAPED_QUOTED_SECRET_VALUE: &str = r#"sensitive \"quoted\" value"#;
     const MULTILINE_SECRET_VALUE: &str = "sensitive\nmultiline\nvalue";
     const COMPOSITE_SECRET_VALUE: &str = "sensitive-composite-value";
+
+    fn observation_text(observation: Observation<u8>) -> String {
+        match observation.fact {
+            ObservationFact::TextDelta { text, .. }
+            | ObservationFact::ThinkingDelta { text, .. } => text,
+            _ => String::new(),
+        }
+    }
     const STRUCTURED_OBJECT_SECRET_VALUE: &str = "sensitive-structured-object-value";
     const STRUCTURED_ARRAY_SECRET_ONE: &str = "sensitive-structured-array-one";
     const STRUCTURED_ARRAY_SECRET_TWO: &str = "sensitive-structured-array-two";
@@ -1349,6 +1457,79 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// INV-035: `auth_token` / `bearer_token` members are redacted even with an
+    /// opaque value lacking any token prefix.
+    #[test]
+    fn inv_035_redacts_authentication_token_members() {
+        let auth = format!(r#"{{"auth_token":"{QUOTED_CREDENTIAL_VALUE}"}}"#);
+        let bearer = format!(r#"{{"bearer_token":"{JSON_CREDENTIAL_VALUE}"}}"#);
+
+        assert_eq!(redact_json(&auth), r#"{"auth_token":"[redacted]"}"#);
+        assert_eq!(redact_json(&bearer), r#"{"bearer_token":"[redacted]"}"#);
+    }
+
+    /// A non-secret usage field that merely contains "token" is not matched.
+    #[test]
+    fn input_tokens_usage_field_is_not_redacted() {
+        let fixture = r#"{"input_tokens":11,"output_tokens":7}"#;
+
+        assert_eq!(redact_json(fixture), fixture);
+    }
+
+    /// INV-035: pathologically nested escapes exhaust the decode budget and
+    /// fail closed rather than leaking or running unbounded.
+    #[test]
+    fn inv_035_exhausted_escape_decode_fails_closed() {
+        // Each `u005c` re-forms an escape after the prior one decodes to a
+        // backslash, so the spelling peels one level per whole-string pass.
+        let nested = format!(r"\u005c{}", "u005c".repeat(64));
+        let fixture = format!("sk{nested}u002dbudget-buster-secret");
+
+        assert!(decode_unicode_escapes(&fixture).is_none());
+        assert_eq!(redact_text(&fixture), REDACTED);
+    }
+
+    /// INV-035: a spaced credential name is held across streamed deltas so the
+    /// separated fragments cannot reconstruct the assignment.
+    #[test]
+    fn inv_035_stream_redaction_holds_a_spaced_credential_name() {
+        assert_eq!(unsafe_stream_suffix_start("safe api_key "), Some(5));
+        assert!(stream_candidate_starts_at_zero("api_key "));
+    }
+
+    /// INV-035: a spaced assignment split between name and separator/value is
+    /// redacted whole once the fragments join.
+    #[test]
+    fn inv_035_stream_redaction_redacts_a_split_spaced_assignment() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "api_key ".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: "= spaced-split-secret done".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted: Vec<String> = observed.into_iter().map(observation_text).collect();
+
+        assert!(
+            !emitted
+                .iter()
+                .any(|text| text.contains("spaced-split-secret"))
+        );
+        assert!(emitted.iter().any(|text| text.contains("[redacted]")));
     }
 
     #[test]
