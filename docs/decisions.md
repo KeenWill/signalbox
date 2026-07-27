@@ -27,7 +27,10 @@ The daemon keeps a durable-only fan-out for older versions and an ordered
 bounded composite fan-out for version twelve. Deltas enter only the composite
 fan-out; durable outbox updates enter both. A lagging or reconnecting follower
 loses deltas, accepts `resync_required`, and reads the complete durable
-transcript. No delta is stored and no migration is added.
+transcript. Delta clones share one immutable text allocation, and each follower
+records its fixed queued prefix when its snapshot completes and drops deltas in
+that prefix, so durable snapshot truth is never followed by stale fragments. No
+delta is stored and no migration is added.
 
 **Rejected alternatives.** Appending deltas to the transactional outbox would
 give presentation fragments durable semantics and storage cost. Re-redacting in

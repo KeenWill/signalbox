@@ -4748,6 +4748,11 @@ where
             return write_snapshot_spool_error(writer, version, request_id, error).await;
         }
     };
+    let mut updates_queued_at_snapshot = if version == ProtocolVersion::Twelve {
+        subscription.len()
+    } else {
+        0
+    };
     let Some(snapshot_write) =
         run_until_shutdown(&mut shutdown, write_spooled_transcript(writer, spool)).await
     else {
@@ -4777,6 +4782,7 @@ where
             }
             Err(broadcast::error::RecvError::Closed) => return Ok(()),
         };
+        let queued_at_snapshot = consume_snapshot_queued_update(&mut updates_queued_at_snapshot);
         match update {
             ProcessUpdate::Durable {
                 cursor,
@@ -4819,7 +4825,10 @@ where
                 event_write?;
             }
             ProcessUpdate::ProviderTextDelta(delta) => {
-                if version != ProtocolVersion::Twelve || delta.session() != selected_session {
+                if queued_at_snapshot
+                    || version != ProtocolVersion::Twelve
+                    || delta.session() != selected_session
+                {
                     continue;
                 }
                 for content in content_fragments(delta.text()) {
@@ -4842,6 +4851,15 @@ where
                 }
             }
         }
+    }
+}
+
+fn consume_snapshot_queued_update(remaining: &mut usize) -> bool {
+    if *remaining == 0 {
+        false
+    } else {
+        *remaining -= 1;
+        true
     }
 }
 
@@ -6353,11 +6371,11 @@ mod tests {
         acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
         acquire_review_command_permit, acquire_review_command_permit_while_buffered,
         acquire_snapshot_reader_permit, admitted_user_content, canonical_review_request_digest,
-        execute_import, inspect_connection_completion, map_rejection, read_frame_line,
-        replacement_model_is_admitted, required_protocol_version_for_selected_session,
-        run_until_shutdown, snapshot_reader_capacity, wire_model_call_state, wire_tool_decision,
-        wire_turn_state, wire_uuid, write_content, write_snapshot_spool_error,
-        write_transcript_entry,
+        consume_snapshot_queued_update, execute_import, inspect_connection_completion,
+        map_rejection, read_frame_line, replacement_model_is_admitted,
+        required_protocol_version_for_selected_session, run_until_shutdown,
+        snapshot_reader_capacity, wire_model_call_state, wire_tool_decision, wire_turn_state,
+        wire_uuid, write_content, write_snapshot_spool_error, write_transcript_entry,
     };
     use signalbox_persistence::{
         outbox::{
@@ -6373,6 +6391,15 @@ mod tests {
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
 
     struct PendingResponseWriter;
+
+    #[test]
+    fn snapshot_delta_boundary_consumes_only_the_queued_prefix() {
+        let mut queued = 2;
+
+        assert!(consume_snapshot_queued_update(&mut queued));
+        assert!(consume_snapshot_queued_update(&mut queued));
+        assert!(!consume_snapshot_queued_update(&mut queued));
+    }
 
     impl tokio::io::AsyncWrite for PendingResponseWriter {
         fn poll_write(

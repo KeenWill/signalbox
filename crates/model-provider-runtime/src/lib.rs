@@ -46,7 +46,7 @@ pub struct ProviderTextDelta {
     turn: TurnId,
     call: ModelCallId,
     part_index: u32,
-    text: String,
+    text: Arc<str>,
 }
 
 impl ProviderTextDelta {
@@ -62,7 +62,7 @@ impl ProviderTextDelta {
             turn,
             call,
             part_index,
-            text,
+            text: text.into(),
         }
     }
 
@@ -1829,6 +1829,21 @@ mod tests {
                 expected_text,
             )]
         );
+    }
+
+    #[test]
+    fn cloned_provider_text_deltas_share_the_text_allocation() {
+        let delta = ProviderTextDelta::new(
+            SessionId::from_uuid(Uuid::from_u128(10)),
+            TurnId::from_uuid(Uuid::from_u128(11)),
+            call(),
+            3,
+            String::from("shared provider text"),
+        );
+        let cloned = delta.clone();
+
+        assert!(Arc::ptr_eq(&delta.text, &cloned.text));
+        assert_eq!(cloned.text(), delta.text());
     }
 
     /// S02 / INV-014 / INV-025: runtime terminal evidence maps to the exact

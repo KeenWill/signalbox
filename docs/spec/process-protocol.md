@@ -887,10 +887,12 @@ retain 64 update events. The dispatcher offers every durable update to both; the
 provider bridge offers deltas only to the composite fan-out. Versions one
 through eight, ten, and eleven therefore cannot lag because of delta volume,
 while version twelve preserves one send order across deltas and durable updates.
-Having no connected followers does not block durable cursor advancement:
-reconnecting clients use a fresh authoritative snapshot. A follower that
-overruns its selected bounded fan-out receives `resync_required` and reconnects
-for another snapshot.
+One immutable text allocation backs every clone of a delta delivered to
+concurrent followers, so fan-out count does not multiply provider-sized text
+allocations. Having no connected followers does not block durable cursor
+advancement: reconnecting clients use a fresh authoritative snapshot. A follower
+that overruns its selected bounded fan-out receives `resync_required` and
+reconnects for another snapshot.
 
 Each `session_event` message carries `cursor`, `session_id`, and exactly one
 closed `event` object. Every version admits these unchanged event shapes:
@@ -928,6 +930,14 @@ eleven subscribe to the durable-only fan-out. Version twelve subscribes to the
 ordered composite fan-out, which interleaves provider-text deltas with those
 same durable updates in their process send order.
 
+When the repeatable-read snapshot completes, the server records the exact count
+of updates already queued on that follower subscription. It discards deltas in
+that fixed prefix while continuing to apply the ordinary durable-cursor filter,
+then forwards later deltas. An initial snapshot that already contains terminal
+reply truth therefore cannot be followed by stale fragments for that reply.
+Losing pre-snapshot deltas is part of their ephemeral presentation semantics;
+the snapshot remains authoritative.
+
 This ordering closes the snapshot/subscription race: every listed client-visible
 transition committed before the snapshot is represented by its durable queued
 content, turn state, and current model-call projection even when it adds no
@@ -957,8 +967,9 @@ durable transcript rather than making token delivery another source of authority
 
 The terminal `send` command follows the submitted turn, accepts terminal state
 from the initial snapshot or waits for its durable terminal event, rereads the
-authoritative transcript, and prints the committed assistant text. Every version
-exits with a typed nonzero recovery-required diagnostic after observing
+authoritative transcript, and prints the committed assistant text. Its internal
+terminal waiter accepts and ignores ephemeral provider-text deltas. Every
+version exits with a typed nonzero recovery-required diagnostic after observing
 `active_awaiting_model_call_recovery` or a live terminal `ambiguous` model-call
 transition followed by that authoritative state.
 
