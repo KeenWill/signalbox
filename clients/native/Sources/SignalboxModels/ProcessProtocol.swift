@@ -1320,7 +1320,43 @@ public struct SignalboxProcessError: Decodable, Equatable, Sendable {
     )
     code = try decoder.decode("code")
     message = try decoder.decode("message")
-    detail = try decoder.decodeIfPresent("detail")
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    switch code {
+    case .rejected:
+      guard container.contains(.detail) else {
+        throw DecodingError.keyNotFound(
+          CodingKeys.detail,
+          .init(
+            codingPath: decoder.codingPath,
+            debugDescription: "A rejected error requires detail."
+          )
+        )
+      }
+      guard try !container.decodeNil(forKey: .detail) else {
+        throw DecodingError.valueNotFound(
+          SignalboxRejectionDetail.self,
+          .init(
+            codingPath: decoder.codingPath + [CodingKeys.detail],
+            debugDescription: "A rejected error requires non-null detail."
+          )
+        )
+      }
+      detail = try container.decode(SignalboxRejectionDetail.self, forKey: .detail)
+    default:
+      guard !container.contains(.detail) else {
+        throw DecodingError.dataCorrupted(
+          .init(
+            codingPath: decoder.codingPath + [CodingKeys.detail],
+            debugDescription: "Only rejected errors admit detail."
+          )
+        )
+      }
+      detail = nil
+    }
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case detail
   }
 }
 
