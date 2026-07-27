@@ -1328,6 +1328,68 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_disabled_include_declares_no_module_path(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "mod inv_001 {\n"
+            "    #[cfg(any())]\n"
+            '    include!("generic.rs");\n'
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/generic.rs").write_text(
+            "#[test]\nfn generic() {}\n", encoding="utf-8"
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_commented_test_attribute_generates_no_test(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "#[proc_macro]\n"
+            "pub fn generate(_: TokenStream) -> TokenStream {\n"
+            "    // Accept input carrying #[test], but emit nothing.\n"
+            "    TokenStream::new()\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_source_outside_every_cargo_target_is_not_read(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\n', encoding="utf-8"
+        )
+        (self.root / "src/lib.rs").write_text(
+            "pub fn thing() {}\n", encoding="utf-8"
+        )
+        (self.root / "fixtures").mkdir()
+        (self.root / "fixtures/example.rs").write_text(
+            "#[test]\nfn s01_inv_001_unattached() {}\n", encoding="utf-8"
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_source_named_by_an_explicit_target_path_is_read(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\n\n'
+            '[[test]]\nname = "custom"\npath = "checks/custom.rs"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text(
+            "pub fn thing() {}\n", encoding="utf-8"
+        )
+        (self.root / "checks").mkdir()
+        (self.root / "checks/custom.rs").write_text(
+            "#[test]\nfn s01_inv_001_custom_target() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("checks/custom.rs", failures[0].message)
+
     def test_tagged_label_claims_only_its_own_link(self) -> None:
         (self.root / "docs/invariants.md").write_text(
             "# Invariants\n\n"

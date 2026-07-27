@@ -48,6 +48,7 @@ import re
 import string
 import subprocess
 import sys
+import tomllib
 import unicodedata
 from dataclasses import dataclass
 from datetime import date
@@ -361,6 +362,7 @@ RUST_MACRO_RULES = re.compile(
     r"[ \t\r\n]*(?P<opening>[\(\[\{])"
 )
 RUST_INCLUDE_OPEN = re.compile(
+    rf"(?P<attributes>(?:{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t\r\n]*)*)"
     r"\binclude![ \t\r\n]*(?P<opening>[\(\[\{])"
 )
 RUST_STRING_LITERAL = re.compile(
@@ -496,8 +498,18 @@ def rust_outer_block_doc_at(text: str, index: int) -> bool:
     return text.startswith("/**", index) and not text.startswith("/***", index)
 
 
-def mask_rust_non_code(text: str, *, preserve_doc_comments: bool = False) -> str:
-    """Mask Rust comments and literals while preserving offsets and newlines."""
+def mask_rust_non_code(
+    text: str,
+    *,
+    preserve_doc_comments: bool = False,
+    preserve_literals: bool = False,
+) -> str:
+    """Mask Rust comments and literals while preserving offsets and newlines.
+
+    ``preserve_literals`` keeps string and character literals readable while
+    still removing comments, which is what a caller inspecting what a macro
+    writes into its output needs.
+    """
     buffer = list(text)
     index = 0
     while index < len(text):
@@ -529,7 +541,8 @@ def mask_rust_non_code(text: str, *, preserve_doc_comments: bool = False) -> str
             closer = '"' + raw.group("hashes")
             end = text.find(closer, raw.end())
             end = len(text) if end == -1 else end + len(closer)
-            mask_range(buffer, index, end)
+            if not preserve_literals:
+                mask_range(buffer, index, end)
             index = end
             continue
 
@@ -546,7 +559,8 @@ def mask_rust_non_code(text: str, *, preserve_doc_comments: bool = False) -> str
                     break
                 else:
                     end += 1
-            mask_range(buffer, index, end)
+            if not preserve_literals:
+                mask_range(buffer, index, end)
             index = end
             continue
 
@@ -559,7 +573,8 @@ def mask_rust_non_code(text: str, *, preserve_doc_comments: bool = False) -> str
             if end is None:
                 index += 1
                 continue
-            mask_range(buffer, index, end.end())
+            if not preserve_literals:
+                mask_range(buffer, index, end.end())
             index = end.end()
             continue
 
@@ -2201,7 +2216,7 @@ def rust_module_child(
 
 
 def rust_module_graph(
-    sources: list[RustSource],
+    sources: list[RustSource], target_roots: frozenset[Path] = frozenset()
 ) -> tuple[dict[Path, tuple[tuple[str, ...], ...]], dict[Path, set[Path]]]:
     """Return each file's out-of-line module paths and the roots reaching it.
 
@@ -2249,7 +2264,11 @@ def rust_module_graph(
                 continue
             plain = literal.group("plain")
             relative = literal.group("raw") if plain is None else plain
-            enclosing = rust_enclosing_modules(module_spans, include.start())
+            if rust_item_is_disabled(include.group("attributes")):
+                continue
+            enclosing = rust_enclosing_modules(
+                module_spans, include.end("opening")
+            )
             if any(item.disabled for item in enclosing):
                 continue
             # `include!` splices into the module that includes it, so the
@@ -2266,10 +2285,22 @@ def rust_module_graph(
 
     prefixes: dict[Path, list[tuple[str, ...]]] = {}
     roots: dict[Path, set[Path]] = {}
+    # Where the repository declares Cargo targets, they are the only roots:
+    # a source-shaped fixture no target reaches is not a crate. A tree with
+    # no manifest at all keeps the plain reading, every undeclared file a
+    # root of its own.
+    if target_roots:
+        seeds = [
+            source.path for source in sources if source.path in target_roots
+        ]
+    else:
+        seeds = [
+            source.path
+            for source in sources
+            if source.path not in declared
+        ]
     pending: list[tuple[Path, tuple[str, ...], frozenset[Path], Path]] = [
-        (source.path, (), frozenset({source.path}), source.path)
-        for source in sources
-        if source.path not in declared
+        (path, (), frozenset({path}), path) for path in seeds
     ]
     while pending:
         path, prefix, walked, root = pending.pop(0)
@@ -2288,6 +2319,53 @@ def rust_module_graph(
         {path: tuple(paths) for path, paths in prefixes.items()},
         roots,
     )
+
+
+CARGO_TARGET_TABLES = ("bin", "test", "bench", "example")
+CARGO_TARGET_DIRECTORIES = ("src/bin", "tests", "benches", "examples")
+CARGO_CONVENTIONAL_ROOTS = ("src/lib.rs", "src/main.rs", "build.rs")
+
+
+def cargo_target_roots(root: Path) -> list[Path]:
+    """Return the Rust files Cargo compiles as a target root.
+
+    Discovery starts from what Cargo builds, so a source-shaped fixture no
+    target reaches is not read as a crate of its own. The conventional layout
+    is enumerated directly and each manifest's explicit `path` entries are
+    added, which together cover every target Cargo resolves without invoking
+    it.
+    """
+    roots: set[Path] = set()
+    for manifest in sorted(root.rglob("Cargo.toml")):
+        if ".git" in manifest.parts or "target" in manifest.parts:
+            continue
+        package = manifest.parent
+        for relative in CARGO_CONVENTIONAL_ROOTS:
+            roots.add(package / relative)
+        for directory in CARGO_TARGET_DIRECTORIES:
+            roots.update((package / directory).glob("*.rs"))
+            roots.update((package / directory).glob("*/main.rs"))
+        try:
+            declared = tomllib.loads(
+                manifest.read_text(encoding="utf-8", errors="replace")
+            )
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        tables: list[dict[str, object]] = []
+        library = declared.get("lib")
+        if isinstance(library, dict):
+            tables.append(library)
+        for name in CARGO_TARGET_TABLES:
+            entries = declared.get(name)
+            if isinstance(entries, list):
+                tables.extend(
+                    entry for entry in entries if isinstance(entry, dict)
+                )
+        for table in tables:
+            path = table.get("path")
+            if isinstance(path, str):
+                roots.add(Path(os.path.normpath(package / path)))
+    return sorted(path for path in roots if path.is_file())
 
 
 def rust_sources(root: Path) -> list[RustSource]:
@@ -2323,7 +2401,10 @@ def rust_sources(root: Path) -> list[RustSource]:
                 module_prefixes=((),),
             )
         )
-    prefixes, roots = rust_module_graph(prepared)
+    target_roots = frozenset(cargo_target_roots(root))
+    prefixes, roots = rust_module_graph(prepared, target_roots)
+    reachable = set(prefixes)
+    prepared = [source for source in prepared if source.path in reachable]
     exported = {
         source.path: rust_exported_test_aliases(source.code)
         for source in prepared
@@ -2371,9 +2452,12 @@ def rust_proc_macro_test_generators(source: RustSource) -> list[int]:
         closing = source.delimiters.get(opening) if opening >= 0 else None
         if closing is None:
             continue
-        # The body is read raw: masking blanks exactly the literals a
-        # generator writes its output into.
-        if RUST_TEST_ATTRIBUTE.search(source.text[opening:closing]) is not None:
+        # Comments are removed but literals kept: a generator writes its
+        # output into literals, and only mentions it in comments.
+        body = mask_rust_non_code(
+            source.text[opening:closing], preserve_literals=True
+        )
+        if RUST_TEST_ATTRIBUTE.search(body) is not None:
             offsets.append(declaration.start())
     return offsets
 
