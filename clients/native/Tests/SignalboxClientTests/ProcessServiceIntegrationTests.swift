@@ -2619,8 +2619,7 @@ private enum ProcessDriverFixture {
   private static func frame(
     _ message: String
   ) throws -> SignalboxProcessServerFrame {
-    try SignalboxJSONCoding.decoder().decode(
-      SignalboxProcessServerFrame.self,
+    try SignalboxProcessServerFrame.decode(
       from: Data(
         """
         {
