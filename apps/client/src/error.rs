@@ -8,7 +8,11 @@ use signalbox_process_protocol::{
 pub(crate) enum ClientError {
     Io(io::Error),
     SourceFile(io::Error),
+    ScanDirectory(io::Error),
     SourceExceedsFrame,
+    ScanIncomplete {
+        skipped_files: usize,
+    },
     Encode(FrameEncodeError),
     Decode(FrameDecodeError),
     Protocol(&'static str),
@@ -39,6 +43,10 @@ impl ClientError {
         Self::SourceFile(error)
     }
 
+    pub(crate) fn scan_directory(error: io::Error) -> Self {
+        Self::ScanDirectory(error)
+    }
+
     pub(crate) fn mutation(self) -> Self {
         match self {
             Self::Remote {
@@ -47,6 +55,8 @@ impl ClientError {
             } => Self::AmbiguousMutation,
             Self::Remote { .. } | Self::SourceFile(_) | Self::SourceExceedsFrame => self,
             Self::Io(_)
+            | Self::ScanDirectory(_)
+            | Self::ScanIncomplete { .. }
             | Self::Encode(_)
             | Self::Decode(_)
             | Self::Protocol(_)
@@ -68,8 +78,15 @@ impl fmt::Display for ClientError {
             Self::SourceFile(_) => {
                 formatter.write_str("the conversation import source file could not be read")
             }
+            Self::ScanDirectory(_) => {
+                formatter.write_str("the conversation import scan directory could not be read")
+            }
             Self::SourceExceedsFrame => formatter.write_str(
                 "the conversation import source cannot fit within the process frame bound",
+            ),
+            Self::ScanIncomplete { skipped_files } => write!(
+                formatter,
+                "the conversation import scan completed with {skipped_files} skipped file(s)"
             ),
             Self::Encode(_) => formatter.write_str("the client could not encode its request"),
             Self::Decode(_) => formatter.write_str("the server violated the process protocol"),
@@ -109,7 +126,7 @@ impl fmt::Display for ClientError {
 impl Error for ClientError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Io(error) | Self::SourceFile(error) => Some(error),
+            Self::Io(error) | Self::SourceFile(error) | Self::ScanDirectory(error) => Some(error),
             Self::Encode(error) => Some(error),
             Self::Decode(error) => Some(error),
             Self::Protocol(_)
@@ -117,6 +134,7 @@ impl Error for ClientError {
             | Self::AmbiguousMutation
             | Self::Input(_)
             | Self::SourceExceedsFrame
+            | Self::ScanIncomplete { .. }
             | Self::TurnRecoveryRequired
             | Self::TurnFailed
             | Self::TurnRefused
@@ -173,6 +191,72 @@ impl fmt::Display for RejectionDisplay {
             } => write!(
                 formatter,
                 "active_turn_present session={session_id} active_turn={active_turn_id}"
+            ),
+            RejectionDetail::ActiveTurnMismatch {
+                session_id,
+                expected_active_turn_id,
+                active_turn_id,
+            } => write!(
+                formatter,
+                "active_turn_mismatch session={session_id} \
+                 expected_active_turn={expected_active_turn_id} active_turn={active_turn_id}"
+            ),
+            RejectionDetail::NoActiveTurn {
+                session_id,
+                expected_active_turn_id,
+            } => write!(
+                formatter,
+                "no_active_turn session={session_id} \
+                 expected_active_turn={expected_active_turn_id}"
+            ),
+            RejectionDetail::TurnNotAwaitingReconciliation {
+                session_id,
+                turn_id,
+            } => write!(
+                formatter,
+                "turn_not_awaiting_reconciliation session={session_id} turn={turn_id}"
+            ),
+            RejectionDetail::InterruptAlreadyApplied {
+                session_id,
+                active_turn_id,
+                existing_command_id,
+            } => write!(
+                formatter,
+                "interrupt_already_applied session={session_id} active_turn={active_turn_id} \
+                 existing_command={existing_command_id}"
+            ),
+            RejectionDetail::InterruptUnavailableWhileAwaitingApproval {
+                session_id,
+                active_turn_id,
+            } => write!(
+                formatter,
+                "interrupt_unavailable_while_awaiting_approval session={session_id} \
+                 active_turn={active_turn_id}; deny the pending tool request first"
+            ),
+            RejectionDetail::ToolRequestNotFound { tool_request_id } => {
+                write!(
+                    formatter,
+                    "tool_request_not_found request={tool_request_id}"
+                )
+            }
+            RejectionDetail::ToolRequestAlreadyResolved { tool_request_id } => write!(
+                formatter,
+                "tool_request_already_resolved request={tool_request_id}"
+            ),
+            RejectionDetail::ToolRequestNotEarliestUndecided {
+                tool_request_id,
+                earliest_tool_request_id,
+            } => write!(
+                formatter,
+                "tool_request_not_earliest_undecided request={tool_request_id} \
+                 earliest={earliest_tool_request_id}"
+            ),
+            RejectionDetail::ToolRequestNotInSession {
+                session_id,
+                tool_request_id,
+            } => write!(
+                formatter,
+                "tool_request_not_in_session session={session_id} request={tool_request_id}"
             ),
             RejectionDetail::DefaultsVersionMismatch {
                 session_id,

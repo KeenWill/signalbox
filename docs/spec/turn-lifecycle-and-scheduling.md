@@ -14,7 +14,12 @@ homes: `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `signalboxd` composition-root name and that `apps/signalboxd` code home were
 verified through PR #258 (`agent/signalboxd-rename`); the additional daemon-held
 code-host credential path is verified through PR #270
-(`agent/tool-batch-tier1`). [docs/invariants.md](../invariants.md) remains the
+(`agent/tool-batch-tier1`); and the owner reconciliation decision that releases
+an ambiguity wait, together with the startup scan's separate report of sessions
+holding their slot for that decision, were verified through PR #281
+(`agent/turn-reconciliation-recovery`). The finite startup scan and removal of
+the superseded steering blocker were verified through PR #291
+(`agent/turn-control-verbs`). [docs/invariants.md](../invariants.md) remains the
 law catalog; INV tags below reference its rows without restating them. Designed
 lifecycle behavior that has no committed code path appears only under
 [Open edges](#open-edges). Sibling pages named in scope deferrals below
@@ -26,9 +31,12 @@ than restating its material.
 ## Turns, states, and the single active slot
 
 A turn is one durable logical request for one conversational outcome from one
-accepted-input origin under one frozen effective configuration (configuration
-freeze is [identity-and-commands](identity-and-commands.md) scope). The
-implemented slice stores three lifecycle states per turn
+accepted-input origin under one frozen effective configuration. Model-selection
+freeze is
+[configuration-and-credentials](configuration-and-credentials.md#model-selection-validation)
+scope; defaults-epoch binding is
+[sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
+scope. The implemented slice stores three lifecycle states per turn
 (`turn_lifecycle.state_kind`): `queued`, `active`, and `terminal`, with the
 terminal disposition kind closed to `failed`, `completed`, `refused`,
 `cancelled`, and `reconciliation_required` (migrations `202607220001` and
@@ -303,6 +311,19 @@ end (INV-034):
   `AfterCancellation(Lost)`, then terminalizes `ReconciliationRequired` with the
   call as its exact ambiguity set, an equal-content terminal frontier, and the
   interrupt reason;
+- a turn already parked in `awaiting_model_call_recovery` is not reclassified:
+  its physical tenure ended in a prior process and its exact ambiguity set is
+  already durable, so the transaction rolls back and reports the session as
+  awaiting a recovery decision. The scan does not count it as recovered and does
+  not block startup on it;
+  `StartupScanOutcome::awaiting_recovery_decision_sessions` carries those
+  sessions so the completed-phase log names each one instead of leaving the wait
+  indistinguishable from a healed session. The scan that parks a turn itself —
+  the in-flight branch below — reports its session the same way, so the wait is
+  named on the restart that creates it and not only on a later one. The report
+  is scoped to the model-call wait: `AwaitingRecoveryDecision` also carries a
+  tool-attempt ambiguity set, which has no operator surface and stays classified
+  as before, so a reported session always names a decision an operator can make;
 - an approval wait remains parked unchanged, with no fabricated decision or live
   attempt; and
 - a running tool attempt follows its stored effect class: prepared or
@@ -374,17 +395,30 @@ delivery outcomes implemented here are:
   until eligibility.
 - `Interrupt` targeting the active turn atomically accepts a configured
   immediate-successor origin, constructs the exact `AppliedInterruptProof`, and
-  applies the predecessor transition (INV-029, INV-037). Before any terminal
-  transition releases the slot, the same transaction reclassifies every pending
-  steering input against the interrupted turn as an ordered queued successor
-  origin. Call, attempt, and turn terminalization follow
+  applies the predecessor transition (INV-029, INV-037). The version-eight
+  `stop_turn` request in [process-protocol](process-protocol.md#client-requests)
+  is the client surface that submits this delivery; it adds no authority beyond
+  the treatment specified here. Before any terminal transition releases the
+  slot, the same transaction reclassifies every pending steering input against
+  the interrupted turn as an ordered queued successor origin. Call, attempt, and
+  turn terminalization follow
   [model-call-execution](model-call-execution.md#terminal-outcomes). A matching
   interrupt against `AwaitingRecoveryDecision` preserves the already terminal
   ambiguous call and ended attempt, records the new proof on the turn's
   reconciliation marker, and terminalizes `ReconciliationRequired` with the
-  wait's exact operation set. A next-safe-point request against a stopping turn
-  records `SafePointUnavailableWhileStopping`; equal interrupt replay returns
-  the original applied result. A distinct later interrupt records
+  wait's exact operation set. The `reconcile_turn` request in
+  [process-protocol](process-protocol.md) is the operator surface that supplies
+  that interrupt for a model-call ambiguity wait, and the only one: it is
+  admitted only for a turn the daemon observes parked in
+  `awaiting_model_call_recovery`, so it never becomes the standalone active-turn
+  cancellation the baseline excludes (INV-029). Because an ended attempt never
+  returns to a live phase, an admitted wait can only remain parked or
+  terminalize before the authoritative transaction runs; that transaction
+  revalidates the exact expected active turn under the scheduler lock and
+  records `ActiveTurnMismatch`, or `NoActiveTurn` when the winning decision left
+  the slot empty, if a racing decision won. A next-safe-point request against a
+  stopping turn records `SafePointUnavailableWhileStopping`; equal interrupt
+  replay returns the original applied result. A distinct later interrupt records
   `InterruptAlreadyApplied { active_turn, existing_command }` without accepting
   an input or replacing the existing proof. An interrupt delivered while the
   active turn is parked on a tool-approval wait records
@@ -562,7 +596,13 @@ clones over the shared pool; no shared locked service instance exists.
 - Startup recovery now classifies model-call evidence (a `Prepared` call closes
   as a known failure; an unstopped in-flight call parks the turn as ambiguous in
   `awaiting_model_call_recovery`) and tool-loop evidence; delegated-result waits
-  remain deferred with delegation.
+  remain deferred with delegation. An owner reconciliation decision is the only
+  implemented resolution for that park: no automatic resolution exists, because
+  the terminal disposition it produces is proof-bearing and the durable evidence
+  supplies no authority to construct. Resolving the ambiguity itself from
+  provider evidence remains an
+  [open question](../open-questions.md#turn-lifecycle); the tool-attempt
+  ambiguity wait keeps its own operator surface deferred with that question.
 - Per-session scan gating, sweep interval, and fairness tuning remain
   operational open questions; the process-wide advisory singleton guard is
   specified by [process-protocol](process-protocol.md).

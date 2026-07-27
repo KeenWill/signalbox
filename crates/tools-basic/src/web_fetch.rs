@@ -12,28 +12,18 @@ use futures_util::StreamExt;
 use reqwest::{Client, Url, redirect::Policy};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
-    OperatorFailureClass, ToolArgumentValidator, ToolDefinition, ToolExecutionInvocation,
-    ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
+    OperatorFailureClass, ToolArgumentValidator, ToolExecutionInvocation, ToolExecutor,
+    ToolExecutorEvidence,
 };
 use signalbox_domain::{
-    NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolName,
-    ToolPermissionDefault,
+    NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
 };
 
-pub(crate) const WEB_FETCH_NAME: &str = "web_fetch";
-const WEB_FETCH_DESCRIPTION: &str =
-    "Fetches one HTTP(S) URL without credentials, redirects, proxies, or retries.";
-const WEB_FETCH_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "url": {
-            "type": "string",
-            "description": "Absolute HTTP(S) URL without user information or a fragment."
-        }
-    },
-    "required": ["url"],
-    "additionalProperties": false
-}"#;
+use signalbox_tool_contract::{
+    ToolContract, ToolContractCompileError, compile_contract_definition,
+};
+
+pub const WEB_FETCH_NAME: &str = "web_fetch";
 const INVALID_ARGUMENTS_DETAIL: &str =
     "expected one absolute HTTP(S) URL without user information or a fragment";
 const REQUEST_FAILED_DETAIL: &str = "web fetch request failed";
@@ -83,6 +73,80 @@ pub struct WebFetchTool<Transport> {
     executor: WebFetchExecutor<Transport>,
 }
 
+impl<Transport> ToolContract for WebFetchTool<Transport> {
+    type Arguments = WebFetchArguments;
+    const NAME: &'static str = WEB_FETCH_NAME;
+    const DESCRIPTION: &'static str =
+        "Fetches one HTTP(S) URL without credentials, redirects, proxies, or retries.";
+}
+
+/// Typed `web_fetch` argument shape; decoder and rendered schema share it.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebFetchArguments {
+    /// Absolute HTTP(S) URL without user information or a fragment.
+    url: WebFetchUrl,
+}
+
+/// One admitted fetch destination.
+///
+/// Admission enforces what the transport requires: an absolute HTTP(S) URL of
+/// at most [`MAX_URL_BYTES`] bytes as supplied and as serialized, with a
+/// host, without user information or a fragment, and — when the host is an IP
+/// literal — a public destination address.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(try_from = "String")]
+struct WebFetchUrl(Url);
+
+impl schemars::JsonSchema for WebFetchUrl {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("WebFetchUrl")
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // `maxLength` counts code points, so it is the tightest sound schema
+        // statement of the decoder's byte cap: every string it excludes also
+        // exceeds the byte cap.
+        schemars::json_schema!({
+            "type": "string",
+            "format": "uri",
+            "maxLength": MAX_URL_BYTES,
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
+impl TryFrom<String> for WebFetchUrl {
+    type Error = InvalidWebFetchArguments;
+
+    fn try_from(supplied: String) -> Result<Self, Self::Error> {
+        if supplied.len() > MAX_URL_BYTES {
+            return Err(InvalidWebFetchArguments);
+        }
+        let url = Url::parse(&supplied).map_err(|_| InvalidWebFetchArguments)?;
+        if url.as_str().len() > MAX_URL_BYTES
+            || !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(InvalidWebFetchArguments);
+        }
+        if url
+            .host_str()
+            .and_then(parse_url_host_ip)
+            .is_some_and(|address| !is_public_destination_address(address))
+        {
+            return Err(InvalidWebFetchArguments);
+        }
+        Ok(Self(url))
+    }
+}
+
 impl WebFetchTool<ReqwestWebFetchTransport> {
     /// Builds the production tool with the fixed bounded transport policy.
     pub fn try_new_production() -> Result<Self, WebFetchToolConstructionError> {
@@ -95,23 +159,20 @@ impl WebFetchTool<ReqwestWebFetchTransport> {
 impl<Transport> WebFetchTool<Transport> {
     /// Compiles immutable metadata around one injected transport.
     pub fn try_new(transport: Transport) -> Result<Self, WebFetchToolConstructionError> {
-        let name = ToolName::try_new(String::from(WEB_FETCH_NAME))
-            .map_err(|_| WebFetchToolConstructionError::Name)?;
-        let schema = ToolInputSchema::try_new(String::from(WEB_FETCH_SCHEMA))
-            .map_err(|_| WebFetchToolConstructionError::Schema)?;
         let invalid_arguments_detail =
             ToolExecutionErrorDetail::try_new(String::from(INVALID_ARGUMENTS_DETAIL))
                 .map_err(|_| WebFetchToolConstructionError::ErrorDetail)?;
         let request_failed_detail =
             ToolExecutionErrorDetail::try_new(String::from(REQUEST_FAILED_DETAIL))
                 .map_err(|_| WebFetchToolConstructionError::ErrorDetail)?;
-        let definition = ToolDefinition::new(
-            name,
-            String::from(WEB_FETCH_DESCRIPTION),
-            schema,
+        let definition = compile_contract_definition::<Self>(
             ToolPermissionDefault::Auto,
             ToolEffectClass::ExternalEffect,
-        );
+        )
+        .map_err(|error| match error {
+            ToolContractCompileError::Name => WebFetchToolConstructionError::Name,
+            ToolContractCompileError::Schema => WebFetchToolConstructionError::Schema,
+        })?;
         let compiled = CompiledTool::new(
             definition,
             WebFetchArgumentValidator {
@@ -306,7 +367,8 @@ async fn fetch_with_client(
 
 /// Whether a body stream still holds content after an exact-cap read. Empty
 /// trailing frames are legal and are not evidence that bytes were discarded.
-pub(crate) async fn has_more_response_bytes<S, B, E>(
+#[doc(hidden)]
+pub async fn has_more_response_bytes<S, B, E>(
     stream: &mut S,
 ) -> Result<bool, WebFetchTransportFailure>
 where
@@ -338,7 +400,8 @@ struct ResolvedPublicDestination {
 
 /// Builds one credential-free client pinned to a URL's complete admitted
 /// public DNS result.
-pub(crate) async fn public_destination_client(
+#[doc(hidden)]
+pub async fn public_destination_client(
     url: &Url,
     exchange_timeout: Duration,
 ) -> Result<Client, PublicDestinationClientError> {
@@ -355,7 +418,8 @@ pub(crate) async fn public_destination_client(
 /// A URL could not be resolved and pinned as a public-only destination before
 /// dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PublicDestinationClientError {
+#[doc(hidden)]
+pub enum PublicDestinationClientError {
     /// The destination shape or resolved address set was not public-only.
     DestinationRejected,
     /// DNS resolution or client construction failed before dispatch.
@@ -535,40 +599,18 @@ where
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct InvalidWebFetchArguments;
 
+impl fmt::Display for InvalidWebFetchArguments {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(INVALID_ARGUMENTS_DETAIL)
+    }
+}
+
 fn decode_arguments(
     arguments: &NormalizedToolArguments,
 ) -> Result<WebFetchRequest, InvalidWebFetchArguments> {
-    let serde_json::Value::Object(object) =
-        serde_json::from_str(arguments.as_str()).map_err(|_| InvalidWebFetchArguments)?
-    else {
-        return Err(InvalidWebFetchArguments);
-    };
-    if object.len() != 1 {
-        return Err(InvalidWebFetchArguments);
-    }
-    let supplied = object
-        .get("url")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| value.len() <= MAX_URL_BYTES)
-        .ok_or(InvalidWebFetchArguments)?;
-    let url = Url::parse(supplied).map_err(|_| InvalidWebFetchArguments)?;
-    if url.as_str().len() > MAX_URL_BYTES
-        || !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(InvalidWebFetchArguments);
-    }
-    if url
-        .host_str()
-        .and_then(parse_url_host_ip)
-        .is_some_and(|address| !is_public_destination_address(address))
-    {
-        return Err(InvalidWebFetchArguments);
-    }
-    Ok(WebFetchRequest { url })
+    let decoded: WebFetchArguments =
+        serde_json::from_str(arguments.as_str()).map_err(|_| InvalidWebFetchArguments)?;
+    Ok(WebFetchRequest { url: decoded.url.0 })
 }
 
 fn web_fetch_success_evidence(
@@ -618,6 +660,40 @@ mod tests {
         assert_eq!(definition.name().as_str(), WEB_FETCH_NAME);
         assert_eq!(definition.permission_default(), ToolPermissionDefault::Auto);
         assert_eq!(definition.effect_class(), ToolEffectClass::ExternalEffect);
+    }
+
+    /// The complete rendered wire schema. The pretty golden is the review
+    /// surface; the byte-exact assertion pins the canonical compact form the
+    /// registry stores and providers receive as its exact serialization. The
+    /// `format` and `maxLength` members state constraints the decoder already
+    /// enforced while the earlier literal declared a bare string.
+    #[test]
+    fn web_fetch_rendered_schema_is_the_exact_wire_artifact() {
+        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport)
+            .expect("static web_fetch tool compiles")
+            .into_parts();
+        let definition = &catalog.definitions()[0];
+        let schema: serde_json::Value = serde_json::from_str(definition.input_schema().as_str())
+            .expect("registry schema is valid JSON");
+
+        expect_test::expect![[r#"
+            {
+              "additionalProperties": false,
+              "properties": {
+                "url": {
+                  "description": "Absolute HTTP(S) URL without user information or a fragment.",
+                  "format": "uri",
+                  "maxLength": 8192,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "url"
+              ],
+              "type": "object"
+            }"#]]
+        .assert_eq(&format!("{schema:#}"));
+        assert_eq!(definition.input_schema().as_str(), schema.to_string());
     }
 
     /// Typed decoding accepts one absolute credential-free URL.

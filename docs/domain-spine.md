@@ -4959,7 +4959,7 @@ pub enum StartupScanSessionOutcome {
     RecoveredModelCall(Box<ModelCallTerminalOutcome>),
     RecoveredToolAttempt(Box<ToolAttemptCrashOutcome>),
     ResumableToolBatch { turn: TurnId },
-    DeferredPendingSteering { accepted_input: AcceptedInputId },
+    AwaitingRecoveryDecision { turn: TurnId },
 }
 
 pub trait StartupScanRepository {
@@ -4981,8 +4981,7 @@ pub trait StartupScanRepository {
 pub struct StartupScanOutcome { /* private */ }
 // sealed: StartupScanService::execute
 impl StartupScanOutcome {
-    // accessors: recovered_turn_count(), pending_steering_sessions(),
-    // is_complete()
+    // accessors: recovered_turn_count(), awaiting_recovery_decision_sessions()
 }
 
 pub struct StartupScanError<RepositoryError> { /* private */ }

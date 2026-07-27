@@ -64,13 +64,13 @@ identifiers refer to [scenarios.md](scenarios.md).
   converter. A later slice must select each source format's exact mapping and
   converter version, with synthetic fixtures and persistence round-trip
   coverage. The accepted format-versioned converter seam remains fixed. (S28)
-- **Import discovery and operational surfaces beyond one file.** The owner
-  terminal's explicit-format, one-file operation and its distinct inserted or
-  already-imported receipt are implemented in
-  [conversation-import](spec/conversation-import.md#operational-surface).
-  Directory traversal, file watching, bulk-import policy, source-size admission
-  beyond the inherited process-frame bound, raw-record access, and any
-  authorization beyond the owner-private local socket remain undecided. (S28)
+- **Import operational surfaces beyond explicit file and directory scans.** The
+  owner terminal's explicit-format, one-file and recursive directory-scan
+  operations are implemented in
+  [conversation-import](spec/conversation-import.md#operational-surface). File
+  watching, source-size admission beyond the inherited process-frame bound,
+  raw-record access, and any authorization beyond the owner-private local socket
+  remain undecided. (S28)
 
 ## Delegation
 
@@ -103,10 +103,13 @@ identifiers refer to [scenarios.md](scenarios.md).
   own proof and disposition rules. Later scope. (S07)
 - **Ambiguous provider-call recovery.** A restart-recovered unstopped in-flight
   call parks its turn in the awaiting-recovery wait
-  ([model-call-execution](spec/model-call-execution.md)) with no resolving
-  writer yet. The retired design analysis identified adopting a provider
-  request-status API — with its polling posture and evidence classes — as the
-  resolution path; the full analysis is in git history. Later scope. (S02)
+  ([model-call-execution](spec/model-call-execution.md)). An owner decision now
+  releases the slot by terminalizing the turn over that exact ambiguity
+  ([process-protocol](spec/process-protocol.md)), but nothing resolves what the
+  provider actually did. The retired design analysis identified adopting a
+  provider request-status API — with its polling posture and evidence classes —
+  as the resolution path; the full analysis is in git history. Later scope.
+  (S02)
 - **Direct interrupt-only reconciliation from a running attempt.**
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) adds
   direct reconciliation only for fatal mismatch at a closed aggregate boundary;
@@ -346,10 +349,12 @@ questions below remain open.
   backpressure, and redaction rules, remain undecided. The implemented durable
   transition relay is owned by [process-protocol](spec/process-protocol.md).
   Blocks live-token display. (S02, S24)
-- **Process-protocol operation expansion.** Defaults replacement, delivery
-  treatments other than `StartWhenNoActiveTurn`, cancellation, approval, tools,
-  and administrative operations need their owning product slices and exact wire
-  projections. Blocks only those operations. (S01–S10)
+- **Process-protocol operation expansion.** The interrupt treatment now crosses
+  the wire as `stop_turn` and the canonical tool decision as
+  `decide_tool_request` ([process-protocol](spec/process-protocol.md)); the
+  next-safe-point and after-current delivery treatments and administrative
+  operations still need their owning product slices and exact wire projections.
+  Blocks only those operations. (S01–S10)
 - **Persistence implementation within the accepted relational baseline.**
   [persistence-protocol](spec/persistence-protocol.md) closes the broad
   stable-storage question, selects the driver, pool, migration, runtime, and
@@ -384,9 +389,11 @@ questions below remain open.
   native slice are known. (S01, S24)
 - **Web client technology (Rust/Wasm or TypeScript).** No leaning until the
   browser protocol and product slice are measured. (S01, S02, S24)
-- **Client approval presentation.** How pending tool-approval prompts are
-  surfaced and owner decisions are collected across the terminal baseline and
-  later client forms remains undesigned. (S10, S11, S24)
+- **Client approval presentation.** The terminal baseline now surfaces the
+  pending request through the transcript's awaiting-turn and tool-use lines and
+  collects decisions through `approve`/`deny`
+  ([process-protocol](spec/process-protocol.md#terminal-client)); interactive
+  prompting and later client forms remain undesigned. (S10, S11, S24)
 
 ## General-purpose artifacts
 

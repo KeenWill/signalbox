@@ -10,6 +10,276 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Retire the superseded startup steering blocker
+
+**Context.** The 2026-07-22 pending-steering boundary commissioned a temporary
+startup blocker and required its replacement by the later atomic
+reclassification transition. That transition now covers every terminal restart
+branch, including evidence-free turns, but the application outcome, daemon
+failure path, and an unreachable PostgreSQL adapter arm still exposed the
+superseded guard and contradicted the implemented specification.
+
+**Decision.** Remove the pending-steering startup outcome, aggregate blocker
+state, and daemon failure path. Startup reports its recovered-turn count and
+continues after the finite scan. The PostgreSQL adapter retains fail-closed
+handling if loss preparation unexpectedly reports pending steering after the
+same checked projection reported none, but classifies that contradiction through
+the existing corruption path rather than as an operator-visible blocker. This
+records completion of the 2026-07-22 replacement obligation; the specification
+already owns the implemented reclassification semantics.
+
+**Rejected alternatives.** Keeping the dead surface for compatibility would
+preserve a public route that no production adapter can produce and that future
+code could accidentally revive. Documenting the blocker would contradict the
+implemented transition and the living specification. Editing an applied
+migration is unnecessary because the repair removes only superseded Rust
+composition.
+
+**Affects.** Startup-scan application outcomes and reporting, PostgreSQL startup
+recovery mapping, signalboxd startup composition and logging, and the
+application domain-spine declaration.
+
+## 2026-07-26 — Separate daemon tools into workspace crates
+
+**Context.** The daemon crate owned the Tier 0 and code-host tool
+implementations together with process composition. That coupled unrelated tool
+changes to the daemon build graph, prevented the tool suites from compiling and
+testing in isolation, and left their dependency direction implicit.
+
+**Decision.** Move the derive-based contract compiler to
+`signalbox-tool-contract`, the four Tier 0 tools to `signalbox-tools-basic`, and
+the ten code-host tools and their transport to `signalbox-tools-code-host`. Tool
+crates depend inward on domain/application contracts and the shared tool
+contract; the code-host transport reuses the basic crate's public-destination
+HTTP seam. `signalboxd` depends on the tool crates and owns only catalog and
+executor composition. This relocation changes no tool name, description, schema,
+permission, effect class, validation, execution, or result behavior.
+
+**Rejected alternatives.** Leaving implementations in `signalboxd` would keep
+the build and caching boundary coupled. One combined tools crate would isolate
+the daemon but not independent Tier 0 and code-host rebuilds. Moving tool
+implementations into domain or application crates would reverse the accepted
+dependency direction and mix infrastructure transports with policy types.
+
+**Affects.** Workspace membership and manifests; `crates/tool-contract`,
+`crates/tools-basic`, `crates/tools-code-host`; `apps/signalboxd` composition
+and re-exports; source-path citations in the invariant catalog and
+configuration-and-credentials specification.
+
+## 2026-07-26 — Surface turn control as the interrupt treatment and the canonical decision command
+
+**Context.** A client could observe a runaway or tool-parked turn but could not
+act on it: no wire request stopped the active turn or decided a pending tool
+request. The domain and persistence spine for both actions already exists — the
+applied-interrupt stop path with its durable cancellation requests, and the
+`DecideToolRequest` command with replay-equality — with no client surface.
+
+**Decision.** Protocol version eight adds two additive requests. `stop_turn` is
+the accepted `Interrupt` delivery on the wire: it names the observed active
+turn, carries the immediate-successor content the interrupt algebra requires,
+and projects the previously daemon-internal interrupt refusals as typed wire
+rejections. `decide_tool_request` issues the canonical decision command; its
+wire posture requires a denial reason, and the named session is a routing
+precondition refused before command recording rather than part of the canonical
+payload. Version eight was taken while version seven was still reserved by the
+then-open owner turn-reconciliation stack; that stack has since landed, so the
+admitted chain is complete. The tool-loop repository's replay-payload mismatch
+became the typed `ConflictingCommandReuse` error so the wire reports
+`conflicting_reuse` without string matching.
+
+**Rejected alternatives.** A standalone content-free cancellation command is the
+obvious verb shape, but the accepted algebra makes an applied interrupt — with
+its immediate successor — the only cancellation authority (INV-029), and the
+recorded open question reserves the standalone command for a future foundation
+decision with its own proof and disposition rules and a migration; fabricating
+synthetic successor content daemon-side would launder a stop into owner speech.
+An optional wire denial reason would mirror the domain, but every
+client-recorded denial is rendered to the model, and an unexplained denial
+invites a retry loop. Separate approve and deny wire requests would split one
+canonical command into two vocabularies.
+
+**Affects.** `crates/process-protocol` (version eight, two requests, one
+receipt, eight rejection details), the daemon request adapter and its
+session-correlation precondition read, `crates/persistence`
+(`ConflictingCommandReuse`, the `tool_request_session` read, the public
+recorded-decision probe), the terminal client's `stop`, `approve`, and `deny`
+verbs and version selection, the terminal-client CI suite filter, and the
+process-protocol, turn-lifecycle-and-scheduling, and tool-loop specification
+pages.
+
+## 2026-07-26 — Narrow a credential file to its value, and name credential faults
+
+**Context.** The first live dogfood run of the dev instance could not use a
+code-host tool at all. Two separate faults compounded. The tools that write a
+credential file — `gh auth token`, `op read`, `pass`, a shell redirect —
+terminate the line they print, and the file channel read those bytes verbatim,
+so `Bearer <token>\n` could not form an `Authorization` header. The resulting
+`InvalidCredential` then shared an error detail with a definitive code-host
+rejection, so the one visible symptom was the model being told the code host had
+rejected a request the daemon never sent.
+
+**Decision.** The file channel narrows what it reads: trailing `\n` and `\r`
+bytes are dropped, every other byte is retained exactly. The narrowing lives at
+the read rather than at each adapter's header formation, so all adapters, the
+durable-record boundary, and the credential scrub agree on one value. Credential
+bytes that cannot form the authentication header now present the
+credential-unavailable detail a failed resolution already presents, leaving the
+code-host detail to mean the code host answered.
+
+**Rejected alternatives.** Trimming at header formation would leave each adapter
+narrowing separately and would hand the scrubber a value that no longer matches
+the token a provider might reflect. Trimming all ASCII whitespace would silently
+accept a credential a deployment never meant to install. Rejecting a terminated
+file outright would keep the honest contract and fail every standard
+provisioning step, which is what the smoke run did. Treating an all-termination
+file as a resolution failure would add a fourth typed failure for a case the
+adapter boundary already refuses.
+
+**Affects.** `FileCredentialAccess`, the code-host executor's known-failure
+detail selection, and the credential-lifecycle and code-host sections of the
+configuration-and-credentials and tool-loop pages. The same run found the dev
+instance never passed `GITHUB_TOKEN_FILE`, which the daemon requires at startup;
+`devenv.nix` now passes it with a `SIGNALBOX_DEV_GITHUB_TOKEN_FILE` override,
+mirroring the Anthropic key file.
+
+## 2026-07-26 — Report a failed tool attempt once, at admission
+
+**Context.** A failed tool attempt was operator-invisible. The typed error
+resolves the logical request and reaches the next model round, and nothing else;
+the same dogfood run showed a credential fault only as a model complaining about
+a code host. The daemon has no metrics or trace export, so the log line is the
+whole operator surface.
+
+**Decision.** Admitting a `KnownFailed` observation emits one `tracing` warning
+carrying the dispatched catalog tool name, the closed error kind, and the
+session and turn identities. Admission in `crates/application` is the single
+site: the executors sit behind one dispatch trait, that layer already holds
+every typed fact the event carries, and it also covers the failures admission
+itself substitutes for oversized or null-bearing results. Completed and
+ambiguous observations stay silent, as do preflight failures, which are
+model-authored rather than deployment facts.
+
+**Rejected alternatives.** Emitting from each executor would repeat the site
+five times and still miss admission-substituted failures — the same argument
+that put the provider bridge, not the adapters, in charge of runtime
+diagnostics. Carrying an `OperatorFailureClass` would be dishonest: a known tool
+failure is a resolved request, not a runtime failure, and the taxonomy grades
+how bad a failure is. Including the bounded error detail would put executor-
+chosen text in telemetry, which the redaction rules keep out. A new closed
+cause-code vocabulary for tools would duplicate the error kind that already
+exists.
+
+**Affects.** `crates/application/src/tool_loop.rs`, the staged-execution section
+of the tool-loop page, and the telemetry field inventory in the
+identity-and-commands and configuration-and-credentials pages.
+
+## 2026-07-26 — Add an explicit recursive conversation-import scan
+
+**Context.** The terminal import verb accepted one named source file, while an
+owner importing a directory had to rediscover source layout and invoke it once
+per file. The process protocol already carries one exact source per request and
+the store already deduplicates exact source bytes by digest. A directory surface
+therefore needs orchestration at the client boundary, not a batch wire shape.
+
+**Decision.** Preserve the positional one-file form and add the mutually
+exclusive `--scan <dir>` form under the existing explicit `--format` selection.
+A scan recursively selects regular files with the exact lowercase `.jsonl`
+extension, does not follow symbolic links, sorts complete paths, and has no
+candidate-count cap. Descriptor-relative no-follow traversal and candidate opens
+use the repository’s existing `rustix` version so a path replacement cannot
+redirect a queued read through a symbolic link. The scan sends one existing
+import request at a time. Every file gets an imported, already-imported, or
+skipped-with-reason line followed by uncapped totals; processing continues after
+a skip, and any skipped file makes the invocation fail after the scan completes.
+
+**Rejected alternatives.** Treating a directory passed in the positional file
+slot as an implicit scan would make the existing form type-dependent and less
+legible. Inferring source directories or formats would embed deployment layout
+in repository behavior. A batch protocol request would duplicate existing digest
+idempotency, complicate the frame bound, and expand the daemon surface.
+Following symbolic links risks cycles and imports outside the named tree;
+path-only metadata checks retain a check/open race. Concurrent requests would
+discard the existing serial operational shape without a demonstrated need.
+
+**Affects.** The terminal client argument, traversal, outcome-presentation, and
+end-to-end test surfaces, plus the conversation-import specification. The
+process protocol, application service, persistence schema, and migrations are
+unchanged.
+
+## 2026-07-26 — Derive daemon tool schemas from their argument types
+
+**Context.** Each daemon tool declared its model-facing JSON Schema as a
+hand-written literal beside a decoder enforcing the same shape by hand: member
+names, requiredness, value types, and `additionalProperties: false` were each
+stated twice, and nothing tied the statements together, so a decoder edit could
+silently leave the advertised schema stale. Validated argument values also
+advertised as bare strings, hiding the constraints the decoder actually
+enforces.
+
+**Decision.** A `ToolContract` trait in `signalboxd` binds each tool's registry
+name, model-facing description, and typed argument struct. The struct's serde
+implementation is the decoder and its schemars derive (already in the workspace
+tree via the model-runtime substrate) renders the schema, with
+`#[serde(deny_unknown_fields)]` making the rendered
+`additionalProperties: false` and the decoder's rejection of unexpected members
+agree by construction. Validated argument newtypes implement `JsonSchema` by
+hand so their real constraints reach the model. The rendered artifact stays
+reviewable: one golden test per tool asserts the complete canonical wire schema,
+so a schemars upgrade or derive edit surfaces as a reviewed snapshot diff, and
+rendering feeds the existing `ToolInputSchema` registration path rather than a
+parallel one.
+
+**Rejected alternatives.** Keeping the literals and adding a conformance test
+against a derived form retains the duplication it checks. A bespoke proc macro
+re-owns what schemars already provides. Hosting the trait in the application
+crate would push a schema-rendering dependency beneath the daemon boundary that
+actually composes tools.
+
+**Affects.** The Tier 0 declarations in `apps/signalboxd` (`current_time`,
+`echo`, `web_fetch`, `session_status_update`) and their golden schema tests; the
+code-host declarations migrate mechanically as a follow-up.
+
+## 2026-07-26 — Reconcile an ambiguity wait through an explicit owner request
+
+**Context.** A model call that terminalizes `Ambiguous` parks its turn in the
+`awaiting_model_call_recovery` wait, which retains the session's progressing
+slot. A live shakedown left a session in that wait across two daemon restarts:
+the startup scan reported `recovered_turn_count = 0` because the parked turn has
+no lost live end to classify, and every later `submit_input` recorded
+`active_turn_present`, so the session was permanently unusable. The process
+protocol's event taxonomy already defines `turn_reconciliation_required`, but no
+request could drive a turn to that terminal.
+
+**Decision.** Protocol version seven adds one additive request,
+`reconcile_turn`, naming the exact parked turn and carrying the successor input.
+The daemon admits it only when a narrow precondition read observes that turn
+parked on the model-call recovery wait, then submits the `Interrupt` delivery
+the accepted turn lifecycle already defines; the parked turn terminalizes
+`reconciliation_required` over its exact ambiguous call. The startup scan
+additionally reports sessions holding their slot for such a decision rather than
+returning them as `NoActiveTurn`.
+
+**Rejected alternatives.** Automatic reconciliation on the startup scan or the
+sweep would be the better operability story, but every reconciliation-required
+terminal in the implemented algebra is proof-bearing — the sealed
+`ReconciliationMarker` admits only an applied interrupt, an applied owner-stop
+decision, or fatal-mismatch causes. The durable evidence proves the turn cannot
+progress; it supplies no authority to construct. Adding an authority-free reason
+would need a new durable representation, a new reconstitution shape, and a
+migration, and would close the recorded open question that reserves provider
+request-status evidence as the resolution path. Failing the turn instead would
+invent a definite outcome the evidence does not support. Exposing a general
+interrupt request would ship active-turn cancellation as a side effect, which
+INV-029 and the standalone-cancellation open question keep out of the baseline.
+Placing the precondition in the durable aggregate would need a new typed
+rejection kind, and therefore a migration, for a refusal that records nothing.
+
+**Affects.** `crates/process-protocol` (version seven, `reconcile_turn`, three
+rejection details), the daemon request adapter and its narrow precondition read,
+the terminal client's `reconcile` verb and its version selection, the startup
+scan's reported outcome, and the process-protocol and
+turn-lifecycle-and-scheduling specification pages.
+
 ## 2026-07-26 — Dev instance under devenv's native process manager
 
 **Context.** Running the daemon locally means satisfying the

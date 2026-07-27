@@ -251,6 +251,27 @@ impl fmt::Display for HubModelConfigurationError {
 
 impl Error for HubModelConfigurationError {}
 
+/// Line-termination bytes a credential file may end with. `gh auth token`,
+/// `op read`, `pass`, and a shell redirect all terminate the line they write,
+/// so these bytes are how the file ends rather than part of the secret.
+const CREDENTIAL_LINE_TERMINATORS: [u8; 2] = *b"\n\r";
+
+/// Narrows the bytes a credential file holds to the credential value itself by
+/// dropping only trailing line termination.
+///
+/// Every other byte is retained exactly, including interior and leading
+/// whitespace: only the terminator a writing tool appends is unambiguously not
+/// the secret. A file holding nothing but terminators narrows to an empty
+/// value, which the adapter boundary then refuses as unusable exactly as an
+/// empty file already was.
+fn credential_bytes(file_bytes: &[u8]) -> &[u8] {
+    let end = file_bytes
+        .iter()
+        .rposition(|byte| !CREDENTIAL_LINE_TERMINATORS.contains(byte))
+        .map_or(0, |last_value_byte| last_value_byte.saturating_add(1));
+    &file_bytes[..end]
+}
+
 /// Credential source that rereads one deployment-owned secret file for every
 /// request preparation so rotation is visible without restarting signalboxd.
 #[derive(Clone)]
@@ -296,7 +317,7 @@ impl CredentialAccess for FileCredentialAccess {
             ));
         }
         match tokio::fs::read(self.path.as_ref()).await {
-            Ok(value) => Ok(CredentialValue::new(value)),
+            Ok(file_bytes) => Ok(CredentialValue::new(credential_bytes(&file_bytes))),
             Err(error) => Err(CredentialAccessError::new(
                 reference.clone(),
                 if error.kind() == io::ErrorKind::NotFound {
@@ -319,7 +340,7 @@ mod tests {
 
     use super::{
         ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
-        HubModelConfigurationError,
+        HubModelConfigurationError, credential_bytes,
     };
 
     const CONFIGURATION: &str = r#"
@@ -443,6 +464,66 @@ selection_id = "10000000-0000-4000-8000-000000000001"
                 .expose_bytes(),
             b"rotated-test-value"
         );
+        std::fs::remove_file(path).expect("fixture file is removable");
+    }
+
+    /// A credential-printing tool terminates the line it writes, so the
+    /// terminator is how the file ends rather than part of the secret.
+    #[test]
+    fn credential_file_trailing_line_feed_is_not_part_of_the_value() {
+        assert_eq!(
+            credential_bytes(b"synthetic-token-value\n"),
+            b"synthetic-token-value"
+        );
+    }
+
+    /// A file written with CRLF line endings ends the same way, so both
+    /// terminator bytes fall outside the value.
+    #[test]
+    fn credential_file_trailing_carriage_return_line_feed_is_not_part_of_the_value() {
+        assert_eq!(
+            credential_bytes(b"synthetic-token-value\r\n"),
+            b"synthetic-token-value"
+        );
+    }
+
+    /// Only trailing termination is dropped: a value carrying interior line
+    /// termination is still delivered whole, so narrowing can never truncate a
+    /// credential at its first line.
+    #[test]
+    fn credential_file_interior_line_termination_is_retained() {
+        assert_eq!(
+            credential_bytes(b"synthetic\ntoken\nvalue\n"),
+            b"synthetic\ntoken\nvalue"
+        );
+    }
+
+    /// A file holding nothing but termination narrows to an empty value, which
+    /// the adapter boundary refuses exactly as it already refuses an empty
+    /// file — narrowing never invents a credential.
+    #[test]
+    fn credential_file_of_only_line_termination_narrows_to_an_empty_value() {
+        assert_eq!(credential_bytes(b"\r\n\n"), b"");
+    }
+
+    /// The narrowing is wired into the file read itself, so every adapter that
+    /// resolves a reference receives the bare secret rather than the bytes the
+    /// writing tool happened to leave behind.
+    #[tokio::test]
+    async fn file_credentials_resolve_a_terminated_file_to_the_bare_value() {
+        let path = std::env::temp_dir().join(format!("signalbox-credential-{}", Uuid::now_v7()));
+        std::fs::write(&path, b"synthetic-token-value\n").expect("fixture file is writable");
+        let source = FileCredentialAccess::new(
+            path.clone(),
+            CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
+        );
+
+        let resolved = source
+            .resolve(&source.credential_reference())
+            .await
+            .expect("fixture value resolves");
+
+        assert_eq!(resolved.expose_bytes(), b"synthetic-token-value");
         std::fs::remove_file(path).expect("fixture file is removable");
     }
 }
