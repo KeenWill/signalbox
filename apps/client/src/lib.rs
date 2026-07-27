@@ -10,7 +10,7 @@ use std::{
 use arguments::{Command, DangerousToolAutoApprovalArgument, ParseOutcome};
 use connection::ProcessClient;
 use error::ClientError;
-use presentation::{Output, SnapshotSelection};
+use presentation::{Output, SessionMetadataRow, SnapshotSelection};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportFormat,
     ConversationImportSource, ErrorCode, InputContent, MAX_FRAME_BYTES, ModelCallDisposition,
@@ -29,6 +29,32 @@ mod transcript;
 
 const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
 const MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
+/// Smallest bounded metadata page the process protocol admits.
+const MIN_METADATA_PAGE_SIZE: u64 = 1;
+/// Largest bounded metadata page the process protocol admits.
+const MAX_METADATA_PAGE_SIZE: u64 = 100;
+
+/// One complete bounded `list_session_metadata` request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionMetadataPageRequest {
+    pub(crate) required_tags: Vec<String>,
+    pub(crate) title_contains: Option<String>,
+    pub(crate) include_archived: bool,
+    pub(crate) page_size: CanonicalU64,
+    pub(crate) after_session_id: Option<CanonicalUuid>,
+}
+
+impl SessionMetadataPageRequest {
+    fn request(&self) -> ClientRequest {
+        ClientRequest::ListSessionMetadata {
+            required_tags: self.required_tags.clone(),
+            title_contains: self.title_contains.clone(),
+            include_archived: self.include_archived,
+            page_size: self.page_size,
+            after_session_id: self.after_session_id,
+        }
+    }
+}
 
 /// Parses and runs one terminal-client invocation.
 pub async fn run(
@@ -83,6 +109,7 @@ async fn execute(
         Command::Import { path, .. } => Some(read_import_source(path).await?),
         Command::Create { .. }
         | Command::List
+        | Command::Search(_)
         | Command::Send { .. }
         | Command::Model { .. }
         | Command::Transcript { .. }
@@ -102,6 +129,7 @@ async fn execute(
             command_id,
         } => create(&mut client, &mut output, selection, command_id).await,
         Command::List => list(&mut client, &mut output).await,
+        Command::Search(page) => search(&mut client, &mut output, page).await,
         Command::Send {
             session_id,
             command_id,
@@ -415,91 +443,111 @@ async fn observe_session_defaults(
     client: &mut ProcessClient,
     selected_session: CanonicalUuid,
 ) -> Result<ObservedSessionDefaults, ClientError> {
-    let mut after_session_id = None;
+    let mut page = SessionMetadataPageRequest {
+        required_tags: Vec::new(),
+        title_contains: None,
+        include_archived: true,
+        page_size: CanonicalU64::new(MAX_METADATA_PAGE_SIZE),
+        after_session_id: None,
+    };
     loop {
-        let mut connection = client
-            .request(ClientRequest::ListSessionMetadata {
-                required_tags: Vec::new(),
-                title_contains: None,
-                include_archived: true,
-                page_size: CanonicalU64::new(100),
-                after_session_id,
-            })
-            .await?;
-        match connection.message().await? {
-            ServerMessage::SessionMetadataPageStart {} => {}
+        let mut selected = None;
+        let next_after_session_id = read_session_metadata_page(client, &page, |frame| {
+            if let ServerMessage::SessionMetadataSummary {
+                session_id,
+                defaults_version,
+                dangerous_tool_auto_approval,
+                ..
+            } = frame.message()
+                && *session_id == selected_session
+            {
+                selected = Some(ObservedSessionDefaults {
+                    version: *defaults_version,
+                    dangerous_tool_auto_approval: *dangerous_tool_auto_approval,
+                });
+            }
+            Ok(())
+        })
+        .await?;
+        if let Some(selected) = selected {
+            return Ok(selected);
+        }
+        let Some(next) = next_after_session_id else {
+            return Err(ClientError::Input("the selected session was not listed"));
+        };
+        page.after_session_id = Some(next);
+    }
+}
+
+/// Reads and validates exactly one bounded metadata page, presenting each
+/// summary frame to `consume` and returning the page's continuation cursor.
+async fn read_session_metadata_page(
+    client: &mut ProcessClient,
+    page: &SessionMetadataPageRequest,
+    mut consume: impl FnMut(&ServerFrame) -> Result<(), ClientError>,
+) -> Result<Option<CanonicalUuid>, ClientError> {
+    let mut connection = client.request(page.request()).await?;
+    match connection.message().await? {
+        ServerMessage::SessionMetadataPageStart {} => {}
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(code, message, detail)),
+        _ => {
+            return Err(ClientError::Protocol(
+                "session metadata page did not begin with its start frame",
+            ));
+        }
+    }
+    let mut prior_session = page.after_session_id;
+    let mut last_in_page = None;
+    let mut summary_count = 0_u64;
+    loop {
+        let frame = connection.frame().await?;
+        match frame.message() {
+            ServerMessage::SessionMetadataSummary { session_id, .. } => {
+                if prior_session
+                    .is_some_and(|prior: CanonicalUuid| prior.into_uuid() >= session_id.into_uuid())
+                {
+                    return Err(ClientError::Protocol(
+                        "session metadata summaries were not strictly ordered",
+                    ));
+                }
+                summary_count = summary_count.checked_add(1).ok_or(ClientError::Protocol(
+                    "session metadata summary count overflowed",
+                ))?;
+                if summary_count > page.page_size.value() {
+                    return Err(ClientError::Protocol(
+                        "session metadata page exceeded its requested bound",
+                    ));
+                }
+                prior_session = Some(*session_id);
+                last_in_page = Some(*session_id);
+                consume(&frame)?;
+            }
+            ServerMessage::SessionMetadataPageEnd {
+                session_count,
+                next_after_session_id,
+            } => {
+                if session_count.value() != summary_count
+                    || next_after_session_id.is_some() && *next_after_session_id != last_in_page
+                {
+                    return Err(ClientError::Protocol(
+                        "session metadata page count or cursor was invalid",
+                    ));
+                }
+                return Ok(*next_after_session_id);
+            }
             ServerMessage::Error {
                 code,
                 message,
                 detail,
-            } => return Err(ClientError::remote(code, message, detail)),
+            } => return Err(ClientError::remote(*code, message.clone(), *detail)),
             _ => {
                 return Err(ClientError::Protocol(
-                    "session metadata page did not begin with its start frame",
+                    "session metadata page sequence or count was invalid",
                 ));
-            }
-        }
-        let mut selected = None;
-        let mut observed_count = 0_u64;
-        let mut last_session_id = after_session_id;
-        let mut last_in_page = None;
-        loop {
-            match connection.message().await? {
-                ServerMessage::SessionMetadataSummary {
-                    session_id,
-                    defaults_version,
-                    dangerous_tool_auto_approval,
-                    ..
-                } => {
-                    if last_session_id.is_some_and(|last: CanonicalUuid| {
-                        session_id.into_uuid() <= last.into_uuid()
-                    }) {
-                        return Err(ClientError::Protocol(
-                            "session metadata summaries were not strictly ordered",
-                        ));
-                    }
-                    observed_count = observed_count.checked_add(1).ok_or(ClientError::Protocol(
-                        "session metadata summary count overflowed",
-                    ))?;
-                    last_session_id = Some(session_id);
-                    last_in_page = Some(session_id);
-                    if session_id == selected_session {
-                        selected = Some(ObservedSessionDefaults {
-                            version: defaults_version,
-                            dangerous_tool_auto_approval,
-                        });
-                    }
-                }
-                ServerMessage::SessionMetadataPageEnd {
-                    session_count,
-                    next_after_session_id,
-                } => {
-                    if session_count.value() != observed_count
-                        || next_after_session_id.is_some() && next_after_session_id != last_in_page
-                    {
-                        return Err(ClientError::Protocol(
-                            "session metadata page count or cursor was invalid",
-                        ));
-                    }
-                    if let Some(selected) = selected {
-                        return Ok(selected);
-                    }
-                    let Some(next) = next_after_session_id else {
-                        return Err(ClientError::Input("the selected session was not listed"));
-                    };
-                    after_session_id = Some(next);
-                    break;
-                }
-                ServerMessage::Error {
-                    code,
-                    message,
-                    detail,
-                } => return Err(ClientError::remote(code, message, detail)),
-                _ => {
-                    return Err(ClientError::Protocol(
-                        "session metadata page sequence or count was invalid",
-                    ));
-                }
             }
         }
     }
@@ -567,6 +615,55 @@ async fn list(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(),
             }
         }
         line.clear();
+    }
+    Ok(())
+}
+
+async fn search(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    page: SessionMetadataPageRequest,
+) -> Result<(), ClientError> {
+    let mut spool = tempfile::tempfile()?;
+    let next_after_session_id = read_session_metadata_page(client, &page, |frame| {
+        spool.write_all(&encode_server_line(frame)?)?;
+        Ok(())
+    })
+    .await?;
+    spool.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(spool);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        match decode_server_line(&line)?.message() {
+            ServerMessage::SessionMetadataSummary {
+                session_id,
+                defaults_version,
+                model_selection,
+                dangerous_tool_auto_approval,
+                title,
+                tags,
+                archived,
+                last_writer,
+            } => output.session_metadata_summary(&SessionMetadataRow {
+                session_id: *session_id,
+                defaults_version: defaults_version.value(),
+                selection: &selection_display(*model_selection),
+                dangerous_tool_auto_approval: *dangerous_tool_auto_approval,
+                archived: *archived,
+                last_writer: *last_writer,
+                tags,
+                title: title.as_deref(),
+            })?,
+            _ => {
+                return Err(ClientError::Protocol(
+                    "session-metadata spool contained a non-summary frame",
+                ));
+            }
+        }
+        line.clear();
+    }
+    if let Some(next_after_session_id) = next_after_session_id {
+        output.next_page_cursor(next_after_session_id)?;
     }
     Ok(())
 }
@@ -1313,10 +1410,10 @@ mod tests {
 
     use super::{
         MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES, ProcessClient,
-        SnapshotSelection, TurnTerminal, create, decide, model_call_recovery_transition,
-        read_input, reconcile_turn, run, socket_path, stop_turn, submit_input,
-        terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
-        tool_recovery_transition,
+        SessionMetadataPageRequest, SnapshotSelection, TurnTerminal, create, decide,
+        model_call_recovery_transition, read_input, reconcile_turn, run, search, socket_path,
+        stop_turn, submit_input, terminal_event_state, terminal_snapshot_selection,
+        terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -1691,6 +1788,89 @@ mod tests {
             String::from_utf8_lossy(&error)
                 .contains("conversation import source cannot fit within the process frame bound")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn search_rejects_a_page_that_exceeds_its_requested_bound() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::ListSessionMetadata {
+                    required_tags: Vec::new(),
+                    title_contains: None,
+                    include_archived: false,
+                    page_size: CanonicalU64::new(1),
+                    after_session_id: None,
+                }
+            );
+            let frame = |message| {
+                ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
+                    .map_err(io::Error::other)
+            };
+            let summary = |seed| ServerMessage::SessionMetadataSummary {
+                session_id: CanonicalUuid::from_uuid(Uuid::from_u128(seed)),
+                defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(9)),
+                },
+                dangerous_tool_auto_approval: false,
+                title: None,
+                tags: Vec::new(),
+                archived: false,
+                last_writer: None,
+            };
+            let mut response = Vec::new();
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::SessionMetadataPageStart {})?)
+                    .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(summary(1))?).map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(summary(2))?).map_err(io::Error::other)?,
+            );
+            writer.write_all(&response).await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let result = search(
+            &mut client,
+            &mut output,
+            SessionMetadataPageRequest {
+                required_tags: Vec::new(),
+                title_contains: None,
+                include_archived: false,
+                page_size: CanonicalU64::new(1),
+                after_session_id: None,
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(ClientError::Protocol(
+                "session metadata page exceeded its requested bound"
+            ))
+        ));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        server.await??;
         Ok(())
     }
 
