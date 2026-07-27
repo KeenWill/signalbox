@@ -54,6 +54,52 @@ would bypass the typed cap and deadline policy.
 **Affects.** Native session synchronization error classification, recovery
 effects, and scripted reducer tests.
 
+## 2026-07-26 — Bound retained native metadata-list text at 32 MiB
+
+**Context.** Each metadata page and summary has a row and UTF-8 bound, and the
+number of pages is capped, but the native client retained every admitted title
+and tag until pagination completed. The product of those independent limits was
+larger than the client should retain for one list operation.
+
+**Decision.** Give metadata-list accumulation its own typed policy parameter and
+set the native default to 32 MiB of title and tag UTF-8. Reject the operation
+before appending a page that would exceed the cap or overflow its byte count.
+
+**Rejected alternatives.** Relying on page count alone leaves a much larger
+implicit memory budget. Truncating metadata silently changes authoritative
+values. Charging fixed-size identifiers does not materially improve the bound
+and obscures what this capacity controls.
+
+**Affects.** Native process-service metadata pagination and its integration
+tests.
+
+## 2026-07-26 — Select bounded native-client operational policies
+
+**Context.** The native synchronization and application layers require concrete
+deadlines, reconnect schedules, memory capacities, metadata pagination limits,
+and ambiguous-mutation retry timing. The process protocol fixes none of these
+client-operational values, and the synchronization policy deliberately keeps
+deadlines separate from heartbeat concerns.
+
+**Decision.** The app allows 5 seconds for connect and hello, 20 seconds for
+initial or side history, and 5 seconds for replay. Reconnect waits are 250 ms, 1
+second, 3 seconds, and 8 seconds, then stop. A snapshot admits at most 50,000
+records and 32 MiB of retained UTF-8; an event buffer admits 2,000 events and 8
+MiB. One-shot application exchanges allow 20 seconds for connection opening and
+for each response frame. Metadata uses 100-row pages with a 100-page cap. An
+exact `commit_ambiguous` mutation retries after 250 ms, 750 ms, and 2 seconds,
+then stops. Each list is the complete cap; there is no implicit retry.
+
+**Rejected alternatives.** Unbounded retries and memory permit indefinite work
+or heap growth. One shared timeout conflates stages with different costs.
+Heartbeat-derived deadlines add a concern absent from the Unix-socket protocol.
+Using the wire frame limit as an aggregate history limit does not bound a
+multi-frame snapshot. Timing only response reads leaves socket opening
+unbounded.
+
+**Affects.** Native application composition, one-shot request exchange, metadata
+paging, mutation retry, and synchronization runtime behavior.
+
 ## 2026-07-26 — Bound retained native diagnostic messages at 4 KiB
 
 **Context.** The native synchronization machine retains the latest 128
@@ -577,6 +623,73 @@ forward narrowing.
 **Affects.** `RunnerToolAttemptAuthorization`, `AuthorizedToolAttempt`,
 `RunnerLease`, placement reconstitution, INV-043 and INV-044, S12, S30, S31, and
 the [runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-26 — Bound native followed-event buffering in memory
+
+**Context.** The native synchronization machine buffers followed events while it
+validates initial history and while a side snapshot is in flight. Neither the
+process protocol nor session lifetime bounds how many events can arrive or how
+much variable-size content they retain before snapshot work completes.
+
+**Decision.** Every native synchronization policy supplies an event-buffer
+capacity: a maximum event count for fixed overhead and a maximum retained UTF-8
+byte count for content and the re-encoded future-event JSON object, including
+container and scalar nodes. Crossing either bound rejects the connection through
+bounded recovery without advancing the cursor past the unadmitted event. The
+application wiring owns the concrete operational values.
+
+**Rejected alternatives.** An unbounded array permits heap growth under a slow
+or stalled snapshot. Bounding count alone leaves large event content unbounded.
+Dropping oldest events creates an unrecoverable cursor gap, and spilling to disk
+adds lifecycle and failure modes disproportionate to this phase.
+
+**Affects.** The native synchronization policy, replay and side-snapshot event
+buffers, scripted transport tests, and application composition that selects the
+capacity.
+
+## 2026-07-26 — Retain a bounded native synchronization diagnostic history
+
+**Context.** The native synchronization machine reports every diagnostic as an
+effect and also retains recent diagnostics so a fallback does not erase the
+reason it occurred. A long-lived follow can encounter arbitrarily many future
+unknown events, stale completions, and recoveries, so retaining the complete
+history would make tolerated input an unbounded heap-growth path.
+
+**Decision.** Retain the most recent 128 synchronization diagnostics in the
+machine while continuing to emit every diagnostic to the caller. New diagnostics
+evict the oldest retained entries after the bound. Recovery and successful
+reconnection preserve the bounded history.
+
+**Rejected alternatives.** Retaining every diagnostic permits unbounded growth.
+Retaining only the latest diagnostic loses nearby fallback context. Moving all
+history to the application would duplicate a machine-owned diagnostic-state
+requirement without changing the need for an explicit bound.
+
+**Affects.** The native synchronization machine and its scripted transport
+tests.
+
+## 2026-07-26 — Bound native snapshot validation in memory
+
+**Context.** The process protocol deliberately has no aggregate transcript-size
+limit, while the native synchronization machine must validate a complete
+snapshot before publishing it. Retaining every record and its identity indexes
+without a client-side bound lets one snapshot consume unbounded memory. The
+bound is an operational client concern rather than a wire restriction.
+
+**Decision.** Every native synchronization policy supplies an explicit snapshot
+capacity: a maximum record count for fixed per-record overhead and a maximum
+retained UTF-8 byte count for wire strings and unknown JSON payloads. Crossing
+either bound rejects the snapshot through the existing bounded recovery path;
+the machine never publishes the partial snapshot. The application wiring owns
+the concrete operational values.
+
+**Rejected alternatives.** Unbounded retention leaves the client exposed to
+unbounded heap growth. A disk-backed spool and identity index would add storage
+lifecycle and failure modes disproportionate to this phase. Silent truncation
+would publish state the server never described.
+
+**Affects.** The native synchronization policy, snapshot accumulator, scripted
+transport tests, and application composition that selects the capacity.
 
 ## 2026-07-25 — Use a bounded GitHub adapter for the first code-host tools
 

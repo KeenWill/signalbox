@@ -190,6 +190,7 @@ public enum SignalboxSessionSynchronizationInput: Sendable {
     message: SignalboxProcessServerMessage
   )
   case sideTransportEnded(generation: UInt64, refreshID: UInt64, message: String)
+  case projectionRejected(message: String)
   case stop
 }
 
@@ -288,6 +289,13 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         refreshID: refreshID,
         message: message
       )
+    case .projectionRejected(let message):
+      switch phase {
+      case .stopped, .recovery:
+        return []
+      case .connect, .hello, .history, .replay, .steady:
+        return enterRecovery(stage: stage, message: message, kind: .protocolViolation)
+      }
     case .stop:
       return stop()
     }

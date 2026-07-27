@@ -21,6 +21,7 @@ enum NativeAppConstants {
 
 extension Notification.Name {
     static let refreshRequested = Notification.Name("signalbox-refresh-requested")
+    static let processServiceChanged = Notification.Name("signalbox-process-service-changed")
 }
 
 @MainActor
