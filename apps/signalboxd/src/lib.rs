@@ -1,6 +1,6 @@
 //! Hub-owned composition between turn activation and model execution.
 //!
-//! docs/spec/runtime-substrate.md makes this package the composition root.
+//! docs/spec/turn-lifecycle-and-scheduling.md owns this composition-root role.
 //! The scheduler pass below hands each complete activated-turn outcome to a
 //! fresh execution invocation; concrete provider selection remains an
 //! injected composition choice.
@@ -24,7 +24,7 @@ use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepos
 use tokio::sync::watch;
 
 mod configuration;
-mod current_time;
+mod daemon_tools;
 mod fenced_database;
 mod local_socket;
 mod process_runtime;
@@ -34,13 +34,42 @@ pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
     HubModelConfigurationError,
 };
-pub use current_time::{
-    CurrentTimeClock, CurrentTimeExecutor, CurrentTimeExecutorError, CurrentTimeTool,
-    CurrentTimeToolConstructionError, SystemCurrentTimeClock,
+pub use daemon_tools::{
+    DaemonToolCatalog, DaemonToolExecutor, DaemonToolExecutorError, DaemonTools,
+    DaemonToolsConstructionError,
 };
 pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{ProcessRuntime, ProcessRuntimeError};
+pub use signalbox_tools_basic::{
+    CurrentTimeClock, CurrentTimeExecutor, CurrentTimeExecutorError, CurrentTimeTool,
+    CurrentTimeToolConstructionError, EchoExecutor, EchoExecutorError, EchoTool,
+    EchoToolConstructionError, PostgresSessionStatusWriter, PostgresSessionStatusWriterError,
+    ReqwestWebFetchConstructionError, ReqwestWebFetchTransport, SessionStatusExecutor,
+    SessionStatusExecutorError, SessionStatusTool, SessionStatusToolConstructionError,
+    SessionStatusWrite, SessionStatusWriteOutcome, SessionStatusWriter, SystemCurrentTimeClock,
+    WebFetchBodyCompleteness, WebFetchExecutor, WebFetchExecutorError, WebFetchRequest,
+    WebFetchResponse, WebFetchTool, WebFetchToolConstructionError, WebFetchTransport,
+    WebFetchTransportFailure,
+};
+pub use signalbox_tools_code_host::{
+    CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
+    CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME, CHANGE_REQUEST_FILE_PATCH_NAME,
+    CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME, CHANGE_REQUEST_REVIEW_THREADS_NAME,
+    CHANGE_REQUEST_SUMMARY_NAME, CHANGE_REQUEST_THREAD_REPLY_NAME,
+    CHANGE_REQUEST_THREAD_RESOLVE_NAME, CODE_HOST_CREDENTIAL_REFERENCE, CODE_HOST_TOOL_NAMES,
+    ChangeRequestCommentArguments, ChangeRequestCommentResult, ChangeRequestSummaryArguments,
+    ChangeRequestSummaryFields, ChangeRequestSummaryResult, ChangedFile, ChangedFilesArguments,
+    ChangedFilesResult, CheckStatus, ChecksStatusArguments, ChecksStatusResult, CiJobLogArguments,
+    CiJobLogResult, CodeHostChangeRequestNumber, CodeHostCommentBody, CodeHostExecutor,
+    CodeHostExecutorError, CodeHostFilePath, CodeHostOpaqueId, CodeHostOperation,
+    CodeHostRepository, CodeHostResult, CodeHostResultCompleteness, CodeHostRevision,
+    CodeHostTools, CodeHostToolsConstructionError, CodeHostTransport, CodeHostTransportFailure,
+    FilePatchArguments, FilePatchResult, GitHubCodeHostConstructionError, GitHubCodeHostTransport,
+    RerunFailedJobsArguments, RerunFailedJobsResult, ReviewThread, ReviewThreadComment,
+    ReviewThreadFields, ReviewThreadResolution, ReviewThreadsArguments, ReviewThreadsResult,
+    ThreadReplyArguments, ThreadReplyResult, ThreadResolveArguments, ThreadResolveResult,
+};
 pub use single_hub::{SingleHubGuard, SingleHubGuardError};
 
 /// Per-activation model execution constructed by the hub composition root.

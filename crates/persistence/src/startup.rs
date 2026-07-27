@@ -363,13 +363,38 @@ where
             StartupScanSessionOutcome::NoActiveTurn,
         ));
     };
-    if !matches!(
-        active_turn.phase(),
-        signalbox_domain::ActiveTurnPhase::Running { .. }
-    ) {
-        return Ok(TransactionDecision::Rollback(
-            StartupScanSessionOutcome::NoActiveTurn,
-        ));
+    match active_turn.phase() {
+        signalbox_domain::ActiveTurnPhase::Running { .. } => {}
+        // A prior process already ended this turn's physical tenure and
+        // recorded the exact ambiguity set, so there is no lost live end for
+        // the scan to classify. Reporting it separately keeps the wait visible
+        // to the operator instead of indistinguishable from a healed session.
+        //
+        // The domain phase also carries a tool-attempt ambiguity wait, which
+        // has no operator surface to point at; that wait stays classified as
+        // it was, so the report never promises a decision nothing can make.
+        signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision {
+            ambiguous_operations,
+            ..
+        } if ambiguous_operations.iter().all(|operation| {
+            matches!(
+                operation,
+                signalbox_domain::IssuedOperationRef::ModelCall(_)
+            )
+        }) =>
+        {
+            return Ok(TransactionDecision::Rollback(
+                StartupScanSessionOutcome::AwaitingRecoveryDecision {
+                    turn: active_turn.turn(),
+                },
+            ));
+        }
+        signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. }
+        | signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. } => {
+            return Ok(TransactionDecision::Rollback(
+                StartupScanSessionOutcome::NoActiveTurn,
+            ));
+        }
     }
     let pending_steering = active_turn
         .pending_steering()
@@ -557,11 +582,6 @@ where
                     StartupScanSessionOutcome::NoActiveTurn,
                 ));
             }
-            AcceptedInputTurnFailureFailure::PendingSteering { accepted_input } => {
-                return Ok(TransactionDecision::Rollback(
-                    StartupScanSessionOutcome::DeferredPendingSteering { accepted_input },
-                ));
-            }
             AcceptedInputTurnFailureFailure::FailureEntryIdentityAlreadyExists => {
                 return Err(StartupScanRepositoryError::IdentityCollision(
                     StartupScanIdentityCollision::FailureEntry,
@@ -572,7 +592,8 @@ where
                     StartupScanIdentityCollision::TerminalFrontier,
                 ));
             }
-            AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
+            AcceptedInputTurnFailureFailure::PendingSteering { .. }
+            | AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
             | AcceptedInputTurnFailureFailure::ActiveStartMissing
             | AcceptedInputTurnFailureFailure::StartingSnapshotMissing
             | AcceptedInputTurnFailureFailure::TerminalFrontierCannotAppend => {
@@ -779,6 +800,7 @@ fn map_tool_loop_error(error: ToolLoopRepositoryError) -> StartupScanRepositoryE
         }
         ToolLoopRepositoryError::Corruption(_)
         | ToolLoopRepositoryError::DifferentCommandKind
+        | ToolLoopRepositoryError::ConflictingCommandReuse
         | ToolLoopRepositoryError::InvalidTransition(_) => {
             StartupScanCorruption::Inconsistent("tool-attempt restart state").into()
         }

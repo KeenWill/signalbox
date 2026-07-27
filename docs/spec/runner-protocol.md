@@ -1,21 +1,20 @@
 # Runner protocol and placement
 
-This page specifies the implemented runner-protocol foundation. Its domain
-surface is verified through PR #260 (`agent/runner-protocol-domain`); its
-relational persistence clauses are verified against PR #267
-(`agent/runner-persistence`). It owns logical runner enrollment,
+This page specifies the implemented runner-protocol domain foundation as
+verified against the implementing stack through PR #260
+(`agent/runner-protocol-domain`). It owns logical runner enrollment,
 daemon-authoritative catalog validation, runner leases, session placement and
-affinity, credential-profile grants, and workspace requirements. The common
-tool-registry declarations remain owned by [tool loop](tool-loop.md); session
-transcript and frontier mechanics remain owned by
+affinity, credential-profile grants, and workspace requirements. The tool
+registry's common declarations remain owned by [tool loop](tool-loop.md);
+session transcript and frontier mechanics remain owned by
 [sessions and transcript](sessions-and-transcript.md); physical tool attempts
 remain owned by [tool loop](tool-loop.md). Invariant tags cite
 [the invariant catalog](../invariants.md).
 
-The verified surface includes the domain aggregates and their PostgreSQL store
-adapter. There is no runner binary, transport message, streaming connection,
-authentication handshake, or network code. Those implementation edges are listed
-under [Open edges](#open-edges).
+The verified surface in this stack is domain-only. There is no runner binary,
+store adapter, transport message, streaming connection, authentication
+handshake, or network code. Those implementation edges are listed under
+[Open edges](#open-edges).
 
 ## Identity, enrollment, and registration
 
@@ -32,23 +31,13 @@ authentication-reference identity, and owner-allowed capability classes. The
 authentication reference identifies daemon-resident enrollment policy; it is not
 an authentication secret. Enrollment is either active or revoked. Revocation is
 terminal and makes later registration invalid. Complete reconstitution rejects
-mismatched enrollment, runner, authentication, allowed class inventory, or
-lifecycle state rather than repairing it. Revocation also makes an existing
-validated registration unable to authorize a later lease. A lease offer rechecks
-the active enrollment and its exact enrollment, runner, and
-authentication-reference correlations; a lease already offered is unaffected.
-
-The relational projection stores the typed enrollment and append-only
-active-or-revoked audit evidence. The current row and its current audit revision
-independently record the runner, authentication reference, allowed-class count,
-and exact allowed-class inventory; reconstitution requires those records to
-agree. Every historical audit revision retains and rechecks its own exact class
-inventory. Every appended audit revision must be installed as that enrollment's
-canonical current revision in the same transaction, so orphan terminal audit
-evidence fails closed. Runner identity and authentication-reference identity
-each remain one-to-one with the logical enrollment. Registration insertion locks
-and reads that canonical enrollment; revocation and re-registration therefore
-cannot race to admit availability under revoked authority.
+mismatched enrollment, runner, authentication, allowed class inventory, optional
+last issued registration revision, or lifecycle state rather than repairing it.
+Revocation flips the enrollment-shared active fence, so an existing validated
+registration becomes non-current for later leases, reconciliation, runner
+replacement, or grant replacement. A lease offer rechecks the active enrollment
+and its exact enrollment, runner, and authentication-reference correlations; a
+lease already offered is unaffected.
 
 A registration carries availability claims only:
 
@@ -61,18 +50,23 @@ It carries no permission default, effect class, placement declaration, approval
 posture, or credential value. Registration validates the advertisement against
 both the enrollment's allowed capability classes and the daemon-side catalog. An
 unknown or disallowed claim rejects the complete registration. A valid
-registration retains the exact advertised subset and attaches the
-daemon-authoritative declarations. Omitting a formerly advertised capability
-removes its availability from the new registration, but never changes its
-daemon-side policy. A pinned session never inherits additions from
-re-registration. If a new registration omits a runner-required capability in
-that session's pinned snapshot, no later lease is authorized; an explicit
-registration-reconciliation transition marks the placement `RunnerLost` without
-rewriting its snapshot. Omitting a combined-locus tool disables runner dispatch
-for that tool but retains placement so daemon fallback remains admissible. Why:
-re-registration can narrow current availability without downgrading a
-confirmation requirement, widening authorization, or silently changing
-established affinity (INV-042, INV-044).
+registration retains the exact advertised subset, attaches the
+daemon-authoritative declarations, and advances the enrollment-owned current
+registration revision. Complete enrollment reconstitution restores the optional
+last issued revision from independently matching stored facts; the next
+successful registration advances it instead of reusing a prior revision.
+Retained copies of every prior registration become stale and cannot authorize a
+later lease, reconciliation, or grant-bearing placement transition. Omitting a
+formerly advertised capability removes its availability from the new
+registration, but never changes its daemon-side policy. A pinned session never
+inherits additions from re-registration. If a new registration omits a
+runner-required capability in that session's pinned snapshot, no later lease is
+authorized; an explicit registration-reconciliation transition marks the
+placement `RunnerLost` without rewriting its snapshot. Omitting a combined-locus
+tool disables runner dispatch for that tool but retains placement so daemon
+fallback remains admissible. Why: re-registration can narrow current
+availability without downgrading a confirmation requirement, widening
+authorization, or silently changing established affinity (INV-042, INV-044).
 
 ## Advertised catalogs and daemon authority
 
@@ -86,15 +80,9 @@ The owner-editable catalog is validated into one `RunnerCatalog` domain value.
 It contains allowed capability classes, complete runner-tool declarations,
 credential-profile policies, and allowed workspace capabilities. Duplicate
 names, a credential policy naming an undeclared tool, or an internally
-inconsistent placement declaration rejects the complete catalog. Idempotent
-tools are runner-only because the daemon-local tool attempt model cannot carry
-their three-way retry classification; relational registration shape rejects an
-idempotent combined-locus row as well. Every relational tool selector requires
-its closed identity-or-capability-class discriminator and matching payload.
+inconsistent placement declaration rejects the complete catalog.
 Configuration-file parsing and replacement are later application work; the
-domain value is independent of TOML. Relational profile-approval rows apply the
-same checked `ToolName` shape while remaining independent of the runner's
-advertised subset.
+domain value is independent of TOML.
 
 Each `RunnerToolDeclaration` contains:
 
@@ -143,16 +131,6 @@ satisfy also rejects the complete advertisement. The resulting
 with daemon-owned policy. A runner can therefore neither self-widen its tool
 surface nor replace confirmation with automatic approval (INV-042).
 
-Every successful advertisement is retained as one append-only validation
-revision: exact advertised classes, tool declarations and selectors,
-credential-profile names and their complete daemon policy snapshots (including
-pairs for catalog tools not advertised by that runner), and workspace
-capabilities. Deferred inventory checks reject partial revisions and require
-every appended revision to advance the current-registration head in the same
-transaction. Loads join the canonical enrollment and every normalized satellite,
-then invoke domain reconstitution; a missing or cross-wired enrollment,
-selector, policy pair, or declared inventory fails closed.
-
 ## Effect classes and runner leases
 
 Every tool declaration has exactly one effect class and there is no default:
@@ -170,19 +148,28 @@ A `RunnerLease` binds one lease identity, exact tool name, complete authorized
 physical-attempt dispatch correlation, session, runner, effect class, and
 positive lease-lineage generation. Lease creation is not a free constructor: it
 consumes one `RunnerToolAttemptAuthorization`, which binds the approved request
-and its exact tool name to the tool loop's `AuthorizedToolAttempt`. The latter
-exists only after the automatic or owner decision authorizes that exact attempt,
-and neither authority nor the resulting lease is cloneable. Current active
-enrollment, pinned placement, its exact validated registration, and any selected
-active credential grant jointly authorize every offer after the first. The
-initial offer instead creates that pinned placement, any selected grant, and
-generation-one lease in one checked transition from `Unpinned`; it does not
-require those products to exist beforehand. The request, attempt, session, and
-two-way crash class must match the selected tool, placement, and
-declaration-derived effect class (`Pure` to `EffectFree`; `Idempotent` or
-`SideEffecting` to `ExternalEffect`). Revoked enrollment, lost placement, or a
-mismatched runner, request, tool, attempt, effect, profile, or grant cannot
-create a lease.
+and its exact tool name to the tool loop's `AuthorizedToolAttempt`. Only
+`ToolBatch::authorize_runner_attempt` and `ToolBatch::resume_runner_attempt`
+publicly produce that pairing: each selects the batch's canonical immutable
+request and approval together with its physical-attempt authority.
+`RunnerToolAttemptAuthorization` has no public raw-parts constructor. The
+underlying attempt exists only after the automatic or owner decision authorizes
+that exact attempt, and neither authority nor the resulting lease is cloneable.
+Every checked `ToolBatch` carries a durable per-attempt inventory of runner
+authority already issued. Its in-memory clones share the exact atomic guard for
+each physical attempt, and complete reconstitution restores every consumed guard
+from that inventory. Atomic runner authorization marks that exact attempt issued
+in the batch; a later clone or reconstitution from the updated facts cannot mint
+a second runner lease capability. Current active enrollment, pinned placement,
+its exact validated registration, and any selected active credential grant
+jointly authorize every offer after the first. The initial offer instead creates
+that pinned placement, any selected grant, and generation-one lease in one
+checked transition from `Unpinned`; it does not require those products to exist
+beforehand. The request, attempt, session, and two-way crash class must match
+the selected tool, placement, and declaration-derived effect class (`Pure` to
+`EffectFree`; `Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked
+enrollment, lost placement, or a mismatched runner, request, tool, attempt,
+effect, profile, or grant cannot create a lease.
 
 When a credential profile is selected, the lease also retains the exact
 immutable `CredentialDispatchAuthorization`: session, runner, profile, grant
@@ -194,79 +181,70 @@ runner, tool, authorized physical-attempt correlation, and lineage generation
 may claim it, producing `Claimed`; only that same correlation may complete it.
 Completion is terminal. A stale or cross-wired correlation cannot advance the
 aggregate. Complete reconstitution accepts only the closed state shapes and
-exact correlations.
+exact correlations, and requires the opaque validated registration whose
+daemon-owned declaration independently confirms the stored runner, tool, and
+three-way effect class.
 
-`LostUnclaimed` means authoritative proof that no execution capability was
-issued, not merely absence of a claim frame after an offer was sent. A future
-transport must durably commit the exact claim and acknowledge it before the
-runner may execute. Channel loss after delivery but before that acknowledgement
-cannot be interpreted as proof either way by transport alone.
+`LostUnclaimed` requires an opaque durable no-execution proof bound to the exact
+lease correlation; complete loss reconstitution requires the same proof. The
+proof exposes no public raw-parts or reconstitution constructor, so an offered
+lease and its public correlation cannot mint this authority. It does not mean
+merely absence of a claim frame after an offer was sent. A future transport must
+supply the independently authoritative producer, durably commit the exact claim,
+and acknowledge it before the runner may execute. Channel loss after delivery
+but before that acknowledgement cannot be interpreted as proof either way by
+transport alone. Without the proof, losing even an `Offered` lease
+conservatively follows the execution-possible law: pure or idempotent work
+requires a fresh physical attempt, while side-effecting work requires crash
+classification.
 
 With that proof, loss before claim permits every effect class to be re-leased at
 the checked successor lease-lineage generation. Loss after claim follows the
 required retry law:
 
 - `Pure` and `Idempotent` produce typed re-lease authority at the checked
-  successor generation; after claim that authority consumes the owning checked
+  successor generation. After claim, that authority consumes the owning checked
   `ToolBatch`, retires the prior in-flight attempt to its effect-correct
   terminal history, installs and authorizes a fresh physical `ToolAttemptId`,
-  retains every retired attempt identity in the updated batch, and returns both
-  attempt records; only the private replacement evidence produced by that batch
-  transition can authorize the claimed re-lease, while authority lost before
-  claim retains the never-executed attempt identity; and
+  retains every retired attempt identity in the updated batch and its complete
+  reconstitution facts, and returns both attempt records. Before claim, the
+  authority instead consumes the owning checked batch, verifies its complete
+  original dispatch, and reissues the never-executed attempt through a fresh
+  single-use durable runner-issuance guard. Only the private evidence produced
+  by the applicable batch transition can authorize the re-lease. Preparing
+  either retry consumes the loss authority's one-shot preparation fence. For an
+  unclaimed retry, the predecessor guard moves one-way from issued to retired
+  while the returned batch installs a distinct successor guard; retained batch
+  copies cannot reopen the predecessor, and retry-marked authority is rejected
+  by the ordinary offer transition; and
 - `SideEffecting` produces typed crash-classification authority whose physical
   attempt is derived from the opaque lost lease and never produces re-lease
   authority.
 
-Generation exhaustion, reuse of any current or retired attempt identity, and a
-standalone same-request authorization for claimed retry all fail closed.
-`RunnerLeaseLoss` has sealed construction, so only `RunnerLease::lose` can
-produce retry or crash-classification authority. Re-leasing continues one
-logical tool request and lease lineage. Its successor `RunnerGeneration` is
-distinct from the fresh physical attempt's `ToolDispatchGeneration`, which
-starts at `first()` under the tool-loop law. Every repeated physical execution
-therefore has its own attempt identity and record as required by INV-004.
-Side-effecting loss composes with the existing physical-attempt ambiguity
-machinery; this domain slice does not duplicate or overwrite that attempt's
-outcome (INV-004, INV-025, INV-026, INV-043).
+Generation exhaustion, reuse of any current or retired attempt identity for
+either claimed replacement or ordinary preparation, and a standalone
+same-request authorization for claimed retry all fail closed. A claimed
+replacement must retire the complete original session, turn, issuing turn
+attempt, request, physical attempt, dispatch generation, and effect fence. Its
+private evidence retains the complete source lease correlation and complete
+replacement dispatch; the re-lease transition compares both without truncating
+them to shared request or attempt identities. `RunnerLeaseLoss` has sealed
+construction, so only `RunnerLease::lose` or `RunnerLease::reconstitute_loss`
+over an already-lost checked projection can produce retry or
+crash-classification authority. Re-leasing continues one logical tool request
+and lease lineage. Its successor `RunnerGeneration` is distinct from the fresh
+physical attempt's `ToolDispatchGeneration`, which starts at `first()` under the
+tool-loop law. Every repeated physical execution therefore has its own attempt
+identity and record as required by INV-004. Side-effecting loss composes with
+the existing physical-attempt ambiguity machinery; this domain slice does not
+duplicate or overwrite that attempt's outcome (INV-004, INV-025, INV-026,
+INV-043).
 
 The lease aggregate contains no channel handle or process-local connection
 state. A reconnecting registration cannot recreate, complete, or discard a lease
 from an advertisement. Why: the held streaming channel is transport, not lease
-or claim authority.
-
-The store retains each offered generation and its monotonic claimed, completed,
-or lost events. An offer references the current pinned placement, exact
-validated registration tool, canonical physical tool attempt, and optional
-active grant pair. Relational triggers reject a stale placement, revoked
-enrollment or grant, a current registration that no longer preserves any
-runner-required pinned capability, mismatched tool or effect, non-successor
-generation, attempt reuse after claimed safe work, and every retry after claimed
-side-effecting loss. One durable request-to-lease binding prevents a fresh lease
-identity from bypassing an established request's retry lineage and must commit
-with a matching generation for that request. The durable physical-attempt
-binding likewise requires a matching lease generation. Every generation must
-commit its ordinal-one offered event and a current event head; every later event
-must advance that head to the latest ordinal in the same transaction. A
-generation without loadable state evidence fails closed. Generation one has no
-predecessor; every successor names exactly its immediately prior generation. The
-durable request binding and lease-event history reject truncation, as does the
-current event head. Initial insertion and later state appends compare the
-complete caller-supplied dispatch fence with the canonical physical attempt.
-Lease admission shares the canonical enrollment, current registration pointer,
-and selected grant authority locks, so enrollment or grant revocation and
-registration replacement serialize before the relational checks admit a new
-generation. Loads independently join the physical-attempt tool and pinned runner
-before invoking lease reconstitution. After claimed retryable loss, the failed
-physical attempt leaves the tool-loop current-attempt projection before its
-fresh replacement is prepared and authorized; that fresh attempt becomes current
-before its successor lease generation is stored, avoiding a circular dependency
-between authorization and lease persistence. Committing a claimed retryable loss
-atomically retires its physical attempt without closing or suspending the
-executing batch: pure loss records known crash loss, while idempotent loss
-retains ambiguous physical-effect evidence. Side-effecting loss does not use
-this retry retirement path. The single runner-initiated outbound stream,
-reconnect resynchronization, and exact wire correlations remain later stacks.
+or claim authority. Store mapping, the single runner-initiated outbound stream,
+reconnect resynchronization, and exact wire correlations are later stacks.
 
 ## Session placement and affinity
 
@@ -321,14 +299,23 @@ selection, tool inventory, and provisioned workspace. Exact-runner placement
 therefore changes identity only through this explicit replacement. It advances a
 positive placement revision and returns one `RunnerPlacementChange` value
 carrying the complete before-and-after placement requests and pinned facts
-needed for a later frontier-extending injected message. Reconstitution accepts a
-complete public raw-facts input and rejects an unpinned revision other than one
-or a pinned or lost state that does not match its current request and validated
-capabilities. Pinned or lost reconstitution validates against the exact
-registration snapshot that produced the pin and rejects any stored tool or
-runner-required-tool inventory that differs from that checked result. A current
-narrowed re-registration is reconciled separately and is not substituted for
-that historical snapshot.
+needed for a later frontier-extending injected message. When credential grant
+authority changes, the same result also carries complete before-and-after grant
+reconstitution facts, including the prior narrowed tool inventory and successor
+inventory. Reconstitution accepts a complete public raw-facts input and rejects
+an unpinned revision other than one, a pinned or lost state that does not match
+its current request and validated capabilities, and any stored credential-grant
+lineage whose revision is newer than the placement revision. A profileless
+placement with retained lineage additionally requires the exact terminally
+revoked grant tombstone for that session, runner, and revision; an omitted,
+active, or cross-wired tombstone fails closed. Durable replacement-history
+verification is enforced by the persistence projection described below. Pinned
+or lost reconstitution validates against the exact registration snapshot that
+produced the pin and rejects any stored tool or runner-required-tool inventory
+that differs from that checked result. A current narrowed re-registration is
+reconciled separately and is not substituted for that historical snapshot. This
+domain aggregate accepts every positive placement revision because each is
+reachable through checked successor transitions.
 
 The store retains append-only created, pinned, runner-lost, runner-replaced, and
 profile-replaced records behind one current pointer. Relational transition
@@ -366,9 +353,11 @@ One daemon catalog policy declares approval posture for exact
 dangerous blanket remains first. Otherwise `Automatic` authorizes the exact pair
 without a judge, while `SessionPolicy` and an absent pair require confirmation.
 The registry's tool-only default applies only when no credential profile is
-selected; it cannot override a pair-level `SessionPolicy`. Profile policy cannot
-make an undeclared tool available and cannot alter its effect class or
-admissible loci.
+selected; it cannot override a pair-level `SessionPolicy`. A profileless
+`Confirm` declaration accepts only an owner-command decision or the frozen
+session blanket; reconstituted policy-auto provenance fails closed. Profile
+policy cannot make an undeclared tool available and cannot alter its effect
+class or admissible loci.
 
 Session creation records the requested profile as a placement axis. The pinning
 transition snapshots the selected profile and validated advertised tool set into
@@ -381,29 +370,32 @@ and profile, a tool present in the snapshot, and consumption of the exact
 that tool. The grant records the exact tool/profile posture without issuing a
 reusable standalone dispatch token.
 
-Grant replacement is forward-only. It checks the current revision and installs
-one complete later snapshot, returning a `CredentialProfileChange` with the
-before-and-after profile and tool inventories for later frontier injection.
-Runner replacement consumes the exact last-grant runner and revision carried by
-the pinned placement and creates a checked successor revision. A profileless
-replacement carries both that placement evidence and the lineage forward as a
-new terminal tombstone; omitting the tombstone is therefore structurally
-rejected, and restoring a previously selected profile cannot recreate revision
-one. Every prior revoked revision remains terminal. Every successor binds its
-predecessor through the immediately prior placement exact runner and grant
-revision, so equal revision numbers in independent session grant lines cannot
-cross-wire provenance. Revocation is also forward-only and gates later lease
-creation. A lease already offered is already dispatched and completes or
-crash-classifies normally; revocation neither rewrites nor cancels it. A revoked
-grant revision cannot become active again. Complete reconstitution accepts a
-complete public raw-facts input, checks an independently authoritative expected
-session, and rejects foreign runner facts, a profile absent from the validated
-registration, or a tool set wider than the advertisement. Grants created by
-initial pin or runner replacement contain the complete validated registration
-tool inventory; explicit profile replacement may select a checked subset. The
-store retains normalized grant snapshots and append-only issued, replaced, and
-revoked audit events. Grant relations contain only profile names, tool names,
-pair approval posture, and typed audit correlations: there is no
+Grant replacement is forward-only. It requires the supplied validated
+registration to remain the enrollment-owned current revision, checks the current
+grant revision, and installs one complete later snapshot. A retained stale
+registration cannot mint a successor grant after later policy has been attached.
+The result carries a `CredentialProfileChange` with the before-and-after profile
+and tool inventories for later frontier injection. Runner replacement applies
+the same current-registration gate, consumes the exact last-grant runner and
+revision carried by the pinned placement, and creates a checked successor
+revision. A profileless replacement carries both that placement evidence and the
+lineage forward as a new terminal tombstone; omitting the tombstone is therefore
+structurally rejected, and restoring a previously selected profile cannot
+recreate revision one. Every prior revoked revision remains terminal. Every
+successor binds its predecessor through the immediately prior placement's exact
+runner and grant revision, so equal revision numbers in independent session
+grant lines cannot cross-wire provenance. Revocation is also forward-only and
+gates later lease creation. A lease already offered is already dispatched and
+completes or crash-classifies normally; revocation neither rewrites nor cancels
+it. A revoked grant revision cannot become active again. Complete reconstitution
+accepts a complete public raw-facts input, checks an independently authoritative
+expected session, and rejects foreign runner facts, a profile absent from the
+validated registration, or a tool set wider than the advertisement. Grants
+created by initial pin or runner replacement contain the complete validated
+registration tool inventory; explicit profile replacement may select a checked
+subset. The store retains normalized grant snapshots and append-only issued,
+replaced, and revoked audit events. Grant relations contain only profile names,
+tool names, pair approval posture, and typed audit correlations: there is no
 credential-value or generic payload column. A stored grant preserves an explicit
 profile approval exactly; only a genuinely absent policy pair may use the
 session-policy fallback. Truncation of immutable grant audit evidence is
@@ -426,8 +418,9 @@ the later runner workspace stack.
 
 ## Open edges
 
-- Runner transport, authentication exchange, reconnect recovery, compatibility,
-  and result envelopes are recorded in
+- Runner transport, authentication exchange, durable registration and lease
+  storage, durable-claim acknowledgement before runner execution, reconnect
+  recovery, compatibility, and result envelopes are recorded in
   [Protocols and persistence](../open-questions.md#protocols-and-persistence)
   and
   [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance).

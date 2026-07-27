@@ -265,13 +265,14 @@ impl RunnerProtocolStore {
     /// Validates and appends one complete availability advertisement.
     pub async fn register(
         &self,
-        enrollment: RunnerEnrollmentId,
+        enrollment: &RunnerEnrollment,
         advertisement: signalbox_domain::RunnerAdvertisement,
         catalog: &signalbox_domain::RunnerCatalog,
     ) -> Result<StoredValidatedRunnerRegistration, RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
+        let enrollment_id = enrollment.enrollment();
         let locked = sqlx::query(RUNNER_ENROLLMENT)
-            .bind(enrollment.into_uuid())
+            .bind(enrollment_id.into_uuid())
             .fetch_optional(&mut *transaction)
             .await?;
         if locked.is_none() {
@@ -279,14 +280,19 @@ impl RunnerProtocolStore {
                 RunnerProtocolCorruption::MissingCanonicalEnrollment,
             ));
         }
-        let canonical = load_enrollment_in(transaction.as_mut(), enrollment)
+        let canonical = load_enrollment_in(transaction.as_mut(), enrollment_id)
             .await?
             .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
-        let registration = canonical
+        if canonical != *enrollment {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ));
+        }
+        let registration = enrollment
             .register(advertisement, catalog)
             .map_err(RunnerProtocolStoreError::Domain)?;
         let previous: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
-            .bind(enrollment.into_uuid())
+            .bind(enrollment_id.into_uuid())
             .fetch_optional(&mut *transaction)
             .await?;
         let revision = match previous {
@@ -303,7 +309,7 @@ impl RunnerProtocolStore {
              ON CONFLICT (enrollment_id)
              DO UPDATE SET registration_revision = EXCLUDED.registration_revision",
         )
-        .bind(enrollment.into_uuid())
+        .bind(enrollment_id.into_uuid())
         .bind(Decimal::from(revision.get()))
         .execute(&mut *transaction)
         .await?;
@@ -511,19 +517,28 @@ impl RunnerProtocolStore {
         };
         let event_ordinal = decode_u64(row.get("event_ordinal"))?;
         let registration = load_placement_registration(transaction.as_mut(), &row).await?;
+        let grant = if registration.is_some() {
+            load_grant_for_placement(transaction.as_mut(), &row).await?
+        } else {
+            None
+        };
+        let profileless_tombstone = grant.as_ref().filter(|grant| {
+            grant.state() == CredentialProfileGrantState::Revoked
+                && row
+                    .try_get::<Option<String>, _>("pinned_credential_profile_name")
+                    .ok()
+                    .flatten()
+                    .is_none()
+        });
         let placement = decode_placement(
             transaction.as_mut(),
             &row,
             registration
                 .as_ref()
                 .map(StoredValidatedRunnerRegistration::registration),
+            profileless_tombstone,
         )
         .await?;
-        let grant = if registration.is_some() {
-            load_grant_for_placement(transaction.as_mut(), &row).await?
-        } else {
-            None
-        };
         transaction.commit().await?;
         Ok(Some(StoredSessionRunnerPlacement {
             event_ordinal,
@@ -680,6 +695,7 @@ impl RunnerProtocolStore {
         lease: RunnerLeaseId,
         generation: RunnerGeneration,
     ) -> Result<Option<RunnerLease>, RunnerProtocolStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
         let row = sqlx::query(
             "SELECT lease_generation.*, event.state_kind,
                     request.tool_name AS canonical_attempt_tool,
@@ -727,9 +743,22 @@ impl RunnerProtocolStore {
         )
         .bind(lease.into_uuid())
         .bind(Decimal::from(generation.get()))
-        .fetch_optional(&self.pool)
+        .fetch_optional(transaction.as_mut())
         .await?;
-        row.map(|row| decode_lease(&row)).transpose()
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let registration = load_registration_in(
+            transaction.as_mut(),
+            runner_enrollment_id(row.get("registration_enrollment_id")),
+            decode_registration_revision(row.get("registration_revision"))?,
+        )
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        let lease = decode_lease(&row, registration.registration())?;
+        transaction.commit().await?;
+        Ok(Some(lease))
     }
 }
 
@@ -744,11 +773,14 @@ async fn load_enrollment_in(
                 audit.runner_id AS audit_runner_id,
                 audit.authentication_reference_id AS audit_authentication_reference_id,
                 audit.allowed_class_count AS audit_allowed_class_count,
-                audit.state_kind AS audit_state_kind
+                audit.state_kind AS audit_state_kind,
+                current_registration.registration_revision
            FROM runner_enrollment AS enrollment
            LEFT JOIN runner_enrollment_audit AS audit
              ON audit.enrollment_id = enrollment.enrollment_id
             AND audit.revision = enrollment.revision
+           LEFT JOIN runner_current_registration AS current_registration
+             ON current_registration.enrollment_id = enrollment.enrollment_id
           WHERE enrollment.enrollment_id = $1",
     )
     .bind(enrollment.into_uuid())
@@ -794,6 +826,10 @@ async fn load_enrollment_in(
         .try_get::<Option<String>, _>("audit_state_kind")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalAudit)?;
     let audit_state = decode_enrollment_state(&audit_state)?;
+    let registration_revision = row
+        .try_get::<Option<Decimal>, _>("registration_revision")?
+        .map(decode_generation)
+        .transpose()?;
     RunnerEnrollment::reconstitute(RunnerEnrollmentReconstitutionInput {
         enrollment,
         recorded_enrollment: runner_enrollment_id(row.get("enrollment_id")),
@@ -811,6 +847,8 @@ async fn load_enrollment_in(
         recorded_allowed_classes: audit_classes,
         state,
         recorded_state: audit_state,
+        registration_revision,
+        recorded_registration_revision: registration_revision,
     })
     .map(Some)
     .map_err(RunnerProtocolStoreError::Domain)
@@ -1435,6 +1473,7 @@ async fn decode_placement(
     connection: &mut PgConnection,
     row: &PgRow,
     registration: Option<&ValidatedRunnerRegistration>,
+    profileless_tombstone: Option<&CredentialProfileGrant>,
 ) -> Result<SessionRunnerPlacement, RunnerProtocolStoreError> {
     let session = session_id(row.get("session_id"));
     let event = row.get::<Decimal, _>("event_ordinal");
@@ -1520,6 +1559,7 @@ async fn decode_placement(
         },
         session,
         registration,
+        profileless_tombstone,
     )
     .map_err(RunnerProtocolStoreError::Domain)
 }
@@ -1735,7 +1775,10 @@ async fn insert_lease_generation(
     Ok(())
 }
 
-fn decode_lease(row: &PgRow) -> Result<RunnerLease, RunnerProtocolStoreError> {
+fn decode_lease(
+    row: &PgRow,
+    registration: &ValidatedRunnerRegistration,
+) -> Result<RunnerLease, RunnerProtocolStoreError> {
     let lease = runner_lease_id(row.get("lease_id"));
     let attempt = tool_attempt_id(row.get("attempt_id"));
     let session = session_id(row.get("session_id"));
@@ -1824,27 +1867,30 @@ fn decode_lease(row: &PgRow) -> Result<RunnerLease, RunnerProtocolStoreError> {
         }
         _ => return Err(RunnerProtocolCorruption::CrossWiredReference.into()),
     };
-    RunnerLease::reconstitute(RunnerLeaseReconstitutionInput {
-        lease,
-        dispatch,
-        runner,
-        tool: tool.clone(),
-        effect: decode_effect(row.get("effect_class"))?,
-        credential_authorization: authorization.clone(),
-        generation,
-        state: decode_lease_state(row.get("state_kind"))?,
-        recorded_correlation: RunnerLeaseCorrelation {
+    RunnerLease::reconstitute(
+        RunnerLeaseReconstitutionInput {
             lease,
-            runner: runner_id(canonical_runner),
-            tool: tool_name(canonical_tool)?,
             dispatch,
+            runner,
+            tool: tool.clone(),
+            effect: decode_effect(row.get("effect_class"))?,
+            credential_authorization: authorization.clone(),
             generation,
+            state: decode_lease_state(row.get("state_kind"))?,
+            recorded_correlation: RunnerLeaseCorrelation {
+                lease,
+                runner: runner_id(canonical_runner),
+                tool: tool_name(canonical_tool)?,
+                dispatch,
+                generation,
+            },
+            recorded_session: session,
+            recorded_effect: decode_effect(row.get("effect_class"))?,
+            recorded_credential_authorization: authorization.clone(),
+            recorded_state: decode_lease_state(row.get("state_kind"))?,
         },
-        recorded_session: session,
-        recorded_effect: decode_effect(row.get("effect_class"))?,
-        recorded_credential_authorization: authorization.clone(),
-        recorded_state: decode_lease_state(row.get("state_kind"))?,
-    })
+        registration,
+    )
     .map_err(RunnerProtocolStoreError::Domain)
 }
 
@@ -1853,6 +1899,18 @@ fn validate_placement_snapshot(
     registration: Option<&StoredValidatedRunnerRegistration>,
     grant: Option<&CredentialProfileGrant>,
 ) -> Result<(), RunnerProtocolStoreError> {
+    let profileless_tombstone = match (placement.state(), grant) {
+        (
+            SessionRunnerPlacementState::Pinned(pinned)
+            | SessionRunnerPlacementState::RunnerLost(pinned),
+            Some(grant),
+        ) if pinned.credential_profile.is_none()
+            && grant.state() == CredentialProfileGrantState::Revoked =>
+        {
+            Some(grant)
+        }
+        _ => None,
+    };
     SessionRunnerPlacement::reconstitute(
         SessionRunnerPlacementReconstitutionInput {
             session: placement.session(),
@@ -1862,6 +1920,7 @@ fn validate_placement_snapshot(
         },
         placement.session(),
         registration.map(StoredValidatedRunnerRegistration::registration),
+        profileless_tombstone,
     )
     .map_err(RunnerProtocolStoreError::Domain)?;
     if grant.is_some() && registration.is_none() {
@@ -2210,6 +2269,7 @@ const fn encode_lease_state(state: RunnerLeaseState) -> &'static str {
         RunnerLeaseState::Completed => "completed",
         RunnerLeaseState::LostUnclaimed => "lost_unclaimed",
         RunnerLeaseState::LostClaimed => "lost_claimed",
+        RunnerLeaseState::LostExecutionPossible => "lost_execution_possible",
     }
 }
 
@@ -2220,6 +2280,7 @@ fn decode_lease_state(value: String) -> Result<RunnerLeaseState, RunnerProtocolS
         "completed" => Ok(RunnerLeaseState::Completed),
         "lost_unclaimed" => Ok(RunnerLeaseState::LostUnclaimed),
         "lost_claimed" => Ok(RunnerLeaseState::LostClaimed),
+        "lost_execution_possible" => Ok(RunnerLeaseState::LostExecutionPossible),
         _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
     }
 }

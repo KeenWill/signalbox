@@ -1,0 +1,633 @@
+//! Typed, bounded results returned by the code-host transport.
+
+use std::borrow::Cow;
+
+use reqwest::Url;
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use serde_json::{Value, json};
+
+use super::arguments::{valid_opaque_id, valid_revision};
+
+const MAX_RESULT_TEXT_BYTES: usize = 64 * 1024;
+const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
+const MAX_RESULT_PATH_BYTES: usize = 4 * 1024;
+const MAX_RESULT_ITEMS: usize = 100;
+pub(super) const MAX_ENCODED_RESULT_BYTES: usize = 512 * 1024;
+
+/// Whether a bounded code-host result exhausted its source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodeHostResultCompleteness {
+    /// The complete source fit within the operation's fixed bound.
+    Complete,
+    /// More source content existed beyond the retained prefix or page.
+    Truncated,
+}
+
+impl CodeHostResultCompleteness {
+    const fn is_truncated(self) -> bool {
+        matches!(self, Self::Truncated)
+    }
+}
+
+/// Resolution posture acknowledged for one review thread.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReviewThreadResolution {
+    /// The thread remains open.
+    Open,
+    /// The thread is resolved.
+    Resolved,
+}
+
+impl ReviewThreadResolution {
+    const fn is_resolved(self) -> bool {
+        matches!(self, Self::Resolved)
+    }
+}
+
+fn valid_text(value: &str) -> bool {
+    value.len() <= MAX_RESULT_TEXT_BYTES && !value.contains('\0')
+}
+
+fn valid_required_text(value: &str) -> bool {
+    !value.is_empty() && valid_text(value)
+}
+
+/// Whether a parsed location is one absolute credential-free HTTPS URL. The
+/// job-log redirect location is admitted by this same predicate.
+pub(super) fn absolute_https_url(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+/// One bounded absolute credential-free HTTPS result location.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodeHostUrl(String);
+
+impl CodeHostUrl {
+    fn try_new(value: String) -> Option<Self> {
+        (value.len() <= MAX_RESULT_URL_BYTES
+            && !value.chars().any(char::is_control)
+            && Url::parse(&value).is_ok_and(|url| absolute_https_url(&url)))
+        .then_some(Self(value))
+    }
+
+    /// Borrows the checked absolute HTTPS location.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl JsonSchema for CodeHostUrl {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CodeHostUrl")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "format": "uri",
+            "maxLength": MAX_RESULT_URL_BYTES,
+            "pattern": r"^https://[^/@\u0000-\u0020\u007F-\u009F]+(?:[/?#]|$)",
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
+fn valid_path(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('/')
+        && value.len() <= MAX_RESULT_PATH_BYTES
+        && !value.contains('\0')
+}
+
+/// Typed result of `change_request_summary`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChangeRequestSummaryResult {
+    number: u32,
+    title: String,
+    body: Option<String>,
+    state: String,
+    draft: bool,
+    author: Option<String>,
+    base_ref: String,
+    head_ref: String,
+    head_revision: String,
+    url: CodeHostUrl,
+}
+
+/// Complete checked fields for one change-request summary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChangeRequestSummaryFields {
+    /// Change-request number.
+    pub number: u32,
+    /// Exact title.
+    pub title: String,
+    /// Optional exact body.
+    pub body: Option<String>,
+    /// Code-host state spelling.
+    pub state: String,
+    /// Whether the request is a draft.
+    pub draft: bool,
+    /// Optional author login.
+    pub author: Option<String>,
+    /// Base branch name.
+    pub base_ref: String,
+    /// Head branch name.
+    pub head_ref: String,
+    /// Exact head revision.
+    pub head_revision: String,
+    /// Browser URL.
+    pub url: String,
+}
+
+impl ChangeRequestSummaryResult {
+    /// Validates one complete summary result.
+    pub fn try_new(fields: ChangeRequestSummaryFields) -> Option<Self> {
+        let url = CodeHostUrl::try_new(fields.url)?;
+        (fields.number > 0
+            && valid_required_text(&fields.title)
+            && fields.body.as_deref().is_none_or(valid_text)
+            && valid_required_text(&fields.state)
+            && fields.author.as_deref().is_none_or(valid_required_text)
+            && valid_required_text(&fields.base_ref)
+            && valid_required_text(&fields.head_ref)
+            && valid_revision(&fields.head_revision))
+        .then_some(Self {
+            number: fields.number,
+            title: fields.title,
+            body: fields.body,
+            state: fields.state,
+            draft: fields.draft,
+            author: fields.author,
+            base_ref: fields.base_ref,
+            head_ref: fields.head_ref,
+            head_revision: fields.head_revision,
+            url,
+        })
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "author": self.author,
+            "base_ref": self.base_ref,
+            "body": self.body,
+            "draft": self.draft,
+            "head_ref": self.head_ref,
+            "head_revision": self.head_revision,
+            "number": self.number,
+            "state": self.state,
+            "title": self.title,
+            "url": self.url.into_string(),
+        })
+    }
+}
+
+/// One changed-file summary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChangedFile {
+    path: String,
+    status: String,
+    additions: u64,
+    deletions: u64,
+}
+
+impl ChangedFile {
+    /// Validates one changed-file summary.
+    pub fn try_new(path: String, status: String, additions: u64, deletions: u64) -> Option<Self> {
+        (valid_path(&path) && valid_required_text(&status)).then_some(Self {
+            path,
+            status,
+            additions,
+            deletions,
+        })
+    }
+
+    /// Borrows the repository-relative path.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "additions": self.additions,
+            "deletions": self.deletions,
+            "path": self.path,
+            "status": self.status,
+        })
+    }
+}
+
+/// Typed result of `change_request_changed_files`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChangedFilesResult {
+    files: Vec<ChangedFile>,
+    completeness: CodeHostResultCompleteness,
+}
+
+impl ChangedFilesResult {
+    /// Validates one bounded changed-file page.
+    pub fn try_new(
+        files: Vec<ChangedFile>,
+        completeness: CodeHostResultCompleteness,
+    ) -> Option<Self> {
+        (files.len() <= MAX_RESULT_ITEMS).then_some(Self {
+            files,
+            completeness,
+        })
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "files": self.files.into_iter().map(ChangedFile::into_value).collect::<Vec<_>>(),
+            "truncated": self.completeness.is_truncated(),
+        })
+    }
+}
+
+/// Typed result of `change_request_file_patch`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FilePatchResult {
+    file: ChangedFile,
+    patch: Option<String>,
+}
+
+impl FilePatchResult {
+    /// Validates one optional bounded patch.
+    pub fn try_new(file: ChangedFile, patch: Option<String>) -> Option<Self> {
+        patch
+            .as_deref()
+            .is_none_or(valid_text)
+            .then_some(Self { file, patch })
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "file": self.file.into_value(),
+            "patch": self.patch,
+        })
+    }
+}
+
+/// One check-run status.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckStatus {
+    id: u64,
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    url: CodeHostUrl,
+}
+
+impl CheckStatus {
+    /// Validates one check-run status.
+    pub fn try_new(
+        id: u64,
+        name: String,
+        status: String,
+        conclusion: Option<String>,
+        url: String,
+    ) -> Option<Self> {
+        let url = CodeHostUrl::try_new(url)?;
+        (id > 0
+            && valid_required_text(&name)
+            && valid_required_text(&status)
+            && conclusion.as_deref().is_none_or(valid_required_text))
+        .then_some(Self {
+            id,
+            name,
+            status,
+            conclusion,
+            url,
+        })
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "conclusion": self.conclusion,
+            "id": self.id,
+            "name": self.name,
+            "status": self.status,
+            "url": self.url.into_string(),
+        })
+    }
+}
+
+/// Typed result of `change_request_checks_status`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChecksStatusResult {
+    revision: String,
+    checks: Vec<CheckStatus>,
+    completeness: CodeHostResultCompleteness,
+}
+
+impl ChecksStatusResult {
+    /// Validates one bounded checks page for an exact revision.
+    pub fn try_new(
+        revision: String,
+        checks: Vec<CheckStatus>,
+        completeness: CodeHostResultCompleteness,
+    ) -> Option<Self> {
+        (valid_required_text(&revision) && checks.len() <= MAX_RESULT_ITEMS).then_some(Self {
+            revision,
+            checks,
+            completeness,
+        })
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "checks": self.checks.into_iter().map(CheckStatus::into_value).collect::<Vec<_>>(),
+            "revision": self.revision,
+            "truncated": self.completeness.is_truncated(),
+        })
+    }
+}
+
+/// Typed result of `change_request_comment`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChangeRequestCommentResult {
+    id: u64,
+    url: CodeHostUrl,
+}
+
+impl ChangeRequestCommentResult {
+    /// Validates the created comment identity and URL.
+    pub fn try_new(id: u64, url: String) -> Option<Self> {
+        let url = CodeHostUrl::try_new(url)?;
+        (id > 0).then_some(Self { id, url })
+    }
+
+    fn into_value(self) -> Value {
+        json!({"id": self.id, "url": self.url.into_string()})
+    }
+}
+
+/// One review-thread comment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewThreadComment {
+    id: String,
+    author: Option<String>,
+    body: String,
+    url: CodeHostUrl,
+}
+
+impl ReviewThreadComment {
+    /// Validates one review-thread comment.
+    pub fn try_new(id: String, author: Option<String>, body: String, url: String) -> Option<Self> {
+        let url = CodeHostUrl::try_new(url)?;
+        (valid_opaque_id(&id)
+            && author.as_deref().is_none_or(valid_required_text)
+            && valid_text(&body))
+        .then_some(Self {
+            id,
+            author,
+            body,
+            url,
+        })
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "author": self.author,
+            "body": self.body,
+            "id": self.id,
+            "url": self.url.into_string(),
+        })
+    }
+}
+
+/// One review thread and its bounded comment page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewThread {
+    id: String,
+    resolved: bool,
+    outdated: bool,
+    path: String,
+    line: Option<u64>,
+    comments: Vec<ReviewThreadComment>,
+    comments_truncated: bool,
+}
+
+/// Complete checked fields for one review thread.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewThreadFields {
+    /// Opaque thread node identity.
+    pub id: String,
+    /// Whether the thread is resolved.
+    pub resolved: bool,
+    /// Whether its location is outdated.
+    pub outdated: bool,
+    /// Repository-relative path.
+    pub path: String,
+    /// Optional current line.
+    pub line: Option<u64>,
+    /// First bounded comment page.
+    pub comments: Vec<ReviewThreadComment>,
+    /// Whether more comments exist.
+    pub comments_truncated: bool,
+}
+
+impl ReviewThread {
+    /// Validates one review thread.
+    pub fn try_new(fields: ReviewThreadFields) -> Option<Self> {
+        (valid_opaque_id(&fields.id)
+            && valid_path(&fields.path)
+            && fields.comments.len() <= MAX_RESULT_ITEMS)
+            .then_some(Self {
+                id: fields.id,
+                resolved: fields.resolved,
+                outdated: fields.outdated,
+                path: fields.path,
+                line: fields.line,
+                comments: fields.comments,
+                comments_truncated: fields.comments_truncated,
+            })
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "comments": self.comments.into_iter().map(ReviewThreadComment::into_value).collect::<Vec<_>>(),
+            "comments_truncated": self.comments_truncated,
+            "id": self.id,
+            "line": self.line,
+            "outdated": self.outdated,
+            "path": self.path,
+            "resolved": self.resolved,
+        })
+    }
+}
+
+/// Typed result of `change_request_review_threads`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewThreadsResult {
+    threads: Vec<ReviewThread>,
+    completeness: CodeHostResultCompleteness,
+}
+
+impl ReviewThreadsResult {
+    /// Validates one bounded review-thread page.
+    pub fn try_new(
+        threads: Vec<ReviewThread>,
+        completeness: CodeHostResultCompleteness,
+    ) -> Option<Self> {
+        (threads.len() <= MAX_RESULT_ITEMS).then_some(Self {
+            threads,
+            completeness,
+        })
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "threads": self.threads.into_iter().map(ReviewThread::into_value).collect::<Vec<_>>(),
+            "truncated": self.completeness.is_truncated(),
+        })
+    }
+}
+
+/// Typed result of `change_request_thread_reply`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadReplyResult {
+    id: String,
+    url: CodeHostUrl,
+}
+
+impl ThreadReplyResult {
+    /// Validates the created reply identity and URL.
+    pub fn try_new(id: String, url: String) -> Option<Self> {
+        let url = CodeHostUrl::try_new(url)?;
+        valid_opaque_id(&id).then_some(Self { id, url })
+    }
+
+    fn into_value(self) -> Value {
+        json!({"id": self.id, "url": self.url.into_string()})
+    }
+}
+
+/// Typed result of `change_request_thread_resolve`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadResolveResult {
+    thread_id: String,
+    resolution: ReviewThreadResolution,
+}
+
+impl ThreadResolveResult {
+    /// Validates the resolved thread identity.
+    pub fn try_new(thread_id: String, resolution: ReviewThreadResolution) -> Option<Self> {
+        (valid_required_text(&thread_id) && resolution == ReviewThreadResolution::Resolved)
+            .then_some(Self {
+                thread_id,
+                resolution,
+            })
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "resolved": self.resolution.is_resolved(),
+            "thread_id": self.thread_id,
+        })
+    }
+}
+
+/// Typed result of `change_request_ci_job_log`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CiJobLogResult {
+    job_id: u64,
+    text: String,
+    completeness: CodeHostResultCompleteness,
+}
+
+impl CiJobLogResult {
+    /// Validates one bounded job-log prefix.
+    pub fn try_new(
+        job_id: u64,
+        text: String,
+        completeness: CodeHostResultCompleteness,
+    ) -> Option<Self> {
+        (job_id > 0 && valid_text(&text)).then_some(Self {
+            job_id,
+            text,
+            completeness,
+        })
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "job_id": self.job_id,
+            "text": self.text,
+            "truncated": self.completeness.is_truncated(),
+        })
+    }
+}
+
+/// Typed acknowledgement from `change_request_rerun_failed_jobs`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RerunFailedJobsResult {
+    run_id: u64,
+}
+
+impl RerunFailedJobsResult {
+    /// Validates one acknowledged workflow-run identity.
+    pub const fn try_new(run_id: u64) -> Option<Self> {
+        if run_id > 0 {
+            Some(Self { run_id })
+        } else {
+            None
+        }
+    }
+
+    fn into_value(self) -> Value {
+        json!({"run_id": self.run_id})
+    }
+}
+
+/// Closed typed result vocabulary for all ten code-host tools.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CodeHostResult {
+    /// Change-request summary.
+    Summary(ChangeRequestSummaryResult),
+    /// Bounded changed-file page.
+    ChangedFiles(ChangedFilesResult),
+    /// One per-file patch.
+    FilePatch(FilePatchResult),
+    /// Bounded check-run page.
+    ChecksStatus(ChecksStatusResult),
+    /// Created top-level comment.
+    Comment(ChangeRequestCommentResult),
+    /// Bounded review-thread page.
+    ReviewThreads(ReviewThreadsResult),
+    /// Created thread reply.
+    ThreadReply(ThreadReplyResult),
+    /// Resolved thread.
+    ThreadResolve(ThreadResolveResult),
+    /// Bounded CI job log.
+    CiJobLog(CiJobLogResult),
+    /// Accepted rerun request.
+    RerunFailedJobs(RerunFailedJobsResult),
+}
+
+impl CodeHostResult {
+    /// Converts the checked result into its exact bounded tool-output object.
+    pub fn into_json_value(self) -> Value {
+        match self {
+            Self::Summary(result) => result.into_value(),
+            Self::ChangedFiles(result) => result.into_value(),
+            Self::FilePatch(result) => result.into_value(),
+            Self::ChecksStatus(result) => result.into_value(),
+            Self::Comment(result) => result.into_value(),
+            Self::ReviewThreads(result) => result.into_value(),
+            Self::ThreadReply(result) => result.into_value(),
+            Self::ThreadResolve(result) => result.into_value(),
+            Self::CiJobLog(result) => result.into_value(),
+            Self::RerunFailedJobs(result) => result.into_value(),
+        }
+    }
+}

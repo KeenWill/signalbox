@@ -8,14 +8,14 @@ use std::{error::Error, time::Duration};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    ApprovedToolRequest, AuthorizedToolAttempt, ContextFrontierId, CredentialProfileGrant,
+    ApprovedToolRequest, ContextFrontierId, CredentialProfileGrant,
     CredentialProfileGrantReconstitutionInput, CredentialProfileName, CredentialProfilePolicy,
     CredentialToolApproval, ModelCallId, NormalizedToolArguments, ProvisionedWorkspace,
-    ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement,
-    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerDomainError,
-    RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId, RunnerLease,
-    RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
-    RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
+    ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement, RunnerAuthenticationId,
+    RunnerCapabilityClass, RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
+    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
+    RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput, RunnerSelector,
+    RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
     RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId, SessionRunnerPin,
     SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
     SessionRunnerPlacementRequest, ToolAdmissibleLoci, ToolApprovalResolutionReconstitutionInput,
@@ -170,18 +170,10 @@ fn authorized_with_effect(
     facts: PhysicalAttemptFacts,
     effect: ToolEffectClass,
 ) -> RunnerToolAttemptAuthorization {
-    let dispatch = ToolAttemptDispatchCorrelation::reconstitute(
-        ToolAttemptDispatchCorrelationReconstitutionInput {
-            session: SessionId::from_uuid(uuid(SESSION)),
-            turn: TurnId::from_uuid(uuid(facts.turn)),
-            issuing_attempt: TurnAttemptId::from_uuid(uuid(facts.turn + RELATED_IDENTITY_OFFSET)),
-            request: ToolRequestId::from_uuid(uuid(facts.request)),
-            attempt: ToolAttemptId::from_uuid(uuid(facts.attempt)),
-            generation: ToolDispatchGeneration::first(),
-        },
-    );
+    let approved = approved_request(facts);
+    let attempt_id = ToolAttemptId::from_uuid(uuid(facts.attempt));
     let attempt = ToolAttemptReconstitutionInput::new(
-        ToolAttemptId::from_uuid(uuid(facts.attempt)),
+        attempt_id,
         ToolRequestId::from_uuid(uuid(facts.request)),
         SessionId::from_uuid(uuid(SESSION)),
         TurnId::from_uuid(uuid(facts.turn)),
@@ -192,13 +184,29 @@ fn authorized_with_effect(
     )
     .reconstitute()
     .expect("the fixture in-flight attempt reconstitutes");
-    let ReconstitutedToolAttempt::Current(attempt) = attempt else {
-        panic!("the fixture attempt is current")
-    };
-    let authorized = AuthorizedToolAttempt::reconstitute(attempt, dispatch)
-        .expect("the canonical in-flight fixture authorizes");
-    RunnerToolAttemptAuthorization::try_new(approved_request(facts), authorized)
-        .expect("the approved request binds the authorized fixture attempt")
+    let batch = ToolBatchReconstitutionInput::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        TurnId::from_uuid(uuid(facts.turn)),
+        ModelCallId::from_uuid(uuid(facts.turn + (RELATED_IDENTITY_OFFSET * 2))),
+        ResolvedContextFrontierReconstitutionInput::new(
+            SessionId::from_uuid(uuid(SESSION)),
+            ContextFrontierId::from_uuid(uuid(facts.turn + (RELATED_IDENTITY_OFFSET * 3))),
+            Vec::new(),
+        )
+        .reconstitute()
+        .expect("the empty fixture frontier is valid"),
+        vec![approved.request().clone()],
+        vec![approved.approval().clone()],
+        vec![attempt],
+        ToolBatchPhaseReconstitutionInput::Executing {
+            turn_attempt: TurnAttemptId::from_uuid(uuid(facts.turn + RELATED_IDENTITY_OFFSET)),
+        },
+    )
+    .reconstitute()
+    .expect("the fixture batch is complete");
+    batch
+        .resume_runner_attempt(attempt_id)
+        .expect("the batch restores canonical runner authority")
 }
 
 fn claimed_batch(facts: PhysicalAttemptFacts) -> ToolBatch {
@@ -248,7 +256,10 @@ fn offer_request() -> RunnerLeaseOfferRequest {
     }
 }
 
-fn lease_with_cross_wired_dispatch(lease: &RunnerLease) -> RunnerLease {
+fn lease_with_cross_wired_dispatch(
+    lease: &RunnerLease,
+    registration: &ValidatedRunnerRegistration,
+) -> RunnerLease {
     let dispatch = ToolAttemptDispatchCorrelation::reconstitute(
         ToolAttemptDispatchCorrelationReconstitutionInput {
             session: lease.session(),
@@ -269,42 +280,48 @@ fn lease_with_cross_wired_dispatch(lease: &RunnerLease) -> RunnerLease {
         dispatch,
         generation: lease.generation(),
     };
-    RunnerLease::reconstitute(RunnerLeaseReconstitutionInput {
-        lease: correlation.lease,
-        dispatch,
-        runner: lease.runner(),
-        tool: lease.tool().clone(),
-        effect: lease.effect(),
-        credential_authorization: authorization.clone(),
-        generation: lease.generation(),
-        state: lease.state(),
-        recorded_correlation: correlation,
-        recorded_session: lease.session(),
-        recorded_effect: lease.effect(),
-        recorded_credential_authorization: authorization,
-        recorded_state: lease.state(),
-    })
+    RunnerLease::reconstitute(
+        RunnerLeaseReconstitutionInput {
+            lease: correlation.lease,
+            dispatch,
+            runner: lease.runner(),
+            tool: lease.tool().clone(),
+            effect: lease.effect(),
+            credential_authorization: authorization.clone(),
+            generation: lease.generation(),
+            state: lease.state(),
+            recorded_correlation: correlation,
+            recorded_session: lease.session(),
+            recorded_effect: lease.effect(),
+            recorded_credential_authorization: authorization,
+            recorded_state: lease.state(),
+        },
+        registration,
+    )
     .expect("the cross-wired dispatch remains internally self-consistent")
 }
 
-fn duplicate_lease(lease: &RunnerLease) -> RunnerLease {
+fn duplicate_lease(lease: &RunnerLease, registration: &ValidatedRunnerRegistration) -> RunnerLease {
     let correlation = lease.correlation();
     let authorization = lease.credential_authorization().cloned();
-    RunnerLease::reconstitute(RunnerLeaseReconstitutionInput {
-        lease: correlation.lease,
-        dispatch: correlation.dispatch,
-        runner: lease.runner(),
-        tool: lease.tool().clone(),
-        effect: lease.effect(),
-        credential_authorization: authorization.clone(),
-        generation: lease.generation(),
-        state: lease.state(),
-        recorded_correlation: correlation,
-        recorded_session: lease.session(),
-        recorded_effect: lease.effect(),
-        recorded_credential_authorization: authorization,
-        recorded_state: lease.state(),
-    })
+    RunnerLease::reconstitute(
+        RunnerLeaseReconstitutionInput {
+            lease: correlation.lease,
+            dispatch: correlation.dispatch,
+            runner: lease.runner(),
+            tool: lease.tool().clone(),
+            effect: lease.effect(),
+            credential_authorization: authorization.clone(),
+            generation: lease.generation(),
+            state: lease.state(),
+            recorded_correlation: correlation,
+            recorded_session: lease.session(),
+            recorded_effect: lease.effect(),
+            recorded_credential_authorization: authorization,
+            recorded_state: lease.state(),
+        },
+        registration,
+    )
     .expect("the fixture lease facts reconstitute")
 }
 
@@ -321,6 +338,7 @@ fn duplicate_placement(
         },
         placement.session(),
         registration,
+        None,
     )
     .expect("the fixture placement facts reconstitute")
 }
@@ -501,11 +519,7 @@ async fn stored_pin_fixture(
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -880,11 +894,7 @@ async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let stored = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
 
     let loaded_enrollment = store
@@ -981,21 +991,17 @@ async fn s30_inv042_historical_enrollment_audit_rechecks_its_own_revision()
 #[ignore = "requires Docker"]
 async fn s30_inv042_current_registration_gates_new_leases() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
+    let (store, expected_enrollment, _registration, pin) = stored_pin_fixture(&pool).await?;
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
-    store
-        .register(
-            expected_enrollment.enrollment(),
-            expanded_advertisement(),
-            &catalog(),
-        )
+    let expanded_registration = store
+        .register(&expected_enrollment, expanded_advertisement(), &catalog())
         .await?;
     let retained_tool_lease = pin
         .placement
         .offer_lease(
             &expected_enrollment,
-            registration.registration(),
+            expanded_registration.registration(),
             pin.grant.as_ref(),
             authorized(LATER_LEASE_PHYSICAL_ATTEMPT),
             RunnerLeaseOfferRequest {
@@ -1007,18 +1013,14 @@ async fn s30_inv042_current_registration_gates_new_leases() -> Result<(), Box<dy
     store.store_lease(&retained_tool_lease).await?;
     terminalize_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, SECOND_LATER_LEASE_PHYSICAL_ATTEMPT).await?;
-    store
-        .register(
-            expected_enrollment.enrollment(),
-            narrowed_advertisement(),
-            &catalog(),
-        )
+    let narrowed_registration = store
+        .register(&expected_enrollment, narrowed_advertisement(), &catalog())
         .await?;
-    let stale_registration_lease = pin
+    let stale_registration = pin
         .placement
         .offer_lease(
             &expected_enrollment,
-            registration.registration(),
+            narrowed_registration.registration(),
             pin.grant.as_ref(),
             authorized(SECOND_LATER_LEASE_PHYSICAL_ATTEMPT),
             RunnerLeaseOfferRequest {
@@ -1026,13 +1028,9 @@ async fn s30_inv042_current_registration_gates_new_leases() -> Result<(), Box<dy
                 tool: tool("inspect"),
             },
         )
-        .expect("historical domain evidence isolates the relational current-head gate");
-    let stale_registration = store
-        .store_lease(&stale_registration_lease)
-        .await
         .expect_err("a withdrawn current tool cannot receive a later runner lease");
 
-    assert_store_check_violation(stale_registration);
+    assert_eq!(stale_registration, RunnerDomainError::RegistrationChanged);
     drop(pool);
     Ok(())
 }
@@ -1048,11 +1046,7 @@ async fn s31_inv042_current_registration_preserves_complete_placement() -> Resul
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(
-            expected_enrollment.enrollment(),
-            expanded_advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, expanded_advertisement(), &catalog())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -1078,18 +1072,14 @@ async fn s31_inv042_current_registration_preserves_complete_placement() -> Resul
     store.store_pin(&pin, &registration).await?;
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, PROFILELESS_PHYSICAL_ATTEMPT).await?;
-    store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+    let current_registration = store
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
-    let stale_snapshot_lease = pin
+    let stale_snapshot = pin
         .placement
         .offer_lease(
             &expected_enrollment,
-            registration.registration(),
+            current_registration.registration(),
             pin.grant.as_ref(),
             authorized(PROFILELESS_PHYSICAL_ATTEMPT),
             RunnerLeaseOfferRequest {
@@ -1097,13 +1087,9 @@ async fn s31_inv042_current_registration_preserves_complete_placement() -> Resul
                 tool: tool("inspect"),
             },
         )
-        .expect("historical evidence still admits the retained offered tool");
-    let stale_snapshot = store
-        .store_lease(&stale_snapshot_lease)
-        .await
         .expect_err("current availability must retain every runner-required pinned tool");
 
-    assert_store_check_violation(stale_snapshot);
+    assert_eq!(stale_snapshot, RunnerDomainError::RegistrationChanged);
     drop(pool);
     Ok(())
 }
@@ -1118,11 +1104,7 @@ async fn s31_inv042_current_registration_preserves_profile() -> Result<(), Box<d
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     let directory = RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
         .expect("the fixture working directory is valid");
@@ -1149,9 +1131,9 @@ async fn s31_inv042_current_registration_preserves_profile() -> Result<(), Box<d
     store.store_pin(&pin, &registration).await?;
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
-    store
+    let current_registration = store
         .register(
-            expected_enrollment.enrollment(),
+            &expected_enrollment,
             profileless_advertisement(),
             &catalog(),
         )
@@ -1160,7 +1142,7 @@ async fn s31_inv042_current_registration_preserves_profile() -> Result<(), Box<d
         .placement
         .offer_lease(
             &expected_enrollment,
-            registration.registration(),
+            current_registration.registration(),
             pin.grant.as_ref(),
             authorized(LATER_LEASE_PHYSICAL_ATTEMPT),
             RunnerLeaseOfferRequest {
@@ -1168,13 +1150,9 @@ async fn s31_inv042_current_registration_preserves_profile() -> Result<(), Box<d
                 tool: tool("inspect"),
             },
         )
-        .expect("historical evidence still carries the pinned profile");
-    let profile_rejected = store
-        .store_lease(&profile_stale)
-        .await
         .expect_err("current registration must retain the pinned profile");
 
-    assert_store_check_violation(profile_rejected);
+    assert_eq!(profile_stale, RunnerDomainError::RegistrationChanged);
     drop(pool);
     Ok(())
 }
@@ -1189,11 +1167,7 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     let repository = WorkspaceRepositoryKey::try_new("signalbox".to_owned())
         .expect("the repository key is valid");
@@ -1229,9 +1203,9 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
     store.store_pin(&pin, &registration).await?;
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
-    store
+    let current_registration = store
         .register(
-            expected_enrollment.enrollment(),
+            &expected_enrollment,
             workspaceless_advertisement(),
             &catalog(),
         )
@@ -1240,7 +1214,7 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
         .placement
         .offer_lease(
             &expected_enrollment,
-            registration.registration(),
+            current_registration.registration(),
             pin.grant.as_ref(),
             authorized(LATER_LEASE_PHYSICAL_ATTEMPT),
             RunnerLeaseOfferRequest {
@@ -1248,13 +1222,9 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
                 tool: tool("inspect"),
             },
         )
-        .expect("historical evidence still carries the worktree capability");
-    let workspace_rejected = store
-        .store_lease(&workspace_stale)
-        .await
         .expect_err("current registration must retain the worktree capability");
 
-    assert_store_check_violation(workspace_rejected);
+    assert_eq!(workspace_stale, RunnerDomainError::RegistrationChanged);
     drop(pool);
     Ok(())
 }
@@ -1278,7 +1248,7 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
     let replacement_store = RunnerProtocolStore::new(pool.clone());
     let daemon_catalog = catalog();
     let mut replacement = Box::pin(replacement_store.register(
-        expected_enrollment.enrollment(),
+        &expected_enrollment,
         narrowed_advertisement(),
         &daemon_catalog,
     ));
@@ -1306,11 +1276,7 @@ async fn s30_inv042_current_registration_head_cannot_rewind() -> Result<(), Box<
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, initial, _) = stored_pin_fixture(&pool).await?;
     store
-        .register(
-            expected_enrollment.enrollment(),
-            expanded_advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, expanded_advertisement(), &catalog())
         .await?;
     let rewound_head = sqlx::query(
         "UPDATE runner_current_registration
@@ -1337,11 +1303,7 @@ async fn s30_inv042_appended_registration_must_advance_current_head() -> Result<
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     let mut malformed = pool.begin().await?;
     clone_registration_without_advancing_head(&mut malformed, expected_enrollment.enrollment())
@@ -1409,7 +1371,7 @@ async fn s31_inv004_inv043_request_cannot_start_second_lease_lineage() -> Result
 {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
-    let claimed = duplicate_lease(&pin.lease)
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact first lease fence claims");
     store.store_lease(&claimed).await?;
@@ -1734,11 +1696,7 @@ async fn s30_inv044_first_placement_record_is_created_unpinned() -> Result<(), B
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     let malformed_first = sqlx::query(
         "INSERT INTO runner_session_placement_record
@@ -1827,11 +1785,7 @@ async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), 
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -1997,11 +1951,7 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     let request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
@@ -2028,7 +1978,7 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
             .grant
             .as_ref()
             .map(|grant| duplicate_grant(grant, registration.registration())),
-        lease: duplicate_lease(&pin.lease)
+        lease: duplicate_lease(&pin.lease, registration.registration())
             .claim(pin.lease.correlation())
             .expect("the exact fixture correlation claims its lease"),
     };
@@ -2183,11 +2133,7 @@ async fn s32_inv045_pin_grant_requires_complete_registration_inventory()
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(
-            expected_enrollment.enrollment(),
-            expanded_advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, expanded_advertisement(), &catalog())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -2283,11 +2229,7 @@ async fn s32_inv044_loaded_placement_retains_reconciliation_registration()
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, historical, pin) = stored_pin_fixture(&pool).await?;
     let current = store
-        .register(
-            expected_enrollment.enrollment(),
-            narrowed_advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, narrowed_advertisement(), &catalog())
         .await?;
     let loaded = store
         .load_placement(SessionId::from_uuid(uuid(SESSION)))
@@ -2367,8 +2309,8 @@ async fn s32_inv044_appended_placement_must_advance_current_head() -> Result<(),
 async fn s31_inv043_initial_lease_rejects_cross_wired_dispatch_fence() -> Result<(), Box<dyn Error>>
 {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, _, _, _, lease) = stored_later_lease_fixture(&pool).await?;
-    let cross_wired = lease_with_cross_wired_dispatch(&lease);
+    let (store, _, registration, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let cross_wired = lease_with_cross_wired_dispatch(&lease, registration.registration());
     let rejected = store
         .store_lease(&cross_wired)
         .await
@@ -2384,12 +2326,12 @@ async fn s31_inv043_initial_lease_rejects_cross_wired_dispatch_fence() -> Result
 async fn s31_inv043_later_lease_event_rejects_cross_wired_dispatch_fence()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, _, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let (store, _, registration, _, lease) = stored_later_lease_fixture(&pool).await?;
     store.store_lease(&lease).await?;
-    let claimed = duplicate_lease(&lease)
+    let claimed = duplicate_lease(&lease, registration.registration())
         .claim(lease.correlation())
         .expect("the exact lease fence claims");
-    let cross_wired = lease_with_cross_wired_dispatch(&claimed);
+    let cross_wired = lease_with_cross_wired_dispatch(&claimed, registration.registration());
     let rejected = store
         .store_lease(&cross_wired)
         .await
@@ -2404,8 +2346,8 @@ async fn s31_inv043_later_lease_event_rejects_cross_wired_dispatch_fence()
 #[ignore = "requires Docker"]
 async fn s31_inv043_current_lease_event_head_cannot_rewind() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
-    let claimed = duplicate_lease(&pin.lease)
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact lease fence claims");
     store.store_lease(&claimed).await?;
@@ -2791,7 +2733,7 @@ async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Resul
     let first_enrollment = enrollment();
     store.insert_enrollment(&first_enrollment).await?;
     let first_registration = store
-        .register(first_enrollment.enrollment(), advertisement(), &catalog())
+        .register(&first_enrollment, advertisement(), &catalog())
         .await?;
     let request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
@@ -2823,7 +2765,7 @@ async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Resul
     let second_enrollment = replacement_enrollment();
     store.insert_enrollment(&second_enrollment).await?;
     let second_registration = store
-        .register(second_enrollment.enrollment(), advertisement(), &catalog())
+        .register(&second_enrollment, advertisement(), &catalog())
         .await?;
     let replacement = lost
         .replace_lost_runner(
@@ -2866,7 +2808,7 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
     let first_enrollment = enrollment();
     store.insert_enrollment(&first_enrollment).await?;
     let first_registration = store
-        .register(first_enrollment.enrollment(), advertisement(), &catalog())
+        .register(&first_enrollment, advertisement(), &catalog())
         .await?;
     let profiled_request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
@@ -2901,7 +2843,7 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
     let second_enrollment = replacement_enrollment();
     store.insert_enrollment(&second_enrollment).await?;
     let second_registration = store
-        .register(second_enrollment.enrollment(), advertisement(), &catalog())
+        .register(&second_enrollment, advertisement(), &catalog())
         .await?;
     let profile_free = first_lost
         .replace_lost_runner(
@@ -2950,7 +2892,7 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
     );
     store.insert_enrollment(&later_enrollment).await?;
     let later_registration = store
-        .register(later_enrollment.enrollment(), advertisement(), &catalog())
+        .register(&later_enrollment, advertisement(), &catalog())
         .await?;
     let later = second_lost
         .replace_lost_runner(
@@ -3056,11 +2998,7 @@ async fn s32_inv044_worktree_pin_requires_provisioned_facts() -> Result<(), Box<
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -3118,8 +3056,8 @@ async fn s32_inv044_worktree_pin_requires_provisioned_facts() -> Result<(), Box<
 async fn s31_inv004_inv043_fresh_retry_attempt_is_current_before_successor_lease()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
-    let claimed = duplicate_lease(&pin.lease)
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact first lease fence claims");
     store.store_lease(&claimed).await?;
@@ -3178,11 +3116,7 @@ async fn s31_inv004_inv043_idempotent_claimed_loss_retires_physical_attempt()
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &idempotent_catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &idempotent_catalog())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -3206,7 +3140,7 @@ async fn s31_inv004_inv043_idempotent_claimed_loss_retires_physical_attempt()
         )
         .expect("the idempotent registration pins its external-effect attempt");
     store.store_pin(&pin, &registration).await?;
-    let claimed = duplicate_lease(&pin.lease)
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact idempotent lease fence claims");
     store.store_lease(&claimed).await?;
@@ -3252,11 +3186,7 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     let request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
@@ -3277,7 +3207,7 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
             offer_request(),
         )
         .expect("the validated registration pins the placement");
-    let offered = duplicate_lease(&pin.lease);
+    let offered = duplicate_lease(&pin.lease, registration.registration());
     store.store_pin(&pin, &registration).await?;
     let correlation = offered.correlation();
     let claimed = offered
@@ -3393,11 +3323,7 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     let request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
@@ -3418,7 +3344,7 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
             offer_request(),
         )
         .expect("the validated registration pins the placement");
-    let offered = duplicate_lease(&pin.lease);
+    let offered = duplicate_lease(&pin.lease, registration.registration());
     store.store_pin(&pin, &registration).await?;
     let correlation = offered.correlation();
     let claimed = offered
@@ -3671,11 +3597,7 @@ async fn s30_inv001_reconstitution_rejects_cross_wired_registration() -> Result<
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let stored = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     sqlx::query("ALTER TABLE runner_registration DISABLE TRIGGER ALL")
         .execute(&pool)
@@ -3713,11 +3635,7 @@ async fn s30_inv001_reconstitution_rejects_noncanonical_tool_schema() -> Result<
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let stored = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     sqlx::query("ALTER TABLE runner_registration_tool DISABLE TRIGGER ALL")
         .execute(&pool)
@@ -3756,11 +3674,7 @@ async fn s30_inv042_idempotent_registration_tool_requires_runner_only_locus()
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let stored = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     sqlx::query(
         "ALTER TABLE runner_registration_tool
@@ -3803,11 +3717,7 @@ async fn s30_inv042_registration_tool_requires_selector_discriminator() -> Resul
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let stored = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     sqlx::query(
         "ALTER TABLE runner_registration_tool
@@ -3849,11 +3759,7 @@ async fn s30_inv042_registration_profile_approval_requires_tool_name_shape()
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let stored = store
-        .register(
-            expected_enrollment.enrollment(),
-            advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, advertisement(), &catalog())
         .await?;
     sqlx::query(
         "ALTER TABLE runner_registration_profile_approval

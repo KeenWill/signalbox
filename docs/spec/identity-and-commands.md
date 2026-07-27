@@ -14,19 +14,28 @@ transaction mechanics, locking, and the reconstitution seam are owned by
 [persistence-protocol](persistence-protocol.md); per-command product semantics
 are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and
-[configuration-and-credentials](configuration-and-credentials.md).
+[configuration-and-credentials](configuration-and-credentials.md). The
+tool-attributed metadata command and reconstitution surface was verified through
+PR #265 (`agent/tool-batch-tier0`). The failed tool-attempt telemetry fields
+were verified through PR #285 (`agent/dev-instance-code-host-credential`). The
+current command/telemetry identity-generation, command-family, and
+ambiguity-ownership inventory was verified through PR #288
+(`agent/audit-fix-docs-coherence`).
 
 ## Identity model
 
-Every semantic identity is a distinct, opaque, UUID-backed newtype built by the
-`define_identity!` macro in `crates/domain/src/lib.rs`: `DurableCommandId`,
-`SessionId`, `AcceptedInputId`, `TurnId`, `TurnAttemptId`, `ModelCallId`,
+The session, command, transcript, model, and tool identities owned by this page
+are distinct, opaque, UUID-backed newtypes built by the `define_identity!` macro
+in `crates/domain/src/lib.rs`: `DurableCommandId`, `SessionId`,
+`AcceptedInputId`, `TurnId`, `TurnAttemptId`, `ModelCallId`,
 `ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` there, plus
 `ImportedConversationId` and `ImportedTranscriptEntryId`
 (`imported_conversation.rs`), `SemanticTranscriptEntryId` and
 `ContextFrontierId` (`context_frontier.rs`), `DirectModelSelection` and
 `ModelAlias` (`configuration.rs`), and `ProviderModelIdentity`
-(`model_call.rs`). Each exposes only `from_uuid`, `as_uuid`, and `into_uuid`;
+(`model_call.rs`). Review-run, pass, finding, target, and external-link
+identities are owned and inventoried by [review-workflows](review-workflows.md).
+Each identity listed here exposes only `from_uuid`, `as_uuid`, and `into_uuid`;
 the macro derives value semantics and `Debug` but no storage or serialization
 traits, so every storage boundary maps explicitly (INV-001, INV-002). The
 derived `Debug` is the one logging-reachable render path (see Encoding).
@@ -186,24 +195,13 @@ records keep each command's comparison payload and result reviewable and
 constraint-checked instead of delegating meaning to a serializer; there is no
 universal JSONB or byte-blob payload anywhere.
 
-For `SubmitInput`, a second deferred constraint trigger
-(`submit_input_command_requires_correlated_effect`, migration `202607180003`,
-redefined for occupied-slot pending steering in `202607180005`) enforces effect
-correlation at every transaction boundary: an `applied` turn-origin row must
-agree field-by-field with exactly one committed `accepted_input` plus
-`queued_input_origin` effect, including the frozen model configuration; an
-applied `next_safe_point` row instead initially correlates with exactly one
-`pending_steering` accepted input naming the expected active turn, with no
-`queued_input_origin` effect permitted; a `rejected` row must have no
-accepted-input effect; and an `unknown_model_alias` rejection must match real
-alias evidence in `session_defaults_version`. The next-safe-point receipt
-remains immutable when that accepted input later becomes consumed steering or a
-reclassified origin. Equal replay returns its original
-`Applied(PendingSteering)` result only after the accepted input's current
-lifecycle passes the correlation checks owned by
-[persistence-protocol](persistence-protocol.md). Why: replay returns recorded
-results as truth, so an applied record without its exact committed effect must
-be unable to commit.
+For `SubmitInput`, each terminal command result must correlate with exactly its
+committed domain effects. Equal replay returns the recorded result only after
+the current durable state still proves that correlation; otherwise the adapter
+fails closed rather than treating an effectless receipt as truth. The exact
+relational representation, deferred triggers, migration evolution, and
+lifecycle-transition checks are owned by
+[persistence-protocol](persistence-protocol.md#relational-representation).
 
 All registry and typed-record tables are append-only, enforced by
 `reject_immutable_record_change` triggers. Why: a claimed identifier's recorded
@@ -303,28 +301,34 @@ attribution confers no lifecycle, authorization, or approval authority (INV-001,
 INV-020).
 
 `SubmitInput` and `ReplaceSessionMetadata` are the command kinds whose durable
-payloads carry an `actor` field. The `SubmitInput` application constructor and
-the canonical `ReplaceSessionMetadata` domain constructor fix `Actor::Owner` —
-no caller can supply another variant, and no code path constructs a non-owner
-command issuer. `SubmitInput` includes the actor in replay equality and hashing:
-replaying a claimed identifier under a different actor is conflicting reuse
-(INV-012). `ReplaceSessionMetadata` has no caller-supplied actor field to
-compare; its `actor()` accessor returns the canonical owner, while checked
-reconstitution compares the independently decoded durable actor with that value.
-Why: attribution recorded outside these checks could be laundered by replaying
-one claimed identifier under a different claimed agency. The durable field is
-constant `Owner` today; carrying it anyway keeps the truthful-`Owner`-backfill
-window open for kinds added before non-owner agencies exist. For metadata
-replacement, the recorded actor is also the applied last-writer provenance.
+payloads carry an `actor` field. The `SubmitInput` application constructor fixes
+`Actor::Owner`. Metadata replacement has two purpose-specific constructors: the
+process-facing form fixes `Actor::Owner`, while the tool-facing form requires
+one exact `ToolRequestId` and fixes `Actor::Tool { request }`. Neither accepts
+an arbitrary actor, and model/recovery issuers remain unconstructible.
+`SubmitInput` and `ReplaceSessionMetadata` both include actor agency in replay
+equality and hashing: replaying a claimed identifier under a different actor is
+conflicting reuse (INV-012). Checked metadata reconstitution independently
+decodes the stored actor and compares it with the canonical command value. Why:
+attribution recorded outside these checks could be laundered by replaying one
+claimed identifier under a different claimed agency. For metadata replacement,
+the recorded actor is also the applied last-writer provenance.
 
 Storage follows the closed-discriminator convention: `actor_kind`
 (`owner`/`model`/`recovery`/`tool`) plus `actor_turn_id` and
 `actor_tool_request_id` reference columns with a `CHECK`-enforced variant shape
-in `submit_input_command` and `replace_session_metadata_command`. Unknown or
-malformed stored spellings fail decoding as corruption. Metadata domain
-reconstitution independently compares the stored actor against the canonical
-command's owner actor (`CommandActorMismatch`) for both applied and rejected
-receipts, so a stored non-owner actor fails closed.
+in `submit_input_command` and `replace_session_metadata_command`. Metadata
+receipts additionally carry constructor-selected `issuer_kind` (`owner`/`tool`)
+and `issuer_tool_request_id` columns, sealed separately from the actor
+projection. The issuer migration fixes every pre-issuer receipt to the owner
+agency that its legacy constructor required, rather than trusting the actor
+projection being checked. Unknown or malformed stored spellings fail decoding as
+corruption. A well-formed `model` or `recovery` actor on a metadata command
+fails earlier as unsupported metadata-writer corruption. Metadata loading
+constructs the canonical command from the independent issuer proof, then domain
+reconstitution compares the separately decoded supported actor against that
+command (`CommandActorMismatch`) for both applied and rejected receipts, so a
+cross-wired owner/tool actor fails closed.
 
 `CreateSession` and `ReplaceSessionDefaults` v1 carry no actor field in payload
 or storage, and no recorded-transition family (including startup-scan
@@ -342,7 +346,10 @@ and installation live only in `apps/signalboxd` (see
 [runtime-substrate](runtime-substrate.md) for the runtime and the operator
 failure taxonomy). Telemetry events correlate durable failures with
 daemon-minted aggregate identifiers — `session_id`, turn identities, phase, and
-failure-class fields — in the two render forms described under Encoding.
+failure-class fields — in the two render forms described under Encoding. The
+same events may carry closed classification tokens that name no aggregate: the
+tool-loop failed-attempt event adds the dispatched catalog tool name and the
+closed tool error kind ([tool-loop](tool-loop.md#serialized-staged-execution)).
 
 No telemetry site emits a caller-supplied `DurableCommandId` in any form: no raw
 UUID, prefix, digest, or token appears in any `tracing` call in the codebase.

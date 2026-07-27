@@ -4,16 +4,19 @@ The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
 (`agent/review-process-amendments`); the migration inventory was verified
 through PR #254 (`agent/fix-parked-approval-interrupt`) and was verified again
-in PR #227 (`agent/review-workflow-persistence`); the `apps/signalboxd`
-migration-invocation home was verified through PR #258
+in PR #227 (`agent/review-workflow-persistence`); the metadata command issuer
+proof was verified through PR #265 (`agent/tool-batch-tier0`); the
+`apps/signalboxd` migration-invocation home was verified through PR #258
 (`agent/signalboxd-rename`); the model-identity frontier shape was verified
-through PR #272 (`agent/mid-session-model`), and the runner lease-admission
-trigger lock was verified against PR #267 (`agent/runner-persistence`). This
-page covers the Postgres representation in `crates/persistence` (source and
+through PR #272 (`agent/mid-session-model`); the runner lease-admission trigger
+lock was verified against PR #267 (`agent/runner-persistence`); and the current
+classifier names, ambiguity reconstitution facts, and command-adapter boundaries
+were verified through PR #288 (`agent/audit-fix-docs-coherence`). This page
+covers the Postgres representation in `crates/persistence` (source and
 migrations), migration discipline, durable command storage and replay equality,
-the fail-closed reconstitution boundary, the lock protocol, pending-steering
-durable state, the corruption taxonomy, commit-ambiguity handling, and the
-transactional outbox. Session aggregate semantics live in
+fail-closed reconstitution boundary, the lock protocol, pending-steering durable
+state, the corruption taxonomy, commit-ambiguity handling, and the transactional
+outbox. Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
@@ -55,8 +58,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — twenty-nine files, `202607180001` through
-`202607280201` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — thirty files, `202607180001` through
+`202607280202` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -309,7 +312,7 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Five explicit lock sites live in the
+`crates/persistence/src/lock_inventory.rs`. Two explicit lock sites live in the
 schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
@@ -317,13 +320,7 @@ schema instead:
   `accepted_input` insert reaches commit; and
 - the metadata receipt-satellite insert trigger (migration `202607260101`) takes
   `FOR UPDATE` on the already-claimed `durable_command` row before it checks
-  whether the typed receipt parent has sealed the command; and
-- the runner registration insert trigger (migration `202607280100`) takes
-  `FOR SHARE` on its canonical enrollment before admitting a successor
-  registration; and
-- the runner lease-generation insert trigger in that migration takes
-  `FOR UPDATE` on the exact physical tool attempt and then `FOR SHARE` on the
-  current validated-registration pointer before admitting the generation.
+  whether the typed receipt parent has sealed the command.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
@@ -498,12 +495,13 @@ Registry inspection has its own closed set (`RegistryCorruption`):
 `UnsupportedKind`, `UnsupportedVersion`, `MissingTypedRecord`,
 `ConflictingTypedRecords`.
 
-Four error families implement the shared operator taxonomy
+Five error families implement the shared operator taxonomy
 (`ClassifyOperatorFailure`, classifying into `OperatorFailureClass`): startup
 scan (`StartupScanRepositoryError`), turn activation
 (`StartEligibleTurnRepositoryError`), the eligibility sweep
-(`PostgresEligibilitySweepError`), and the model-call repository
-(`ModelCallRepositoryError`). The classes: `Infrastructure { commit_ambiguous }`
+(`PostgresEligibilitySweepError`), the model-call repository
+(`ModelCallRepositoryError`), and the tool-loop repository
+(`ToolLoopRepositoryError`). The classes: `Infrastructure { commit_ambiguous }`
 (with `commit_ambiguous: false`, infrastructure prevented the operation from
 completing before commit and retrying is safe; with `commit_ambiguous: true`,
 the failure struck at the commit boundary and the transaction may or may not
@@ -512,31 +510,33 @@ outcome — see Commit-ambiguity handling), `FailClosedCorruption` (committed ro
 cannot construct the accepted domain value; nothing proceeds),
 `IdentityCollision` (a fresh daemon-minted identity collided with a durable one;
 detected either by the domain seam or by mapping the violated unique constraint
-out of the database error), and `CallerOrHubBug`. The command-handling error
-families draw the same corruption/infrastructure distinctions in their variants
-but implement no operator classification yet (open edge). Startup-scan
+out of the database error), and `CallerOrHubBug`. The remaining command-handling
+error families draw the same corruption/infrastructure distinctions in their
+variants but implement no operator classification yet (open edge). Startup-scan
 corruption additionally carries the scoped active turn so operational policy can
 isolate the affected session while remaining fail-closed.
 
 ## Commit-ambiguity handling
 
-Transactions whose effects cannot be re-derived from a caller-held command
-identifier classify commit failures. `commit_failure_is_ambiguous` (in
-`start_eligible_turn.rs`, `startup.rs`, and `model_execution.rs`) treats a
-database-reported error as ambiguous only for SQLSTATE `08007` (transaction
-resolution unknown) and `40003` (statement completion unknown); any non-database
-failure awaiting the commit response (lost connection, IO error) is ambiguous;
-every other database-reported commit rejection is a definite failure. The flag
-surfaces as `Infrastructure { commit_ambiguous: true }` so the caller knows
-durable state may or may not include the transaction. Why: activation and
-recovery mint fresh identities instead of claiming a command identifier, so a
-lost commit response cannot be resolved by replay and must be reported as
-ambiguous rather than guessed.
+Transaction boundaries that retain the failing phase classify commit failures
+with `commit_failure_is_ambiguous`: the helper is crate-shared in `lib.rs` for
+durable-command adapters and repeated locally in `start_eligible_turn.rs`,
+`startup.rs`, `model_execution.rs`, and `tool_loop.rs`. This inventory excludes
+the phase-insensitive conversation-import repository, whose conservative wire
+mapping is owned by [process-protocol](process-protocol.md). A database-reported
+error is ambiguous only for SQLSTATE `08007` (transaction resolution unknown)
+and `40003` (statement completion unknown); any non-database failure awaiting
+the commit response (lost connection, IO error) is ambiguous; every other
+database-reported commit rejection is a definite failure.
 
-Command-handling adapters carry no ambiguity flag: retrying the same
-`DurableCommandId` replays through the registry and either returns the recorded
-result (the commit won) or handles the command fresh (it never claimed), which
-resolves the ambiguity exactly (INV-012).
+The activation and recovery families surface ambiguity as
+`Infrastructure { commit_ambiguous: true }` because they mint fresh identities
+instead of claiming a command identifier: a lost commit response cannot be
+resolved by replay and must not be guessed. Command-handling adapters likewise
+surface a typed ambiguity variant or flag at the final commit boundary. A caller
+can then retry the same `DurableCommandId`: registry replay either returns the
+recorded result (the commit won) or handles the command fresh (it never
+claimed), which resolves the ambiguity exactly (INV-012).
 
 The model-call repository additionally resolves an ambiguous authorization
 commit by rereading exact durable authority (`reread_ambiguous_authorization`)
@@ -634,8 +634,7 @@ owned by [process-protocol](process-protocol.md).
 - The aggregate-map rows for model calls and the tool loop have landed; provider
   evidence, authority transfers, and fatal cancellation intent are not yet in
   the schema.
-- Command-handling error families implement no `ClassifyOperatorFailure`;
-  operator classification covers only startup scan, turn activation, the
-  eligibility sweep, and the model-call repository.
+- Command-handling operator classification covers the tool-loop repository; the
+  other command families do not yet implement `ClassifyOperatorFailure`.
 - Database-role separation remains a deployment choice; migration invocation
   itself is wired in `apps/signalboxd`.

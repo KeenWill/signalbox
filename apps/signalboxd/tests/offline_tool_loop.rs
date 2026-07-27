@@ -8,6 +8,7 @@ use std::{
     error::Error,
     fmt,
     sync::{Arc, Mutex},
+    time::SystemTime,
 };
 
 use signalbox_application::{
@@ -35,11 +36,12 @@ use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
 };
 use signalbox_model_runtime::{
-    AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, ExchangeFacts,
-    MessagePart, ModelOperation, ModelRuntime, ObservationSink, PreparationOutcome,
-    ProviderReportedModel, Script, ScriptedModel, ScriptedPrepared, TerminalEvidence,
-    TerminalReport, TokenUsage, ToolCallId, ToolCallProposal as RuntimeToolCallProposal,
-    ToolName as RuntimeToolName, ToolResultRecord,
+    AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, CredentialAccess,
+    CredentialAccessError, CredentialReference, CredentialValue, ExchangeFacts, MessagePart,
+    ModelOperation, ModelRuntime, ObservationSink, PreparationOutcome, ProviderReportedModel,
+    Script, ScriptedModel, ScriptedPrepared, TerminalEvidence, TerminalReport, TokenUsage,
+    ToolCallId, ToolCallProposal as RuntimeToolCallProposal, ToolName as RuntimeToolName,
+    ToolResultRecord,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository, local_test_connection_options, migrate,
@@ -48,7 +50,19 @@ use signalbox_persistence::{
     submit_input::SubmitInputRepository, tool_loop::PostgresToolLoopRepository,
 };
 use signalboxd::{
-    ActivatedTurnExecution, PostgresProviderModelExecution, PostgresProviderToolLoopExecution,
+    ActivatedTurnExecution, CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
+    CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME, CHANGE_REQUEST_FILE_PATCH_NAME,
+    CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME, CHANGE_REQUEST_REVIEW_THREADS_NAME,
+    CHANGE_REQUEST_SUMMARY_NAME, CHANGE_REQUEST_THREAD_REPLY_NAME,
+    CHANGE_REQUEST_THREAD_RESOLVE_NAME, ChangeRequestCommentResult, ChangeRequestSummaryFields,
+    ChangeRequestSummaryResult, ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult,
+    CiJobLogResult, CodeHostOperation, CodeHostResult, CodeHostResultCompleteness,
+    CodeHostTransport, CodeHostTransportFailure, DaemonTools, FilePatchResult,
+    PostgresProviderModelExecution, PostgresProviderToolLoopExecution, PostgresSessionStatusWriter,
+    RerunFailedJobsResult, ReviewThread, ReviewThreadComment, ReviewThreadFields,
+    ReviewThreadResolution, ReviewThreadsResult, SessionStatusWrite, SessionStatusWriteOutcome,
+    SessionStatusWriter, ThreadReplyResult, ThreadResolveResult, WebFetchBodyCompleteness,
+    WebFetchRequest, WebFetchResponse, WebFetchTransport, WebFetchTransportFailure,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -62,6 +76,7 @@ const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const FIXTURE_ID_SEED: u128 = 0x3100;
 const DECISION_COMMAND_ID: u128 = 0x3110;
+const OFFLINE_CODE_HOST_TOKEN: &[u8] = b"offline-code-host-token";
 
 #[derive(Clone, Debug)]
 struct RecordingScriptedModel {
@@ -99,6 +114,14 @@ struct ToolLoopFixture {
     runtime_models: RuntimeModelCatalog,
     credential_reference: ModelCallCredentialReference,
     tool_dispatch_gate: InProcessToolDispatchGate,
+}
+
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+struct SessionMetadataRootFacts {
+    title: String,
+    archived: bool,
+    actor_kind: String,
+    actor_tool_request_id: Option<Uuid>,
 }
 
 impl ToolLoopFixture {
@@ -486,12 +509,30 @@ fn expected_tool_call(request: ToolRequestId, name: &str, arguments_json: &str) 
     })
 }
 
-fn expected_tool_result(request: ToolRequestId, content: String, is_error: bool) -> MessagePart {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExpectedToolResultDisposition {
+    Successful,
+    Failed,
+}
+
+fn expected_tool_result(
+    request: ToolRequestId,
+    content: String,
+    disposition: ExpectedToolResultDisposition,
+) -> MessagePart {
     MessagePart::ToolResult(ToolResultRecord {
         tool_call_id: ToolCallId::new(request.into_uuid().to_string()),
         content,
-        is_error,
+        is_error: matches!(disposition, ExpectedToolResultDisposition::Failed),
     })
+}
+
+fn expected_successful_tool_result(request: ToolRequestId, content: String) -> MessagePart {
+    expected_tool_result(request, content, ExpectedToolResultDisposition::Successful)
+}
+
+fn expected_failed_tool_result(request: ToolRequestId, content: String) -> MessagePart {
+    expected_tool_result(request, content, ExpectedToolResultDisposition::Failed)
 }
 
 #[track_caller]
@@ -653,6 +694,492 @@ impl ClassifyOperatorFailure for FixtureExecutorError {
     }
 }
 
+#[derive(Clone, Debug)]
+struct OfflineWebTransport {
+    response: Result<WebFetchResponse, WebFetchTransportFailure>,
+    requests: Arc<Mutex<Vec<WebFetchRequest>>>,
+}
+
+impl OfflineWebTransport {
+    fn responding(response: WebFetchResponse) -> Self {
+        Self {
+            response: Ok(response),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn unused() -> Self {
+        Self {
+            response: Err(WebFetchTransportFailure::RequestFailed),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn requests(&self) -> Vec<WebFetchRequest> {
+        self.requests
+            .lock()
+            .expect("fixture web-request lock is available")
+            .clone()
+    }
+}
+
+impl WebFetchTransport for OfflineWebTransport {
+    async fn fetch(
+        &mut self,
+        request: WebFetchRequest,
+    ) -> Result<WebFetchResponse, WebFetchTransportFailure> {
+        self.requests
+            .lock()
+            .expect("fixture web-request lock is available")
+            .push(request);
+        self.response.clone()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OfflineCodeHostCredentials;
+
+impl CredentialAccess for OfflineCodeHostCredentials {
+    async fn resolve(
+        &self,
+        _reference: &CredentialReference,
+    ) -> Result<CredentialValue, CredentialAccessError> {
+        Ok(CredentialValue::new(OFFLINE_CODE_HOST_TOKEN.to_vec()))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UnusedCodeHostTransport;
+
+impl CodeHostTransport for UnusedCodeHostTransport {
+    async fn execute(
+        &mut self,
+        _operation: CodeHostOperation,
+        _credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        Err(CodeHostTransportFailure::Rejected)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RecordingCodeHostTransport {
+    result: CodeHostResult,
+    operations: Arc<Mutex<Vec<CodeHostOperation>>>,
+    credential_matches: Arc<Mutex<Vec<bool>>>,
+}
+
+impl RecordingCodeHostTransport {
+    fn responding(result: CodeHostResult) -> Self {
+        Self {
+            result,
+            operations: Arc::new(Mutex::new(Vec::new())),
+            credential_matches: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn operations(&self) -> Vec<CodeHostOperation> {
+        self.operations
+            .lock()
+            .expect("fixture code-host operation lock is available")
+            .clone()
+    }
+
+    fn credential_matches(&self) -> Vec<bool> {
+        self.credential_matches
+            .lock()
+            .expect("fixture credential-observation lock is available")
+            .clone()
+    }
+}
+
+impl CodeHostTransport for RecordingCodeHostTransport {
+    async fn execute(
+        &mut self,
+        operation: CodeHostOperation,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        self.operations
+            .lock()
+            .expect("fixture code-host operation lock is available")
+            .push(operation);
+        self.credential_matches
+            .lock()
+            .expect("fixture credential-observation lock is available")
+            .push(credential.expose_bytes() == OFFLINE_CODE_HOST_TOKEN);
+        Ok(self.result.clone())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExpectedCodeHostApproval {
+    Auto,
+    Confirm,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExpectedCodeHostOperation {
+    Summary {
+        repository: &'static str,
+        number: u32,
+    },
+    ChangedFiles {
+        repository: &'static str,
+        number: u32,
+    },
+    FilePatch {
+        repository: &'static str,
+        number: u32,
+        path: &'static str,
+    },
+    ChecksStatus {
+        repository: &'static str,
+        revision: &'static str,
+    },
+    Comment {
+        repository: &'static str,
+        number: u32,
+        body: &'static str,
+    },
+    ReviewThreads {
+        repository: &'static str,
+        number: u32,
+    },
+    ThreadReply {
+        thread_id: &'static str,
+        body: &'static str,
+    },
+    ThreadResolve {
+        thread_id: &'static str,
+    },
+    CiJobLog {
+        repository: &'static str,
+        job_id: u64,
+    },
+    RerunFailedJobs {
+        repository: &'static str,
+        run_id: u64,
+    },
+}
+
+#[track_caller]
+fn assert_code_host_operation(actual: &CodeHostOperation, expected: ExpectedCodeHostOperation) {
+    match (actual, expected) {
+        (
+            CodeHostOperation::Summary(arguments),
+            ExpectedCodeHostOperation::Summary { repository, number },
+        ) => {
+            assert_eq!(arguments.repository().as_str(), repository);
+            assert_eq!(arguments.number().get(), number);
+        }
+        (
+            CodeHostOperation::ChangedFiles(arguments),
+            ExpectedCodeHostOperation::ChangedFiles { repository, number },
+        ) => {
+            assert_eq!(arguments.repository().as_str(), repository);
+            assert_eq!(arguments.number().get(), number);
+        }
+        (
+            CodeHostOperation::FilePatch(arguments),
+            ExpectedCodeHostOperation::FilePatch {
+                repository,
+                number,
+                path,
+            },
+        ) => {
+            assert_eq!(arguments.repository().as_str(), repository);
+            assert_eq!(arguments.number().get(), number);
+            assert_eq!(arguments.path().as_str(), path);
+        }
+        (
+            CodeHostOperation::ChecksStatus(arguments),
+            ExpectedCodeHostOperation::ChecksStatus {
+                repository,
+                revision,
+            },
+        ) => {
+            assert_eq!(arguments.repository().as_str(), repository);
+            assert_eq!(arguments.revision().as_str(), revision);
+        }
+        (
+            CodeHostOperation::Comment(arguments),
+            ExpectedCodeHostOperation::Comment {
+                repository,
+                number,
+                body,
+            },
+        ) => {
+            assert_eq!(arguments.repository().as_str(), repository);
+            assert_eq!(arguments.number().get(), number);
+            assert_eq!(arguments.body().as_str(), body);
+        }
+        (
+            CodeHostOperation::ReviewThreads(arguments),
+            ExpectedCodeHostOperation::ReviewThreads { repository, number },
+        ) => {
+            assert_eq!(arguments.repository().as_str(), repository);
+            assert_eq!(arguments.number().get(), number);
+        }
+        (
+            CodeHostOperation::ThreadReply(arguments),
+            ExpectedCodeHostOperation::ThreadReply { thread_id, body },
+        ) => {
+            assert_eq!(arguments.thread_id().as_str(), thread_id);
+            assert_eq!(arguments.body().as_str(), body);
+        }
+        (
+            CodeHostOperation::ThreadResolve(arguments),
+            ExpectedCodeHostOperation::ThreadResolve { thread_id },
+        ) => {
+            assert_eq!(arguments.thread_id().as_str(), thread_id);
+        }
+        (
+            CodeHostOperation::CiJobLog(arguments),
+            ExpectedCodeHostOperation::CiJobLog { repository, job_id },
+        ) => {
+            assert_eq!(arguments.repository().as_str(), repository);
+            assert_eq!(arguments.job_id(), job_id);
+        }
+        (
+            CodeHostOperation::RerunFailedJobs(arguments),
+            ExpectedCodeHostOperation::RerunFailedJobs { repository, run_id },
+        ) => {
+            assert_eq!(arguments.repository().as_str(), repository);
+            assert_eq!(arguments.run_id(), run_id);
+        }
+        _ => panic!("typed code-host operation did not match the invoked registry tool"),
+    }
+}
+
+/// Runs one code-host tool through the durable loop against a mocked
+/// transport. `expected_result` is the persisted tool-result JSON stated
+/// independently of the serializer under test.
+async fn code_host_tool_completes_offline(
+    name: &'static str,
+    arguments: String,
+    result: CodeHostResult,
+    expected_result: serde_json::Value,
+    expected_operation: ExpectedCodeHostOperation,
+    approval: ExpectedCodeHostApproval,
+) -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let web = OfflineWebTransport::unused();
+    let code_host = RecordingCodeHostTransport::responding(result);
+    let (tool_catalog, tool_executor) = DaemonTools::try_new(
+        || SystemTime::UNIX_EPOCH,
+        web.clone(),
+        UnusedSessionStatusWriter,
+        OfflineCodeHostCredentials,
+        code_host.clone(),
+    )?
+    .into_parts();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[(name, arguments.as_str())]),
+            completion_script("code-host result observed"),
+        ],
+        tool_catalog,
+        tool_executor,
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.wait_for_requests(1).await?[0];
+    if approval == ExpectedCodeHostApproval::Confirm {
+        fixture
+            .decide(request, ToolApprovalDecision::Approve)
+            .await?;
+        execution.resume_active(fixture.session).await?;
+    }
+    let operations = code_host.operations();
+    let [operation] = operations.as_slice() else {
+        panic!("one physical code-host operation crosses the mocked transport")
+    };
+
+    assert_code_host_operation(operation, expected_operation);
+    assert_eq!(code_host.credential_matches(), vec![true]);
+    assert_eq!(
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(request, name, &arguments),
+            expected_successful_tool_result(request, expected_result.to_string()),
+        ]
+    );
+    assert!(
+        web.requests().is_empty(),
+        "code-host tools must not enter the credential-free web transport"
+    );
+    Ok(())
+}
+
+fn summary_result() -> CodeHostResult {
+    CodeHostResult::Summary(
+        ChangeRequestSummaryResult::try_new(ChangeRequestSummaryFields {
+            number: 17,
+            title: format!(
+                "summary {}",
+                std::str::from_utf8(OFFLINE_CODE_HOST_TOKEN)
+                    .expect("fixture credential is valid UTF-8")
+            ),
+            body: Some(String::from("bounded body")),
+            state: String::from("open"),
+            draft: false,
+            author: Some(String::from("reviewer")),
+            base_ref: String::from("main"),
+            head_ref: String::from("feature"),
+            head_revision: String::from("0123456789abcdef0123456789abcdef01234567"),
+            url: String::from("https://github.example/owner/repository/pull/17"),
+        })
+        .expect("fixture summary is bounded"),
+    )
+}
+
+fn changed_files_result() -> CodeHostResult {
+    CodeHostResult::ChangedFiles(
+        ChangedFilesResult::try_new(
+            vec![
+                ChangedFile::try_new(String::from("src/lib.rs"), String::from("modified"), 7, 2)
+                    .expect("fixture changed file is bounded"),
+            ],
+            CodeHostResultCompleteness::Complete,
+        )
+        .expect("fixture changed-file page is bounded"),
+    )
+}
+
+fn file_patch_result() -> CodeHostResult {
+    CodeHostResult::FilePatch(
+        FilePatchResult::try_new(
+            ChangedFile::try_new(String::from("src/lib.rs"), String::from("modified"), 7, 2)
+                .expect("fixture changed file is bounded"),
+            Some(String::from("@@ -1 +1 @@\n-old\n+new")),
+        )
+        .expect("fixture patch is bounded"),
+    )
+}
+
+fn checks_status_result() -> CodeHostResult {
+    CodeHostResult::ChecksStatus(
+        ChecksStatusResult::try_new(
+            String::from("0123456789abcdef0123456789abcdef01234567"),
+            vec![
+                CheckStatus::try_new(
+                    9001,
+                    String::from("validate"),
+                    String::from("completed"),
+                    Some(String::from("success")),
+                    String::from("https://github.example/check/9001"),
+                )
+                .expect("fixture check is bounded"),
+            ],
+            CodeHostResultCompleteness::Complete,
+        )
+        .expect("fixture checks page is bounded"),
+    )
+}
+
+fn comment_result() -> CodeHostResult {
+    CodeHostResult::Comment(
+        ChangeRequestCommentResult::try_new(
+            8001,
+            String::from("https://github.example/comment/8001"),
+        )
+        .expect("fixture comment result is bounded"),
+    )
+}
+
+fn review_threads_result() -> CodeHostResult {
+    let comment = ReviewThreadComment::try_new(
+        String::from("PRRC_comment"),
+        Some(String::from("reviewer")),
+        String::from("please adjust"),
+        String::from("https://github.example/comment/7001"),
+    )
+    .expect("fixture review comment is bounded");
+    let thread = ReviewThread::try_new(ReviewThreadFields {
+        id: String::from("PRRT_thread"),
+        resolved: false,
+        outdated: false,
+        path: String::from("src/lib.rs"),
+        line: Some(12),
+        comments: vec![comment],
+        comments_truncated: false,
+    })
+    .expect("fixture review thread is bounded");
+    CodeHostResult::ReviewThreads(
+        ReviewThreadsResult::try_new(vec![thread], CodeHostResultCompleteness::Complete)
+            .expect("fixture review-thread page is bounded"),
+    )
+}
+
+fn thread_reply_result() -> CodeHostResult {
+    CodeHostResult::ThreadReply(
+        ThreadReplyResult::try_new(
+            String::from("PRRC_reply"),
+            String::from("https://github.example/comment/7002"),
+        )
+        .expect("fixture reply result is bounded"),
+    )
+}
+
+fn thread_resolve_result() -> CodeHostResult {
+    CodeHostResult::ThreadResolve(
+        ThreadResolveResult::try_new(
+            String::from("PRRT_thread"),
+            ReviewThreadResolution::Resolved,
+        )
+        .expect("fixture resolve result is bounded"),
+    )
+}
+
+fn ci_job_log_result() -> CodeHostResult {
+    CodeHostResult::CiJobLog(
+        CiJobLogResult::try_new(
+            9001,
+            String::from("offline job log"),
+            CodeHostResultCompleteness::Complete,
+        )
+        .expect("fixture job log is bounded"),
+    )
+}
+
+fn rerun_failed_jobs_result() -> CodeHostResult {
+    CodeHostResult::RerunFailedJobs(
+        RerunFailedJobsResult::try_new(7001).expect("fixture rerun result is valid"),
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UnusedSessionStatusWriterError;
+
+impl fmt::Display for UnusedSessionStatusWriterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("unused session status writer was invoked")
+    }
+}
+
+impl Error for UnusedSessionStatusWriterError {}
+
+impl ClassifyOperatorFailure for UnusedSessionStatusWriterError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        OperatorFailureClass::CallerOrHubBug
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UnusedSessionStatusWriter;
+
+impl SessionStatusWriter for UnusedSessionStatusWriter {
+    type Error = UnusedSessionStatusWriterError;
+
+    async fn write(
+        &mut self,
+        _update: SessionStatusWrite,
+    ) -> Result<SessionStatusWriteOutcome, Self::Error> {
+        Err(UnusedSessionStatusWriterError)
+    }
+}
+
 impl ToolExecutor for RecordingExecutor {
     type Error = FixtureExecutorError;
 
@@ -773,7 +1300,7 @@ async fn s10_inv004_inv005_inv019_inv021_inv024_tool_loop_completes() -> Result<
         continuation_tool_exchange(&runtime)?,
         vec![
             expected_tool_call(requests[0], "confirmed", r#"{"value":"one"}"#),
-            expected_tool_result(requests[0], String::from("completed:confirmed"), false),
+            expected_successful_tool_result(requests[0], String::from("completed:confirmed")),
         ]
     );
     let operations = runtime.received_operations();
@@ -866,6 +1393,491 @@ async fn s10_inv004_inv005_inv019_inv021_inv024_tool_loop_completes() -> Result<
     Ok(())
 }
 
+/// The compiled echo declaration, typed decoder, daemon dispatcher, durable
+/// tool loop, and continuation projection complete without network access.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_zero_echo_completes_offline_tool_loop() -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let web = OfflineWebTransport::unused();
+    let echoed_text = "offline echo";
+    let arguments = serde_json::json!({"text": echoed_text}).to_string();
+    let (tool_catalog, tool_executor) = DaemonTools::try_new(
+        || SystemTime::UNIX_EPOCH,
+        web.clone(),
+        UnusedSessionStatusWriter,
+        OfflineCodeHostCredentials,
+        UnusedCodeHostTransport,
+    )?
+    .into_parts();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[("echo", arguments.as_str())]),
+            completion_script("echo observed"),
+        ],
+        tool_catalog,
+        tool_executor,
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.wait_for_requests(1).await?[0];
+
+    assert_eq!(
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(request, "echo", &arguments),
+            expected_successful_tool_result(request, arguments),
+        ]
+    );
+    assert!(
+        web.requests().is_empty(),
+        "echo must not enter the web transport"
+    );
+    Ok(())
+}
+
+/// The compiled web-fetch declaration and daemon dispatcher use only the
+/// injected bounded transport while the durable tool loop remains fully
+/// offline.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let expected_status = 200;
+    let expected_content_type = "text/plain";
+    let expected_body = "offline body";
+    let response = WebFetchResponse::new(
+        expected_status,
+        Some(String::from(expected_content_type)),
+        expected_body.as_bytes().to_vec(),
+        WebFetchBodyCompleteness::Complete,
+    )
+    .expect("fixture response is bounded");
+    let web = OfflineWebTransport::responding(response);
+    let expected_url = "https://example.com/offline";
+    let (tool_catalog, tool_executor) = DaemonTools::try_new(
+        || SystemTime::UNIX_EPOCH,
+        web.clone(),
+        UnusedSessionStatusWriter,
+        OfflineCodeHostCredentials,
+        UnusedCodeHostTransport,
+    )?
+    .into_parts();
+    let arguments = serde_json::json!({"url": expected_url}).to_string();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[("web_fetch", arguments.as_str())]),
+            completion_script("fetch observed"),
+        ],
+        tool_catalog,
+        tool_executor,
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.wait_for_requests(1).await?[0];
+    let fetched = web.requests();
+    let [physical_request] = fetched.as_slice() else {
+        panic!("one physical fetch crosses the injected transport")
+    };
+
+    let expected_result = serde_json::json!({
+        "body": expected_body,
+        "content_type": expected_content_type,
+        "status": expected_status,
+        "truncated": false,
+        "url": expected_url,
+    })
+    .to_string();
+
+    assert_eq!(physical_request.url().as_str(), expected_url);
+    assert_eq!(
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(request, "web_fetch", &arguments),
+            expected_successful_tool_result(request, expected_result),
+        ]
+    );
+    Ok(())
+}
+
+/// The confirmed session-status tool replaces the existing metadata snapshot
+/// through the application service and attributes the durable write to the
+/// exact tool request.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_zero_session_status_updates_metadata_offline() -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let web = OfflineWebTransport::unused();
+    let expected_title = "Tool batch";
+    let expected_tag = "tooling";
+    let expected_attribute_key = "phase";
+    let expected_attribute_value = "review";
+    let expected_archived = false;
+    let arguments = serde_json::json!({
+        "archived": expected_archived,
+        "attributes": {(expected_attribute_key): expected_attribute_value},
+        "tags": [expected_tag],
+        "title": expected_title,
+    })
+    .to_string();
+    let (tool_catalog, tool_executor) = DaemonTools::try_new(
+        || SystemTime::UNIX_EPOCH,
+        web.clone(),
+        PostgresSessionStatusWriter::new(fixture.pool.clone()),
+        OfflineCodeHostCredentials,
+        UnusedCodeHostTransport,
+    )?
+    .into_parts();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[("session_status_update", arguments.as_str())]),
+            completion_script("status observed"),
+        ],
+        tool_catalog,
+        tool_executor,
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.wait_for_requests(1).await?[0];
+    fixture
+        .decide(request, ToolApprovalDecision::Approve)
+        .await?;
+    execution.resume_active(fixture.session).await?;
+    let root: SessionMetadataRootFacts = sqlx::query_as(
+        "SELECT title, archived, actor_kind, actor_tool_request_id
+           FROM session_metadata
+          WHERE session_id = $1",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let tags: Vec<String> = sqlx::query_scalar(
+        "SELECT tag
+           FROM session_metadata_tag
+          WHERE session_id = $1
+          ORDER BY tag",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_all(&fixture.pool)
+    .await?;
+    let attributes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT attribute_key, attribute_value
+           FROM session_metadata_attribute
+          WHERE session_id = $1
+          ORDER BY attribute_key",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_all(&fixture.pool)
+    .await?;
+    let result = serde_json::json!({
+        "archived": expected_archived,
+        "attributes": {(expected_attribute_key): expected_attribute_value},
+        "session_id": fixture.session.into_uuid().to_string(),
+        "tags": [expected_tag],
+        "title": expected_title,
+    })
+    .to_string();
+
+    assert_eq!(
+        root,
+        SessionMetadataRootFacts {
+            title: String::from(expected_title),
+            archived: expected_archived,
+            actor_kind: String::from("tool"),
+            actor_tool_request_id: Some(request.into_uuid()),
+        }
+    );
+    assert_eq!(tags, vec![String::from(expected_tag)]);
+    assert_eq!(
+        attributes,
+        vec![(
+            String::from(expected_attribute_key),
+            String::from(expected_attribute_value),
+        )]
+    );
+    assert_eq!(
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(request, "session_status_update", &arguments),
+            expected_successful_tool_result(request, result),
+        ]
+    );
+    assert!(
+        web.requests().is_empty(),
+        "session status must not enter the web transport"
+    );
+    Ok(())
+}
+
+/// Tier 1 / INV-035: summary lookup crosses the typed mock, scrubs reflected
+/// credential text, and persists only the bounded result in the continuation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_one_change_request_summary_completes_offline_tool_loop() -> Result<(), Box<dyn Error>>
+{
+    code_host_tool_completes_offline(
+        CHANGE_REQUEST_SUMMARY_NAME,
+        serde_json::json!({"number": 17, "repository": "owner/repository"}).to_string(),
+        summary_result(),
+        serde_json::json!({
+            "author": "reviewer",
+            "base_ref": "main",
+            "body": "bounded body",
+            "draft": false,
+            "head_ref": "feature",
+            "head_revision": "0123456789abcdef0123456789abcdef01234567",
+            "number": 17,
+            "state": "open",
+            "title": "summary [redacted]",
+            "url": "https://github.example/owner/repository/pull/17",
+        }),
+        ExpectedCodeHostOperation::Summary {
+            repository: "owner/repository",
+            number: 17,
+        },
+        ExpectedCodeHostApproval::Auto,
+    )
+    .await
+}
+
+/// Tier 1 changed-files lookup crosses only the typed mocked transport.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_one_change_request_changed_files_completes_offline_tool_loop()
+-> Result<(), Box<dyn Error>> {
+    code_host_tool_completes_offline(
+        CHANGE_REQUEST_CHANGED_FILES_NAME,
+        serde_json::json!({"number": 17, "repository": "owner/repository"}).to_string(),
+        changed_files_result(),
+        serde_json::json!({
+            "files": [{
+                "additions": 7,
+                "deletions": 2,
+                "path": "src/lib.rs",
+                "status": "modified",
+            }],
+            "truncated": false,
+        }),
+        ExpectedCodeHostOperation::ChangedFiles {
+            repository: "owner/repository",
+            number: 17,
+        },
+        ExpectedCodeHostApproval::Auto,
+    )
+    .await
+}
+
+/// Tier 1 per-file patch lookup preserves the exact checked path offline.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_one_change_request_file_patch_completes_offline_tool_loop()
+-> Result<(), Box<dyn Error>> {
+    code_host_tool_completes_offline(
+        CHANGE_REQUEST_FILE_PATCH_NAME,
+        serde_json::json!({
+            "number": 17,
+            "path": "src/lib.rs",
+            "repository": "owner/repository",
+        })
+        .to_string(),
+        file_patch_result(),
+        serde_json::json!({
+            "file": {
+                "additions": 7,
+                "deletions": 2,
+                "path": "src/lib.rs",
+                "status": "modified",
+            },
+            "patch": "@@ -1 +1 @@\n-old\n+new",
+        }),
+        ExpectedCodeHostOperation::FilePatch {
+            repository: "owner/repository",
+            number: 17,
+            path: "src/lib.rs",
+        },
+        ExpectedCodeHostApproval::Auto,
+    )
+    .await
+}
+
+/// Tier 1 checks lookup preserves the frozen revision offline.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_one_change_request_checks_status_completes_offline_tool_loop()
+-> Result<(), Box<dyn Error>> {
+    code_host_tool_completes_offline(
+        CHANGE_REQUEST_CHECKS_STATUS_NAME,
+        serde_json::json!({
+            "repository": "owner/repository",
+            "revision": "0123456789abcdef0123456789abcdef01234567",
+        })
+        .to_string(),
+        checks_status_result(),
+        serde_json::json!({
+            "checks": [{
+                "conclusion": "success",
+                "id": 9001,
+                "name": "validate",
+                "status": "completed",
+                "url": "https://github.example/check/9001",
+            }],
+            "revision": "0123456789abcdef0123456789abcdef01234567",
+            "truncated": false,
+        }),
+        ExpectedCodeHostOperation::ChecksStatus {
+            repository: "owner/repository",
+            revision: "0123456789abcdef0123456789abcdef01234567",
+        },
+        ExpectedCodeHostApproval::Auto,
+    )
+    .await
+}
+
+/// Tier 1 top-level comment creation remains parked until owner approval and
+/// then crosses only the typed mocked transport.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_one_change_request_comment_completes_offline_tool_loop() -> Result<(), Box<dyn Error>>
+{
+    code_host_tool_completes_offline(
+        CHANGE_REQUEST_COMMENT_NAME,
+        serde_json::json!({
+            "body": "offline review",
+            "number": 17,
+            "repository": "owner/repository",
+        })
+        .to_string(),
+        comment_result(),
+        serde_json::json!({"id": 8001, "url": "https://github.example/comment/8001"}),
+        ExpectedCodeHostOperation::Comment {
+            repository: "owner/repository",
+            number: 17,
+            body: "offline review",
+        },
+        ExpectedCodeHostApproval::Confirm,
+    )
+    .await
+}
+
+/// Tier 1 review-thread lookup crosses only the typed mocked transport.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_one_change_request_review_threads_completes_offline_tool_loop()
+-> Result<(), Box<dyn Error>> {
+    code_host_tool_completes_offline(
+        CHANGE_REQUEST_REVIEW_THREADS_NAME,
+        serde_json::json!({"number": 17, "repository": "owner/repository"}).to_string(),
+        review_threads_result(),
+        serde_json::json!({
+            "threads": [{
+                "comments": [{
+                    "author": "reviewer",
+                    "body": "please adjust",
+                    "id": "PRRC_comment",
+                    "url": "https://github.example/comment/7001",
+                }],
+                "comments_truncated": false,
+                "id": "PRRT_thread",
+                "line": 12,
+                "outdated": false,
+                "path": "src/lib.rs",
+                "resolved": false,
+            }],
+            "truncated": false,
+        }),
+        ExpectedCodeHostOperation::ReviewThreads {
+            repository: "owner/repository",
+            number: 17,
+        },
+        ExpectedCodeHostApproval::Auto,
+    )
+    .await
+}
+
+/// Tier 1 thread replies remain parked until owner approval and preserve the
+/// exact opaque thread identity offline.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_one_change_request_thread_reply_completes_offline_tool_loop()
+-> Result<(), Box<dyn Error>> {
+    code_host_tool_completes_offline(
+        CHANGE_REQUEST_THREAD_REPLY_NAME,
+        serde_json::json!({"body": "fixed offline", "thread_id": "PRRT_thread"}).to_string(),
+        thread_reply_result(),
+        serde_json::json!({"id": "PRRC_reply", "url": "https://github.example/comment/7002"}),
+        ExpectedCodeHostOperation::ThreadReply {
+            thread_id: "PRRT_thread",
+            body: "fixed offline",
+        },
+        ExpectedCodeHostApproval::Confirm,
+    )
+    .await
+}
+
+/// Tier 1 thread resolution remains parked until owner approval and preserves
+/// the exact opaque thread identity offline.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_one_change_request_thread_resolve_completes_offline_tool_loop()
+-> Result<(), Box<dyn Error>> {
+    code_host_tool_completes_offline(
+        CHANGE_REQUEST_THREAD_RESOLVE_NAME,
+        serde_json::json!({"thread_id": "PRRT_thread"}).to_string(),
+        thread_resolve_result(),
+        serde_json::json!({"resolved": true, "thread_id": "PRRT_thread"}),
+        ExpectedCodeHostOperation::ThreadResolve {
+            thread_id: "PRRT_thread",
+        },
+        ExpectedCodeHostApproval::Confirm,
+    )
+    .await
+}
+
+/// Tier 1 CI job-log lookup preserves the exact job identity offline.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_one_change_request_ci_job_log_completes_offline_tool_loop()
+-> Result<(), Box<dyn Error>> {
+    code_host_tool_completes_offline(
+        CHANGE_REQUEST_CI_JOB_LOG_NAME,
+        serde_json::json!({"job_id": 9001, "repository": "owner/repository"}).to_string(),
+        ci_job_log_result(),
+        serde_json::json!({"job_id": 9001, "text": "offline job log", "truncated": false}),
+        ExpectedCodeHostOperation::CiJobLog {
+            repository: "owner/repository",
+            job_id: 9001,
+        },
+        ExpectedCodeHostApproval::Auto,
+    )
+    .await
+}
+
+/// Tier 1 failed-job reruns remain parked until owner approval and preserve
+/// the exact workflow-run identity offline.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_one_change_request_rerun_failed_jobs_completes_offline_tool_loop()
+-> Result<(), Box<dyn Error>> {
+    code_host_tool_completes_offline(
+        CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME,
+        serde_json::json!({"repository": "owner/repository", "run_id": 7001}).to_string(),
+        rerun_failed_jobs_result(),
+        serde_json::json!({"run_id": 7001}),
+        ExpectedCodeHostOperation::RerunFailedJobs {
+            repository: "owner/repository",
+            run_id: 7001,
+        },
+        ExpectedCodeHostApproval::Confirm,
+    )
+    .await
+}
+
 /// S10 / S11 / INV-019 / INV-020 / INV-027: owner denial creates no physical
 /// attempt, projects one error result to the continuation call, and allows the
 /// same turn to complete from the model's response.
@@ -902,7 +1914,7 @@ async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<()
         continuation_tool_exchange(&runtime)?,
         vec![
             expected_tool_call(request, "confirmed", "{}"),
-            expected_tool_result(
+            expected_failed_tool_result(
                 request,
                 serde_json::json!({
                     "error": {
@@ -911,7 +1923,6 @@ async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<()
                     }
                 })
                 .to_string(),
-                true,
             ),
         ]
     );
@@ -1165,10 +2176,8 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
         PostgresStartupScanRepository::new(fixture.pool.clone()),
     );
     let outcome = scan.execute().await?;
-    assert!(outcome.is_complete());
     assert_eq!(outcome.recovered_turn_count(), 0);
     let repeated = scan.execute().await?;
-    assert!(repeated.is_complete());
     assert_eq!(repeated.recovered_turn_count(), 0);
     let parked: (String, Option<Uuid>, i64) = sqlx::query_as(
         "SELECT active_phase_kind, approval_tool_request_id,
@@ -1211,7 +2220,7 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
         continuation_tool_exchange(&restarted_runtime)?,
         vec![
             expected_tool_call(request, "confirmed", "{}"),
-            expected_tool_result(request, String::from("completed:confirmed"), false),
+            expected_successful_tool_result(request, String::from("completed:confirmed")),
         ],
         "the fresh composition must reach the correlated continuation call"
     );
@@ -1316,8 +2325,8 @@ async fn s10_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
         vec![
             expected_tool_call(requests[0], "automatic", "{}"),
             expected_tool_call(requests[1], "confirmed", "{}"),
-            expected_tool_result(requests[0], String::from("completed:automatic"), false),
-            expected_tool_result(requests[1], String::from("completed:confirmed"), false),
+            expected_successful_tool_result(requests[0], String::from("completed:automatic")),
+            expected_successful_tool_result(requests[1], String::from("completed:confirmed")),
         ],
         "continuation history retains paired calls and proposal-ordered results"
     );
@@ -1457,14 +2466,12 @@ async fn s05_inv005_inv006_inv024_failed_tool_round_admits_and_runs_later_turn()
         PostgresStartupScanRepository::new(fixture.pool.clone()),
     );
     let recovery = startup.execute().await?;
-    assert!(recovery.is_complete());
     assert_eq!(
         recovery.recovered_turn_count(),
         0,
         "dispatch failure already classified the effect-free attempt and failed the turn"
     );
     let repeated_recovery = startup.execute().await?;
-    assert!(repeated_recovery.is_complete());
     assert_eq!(repeated_recovery.recovered_turn_count(), 0);
     assert_eq!(crashing.events(), vec![String::from("effect_free")]);
     let classified: (String, String, String, String) = sqlx::query_as(
@@ -1573,14 +2580,12 @@ async fn s06_inv005_inv024_inv025_inv026_inv034_external_crash_parks_without_ret
         PostgresStartupScanRepository::new(fixture.pool.clone()),
     );
     let recovery = startup.execute().await?;
-    assert!(recovery.is_complete());
     assert_eq!(
         recovery.recovered_turn_count(),
         0,
         "the ambiguous turn remains active while its attempt is recovered"
     );
     let repeated_recovery = startup.execute().await?;
-    assert!(repeated_recovery.is_complete());
     assert_eq!(
         repeated_recovery.recovered_turn_count(),
         0,

@@ -5,6 +5,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU64,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 
 use crate::{
@@ -12,7 +16,7 @@ use crate::{
     RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId, SessionId,
     ToolArgumentsKind, ToolAttemptDispatchCorrelation, ToolAttemptId, ToolBatch,
     ToolBatchExecutionFailure, ToolDecisionSource, ToolEffectClass, ToolName,
-    ToolPermissionDefault, ToolRequestId,
+    ToolPermissionDefault,
 };
 
 const NAME_MAX_BYTES: usize = 64;
@@ -418,14 +422,28 @@ pub enum RunnerEnrollmentState {
 }
 
 /// Logical enrollment; identity never derives from machine properties.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct RunnerEnrollment {
     enrollment: RunnerEnrollmentId,
     runner: RunnerId,
     authentication: RunnerAuthenticationId,
     allowed_classes: BTreeSet<RunnerCapabilityClass>,
     state: RunnerEnrollmentState,
+    registration_revision: Arc<AtomicU64>,
+    registration_active: Arc<AtomicBool>,
 }
+
+impl PartialEq for RunnerEnrollment {
+    fn eq(&self, other: &Self) -> bool {
+        self.enrollment == other.enrollment
+            && self.runner == other.runner
+            && self.authentication == other.authentication
+            && self.allowed_classes == other.allowed_classes
+            && self.state == other.state
+    }
+}
+
+impl Eq for RunnerEnrollment {}
 
 impl RunnerEnrollment {
     pub fn new(
@@ -440,6 +458,8 @@ impl RunnerEnrollment {
             authentication,
             allowed_classes: allowed_classes.into_iter().collect(),
             state: RunnerEnrollmentState::Active,
+            registration_revision: Arc::new(AtomicU64::new(0)),
+            registration_active: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -468,6 +488,7 @@ impl RunnerEnrollment {
             return Err(RunnerDomainError::InvalidState);
         }
         self.state = RunnerEnrollmentState::Revoked;
+        self.registration_active.store(false, Ordering::Release);
         Ok(self)
     }
 
@@ -535,6 +556,14 @@ impl RunnerEnrollment {
             };
             profiles.insert(name, policy.clone());
         }
+        let prior_revision = self
+            .registration_revision
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |revision| {
+                revision.checked_add(1)
+            })
+            .map_err(|_| RunnerDomainError::GenerationExhausted)?;
+        let revision = RunnerGeneration::try_from_u64(prior_revision + 1)
+            .ok_or(RunnerDomainError::GenerationExhausted)?;
         Ok(ValidatedRunnerRegistration {
             enrollment: self.enrollment,
             runner: self.runner,
@@ -543,6 +572,9 @@ impl RunnerEnrollment {
             tools,
             profiles,
             workspaces: advertisement.workspaces,
+            revision,
+            current_revision: Arc::clone(&self.registration_revision),
+            enrollment_active: Arc::clone(&self.registration_active),
         })
     }
 
@@ -556,8 +588,13 @@ impl RunnerEnrollment {
         if self.enrollment != registration.enrollment
             || self.runner != registration.runner
             || self.authentication != registration.authentication
+            || !Arc::ptr_eq(&self.registration_revision, &registration.current_revision)
+            || !Arc::ptr_eq(&self.registration_active, &registration.enrollment_active)
         {
             return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        if !registration.is_current() {
+            return Err(RunnerDomainError::RegistrationChanged);
         }
         Ok(())
     }
@@ -569,16 +606,22 @@ impl RunnerEnrollment {
             || input.runner != input.recorded_runner
             || input.authentication != input.recorded_authentication
             || input.allowed_classes != input.recorded_allowed_classes
+            || input.registration_revision != input.recorded_registration_revision
             || input.state != input.recorded_state
         {
             return Err(RunnerDomainError::CorruptStoredFacts);
         }
+        let registration_revision = input.registration_revision.map_or(0, RunnerGeneration::get);
         Ok(Self {
             enrollment: input.enrollment,
             runner: input.runner,
             authentication: input.authentication,
             allowed_classes: input.allowed_classes,
             state: input.state,
+            registration_revision: Arc::new(AtomicU64::new(registration_revision)),
+            registration_active: Arc::new(AtomicBool::new(
+                input.state == RunnerEnrollmentState::Active,
+            )),
         })
     }
 }
@@ -594,12 +637,14 @@ pub struct RunnerEnrollmentReconstitutionInput {
     pub recorded_authentication: RunnerAuthenticationId,
     pub allowed_classes: BTreeSet<RunnerCapabilityClass>,
     pub recorded_allowed_classes: BTreeSet<RunnerCapabilityClass>,
+    pub registration_revision: Option<RunnerGeneration>,
+    pub recorded_registration_revision: Option<RunnerGeneration>,
     pub state: RunnerEnrollmentState,
     pub recorded_state: RunnerEnrollmentState,
 }
 
 /// Validated availability paired with daemon-owned policy.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ValidatedRunnerRegistration {
     enrollment: RunnerEnrollmentId,
     runner: RunnerId,
@@ -608,7 +653,25 @@ pub struct ValidatedRunnerRegistration {
     tools: BTreeMap<ToolName, RunnerToolDeclaration>,
     profiles: BTreeMap<CredentialProfileName, CredentialProfilePolicy>,
     workspaces: BTreeSet<WorkspaceCapability>,
+    revision: RunnerGeneration,
+    current_revision: Arc<AtomicU64>,
+    enrollment_active: Arc<AtomicBool>,
 }
+
+impl PartialEq for ValidatedRunnerRegistration {
+    fn eq(&self, other: &Self) -> bool {
+        self.enrollment == other.enrollment
+            && self.runner == other.runner
+            && self.authentication == other.authentication
+            && self.classes == other.classes
+            && self.tools == other.tools
+            && self.profiles == other.profiles
+            && self.workspaces == other.workspaces
+            && self.revision == other.revision
+    }
+}
+
+impl Eq for ValidatedRunnerRegistration {}
 
 impl ValidatedRunnerRegistration {
     pub const fn enrollment(&self) -> RunnerEnrollmentId {
@@ -621,6 +684,15 @@ impl ValidatedRunnerRegistration {
 
     pub const fn authentication(&self) -> RunnerAuthenticationId {
         self.authentication
+    }
+
+    pub const fn revision(&self) -> RunnerGeneration {
+        self.revision
+    }
+
+    fn is_current(&self) -> bool {
+        self.enrollment_active.load(Ordering::Acquire)
+            && self.current_revision.load(Ordering::Acquire) == self.revision.get()
     }
 
     pub fn satisfies(&self, selector: &RunnerSelector) -> bool {
@@ -710,6 +782,8 @@ impl ValidatedRunnerRegistration {
             authentication: enrollment.authentication,
             allowed_classes: enrollment.allowed_classes.clone(),
             state: RunnerEnrollmentState::Active,
+            registration_revision: Arc::new(AtomicU64::new(0)),
+            registration_active: Arc::new(AtomicBool::new(true)),
         };
         let mut registration = historical_authority
             .register(advertisement, &catalog)
@@ -781,21 +855,40 @@ pub struct RunnerLeaseOfferRequest {
 
 #[derive(Debug, Eq, PartialEq)]
 struct ClaimedAttemptReplacementEvidence {
-    retired: ToolAttemptId,
-    replacement: ToolAttemptId,
-    request: ToolRequestId,
+    source: RunnerLeaseCorrelation,
+    replacement: ToolAttemptDispatchCorrelation,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum RunnerRetryAttemptEvidence {
+    Unclaimed {
+        dispatch: ToolAttemptDispatchCorrelation,
+    },
+    Claimed(ClaimedAttemptReplacementEvidence),
 }
 
 /// Single-use tool-loop authority bound to its approved tool request.
+///
+/// Canonical request pairing is owned by [`ToolBatch`], not by callers:
+///
+/// ```compile_fail
+/// use signalbox_domain::{
+///     ApprovedToolRequest, AuthorizedToolAttempt, RunnerToolAttemptAuthorization,
+/// };
+///
+/// fn substitute_request(approved: ApprovedToolRequest, authorized: AuthorizedToolAttempt) {
+///     let _ = RunnerToolAttemptAuthorization::try_new(approved, authorized);
+/// }
+/// ```
 #[derive(Debug, Eq, PartialEq)]
 pub struct RunnerToolAttemptAuthorization {
     approved: ApprovedToolRequest,
     authorized: AuthorizedToolAttempt,
-    claimed_replacement: Option<ClaimedAttemptReplacementEvidence>,
+    retry_evidence: Option<RunnerRetryAttemptEvidence>,
 }
 
 impl RunnerToolAttemptAuthorization {
-    pub fn try_new(
+    pub(crate) fn try_new(
         approved: ApprovedToolRequest,
         authorized: AuthorizedToolAttempt,
     ) -> Result<Self, RunnerDomainError> {
@@ -807,10 +900,13 @@ impl RunnerToolAttemptAuthorization {
         {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
+        if !authorized.claim_runner_issuance() {
+            return Err(RunnerDomainError::InvalidState);
+        }
         Ok(Self {
             approved,
             authorized,
-            claimed_replacement: None,
+            retry_evidence: None,
         })
     }
 
@@ -823,9 +919,9 @@ impl RunnerToolAttemptAuthorization {
     ) -> (
         ApprovedToolRequest,
         AuthorizedToolAttempt,
-        Option<ClaimedAttemptReplacementEvidence>,
+        Option<RunnerRetryAttemptEvidence>,
     ) {
-        (self.approved, self.authorized, self.claimed_replacement)
+        (self.approved, self.authorized, self.retry_evidence)
     }
 }
 
@@ -836,7 +932,28 @@ pub enum RunnerLeaseState {
     Claimed,
     Completed,
     LostUnclaimed,
+    LostExecutionPossible,
     LostClaimed,
+}
+
+/// Durable authority proving that one offered lease never issued execution capability.
+///
+/// ```compile_fail
+/// use signalbox_domain::{RunnerLeaseCorrelation, RunnerLeaseNoExecutionProof};
+///
+/// fn fabricate(correlation: RunnerLeaseCorrelation) {
+///     let _ = RunnerLeaseNoExecutionProof { correlation };
+/// }
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerLeaseNoExecutionProof {
+    correlation: RunnerLeaseCorrelation,
+}
+
+impl RunnerLeaseNoExecutionProof {
+    pub const fn correlation(&self) -> &RunnerLeaseCorrelation {
+        &self.correlation
+    }
 }
 
 /// One fenced runner lease.
@@ -934,15 +1051,39 @@ impl RunnerLease {
     }
 
     pub fn lose(mut self) -> Result<RunnerLeaseLoss, RunnerDomainError> {
-        let claimed = match self.state {
-            RunnerLeaseState::Offered => false,
-            RunnerLeaseState::Claimed => true,
+        if !matches!(
+            self.state,
+            RunnerLeaseState::Offered | RunnerLeaseState::Claimed
+        ) {
+            return Err(RunnerDomainError::InvalidState);
+        }
+        self.state = match self.state {
+            RunnerLeaseState::Offered => RunnerLeaseState::LostExecutionPossible,
+            RunnerLeaseState::Claimed => RunnerLeaseState::LostClaimed,
             _ => return Err(RunnerDomainError::InvalidState),
         };
-        self.state = if claimed {
-            RunnerLeaseState::LostClaimed
-        } else {
-            RunnerLeaseState::LostUnclaimed
+        self.into_loss_consequence()
+    }
+
+    pub fn lose_unclaimed(
+        mut self,
+        proof: &RunnerLeaseNoExecutionProof,
+    ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
+        if self.state != RunnerLeaseState::Offered {
+            return Err(RunnerDomainError::InvalidState);
+        }
+        if proof.correlation != self.correlation() {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        self.state = RunnerLeaseState::LostUnclaimed;
+        self.into_loss_consequence()
+    }
+
+    fn into_loss_consequence(self) -> Result<RunnerLeaseLoss, RunnerDomainError> {
+        let claimed = match self.state {
+            RunnerLeaseState::LostUnclaimed => false,
+            RunnerLeaseState::LostExecutionPossible | RunnerLeaseState::LostClaimed => true,
+            _ => return Err(RunnerDomainError::InvalidState),
         };
         if claimed && self.effect == RunnerToolEffectClass::SideEffecting {
             return Ok(RunnerLeaseLoss {
@@ -962,12 +1103,16 @@ impl RunnerLease {
                     source,
                     generation,
                     claimed_attempt,
+                    preparation: RunnerRetryPreparationGuard::new(),
                 }),
             },
         })
     }
 
-    pub fn reconstitute(input: RunnerLeaseReconstitutionInput) -> Result<Self, RunnerDomainError> {
+    pub fn reconstitute(
+        input: RunnerLeaseReconstitutionInput,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<Self, RunnerDomainError> {
         let lease = Self {
             lease: input.lease,
             dispatch: input.dispatch,
@@ -987,16 +1132,40 @@ impl RunnerLease {
                         && authorization.runner == lease.runner
                         && authorization.tool == lease.tool
                 });
+        let declaration_matches = registration.runner == lease.runner
+            && registration
+                .tool(&lease.tool)
+                .is_some_and(|declaration| declaration.effect == lease.effect);
         if lease.correlation() != input.recorded_correlation
             || lease.dispatch.session() != input.recorded_session
             || lease.effect != input.recorded_effect
             || lease.credential_authorization != input.recorded_credential_authorization
             || !credential_matches
+            || !declaration_matches
             || lease.state != input.recorded_state
         {
             return Err(RunnerDomainError::CorruptStoredFacts);
         }
         Ok(lease)
+    }
+
+    pub fn reconstitute_loss(
+        input: RunnerLeaseReconstitutionInput,
+        registration: &ValidatedRunnerRegistration,
+        no_execution: Option<&RunnerLeaseNoExecutionProof>,
+    ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
+        let lease = Self::reconstitute(input, registration)?;
+        let proof_matches =
+            no_execution.is_some_and(|proof| proof.correlation == lease.correlation());
+        match (lease.state, proof_matches, no_execution.is_some()) {
+            (RunnerLeaseState::LostUnclaimed, true, true)
+            | (
+                RunnerLeaseState::LostExecutionPossible | RunnerLeaseState::LostClaimed,
+                false,
+                false,
+            ) => lease.into_loss_consequence(),
+            _ => Err(RunnerDomainError::InvalidState),
+        }
     }
 }
 
@@ -1028,7 +1197,7 @@ pub struct RunnerLeaseReconstitutionInput {
     pub recorded_state: RunnerLeaseState,
 }
 
-/// Typed consequence of lease loss. Construction is sealed to `RunnerLease::lose`.
+/// Typed consequence of lease loss. Construction is sealed to checked `RunnerLease` transitions.
 ///
 /// ```compile_fail
 /// use signalbox_domain::RunnerLeaseLoss;
@@ -1085,6 +1254,23 @@ impl RunnerLeaseLoss {
     }
 }
 
+/// One checked unclaimed-retry batch successor for the never-executed attempt.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RunnerUnclaimedAttemptReauthorization {
+    batch: ToolBatch,
+    authorization: RunnerToolAttemptAuthorization,
+}
+
+impl RunnerUnclaimedAttemptReauthorization {
+    pub const fn batch(&self) -> &ToolBatch {
+        &self.batch
+    }
+
+    pub fn into_parts(self) -> (ToolBatch, RunnerToolAttemptAuthorization) {
+        (self.batch, self.authorization)
+    }
+}
+
 /// One checked claimed-retry batch successor with both physical attempts.
 #[derive(Debug, Eq, PartialEq)]
 pub struct RunnerClaimedAttemptReplacement {
@@ -1108,16 +1294,68 @@ impl RunnerClaimedAttemptReplacement {
 }
 
 /// Checked successor fence for one lost lease lineage.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
+struct RunnerRetryPreparationGuard(AtomicBool);
+
+impl RunnerRetryPreparationGuard {
+    const fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    fn claim(&self) -> bool {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
+
+#[derive(Debug)]
 pub struct RunnerLeaseRetryAuthority {
     source: RunnerLeaseRetrySource,
     generation: RunnerGeneration,
     claimed_attempt: Option<ToolAttemptId>,
+    preparation: RunnerRetryPreparationGuard,
 }
+
+// The process-local preparation guard is not part of durable retry identity.
+impl PartialEq for RunnerLeaseRetryAuthority {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.generation == other.generation
+            && self.claimed_attempt == other.claimed_attempt
+    }
+}
+
+impl Eq for RunnerLeaseRetryAuthority {}
 
 impl RunnerLeaseRetryAuthority {
     pub const fn generation(&self) -> RunnerGeneration {
         self.generation
+    }
+
+    /// Reauthorizes the never-executed physical attempt through its owning batch.
+    pub fn prepare_unclaimed_attempt(
+        &self,
+        batch: ToolBatch,
+    ) -> Result<RunnerUnclaimedAttemptReauthorization, RunnerDomainError> {
+        if self.claimed_attempt.is_some() || !self.preparation.claim() {
+            return Err(RunnerDomainError::InvalidState);
+        }
+        let (batch, mut authorization) = batch
+            .reauthorize_unclaimed_runner_attempt(self.source.correlation.dispatch.attempt())
+            .map_err(|_| RunnerDomainError::CorrelationMismatch)?;
+        if authorization.approved.request().name() != &self.source.correlation.tool
+            || authorization.authorized.correlation() != self.source.correlation.dispatch
+        {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        authorization.retry_evidence = Some(RunnerRetryAttemptEvidence::Unclaimed {
+            dispatch: self.source.correlation.dispatch,
+        });
+        Ok(RunnerUnclaimedAttemptReauthorization {
+            batch,
+            authorization,
+        })
     }
 
     /// Produces a fresh physical attempt through its owning batch.
@@ -1132,6 +1370,9 @@ impl RunnerLeaseRetryAuthority {
         if attempt == claimed {
             return Err(RunnerDomainError::AttemptIdentityReuse);
         }
+        if !self.preparation.claim() {
+            return Err(RunnerDomainError::InvalidState);
+        }
         let replacement = batch
             .replace_claimed_attempt(claimed, attempt)
             .map_err(|error| match error.failure() {
@@ -1145,18 +1386,25 @@ impl RunnerLeaseRetryAuthority {
                 != self.source.correlation.dispatch.session()
             || replacement.approved.request().turn() != self.source.correlation.dispatch.turn()
             || replacement.approved.request().name() != &self.source.correlation.tool
-            || replacement.retired.attempt() != claimed
+            || replacement.retired.session() != self.source.correlation.dispatch.session()
+            || replacement.retired.turn() != self.source.correlation.dispatch.turn()
+            || replacement.retired.issuing_attempt()
+                != self.source.correlation.dispatch.issuing_attempt()
+            || replacement.retired.request() != self.source.correlation.dispatch.request()
+            || replacement.retired.attempt() != self.source.correlation.dispatch.attempt()
+            || replacement.retired.generation() != self.source.correlation.dispatch.generation()
             || replacement.retired.effect_class() != tool_effect_class(self.source.effect)
         {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
         let mut authorization =
             RunnerToolAttemptAuthorization::try_new(replacement.approved, replacement.authorized)?;
-        authorization.claimed_replacement = Some(ClaimedAttemptReplacementEvidence {
-            retired: replacement.retired.attempt(),
-            replacement: authorization.authorized.correlation().attempt(),
-            request: authorization.approved.request().id(),
-        });
+        authorization.retry_evidence = Some(RunnerRetryAttemptEvidence::Claimed(
+            ClaimedAttemptReplacementEvidence {
+                source: self.source.correlation.clone(),
+                replacement: authorization.authorized.correlation(),
+            },
+        ));
         Ok(RunnerClaimedAttemptReplacement {
             batch: replacement.batch,
             retired: replacement.retired,
@@ -1339,14 +1587,15 @@ impl SessionRunnerPlacement {
         offer: RunnerLeaseOfferRequest,
     ) -> Result<RunnerLease, RunnerDomainError> {
         let dispatch = validate_dispatch(self, enrollment, registration, grant, &offer.tool)?;
-        let (attempt, claimed_replacement) = validate_authorized_attempt(
+        let (attempt, retry_evidence) = validate_authorized_attempt(
             self.session,
             &offer.tool,
             dispatch.effect,
+            dispatch.permission,
             dispatch.credential_authorization.as_ref(),
             authorization,
         )?;
-        if claimed_replacement.is_some() {
+        if retry_evidence.is_some() {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
         Ok(RunnerLease::offer_validated(ValidatedRunnerLeaseOffer {
@@ -1382,24 +1631,25 @@ impl SessionRunnerPlacement {
         {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
-        let (attempt, claimed_replacement) = validate_authorized_attempt(
+        let (attempt, retry_evidence) = validate_authorized_attempt(
             self.session,
             &lost.tool,
             dispatch.effect,
+            dispatch.permission,
             dispatch.credential_authorization.as_ref(),
             authorization,
         )?;
-        match (retry.claimed_attempt, claimed_replacement) {
+        match (retry.claimed_attempt, retry_evidence) {
             (Some(claimed), _) if attempt.attempt() == claimed => {
                 return Err(RunnerDomainError::AttemptIdentityReuse);
             }
-            (Some(claimed), Some(replacement))
-                if replacement.retired == claimed
-                    && replacement.replacement == attempt.attempt()
-                    && replacement.request == lost.dispatch.request()
-                    && attempt.request() == lost.dispatch.request() => {}
+            (Some(claimed), Some(RunnerRetryAttemptEvidence::Claimed(replacement)))
+                if replacement.source == lost.correlation()
+                    && replacement.source.dispatch.attempt() == claimed
+                    && replacement.replacement == attempt => {}
             (Some(_), _) => return Err(RunnerDomainError::CorrelationMismatch),
-            (None, None) if attempt == lost.dispatch => {}
+            (None, Some(RunnerRetryAttemptEvidence::Unclaimed { dispatch: source }))
+                if attempt == lost.dispatch && source == lost.dispatch => {}
             (None, _) => return Err(RunnerDomainError::CorrelationMismatch),
         }
         Ok(RunnerLease::offer_validated(ValidatedRunnerLeaseOffer {
@@ -1428,6 +1678,9 @@ impl SessionRunnerPlacement {
         let SessionRunnerPlacementState::Pinned(pinned) = &self.state else {
             return Err(RunnerDomainError::InvalidState);
         };
+        if !registration.is_current() {
+            return Err(RunnerDomainError::RegistrationChanged);
+        }
         if registration.runner != pinned.runner {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
@@ -1452,6 +1705,9 @@ impl SessionRunnerPlacement {
         let SessionRunnerPlacementState::RunnerLost(before) = self.state else {
             return Err(RunnerDomainError::InvalidState);
         };
+        if !registration.is_current() {
+            return Err(RunnerDomainError::RegistrationChanged);
+        }
         let revision = self
             .revision
             .checked_next()
@@ -1459,7 +1715,8 @@ impl SessionRunnerPlacement {
         let mut after =
             validate_placement(self.session, &request, registration, directory, workspace)?;
         let prior_request = self.request;
-        let grant = successor_grant(self.session, &before, &after, registration, prior_grant)?;
+        let (grant, grant_change) =
+            successor_grant(self.session, &before, &after, registration, prior_grant)?;
         after.grant_lineage = grant.as_ref().map(|grant| RunnerCredentialGrantLineage {
             runner: grant.runner,
             revision: grant.revision,
@@ -1481,6 +1738,7 @@ impl SessionRunnerPlacement {
                 after,
             },
             grant,
+            grant_change,
         })
     }
 
@@ -1494,6 +1752,9 @@ impl SessionRunnerPlacement {
         let SessionRunnerPlacementState::Pinned(before) = self.state else {
             return Err(RunnerDomainError::InvalidState);
         };
+        if !registration.is_current() {
+            return Err(RunnerDomainError::RegistrationChanged);
+        }
         let Some(current_profile) = &before.credential_profile else {
             return Err(RunnerDomainError::CredentialProfileUnavailable);
         };
@@ -1546,6 +1807,7 @@ impl SessionRunnerPlacement {
         input: SessionRunnerPlacementReconstitutionInput,
         expected_session: SessionId,
         registration: Option<&ValidatedRunnerRegistration>,
+        profileless_tombstone: Option<&CredentialProfileGrant>,
     ) -> Result<Self, RunnerDomainError> {
         if input.session != expected_session {
             return Err(RunnerDomainError::CorruptStoredFacts);
@@ -1566,12 +1828,35 @@ impl SessionRunnerPlacement {
             | SessionRunnerPlacementState::RunnerLost(stored) => {
                 let pinned_registration =
                     registration.ok_or(RunnerDomainError::CorruptStoredFacts)?;
-                if stored_placement_is_valid(
+                let mut checked = validate_placement(
                     placement.session,
                     &placement.request,
-                    stored,
                     pinned_registration,
+                    stored.working_directory.clone(),
+                    stored.workspace.clone(),
+                )?;
+                checked.grant_lineage = stored.grant_lineage;
+                let lineage_is_valid = match (
+                    stored.credential_profile.as_ref(),
+                    stored.grant_lineage,
+                    profileless_tombstone,
                 ) {
+                    (Some(_), Some(lineage), None) => {
+                        lineage.runner == stored.runner && lineage.revision <= placement.revision
+                    }
+                    (None, None, None) => true,
+                    (None, Some(lineage), Some(tombstone)) => {
+                        tombstone.session == placement.session
+                            && tombstone.state == CredentialProfileGrantState::Revoked
+                            && tombstone.lineage() == lineage
+                            && lineage.revision <= placement.revision
+                    }
+                    (None, None, Some(_))
+                    | (Some(_), None, _)
+                    | (Some(_), Some(_), Some(_))
+                    | (None, Some(_), None) => false,
+                };
+                if lineage_is_valid && checked == *stored {
                     Ok(placement)
                 } else {
                     Err(RunnerDomainError::CorruptStoredFacts)
@@ -1593,6 +1878,7 @@ pub struct SessionRunnerPlacementReconstitutionInput {
 
 struct ValidatedRunnerDispatch {
     runner: RunnerId,
+    permission: ToolPermissionDefault,
     effect: RunnerToolEffectClass,
     credential_authorization: Option<CredentialDispatchAuthorization>,
 }
@@ -1626,6 +1912,7 @@ fn validate_dispatch(
     };
     Ok(ValidatedRunnerDispatch {
         runner: pinned.runner,
+        permission: declaration.permission,
         effect: declaration.effect,
         credential_authorization,
     })
@@ -1635,16 +1922,17 @@ fn validate_authorized_attempt(
     session: SessionId,
     tool: &ToolName,
     effect: RunnerToolEffectClass,
+    permission: ToolPermissionDefault,
     credential_authorization: Option<&CredentialDispatchAuthorization>,
     authorization: RunnerToolAttemptAuthorization,
 ) -> Result<
     (
         ToolAttemptDispatchCorrelation,
-        Option<ClaimedAttemptReplacementEvidence>,
+        Option<RunnerRetryAttemptEvidence>,
     ),
     RunnerDomainError,
 > {
-    let (approved, authorized, claimed_replacement) = authorization.into_parts();
+    let (approved, authorized, retry_evidence) = authorization.into_parts();
     let (attempt, correlation) = authorized.into_parts();
     let expected_effect = tool_effect_class(effect);
     if approved.request().name() != tool
@@ -1654,6 +1942,12 @@ fn validate_authorized_attempt(
         || attempt.session() != session
         || attempt.effect_class() != expected_effect
         || attempt.attempt() != correlation.attempt()
+        || (credential_authorization.is_none()
+            && permission == ToolPermissionDefault::Confirm
+            && !matches!(
+                approved.approval().source(),
+                ToolDecisionSource::OwnerCommand | ToolDecisionSource::SessionBlanket
+            ))
         || credential_authorization.is_some_and(|authorization| {
             authorization.approval == CredentialToolApproval::SessionPolicy
                 && !matches!(
@@ -1664,7 +1958,7 @@ fn validate_authorized_attempt(
     {
         return Err(RunnerDomainError::CorrelationMismatch);
     }
-    Ok((correlation, claimed_replacement))
+    Ok((correlation, retry_evidence))
 }
 
 const fn tool_effect_class(effect: RunnerToolEffectClass) -> ToolEffectClass {
@@ -1697,50 +1991,6 @@ fn registration_preserves_snapshot(
                 registration.supports_workspace(WorkspaceCapability::WorktreePerSession)
             }
         }
-}
-
-fn stored_placement_is_valid(
-    session: SessionId,
-    request: &SessionRunnerPlacementRequest,
-    stored: &PinnedRunnerPlacement,
-    registration: &ValidatedRunnerRegistration,
-) -> bool {
-    let exact_runner_required_tools: BTreeSet<_> = registration
-        .tools
-        .iter()
-        .filter(|(tool, _)| stored.tools.contains(*tool))
-        .filter(|(_, declaration)| {
-            matches!(declaration.loci, ToolAdmissibleLoci::RunnerOnly { .. })
-        })
-        .map(|(tool, _)| tool.clone())
-        .collect();
-    let grant_lineage_is_valid = match (stored.credential_profile.as_ref(), stored.grant_lineage) {
-        (Some(_), Some(lineage)) => lineage.runner == stored.runner,
-        (None, _) => true,
-        (Some(_), None) => false,
-    };
-    if !registration_preserves_snapshot(request, stored, registration)
-        || stored.credential_profile != request.credential_profile
-        || stored.runner_required_tools != exact_runner_required_tools
-        || !grant_lineage_is_valid
-    {
-        return false;
-    }
-    if let WorkingDirectorySelection::Exact(required) = &request.working_directory
-        && required != &stored.working_directory
-    {
-        return false;
-    }
-    match (&request.workspace, &stored.workspace) {
-        (WorkspaceRequirement::None, None) => true,
-        (WorkspaceRequirement::RepositoryWorktree { repository }, Some(actual)) => {
-            actual.session == session
-                && actual.runner == stored.runner
-                && &actual.repository == repository
-                && actual.working_directory == stored.working_directory
-        }
-        _ => false,
-    }
 }
 
 fn validate_placement(
@@ -1818,6 +2068,7 @@ pub struct RunnerPlacementReplacement {
     pub placement: SessionRunnerPlacement,
     pub change: RunnerPlacementChange,
     pub grant: Option<CredentialProfileGrant>,
+    pub grant_change: Option<RunnerCredentialGrantChange>,
 }
 
 /// Complete before-and-after facts for frontier injection.
@@ -1914,6 +2165,18 @@ impl CredentialProfileGrant {
         self.approvals
             .iter()
             .map(|(tool, approval)| (tool, *approval))
+    }
+
+    fn reconstitution_facts(&self) -> CredentialProfileGrantReconstitutionInput {
+        CredentialProfileGrantReconstitutionInput {
+            session: self.session,
+            runner: self.runner,
+            revision: self.revision,
+            profile: self.profile.clone(),
+            tools: self.tools.clone(),
+            approvals: self.approvals.clone(),
+            state: self.state,
+        }
     }
 
     fn authorization_for(
@@ -2025,13 +2288,26 @@ pub struct CredentialProfileGrantReconstitutionInput {
     pub state: CredentialProfileGrantState,
 }
 
+/// Complete before-and-after credential-grant facts from runner replacement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerCredentialGrantChange {
+    pub before: Option<CredentialProfileGrantReconstitutionInput>,
+    pub after: Option<CredentialProfileGrantReconstitutionInput>,
+}
+
 fn successor_grant(
     session: SessionId,
     before: &PinnedRunnerPlacement,
     after: &PinnedRunnerPlacement,
     registration: &ValidatedRunnerRegistration,
     prior: Option<CredentialProfileGrant>,
-) -> Result<Option<CredentialProfileGrant>, RunnerDomainError> {
+) -> Result<
+    (
+        Option<CredentialProfileGrant>,
+        Option<RunnerCredentialGrantChange>,
+    ),
+    RunnerDomainError,
+> {
     let prior = match (
         before.credential_profile.as_ref(),
         before.grant_lineage,
@@ -2053,8 +2329,11 @@ fn successor_grant(
         (None, None, None) => None,
         _ => return Err(RunnerDomainError::CorrelationMismatch),
     };
-    let Some(prior) = prior else {
-        return after
+    let before_facts = prior
+        .as_ref()
+        .map(CredentialProfileGrant::reconstitution_facts);
+    let grant = match prior {
+        None => after
             .credential_profile
             .clone()
             .map(|profile| {
@@ -2067,28 +2346,38 @@ fn successor_grant(
                     CredentialProfileGrantState::Active,
                 )
             })
-            .transpose();
+            .transpose()?,
+        Some(prior) => {
+            let revision = prior
+                .revision
+                .checked_next()
+                .ok_or(RunnerDomainError::GenerationExhausted)?;
+            match after.credential_profile.clone() {
+                Some(profile) => Some(build_grant(
+                    session,
+                    revision,
+                    registration,
+                    profile,
+                    registration.tool_names().cloned(),
+                    CredentialProfileGrantState::Active,
+                )?),
+                None => Some(CredentialProfileGrant {
+                    revision,
+                    state: CredentialProfileGrantState::Revoked,
+                    ..prior
+                }),
+            }
+        }
     };
-    let revision = prior
-        .revision
-        .checked_next()
-        .ok_or(RunnerDomainError::GenerationExhausted)?;
-    match after.credential_profile.clone() {
-        Some(profile) => build_grant(
-            session,
-            revision,
-            registration,
-            profile,
-            registration.tool_names().cloned(),
-            CredentialProfileGrantState::Active,
-        )
-        .map(Some),
-        None => Ok(Some(CredentialProfileGrant {
-            revision,
-            state: CredentialProfileGrantState::Revoked,
-            ..prior
-        })),
-    }
+    let after_facts = grant
+        .as_ref()
+        .map(CredentialProfileGrant::reconstitution_facts);
+    let grant_change =
+        (before_facts.is_some() || after_facts.is_some()).then_some(RunnerCredentialGrantChange {
+            before: before_facts,
+            after: after_facts,
+        });
+    Ok((grant, grant_change))
 }
 
 fn build_grant(
@@ -2262,17 +2551,30 @@ mod tests {
         enrollment_for(runner_id(RUNNER))
     }
 
+    fn enrollment_for_registration(registration: &ValidatedRunnerRegistration) -> RunnerEnrollment {
+        RunnerEnrollment {
+            enrollment: registration.enrollment,
+            runner: registration.runner,
+            authentication: registration.authentication,
+            allowed_classes: BTreeSet::from([class()]),
+            state: RunnerEnrollmentState::Active,
+            registration_revision: Arc::clone(&registration.current_revision),
+            registration_active: Arc::clone(&registration.enrollment_active),
+        }
+    }
+
+    fn advertisement() -> RunnerAdvertisement {
+        RunnerAdvertisement::new(
+            [class()],
+            [tool("inspect"), tool("deploy"), tool("sync")],
+            [profile("readonly"), profile("admin")],
+            [WorkspaceCapability::WorktreePerSession],
+        )
+    }
+
     fn registration_for(runner: RunnerId) -> ValidatedRunnerRegistration {
         enrollment_for(runner)
-            .register(
-                RunnerAdvertisement::new(
-                    [class()],
-                    [tool("inspect"), tool("deploy"), tool("sync")],
-                    [profile("readonly"), profile("admin")],
-                    [WorkspaceCapability::WorktreePerSession],
-                ),
-                &catalog(),
-            )
+            .register(advertisement(), &catalog())
             .expect("the advertisement is a subset of daemon policy")
     }
 
@@ -2349,11 +2651,19 @@ mod tests {
     }
 
     fn claimed_batch(tool_name: &str, effect: RunnerToolEffectClass) -> ToolBatch {
+        claimed_batch_with_issuing_attempt(tool_name, effect, turn_attempt_id(0x7b00))
+    }
+
+    fn claimed_batch_with_issuing_attempt(
+        tool_name: &str,
+        effect: RunnerToolEffectClass,
+        issuing_attempt: crate::TurnAttemptId,
+    ) -> ToolBatch {
         let approved = approved_request(tool_name);
         let current = approved
             .prepare_attempt(
                 tool_attempt_id(ATTEMPT),
-                turn_attempt_id(0x7b00),
+                issuing_attempt,
                 tool_effect_class(effect),
             )
             .authorize()
@@ -2374,7 +2684,7 @@ mod tests {
             vec![approved.approval().clone()],
             vec![ReconstitutedToolAttempt::Current(current)],
             ToolBatchPhaseReconstitutionInput::Executing {
-                turn_attempt: turn_attempt_id(0x7b00),
+                turn_attempt: issuing_attempt,
             },
         )
         .reconstitute()
@@ -2385,6 +2695,16 @@ mod tests {
         batch.attempt(request).map(|attempt| match attempt {
             ReconstitutedToolAttempt::Current(current) => current.attempt(),
             ReconstitutedToolAttempt::Ended(ended) => ended.attempt(),
+        })
+    }
+
+    fn current_attempt_effect_class(
+        batch: &ToolBatch,
+        request: ToolRequestId,
+    ) -> Option<ToolEffectClass> {
+        batch.attempt(request).map(|attempt| match attempt {
+            ReconstitutedToolAttempt::Current(current) => current.effect_class(),
+            ReconstitutedToolAttempt::Ended(ended) => ended.effect_class(),
         })
     }
 
@@ -2483,7 +2803,7 @@ mod tests {
             placement_request(profile(profile_name)),
         )
         .pin_and_offer_lease(
-            &enrollment(),
+            &enrollment_for_registration(&registration),
             &registration,
             directory("/workspace/session"),
             None,
@@ -2520,7 +2840,7 @@ mod tests {
             placement_request(profile("readonly")),
         )
         .pin_and_offer_lease(
-            &enrollment(),
+            &enrollment_for_registration(&registration),
             &registration,
             directory("/workspace/session"),
             None,
@@ -2529,6 +2849,36 @@ mod tests {
         )
         .expect("the first authorized lease pins the fixture placement");
         (registration, pin.placement, pin.grant, pin.lease)
+    }
+
+    fn offered_from_batch(
+        tool_name: &str,
+    ) -> (
+        ValidatedRunnerRegistration,
+        SessionRunnerPlacement,
+        Option<CredentialProfileGrant>,
+        ToolBatch,
+        RunnerLease,
+    ) {
+        let registration = registration();
+        let batch = claimed_batch(tool_name, declared_effect(tool_name));
+        let authorization = batch
+            .resume_runner_attempt(tool_attempt_id(ATTEMPT))
+            .expect("the owning batch issues the fixture runner authority once");
+        let pin = SessionRunnerPlacement::new(
+            session_id(SESSION),
+            placement_request(profile("readonly")),
+        )
+        .pin_and_offer_lease(
+            &enrollment_for_registration(&registration),
+            &registration,
+            directory("/workspace/session"),
+            None,
+            authorization,
+            lease_offer_request(tool_name),
+        )
+        .expect("batch-issued authority pins the fixture placement");
+        (registration, pin.placement, pin.grant, batch, pin.lease)
     }
 
     fn placement_without_required_tool(
@@ -2552,6 +2902,17 @@ mod tests {
         placement
     }
 
+    fn placement_with_grant_lineage(
+        mut placement: SessionRunnerPlacement,
+        lineage: RunnerCredentialGrantLineage,
+    ) -> SessionRunnerPlacement {
+        let SessionRunnerPlacementState::Pinned(pinned) = &mut placement.state else {
+            panic!("the fixture placement must be pinned")
+        };
+        pinned.grant_lineage = Some(lineage);
+        placement
+    }
+
     fn enrollment_reconstitution_input() -> RunnerEnrollmentReconstitutionInput {
         RunnerEnrollmentReconstitutionInput {
             enrollment: runner_enrollment_id(ENROLLMENT),
@@ -2562,6 +2923,8 @@ mod tests {
             recorded_authentication: runner_authentication_id(AUTHENTICATION),
             allowed_classes: BTreeSet::from([class()]),
             recorded_allowed_classes: BTreeSet::from([class()]),
+            registration_revision: None,
+            recorded_registration_revision: None,
             state: RunnerEnrollmentState::Active,
             recorded_state: RunnerEnrollmentState::Active,
         }
@@ -2582,6 +2945,30 @@ mod tests {
             recorded_effect: lease.effect,
             recorded_credential_authorization: lease.credential_authorization.clone(),
             recorded_state: lease.state,
+        }
+    }
+
+    fn borrowed_lease_reconstitution_input(lease: &RunnerLease) -> RunnerLeaseReconstitutionInput {
+        RunnerLeaseReconstitutionInput {
+            lease: lease.lease,
+            dispatch: lease.dispatch,
+            runner: lease.runner,
+            tool: lease.tool.clone(),
+            effect: lease.effect,
+            credential_authorization: lease.credential_authorization.clone(),
+            generation: lease.generation,
+            state: lease.state,
+            recorded_correlation: lease.correlation(),
+            recorded_session: lease.dispatch.session(),
+            recorded_effect: lease.effect,
+            recorded_credential_authorization: lease.credential_authorization.clone(),
+            recorded_state: lease.state,
+        }
+    }
+
+    fn no_execution_proof(lease: &RunnerLease) -> RunnerLeaseNoExecutionProof {
+        RunnerLeaseNoExecutionProof {
+            correlation: lease.correlation(),
         }
     }
 
@@ -2856,6 +3243,45 @@ mod tests {
     }
 
     #[test]
+    fn s32_inv042_inv045_revocation_invalidates_registration_for_grant_transition() {
+        let enrollment = enrollment();
+        let registration = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the active enrollment issues a registration");
+        let mut pin = SessionRunnerPlacement::new(
+            session_id(SESSION),
+            placement_request(profile("readonly")),
+        )
+        .pin_and_offer_lease(
+            &enrollment,
+            &registration,
+            directory("/workspace/session"),
+            None,
+            authorized(
+                "inspect",
+                tool_attempt_id(ATTEMPT),
+                RunnerToolEffectClass::Pure,
+            ),
+            lease_offer_request("inspect"),
+        )
+        .expect("the active registration pins its runner");
+        let grant = pin.grant.take().expect("profile selection creates a grant");
+        let _revoked = enrollment
+            .revoke()
+            .expect("revocation invalidates retained registration authority");
+
+        assert_eq!(
+            pin.placement.replace_credential_profile(
+                grant,
+                &registration,
+                profile("admin"),
+                BTreeSet::from([tool("deploy")]),
+            ),
+            Err(RunnerDomainError::RegistrationChanged)
+        );
+    }
+
+    #[test]
     fn s31_inv042_lease_rejects_a_foreign_active_enrollment() {
         let (registration, pin) = pinned("readonly");
         let foreign = enrollment_for(runner_id(REPLACEMENT_RUNNER));
@@ -2885,6 +3311,51 @@ mod tests {
 
         assert_eq!(declaration.permission(), ToolPermissionDefault::Confirm);
         assert_eq!(declaration.effect(), RunnerToolEffectClass::SideEffecting);
+    }
+
+    #[test]
+    fn s30_inv042_inv043_reregistration_retires_prior_registration_authority() {
+        let enrollment = enrollment();
+        let initial = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the initial advertisement is valid");
+        let retained = initial.clone();
+        let pin = SessionRunnerPlacement::new(
+            session_id(SESSION),
+            placement_request(profile("readonly")),
+        )
+        .pin_and_offer_lease(
+            &enrollment,
+            &initial,
+            directory("/workspace/session"),
+            None,
+            authorized(
+                "inspect",
+                tool_attempt_id(ATTEMPT),
+                RunnerToolEffectClass::Pure,
+            ),
+            lease_offer_request("inspect"),
+        )
+        .expect("the initial registration pins the placement");
+        let current = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the replacement advertisement is valid");
+
+        assert_eq!(
+            pin.placement.offer_lease(
+                &enrollment,
+                &retained,
+                pin.grant.as_ref(),
+                authorized(
+                    "inspect",
+                    tool_attempt_id(RETRY_ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            ),
+            Err(RunnerDomainError::RegistrationChanged)
+        );
+        assert_ne!(retained.revision(), current.revision());
     }
 
     #[test]
@@ -2921,26 +3392,146 @@ mod tests {
     }
 
     #[test]
+    fn s30_inv042_enrollment_reconstitution_restores_registration_revision() {
+        let mut input = enrollment_reconstitution_input();
+        let restored_revision = RunnerGeneration::try_from_u64(2).expect("two is positive");
+        input.registration_revision = Some(restored_revision);
+        input.recorded_registration_revision = Some(restored_revision);
+        let enrollment = RunnerEnrollment::reconstitute(input)
+            .expect("the complete enrollment facts restore the registration counter");
+
+        let registration = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the next registration advances the restored counter");
+
+        assert_eq!(
+            registration.revision(),
+            RunnerGeneration::try_from_u64(3).expect("three is positive")
+        );
+    }
+
+    #[test]
+    fn s30_inv042_enrollment_reconstitution_rejects_cross_wired_registration_revision() {
+        let mut input = enrollment_reconstitution_input();
+        input.registration_revision = Some(RunnerGeneration::one());
+        input.recorded_registration_revision =
+            Some(RunnerGeneration::try_from_u64(2).expect("two is positive"));
+
+        assert_eq!(
+            RunnerEnrollment::reconstitute(input),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
     fn s31_inv043_unclaimed_side_effecting_loss_is_releasable() {
         let attempt = tool_attempt_id(ATTEMPT);
-        let (registration, placement, grant, lease) = offered("deploy", attempt);
-
-        let loss = lease.lose().expect("an offered lease can be lost");
+        let (registration, placement, grant, batch, lease) = offered_from_batch("deploy");
+        let preexisting_clone = batch.clone();
+        let proof = no_execution_proof(&lease);
+        let loss = lease
+            .lose_unclaimed(&proof)
+            .expect("proof-backed unclaimed loss is checked");
+        let prepared = loss
+            .retry()
+            .expect("unclaimed loss carries retry authority")
+            .prepare_unclaimed_attempt(batch)
+            .expect("the owning batch reauthorizes the never-executed attempt");
+        let (retry_batch, authorization) = prepared.into_parts();
         let replacement = placement
             .offer_retry(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 grant.as_ref(),
                 loss,
-                authorized("deploy", attempt, RunnerToolEffectClass::SideEffecting),
+                authorization,
             )
             .expect("unclaimed loss retains its never-executed attempt");
+        let duplicate = retry_batch
+            .resume_runner_attempt(attempt)
+            .expect_err("the reissued runner authority remains single-use");
+        let clone_duplicate = preexisting_clone
+            .resume_runner_attempt(attempt)
+            .expect_err("a preexisting clone shares the reissued single-use fence");
+        let retained_authorized_attempts = preexisting_clone
+            .runner_authorized_attempts()
+            .collect::<Vec<_>>();
 
         assert_eq!(
             replacement.generation(),
             RunnerGeneration::try_from_u64(2).expect("two is positive")
         );
         assert_eq!(replacement.attempt(), attempt);
+        assert_eq!(retained_authorized_attempts, vec![attempt]);
+        assert_eq!(
+            duplicate.failure(),
+            ToolBatchExecutionFailure::AttemptStageMismatch
+        );
+        assert_eq!(
+            clone_duplicate.failure(),
+            ToolBatchExecutionFailure::AttemptStageMismatch
+        );
+    }
+
+    #[test]
+    fn s31_inv043_unclaimed_retry_preparation_is_single_use_across_batch_copies() {
+        let (_, _, _, batch, lease) = offered_from_batch("deploy");
+        let retained_batch = batch.clone();
+        let proof = no_execution_proof(&lease);
+        let loss = lease
+            .lose_unclaimed(&proof)
+            .expect("proof-backed unclaimed loss is checked");
+        let _prepared = loss
+            .retry()
+            .expect("unclaimed loss carries retry authority")
+            .prepare_unclaimed_attempt(batch)
+            .expect("the first batch copy consumes retry preparation authority");
+
+        assert_eq!(
+            loss.retry()
+                .expect("the loss still exposes its checked lineage")
+                .prepare_unclaimed_attempt(retained_batch),
+            Err(RunnerDomainError::InvalidState)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_unclaimed_retry_authority_is_rejected_by_ordinary_offer() {
+        let (registration, placement, grant, batch, lease) = offered_from_batch("deploy");
+        let proof = no_execution_proof(&lease);
+        let loss = lease
+            .lose_unclaimed(&proof)
+            .expect("proof-backed unclaimed loss is checked");
+        let prepared = loss
+            .retry()
+            .expect("unclaimed loss carries retry authority")
+            .prepare_unclaimed_attempt(batch)
+            .expect("the owning batch reauthorizes the never-executed attempt");
+        let (_, authorization) = prepared.into_parts();
+
+        assert_eq!(
+            placement.offer_lease(
+                &enrollment_for_registration(&registration),
+                &registration,
+                grant.as_ref(),
+                authorization,
+                lease_offer_request("deploy"),
+            ),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
+    }
+
+    #[test]
+    fn s31_inv025_inv026_inv043_offered_side_effecting_loss_without_proof_is_ambiguous() {
+        let (_, _, _, offered) = offered("deploy", tool_attempt_id(ATTEMPT));
+        let expected_attempt = offered.attempt();
+
+        let loss = offered
+            .lose()
+            .expect("loss without no-execution proof stays ambiguous");
+
+        assert_eq!(loss.retry(), None);
+        assert_eq!(loss.crash_attempt(), Some(expected_attempt));
     }
 
     #[test]
@@ -2967,14 +3558,22 @@ mod tests {
         let (retry_batch, retired_attempt, authorization) = prepared.into_parts();
         let replacement = placement
             .offer_retry(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 grant.as_ref(),
                 loss,
                 authorization,
             )
             .expect("pure claimed work permits a fresh physical attempt");
+        let duplicate_local_authority = retry_batch
+            .resume_in_flight_attempt(retry_attempt)
+            .expect("the replacement remains locally resumable");
+        let duplicate_approved = approved_request("inspect");
 
+        assert_eq!(
+            RunnerToolAttemptAuthorization::try_new(duplicate_approved, duplicate_local_authority),
+            Err(RunnerDomainError::InvalidState)
+        );
         assert_eq!(retired_attempt.attempt(), offered_attempt);
         assert_eq!(
             retired_attempt.end(),
@@ -2988,6 +3587,43 @@ mod tests {
         );
         assert_eq!(replacement.attempt(), retry_attempt);
         assert_eq!(replacement.tool(), &expected_tool);
+    }
+
+    #[test]
+    fn s31_inv043_claimed_retry_rejects_cross_wired_lost_lease_correlation() {
+        let (registration, placement, grant, offered) =
+            offered("inspect", tool_attempt_id(ATTEMPT));
+        let correlation = offered.correlation();
+        let claimed = offered
+            .claim(correlation)
+            .expect("the exact first lease is claimed");
+        let source_loss = claimed.lose().expect("the claimed pure lease may be lost");
+        let prepared = source_loss
+            .retry()
+            .expect("the source loss carries retry authority")
+            .prepare_claimed_attempt(
+                claimed_batch("inspect", RunnerToolEffectClass::Pure),
+                tool_attempt_id(RETRY_ATTEMPT),
+            )
+            .expect("the source loss prepares its exact replacement");
+        let (_, _, authorization) = prepared.into_parts();
+        let mut cross_wired_input = borrowed_lease_reconstitution_input(source_loss.lost());
+        cross_wired_input.lease = runner_lease_id(LEASE + 1);
+        cross_wired_input.recorded_correlation.lease = runner_lease_id(LEASE + 1);
+        let cross_wired_loss =
+            RunnerLease::reconstitute_loss(cross_wired_input, &registration, None)
+                .expect("the distinct complete loss is internally consistent");
+
+        assert_eq!(
+            placement.offer_retry(
+                &enrollment_for_registration(&registration),
+                &registration,
+                grant.as_ref(),
+                cross_wired_loss,
+                authorization,
+            ),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
     }
 
     #[test]
@@ -3011,7 +3647,7 @@ mod tests {
         let (retry_batch, _, authorization) = prepared.into_parts();
         let retry_lease = placement
             .offer_retry(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 grant.as_ref(),
                 first_loss,
@@ -3077,9 +3713,34 @@ mod tests {
     }
 
     #[test]
+    fn s31_inv004_inv043_claimed_retry_rejects_cross_wired_issuing_attempt() {
+        let (_, _, _, offered) = offered("sync", tool_attempt_id(ATTEMPT));
+        let correlation = offered.correlation();
+        let claimed = offered
+            .claim(correlation)
+            .expect("the exact fence claims the offered lease");
+        let loss = claimed.lose().expect("a claimed lease can be lost");
+        let cross_wired = claimed_batch_with_issuing_attempt(
+            "sync",
+            RunnerToolEffectClass::Idempotent,
+            turn_attempt_id(0x7b01),
+        );
+
+        assert_eq!(
+            loss.retry()
+                .expect("claimed idempotent work carries retry authority")
+                .prepare_claimed_attempt(cross_wired, tool_attempt_id(RETRY_ATTEMPT)),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
+    }
+
+    #[test]
     fn s31_inv004_inv043_unclaimed_retry_cannot_mint_a_fresh_attempt() {
         let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
-        let loss = offered.lose().expect("an offered lease can be lost");
+        let proof = no_execution_proof(&offered);
+        let loss = offered
+            .lose_unclaimed(&proof)
+            .expect("proof-backed unclaimed loss is checked");
 
         assert_eq!(
             loss.retry()
@@ -3100,22 +3761,19 @@ mod tests {
             .claim(correlation)
             .expect("the exact fence claims the offered lease");
         let loss = claimed.lose().expect("a claimed lease can be lost");
+        let source_batch = claimed_batch("sync", RunnerToolEffectClass::Idempotent);
+        let source_effect = current_attempt_effect_class(&source_batch, request("sync").id())
+            .expect("the source batch carries its current attempt effect");
         let prepared = loss
             .retry()
             .expect("claimed idempotent work carries retry authority")
-            .prepare_claimed_attempt(
-                claimed_batch("sync", RunnerToolEffectClass::Idempotent),
-                tool_attempt_id(RETRY_ATTEMPT),
-            )
+            .prepare_claimed_attempt(source_batch, tool_attempt_id(RETRY_ATTEMPT))
             .expect("retry authority preserves the source effect");
         let (_, retired_attempt, authorization) = prepared.into_parts();
         let (attempt, _) = authorization.authorized.into_parts();
 
         assert_eq!(retired_attempt.end(), &ToolAttemptEnd::Ambiguous);
-        assert_eq!(
-            attempt.effect_class(),
-            tool_effect_class(declared_effect("sync"))
-        );
+        assert_eq!(attempt.effect_class(), source_effect);
     }
 
     #[test]
@@ -3132,7 +3790,7 @@ mod tests {
 
         assert_eq!(
             placement.offer_retry(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 grant.as_ref(),
                 loss,
@@ -3201,7 +3859,7 @@ mod tests {
 
         assert_eq!(
             pin.placement.offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 pin.grant.as_ref(),
                 authorized(
@@ -3221,7 +3879,7 @@ mod tests {
 
         assert_eq!(
             pin.placement.offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 pin.grant.as_ref(),
                 authorized(
@@ -3256,7 +3914,7 @@ mod tests {
 
     #[test]
     fn s31_inv043_lease_reconstitution_rejects_cross_wired_fence() {
-        let (_, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         input.recorded_correlation = RunnerLeaseCorrelation {
             runner: runner_id(REPLACEMENT_RUNNER),
@@ -3264,38 +3922,56 @@ mod tests {
         };
 
         assert_eq!(
-            RunnerLease::reconstitute(input),
+            RunnerLease::reconstitute(input, &registration),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
 
     #[test]
     fn s31_inv043_lease_reconstitution_rejects_cross_wired_effect() {
-        let (_, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         input.recorded_effect = RunnerToolEffectClass::SideEffecting;
 
         assert_eq!(
-            RunnerLease::reconstitute(input),
+            RunnerLease::reconstitute(input, &registration),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_lease_reconstitution_binds_effect_to_registration_declaration() {
+        let (registration, _, _, offered) = offered("deploy", tool_attempt_id(ATTEMPT));
+        let correlation = offered.correlation();
+        let claimed = offered
+            .claim(correlation)
+            .expect("the exact side-effecting lease is claimed");
+        let loss = claimed.lose().expect("the claimed lease may be lost");
+        let mut input = borrowed_lease_reconstitution_input(loss.lost());
+        input.effect = RunnerToolEffectClass::Idempotent;
+        input.recorded_effect = RunnerToolEffectClass::Idempotent;
+
+        assert_eq!(
+            RunnerLease::reconstitute_loss(input, &registration, None),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
 
     #[test]
     fn s31_inv043_lease_reconstitution_rejects_cross_wired_authorization() {
-        let (_, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         input.recorded_credential_authorization = None;
 
         assert_eq!(
-            RunnerLease::reconstitute(input),
+            RunnerLease::reconstitute(input, &registration),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
 
     #[test]
     fn s31_inv043_inv045_lease_reconstitution_rejects_foreign_credential_session() {
-        let (_, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         let authorization = input
             .credential_authorization
@@ -3305,14 +3981,14 @@ mod tests {
         input.recorded_credential_authorization = input.credential_authorization.clone();
 
         assert_eq!(
-            RunnerLease::reconstitute(input),
+            RunnerLease::reconstitute(input, &registration),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
 
     #[test]
     fn s31_inv043_inv045_lease_reconstitution_rejects_foreign_credential_runner() {
-        let (_, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         let authorization = input
             .credential_authorization
@@ -3322,14 +3998,14 @@ mod tests {
         input.recorded_credential_authorization = input.credential_authorization.clone();
 
         assert_eq!(
-            RunnerLease::reconstitute(input),
+            RunnerLease::reconstitute(input, &registration),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
 
     #[test]
     fn s31_inv043_inv045_lease_reconstitution_rejects_foreign_credential_tool() {
-        let (_, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         let authorization = input
             .credential_authorization
@@ -3338,31 +4014,31 @@ mod tests {
         authorization.tool = tool("deploy");
         input.recorded_credential_authorization = input.credential_authorization.clone();
         assert_eq!(
-            RunnerLease::reconstitute(input),
+            RunnerLease::reconstitute(input, &registration),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
 
     #[test]
     fn s31_inv043_lease_reconstitution_rejects_cross_wired_session() {
-        let (_, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         input.recorded_session = session_id(SESSION + 1);
 
         assert_eq!(
-            RunnerLease::reconstitute(input),
+            RunnerLease::reconstitute(input, &registration),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
 
     #[test]
     fn s31_inv043_lease_reconstitution_rejects_cross_wired_state() {
-        let (_, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         input.recorded_state = RunnerLeaseState::Claimed;
 
         assert_eq!(
-            RunnerLease::reconstitute(input),
+            RunnerLease::reconstitute(input, &registration),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
@@ -3377,7 +4053,7 @@ mod tests {
 
         let pinned = placement
             .pin_and_offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 directory("/workspace/session"),
                 None,
@@ -3416,9 +4092,13 @@ mod tests {
         let expected_state = pin.placement.state().clone();
         let input = placement_reconstitution_input(pin.placement);
 
-        let reconstituted =
-            SessionRunnerPlacement::reconstitute(input, session_id(SESSION), Some(&registration))
-                .expect("complete pinned facts reconstitute");
+        let reconstituted = SessionRunnerPlacement::reconstitute(
+            input,
+            session_id(SESSION),
+            Some(&registration),
+            None,
+        )
+        .expect("complete pinned facts reconstitute");
 
         assert_eq!(reconstituted.state(), &expected_state);
     }
@@ -3430,8 +4110,97 @@ mod tests {
         let input = placement_reconstitution_input(corrupted);
 
         assert_eq!(
-            SessionRunnerPlacement::reconstitute(input, session_id(SESSION), Some(&registration),),
+            SessionRunnerPlacement::reconstitute(
+                input,
+                session_id(SESSION),
+                Some(&registration),
+                None,
+            ),
             Err(RunnerDomainError::CorruptStoredFacts),
+        );
+    }
+
+    #[test]
+    fn s30_inv044_generation_one_profiled_placement_rejects_later_grant_revision() {
+        let (registration, pin) = pinned("readonly");
+        let corrupted = placement_with_grant_lineage(
+            pin.placement,
+            RunnerCredentialGrantLineage {
+                runner: registration.runner(),
+                revision: RunnerGeneration::try_from_u64(2).expect("two is positive"),
+            },
+        );
+        let input = placement_reconstitution_input(corrupted);
+
+        assert_eq!(
+            SessionRunnerPlacement::reconstitute(
+                input,
+                session_id(SESSION),
+                Some(&registration),
+                None,
+            ),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
+    fn s30_inv044_placement_rejects_grant_lineage_newer_than_its_revision() {
+        let (registration, pin) = pinned("readonly");
+        let mut placement = pin.placement;
+        placement.revision = RunnerGeneration::try_from_u64(2).expect("two is positive");
+        let corrupted = placement_with_grant_lineage(
+            placement,
+            RunnerCredentialGrantLineage {
+                runner: registration.runner(),
+                revision: RunnerGeneration::try_from_u64(3).expect("three is positive"),
+            },
+        );
+        let input = placement_reconstitution_input(corrupted);
+
+        assert_eq!(
+            SessionRunnerPlacement::reconstitute(
+                input,
+                session_id(SESSION),
+                Some(&registration),
+                None,
+            ),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+    #[test]
+    fn s30_inv044_generation_one_profileless_placement_rejects_grant_lineage() {
+        let registration = registration();
+        let pin = SessionRunnerPlacement::new(session_id(SESSION), profileless_placement_request())
+            .pin_and_offer_lease(
+                &enrollment_for_registration(&registration),
+                &registration,
+                directory("/workspace/session"),
+                None,
+                automatically_authorized(
+                    "inspect",
+                    tool_attempt_id(ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            )
+            .expect("profileless execution pins without a grant");
+        let corrupted = placement_with_grant_lineage(
+            pin.placement,
+            RunnerCredentialGrantLineage {
+                runner: registration.runner(),
+                revision: RunnerGeneration::one(),
+            },
+        );
+        let input = placement_reconstitution_input(corrupted);
+
+        assert_eq!(
+            SessionRunnerPlacement::reconstitute(
+                input,
+                session_id(SESSION),
+                Some(&registration),
+                None,
+            ),
+            Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
 
@@ -3445,6 +4214,7 @@ mod tests {
                 input,
                 session_id(SESSION + 1),
                 Some(&registration),
+                None,
             ),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
@@ -3457,7 +4227,12 @@ mod tests {
         let input = placement_reconstitution_input(corrupted);
 
         assert_eq!(
-            SessionRunnerPlacement::reconstitute(input, session_id(SESSION), Some(&registration),),
+            SessionRunnerPlacement::reconstitute(
+                input,
+                session_id(SESSION),
+                Some(&registration),
+                None,
+            ),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
@@ -3469,7 +4244,12 @@ mod tests {
         let input = placement_reconstitution_input(pin.placement);
 
         assert_eq!(
-            SessionRunnerPlacement::reconstitute(input, session_id(SESSION), Some(&registration),),
+            SessionRunnerPlacement::reconstitute(
+                input,
+                session_id(SESSION),
+                Some(&registration),
+                None,
+            ),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
@@ -3492,7 +4272,7 @@ mod tests {
             placement_request(profile("readonly")),
         )
         .pin_and_offer_lease(
-            &enrollment(),
+            &enrollment_for_registration(&narrow_registration),
             &narrow_registration,
             directory("/workspace/session"),
             None,
@@ -3512,7 +4292,7 @@ mod tests {
 
         assert_eq!(
             reconciled.offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&expanded_registration),
                 &expanded_registration,
                 pin.grant.as_ref(),
                 authorized(
@@ -3549,7 +4329,7 @@ mod tests {
 
         assert_eq!(
             pin_for_offer.placement.offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&narrowed_registration),
                 &narrowed_registration,
                 pin_for_offer.grant.as_ref(),
                 authorized(
@@ -3568,6 +4348,48 @@ mod tests {
                 .reconcile_registration(&narrowed_registration)
                 .expect("registration narrowing is explicit runner loss")
         );
+    }
+
+    #[test]
+    fn s30_inv042_inv044_reconciliation_rejects_a_stale_registration() {
+        let enrollment = enrollment();
+        let retained = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the first registration pins the complete runner snapshot");
+        let pin = SessionRunnerPlacement::new(
+            session_id(SESSION),
+            placement_request(profile("readonly")),
+        )
+        .pin_and_offer_lease(
+            &enrollment,
+            &retained,
+            directory("/workspace/session"),
+            None,
+            authorized(
+                "inspect",
+                tool_attempt_id(ATTEMPT),
+                RunnerToolEffectClass::Pure,
+            ),
+            lease_offer_request("inspect"),
+        )
+        .expect("the first registration pins the runner");
+        let current = enrollment
+            .register(
+                RunnerAdvertisement::new(
+                    [class()],
+                    [tool("inspect")],
+                    [profile("readonly")],
+                    [WorkspaceCapability::WorktreePerSession],
+                ),
+                &catalog(),
+            )
+            .expect("the narrowed successor registration is current");
+
+        assert_eq!(
+            pin.placement.reconcile_registration(&retained),
+            Err(RunnerDomainError::RegistrationChanged)
+        );
+        assert_ne!(retained.revision(), current.revision());
     }
 
     #[test]
@@ -3606,7 +4428,7 @@ mod tests {
         assert_eq!(reconciled.revision(), expected_revision);
         assert_eq!(
             reconciled.offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&narrowed_registration),
                 &narrowed_registration,
                 pin.grant.as_ref(),
                 authorized(
@@ -3631,7 +4453,7 @@ mod tests {
 
         assert_eq!(
             lost.offer_lease(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 Some(&grant),
                 authorized(
@@ -3654,7 +4476,7 @@ mod tests {
             placement_request(profile("readonly")),
         )
         .pin_and_offer_lease(
-            &enrollment(),
+            &enrollment_for_registration(&initial),
             &initial,
             directory("/workspace/old"),
             None,
@@ -3741,7 +4563,7 @@ mod tests {
         };
         let mut pin = SessionRunnerPlacement::new(session_id(SESSION), before_request.clone())
             .pin_and_offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 directory("/workspace/session"),
                 None,
@@ -3833,6 +4655,52 @@ mod tests {
     }
 
     #[test]
+    fn s32_inv044_inv045_profileless_placement_reconstitutes_with_exact_tombstone() {
+        let registration = registration();
+        let mut pin = pinned("readonly").1;
+        let prior_grant = pin
+            .grant
+            .take()
+            .expect("profile selection creates a prior grant");
+        let lost = pin
+            .placement
+            .mark_runner_lost()
+            .expect("the profiled placement can be marked lost");
+        let profileless = lost
+            .replace_lost_runner(
+                profileless_placement_request(),
+                &registration,
+                directory("/workspace/session"),
+                None,
+                Some(prior_grant),
+            )
+            .expect("profileless replacement creates its terminal tombstone");
+        let tombstone = profileless
+            .grant
+            .expect("the checked replacement returns the tombstone");
+        let expected_state = profileless.placement.state().clone();
+        let input = placement_reconstitution_input(profileless.placement);
+
+        assert_eq!(
+            SessionRunnerPlacement::reconstitute(
+                input.clone(),
+                session_id(SESSION),
+                Some(&registration),
+                None,
+            ),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+        let restored = SessionRunnerPlacement::reconstitute(
+            input,
+            session_id(SESSION),
+            Some(&registration),
+            Some(&tombstone),
+        )
+        .expect("the exact revoked tombstone authenticates retained profileless lineage");
+        assert_eq!(restored.state(), &expected_state);
+    }
+
+    #[test]
     fn s32_inv045_profileless_lineage_rejects_an_omitted_tombstone() {
         let registration = registration();
         let mut pin = pinned("readonly").1;
@@ -3900,7 +4768,7 @@ mod tests {
 
         assert_eq!(
             SessionRunnerPlacement::new(session_id(SESSION), request).pin_and_offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 directory("/workspace/session"),
                 Some(foreign_workspace),
@@ -3932,7 +4800,7 @@ mod tests {
         let lease = pin
             .placement
             .offer_lease(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 pin.grant.as_ref(),
                 authorized(
@@ -3959,7 +4827,7 @@ mod tests {
 
         assert_eq!(
             pin.placement.offer_lease(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 pin.grant.as_ref(),
                 automatically_authorized(
@@ -3979,7 +4847,7 @@ mod tests {
         let lease = pin
             .placement
             .offer_lease(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 pin.grant.as_ref(),
                 automatically_authorized(
@@ -4006,7 +4874,7 @@ mod tests {
         let lease = pin
             .placement
             .offer_lease(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 pin.grant.as_ref(),
                 blanket_authorized(
@@ -4057,7 +4925,7 @@ mod tests {
 
         assert_eq!(
             pin.placement.offer_lease(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 Some(&revoked),
                 authorized(
@@ -4099,6 +4967,27 @@ mod tests {
             replaced.placement_change.after.credential_profile,
             Some(profile("admin"))
         );
+    }
+
+    #[test]
+    fn s32_inv042_inv045_profile_replacement_rejects_stale_registration() {
+        let (registration, mut pin) = pinned("readonly");
+        let retained = registration.clone();
+        let current = enrollment_for_registration(&registration)
+            .register(advertisement(), &catalog())
+            .expect("the later registration retires the retained snapshot");
+        let grant = pin.grant.take().expect("profile selection creates a grant");
+
+        assert_eq!(
+            pin.placement.replace_credential_profile(
+                grant,
+                &retained,
+                profile("admin"),
+                BTreeSet::from([tool("deploy")]),
+            ),
+            Err(RunnerDomainError::RegistrationChanged)
+        );
+        assert_ne!(retained.revision(), current.revision());
     }
 
     #[test]
@@ -4166,6 +5055,194 @@ mod tests {
         assert_eq!(
             CredentialProfileGrant::reconstitute(input, session_id(SESSION + 1), &registration,),
             Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+    #[test]
+    fn s31_inv043_profileless_confirm_rejects_policy_auto_authorization() {
+        let registration = registration();
+        let pin = SessionRunnerPlacement::new(session_id(SESSION), profileless_placement_request())
+            .pin_and_offer_lease(
+                &enrollment_for_registration(&registration),
+                &registration,
+                directory("/workspace/session"),
+                None,
+                automatically_authorized(
+                    "inspect",
+                    tool_attempt_id(ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            )
+            .expect("automatic profileless work can pin the runner");
+
+        assert_eq!(
+            pin.placement.offer_lease(
+                &enrollment_for_registration(&registration),
+                &registration,
+                None,
+                automatically_authorized(
+                    "sync",
+                    tool_attempt_id(RETRY_ATTEMPT),
+                    RunnerToolEffectClass::Idempotent,
+                ),
+                lease_offer_request("sync"),
+            ),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_profileless_confirm_accepts_session_blanket_authorization() {
+        let registration = registration();
+        let pin = SessionRunnerPlacement::new(session_id(SESSION), profileless_placement_request())
+            .pin_and_offer_lease(
+                &enrollment_for_registration(&registration),
+                &registration,
+                directory("/workspace/session"),
+                None,
+                automatically_authorized(
+                    "inspect",
+                    tool_attempt_id(ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            )
+            .expect("automatic profileless work can pin the runner");
+
+        pin.placement
+            .offer_lease(
+                &enrollment_for_registration(&registration),
+                &registration,
+                None,
+                blanket_authorized(
+                    "sync",
+                    tool_attempt_id(RETRY_ATTEMPT),
+                    RunnerToolEffectClass::Idempotent,
+                ),
+                lease_offer_request("sync"),
+            )
+            .expect("the frozen session blanket overrides profileless confirmation");
+    }
+
+    #[test]
+    fn s31_inv043_lost_unclaimed_lease_reconstitutes_retry_authority() {
+        let (registration, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let proof = no_execution_proof(&offered);
+        let loss = offered
+            .lose_unclaimed(&proof)
+            .expect("proof-backed unclaimed loss is checked");
+        let expected_generation = loss
+            .retry()
+            .expect("unclaimed pure loss carries retry authority")
+            .generation();
+        let input = borrowed_lease_reconstitution_input(loss.lost());
+
+        let restored = RunnerLease::reconstitute_loss(input, &registration, Some(&proof))
+            .expect("complete lost facts and proof restore the checked consequence");
+
+        assert_eq!(
+            restored
+                .retry()
+                .expect("restored unclaimed pure loss carries retry authority")
+                .generation(),
+            expected_generation
+        );
+        assert_eq!(restored.crash_attempt(), None);
+    }
+
+    #[test]
+    fn s31_inv043_lost_unclaimed_reconstitution_requires_no_execution_proof() {
+        let (registration, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let proof = no_execution_proof(&offered);
+        let loss = offered
+            .lose_unclaimed(&proof)
+            .expect("proof-backed unclaimed loss is checked");
+        let input = borrowed_lease_reconstitution_input(loss.lost());
+
+        assert_eq!(
+            RunnerLease::reconstitute_loss(input, &registration, None),
+            Err(RunnerDomainError::InvalidState)
+        );
+    }
+
+    #[test]
+    fn s31_inv025_inv026_inv043_lost_claimed_side_effect_reconstitutes_crash_authority() {
+        let (registration, _, _, offered) = offered("deploy", tool_attempt_id(ATTEMPT));
+        let correlation = offered.correlation();
+        let expected_attempt = offered.attempt();
+        let claimed = offered
+            .claim(correlation)
+            .expect("the exact fence claims the offered lease");
+        let loss = claimed.lose().expect("a claimed lease can be lost");
+        let input = borrowed_lease_reconstitution_input(loss.lost());
+
+        let restored = RunnerLease::reconstitute_loss(input, &registration, None)
+            .expect("complete lost facts restore crash classification authority");
+
+        assert_eq!(restored.retry(), None);
+        assert_eq!(restored.crash_attempt(), Some(expected_attempt));
+    }
+
+    #[test]
+    fn s31_inv043_nonlost_lease_cannot_reconstitute_a_loss_consequence() {
+        let (registration, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let input = lease_reconstitution_input(offered);
+
+        assert_eq!(
+            RunnerLease::reconstitute_loss(input, &registration, None),
+            Err(RunnerDomainError::InvalidState)
+        );
+    }
+
+    #[test]
+    fn s32_inv044_inv045_runner_replacement_reports_complete_grant_change() {
+        let (registration, mut pin) = pinned("readonly");
+        let initial_grant = pin.grant.take().expect("profile selection creates a grant");
+        let narrowed = pin
+            .placement
+            .replace_credential_profile(
+                initial_grant,
+                &registration,
+                profile("readonly"),
+                [tool("inspect")],
+            )
+            .expect("the explicit profile replacement narrows the grant");
+        let expected_before_tools = narrowed.grant.change.after_tools.clone();
+        let lost = narrowed
+            .placement
+            .mark_runner_lost()
+            .expect("the narrowed placement can be marked lost");
+        let replaced = lost
+            .replace_lost_runner(
+                placement_request(profile("readonly")),
+                &registration,
+                directory("/workspace/session"),
+                None,
+                Some(narrowed.grant.grant),
+            )
+            .expect("runner replacement advances the narrowed grant");
+        let expected_after_tools = replaced
+            .grant
+            .as_ref()
+            .map(|grant| grant.tools.clone())
+            .expect("the replacement carries its successor grant inventory");
+        let change = replaced
+            .grant_change
+            .expect("credential-bearing replacement reports grant change facts");
+
+        assert_eq!(
+            change
+                .before
+                .expect("a prior grant supplies before facts")
+                .tools,
+            expected_before_tools
+        );
+        assert_eq!(
+            change
+                .after
+                .expect("a successor grant supplies after facts")
+                .tools,
+            expected_after_tools
         );
     }
 }
