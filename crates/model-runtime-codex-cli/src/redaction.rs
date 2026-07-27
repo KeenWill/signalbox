@@ -95,6 +95,10 @@ const LINE_CREDENTIAL_NAMES: &[&str] = &["authorization", "cookie"];
 const VALUE_CREDENTIAL_NAMES: &[&str] = &[
     "api_key",
     "api-key",
+    "auth_token",
+    "auth-token",
+    "bearer_token",
+    "bearer-token",
     "access_token",
     "refresh_token",
     "id_token",
@@ -1468,6 +1472,20 @@ mod tests {
 
         assert_eq!(redact_json(&auth), r#"{"auth_token":"[redacted]"}"#);
         assert_eq!(redact_json(&bearer), r#"{"bearer_token":"[redacted]"}"#);
+    }
+
+    /// INV-035: plaintext `auth_token` / `bearer_token` assignments are
+    /// redacted, not only their quoted JSON-member forms.
+    #[test]
+    fn inv_035_redacts_plaintext_auth_token_assignments() {
+        let auth = redact_text("auth_token = plaintext-auth-secret and safe-tail");
+        let bearer = redact_text("bearer_token: plaintext-bearer-secret");
+
+        assert!(!auth.contains("plaintext-auth-secret"));
+        assert!(auth.contains("[redacted]"));
+        assert!(auth.contains("safe-tail"));
+        assert!(!bearer.contains("plaintext-bearer-secret"));
+        assert!(bearer.contains("[redacted]"));
     }
 
     /// A non-secret usage field that merely contains "token" is not matched.
