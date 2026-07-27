@@ -52,7 +52,6 @@ clients/native/scripts/tart/run-shard.sh ios-screenshots
 clients/native/scripts/tart/run-shard.sh ipados-screenshots
 clients/native/scripts/tart/run-shard.sh macos-screenshots
 clients/native/scripts/tart/run-shard.sh bazel
-clients/native/scripts/tart/run-shard.sh real-smoke
 ```
 
 Run the default matrix:
@@ -69,11 +68,8 @@ The default matrix runs:
 - `ipados-screenshots`
 - `privacy`
 
-Add the real server smoke shard with:
-
-```bash
-TART_INCLUDE_REAL_SMOKE=1 clients/native/scripts/tart/run-matrix.sh
-```
+The imported `real-smoke` shard name remains parseable for existing plans but
+stops at the phase-A gate described below.
 
 The `bazel` shard is inert in this repository: the snapshot import deliberately
 left the Bazel build files behind, so the shard's `scripts/build-bazel.sh` and
@@ -95,7 +91,7 @@ that is explicitly licensed and provisioned.
 For larger farms, run the same shard commands on multiple Apple Silicon hosts or
 put these scripts behind Orchard/Cirrus-style orchestration. The shard contract
 is deliberately plain shell so a remote runner only needs the repo, Tart, Xcode,
-and a reachable server URL.
+and the mounted worktree.
 
 ## Screenshots
 
@@ -131,31 +127,17 @@ is intentionally left as an explicit `SCREENSHOT_DEVICE_NAMES` opt-in because it
 has shown repeated CoreSimulator lockdown timeouts in the stock Tahoe/Xcode Tart
 image.
 
-## Real Server Smoke
+## Real server smoke gate
 
-The `real-smoke` shard uses the native app UI test
-`testRealServerConnectionListsRunnerAndCreatesSessionWhenConfigured`. It is the
-only shard that runs this test. The `xcode` shard excludes it while continuing
-to run the remaining Xcode tests, and `real-smoke` selects it explicitly.
+The imported `real-smoke` shard targets the retired REST surface and is disabled
+for phase A. Its test identifier remains temporarily so existing Tart plans stay
+parseable, but the test skips with the recorded transport gate.
 
-The VM can read `clients/native/.env` through the shared worktree mount for
-`SIGNALBOX_API_KEY`, but `http://127.0.0.1:8000` inside the VM points at the
-guest, not the host. Prefer an explicit URL reachable from the guest:
-
-```bash
-TART_SERVER_URL='http://192.168.64.1:8000' \
-clients/native/scripts/tart/run-shard.sh real-smoke
-```
-
-If `TART_SERVER_URL` is not set, the guest tries to infer the Tart NAT router IP
-and uses `http://<router>:8000`. For that to work, the server must listen on an
-address reachable from the VM, not only `127.0.0.1`.
-
-Do not pass API keys on a command line. The scripts either read the ignored
-`clients/native/.env` file from the mounted worktree or mount
-`SIGNALBOX_NATIVE_REAL_SERVER_API_KEY` from the host environment through a
-temporary 0600 env file. The key value is never embedded in the Tart/SSH command
-line and is never printed by the scripts.
+`signalboxd` currently exposes only a local Unix socket. A Tart guest cannot
+reach the host socket through the retired URL-based shard, and the process
+protocol defines no API credential. Do not configure the legacy real-smoke
+variables. Real remote/mobile validation resumes only after an owner-approved
+transport, identity, authentication, authorization, and revocation design.
 
 ## Custom Images And Existing VMs
 

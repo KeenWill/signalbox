@@ -248,7 +248,7 @@ pub use turn_eligibility::{
     FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
     PreparedAcceptedInputTurnActivation, PreparedAcceptedInputTurnFailure,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
-    TerminalAttemptEndReconstitutionInput,
+    SteeringContinuationRoundReconstitutionInput, TerminalAttemptEndReconstitutionInput,
 };
 pub use turn_lifecycle::{
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,

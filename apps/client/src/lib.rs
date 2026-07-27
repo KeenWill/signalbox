@@ -149,6 +149,7 @@ async fn execute(
             ..
         } => Some(PreparedImport::Scan(collect_import_paths(path)?)),
         Command::Create { .. }
+        | Command::Continue { .. }
         | Command::List
         | Command::Search(_)
         | Command::Send { .. }
@@ -169,6 +170,24 @@ async fn execute(
             selection,
             command_id,
         } => create(&mut client, &mut output, selection, command_id).await,
+        Command::Continue {
+            imported_conversation_id,
+            through_position,
+            relationship,
+            selection,
+            command_id,
+        } => {
+            continue_imported(
+                &mut client,
+                &mut output,
+                imported_conversation_id,
+                through_position,
+                relationship,
+                selection,
+                command_id,
+            )
+            .await
+        }
         Command::List => list(&mut client, &mut output).await,
         Command::Search(page) => search(&mut client, &mut output, page).await,
         Command::Send {
@@ -399,6 +418,45 @@ async fn create(
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("create returned an unexpected response").mutation()),
+    }
+}
+
+async fn continue_imported(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    imported_conversation_id: CanonicalUuid,
+    through_position: CanonicalU64,
+    relationship: signalbox_process_protocol::ImportedSessionRelationship,
+    selection: ModelSelection,
+    command_id: Option<CommandId>,
+) -> Result<(), ClientError> {
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let mut connection = client
+        .mutation_request(ClientRequest::CreateSessionFromImportedFrontier {
+            command_id,
+            imported_conversation_id,
+            through_position,
+            relationship,
+            initial_model_selection: selection,
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::SessionCreated { session_id } => {
+            output.session_created(session_id)?;
+            Ok(())
+        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("continue returned an unexpected response").mutation()),
     }
 }
 
