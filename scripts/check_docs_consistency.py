@@ -275,10 +275,31 @@ RUST_TEST_META = re.compile(
     r"test(?=[ \t\r\n(]|$)",
     re.IGNORECASE,
 )
+RUST_META_NAME = re.compile(
+    rf"{RUST_IDENTIFIER_PATTERN}(?=[ \t\r\n(]|$)"
+)
+RUST_META_ITEM = re.compile(
+    rf"(?:::)?(?:{RUST_IDENTIFIER_PATTERN}[ \t\r\n]*::[ \t\r\n]*)*"
+    rf"{RUST_IDENTIFIER_PATTERN}"
+)
+RUST_USE_ITEM = re.compile(r"\buse\b(?P<body>[^;]*);", re.DOTALL)
+RUST_TEST_ALIAS = re.compile(
+    rf"\btest[ \t\r\n]+as[ \t\r\n]+(?P<alias>{RUST_IDENTIFIER_PATTERN})",
+    re.IGNORECASE,
+)
 RUST_RAW_STRING_OPEN = re.compile(r'(?:br|rb|cr|r)(?P<hashes>#{0,255})"')
 RUST_INLINE_MODULE = re.compile(
     rf"\bmod[ \t\r\n]+(?P<name>{RUST_IDENTIFIER_PATTERN})[ \t\r\n]*\{{"
 )
+RUST_OUT_OF_LINE_MODULE = re.compile(
+    rf"(?P<attributes>(?:#\[[^\]]*\][ \t\r\n]*)*)"
+    rf"\b(?:pub(?:\([^)]*\))?[ \t\r\n]+)?"
+    rf"mod[ \t\r\n]+(?P<name>{RUST_IDENTIFIER_PATTERN})[ \t\r\n]*;"
+)
+RUST_PATH_ATTRIBUTE = re.compile(
+    r"#\[[ \t\r\n]*path[ \t\r\n]*=[ \t\r\n]*\"(?P<path>[^\"\n]*)\"[ \t\r\n]*\]"
+)
+RUST_CRATE_ROOT_NAMES = ("mod.rs", "lib.rs", "main.rs")
 RUST_MACRO_RULES = re.compile(
     rf"\bmacro_rules![ \t\r\n]*(?P<name>{RUST_IDENTIFIER_PATTERN})"
     r"[ \t\r\n]*(?P<opening>[\(\[\{])"
@@ -512,10 +533,33 @@ def rust_cfg_truth(meta: str) -> bool | None:
     return None
 
 
-def rust_meta_applies_test(meta: str) -> bool:
+def rust_test_attribute_aliases(code: str) -> frozenset[str]:
+    """Return the local names a `use` item gives an imported `test` attribute.
+
+    ``use tokio::test as async_test;`` registers tests under `#[async_test]`,
+    so the alias is a test attribute wherever that file uses it.
+    """
+    aliases: set[str] = set()
+    for item in RUST_USE_ITEM.finditer(code):
+        for alias in RUST_TEST_ALIAS.finditer(item.group("body")):
+            aliases.add(alias.group("alias"))
+    return frozenset(aliases)
+
+
+def rust_meta_names_test(meta: str, aliases: frozenset[str]) -> bool:
+    """Return whether one meta names `test` by path or by an imported alias."""
+    if RUST_TEST_META.match(meta) is not None:
+        return True
+    name = RUST_META_NAME.match(meta)
+    return name is not None and name.group(0) in aliases
+
+
+def rust_meta_applies_test(
+    meta: str, aliases: frozenset[str] = frozenset()
+) -> bool:
     """Return whether one direct or recursively conditional meta is `test`."""
     meta = meta.strip()
-    if RUST_TEST_META.match(meta) is not None:
+    if rust_meta_names_test(meta, aliases):
         return True
     cfg_attr = RUST_CFG_ATTR_META.fullmatch(meta)
     if cfg_attr is None:
@@ -523,13 +567,48 @@ def rust_meta_applies_test(meta: str) -> bool:
     items = split_rust_meta_items(cfg_attr.group("body"))
     if not items or rust_cfg_truth(items[0]) is False:
         return False
-    return any(rust_meta_applies_test(item) for item in items[1:])
+    return any(rust_meta_applies_test(item, aliases) for item in items[1:])
 
 
-def rust_cfg_attr_has_test(prefix: str) -> bool:
-    """Return whether a cfg_attr applies a test attribute when enabled."""
+def rust_top_level_meta_items(text: str) -> list[str]:
+    """Return the path-headed meta items appearing at the top nesting level.
+
+    A matcher whose argument separators cannot be attributed leaves the whole
+    token sequence as one candidate, so each top-level item is offered on its
+    own; tokens nested inside a delimited group belong to their own item and
+    are never lifted out of it.
+    """
+    delimiters = rust_matching_delimiters(text)
+    items: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] in "([{":
+            closing = delimiters.get(index)
+            index = len(text) if closing is None else closing + 1
+            continue
+        match = RUST_META_ITEM.match(text, index)
+        if match is None:
+            index += 1
+            continue
+        end = match.end()
+        probe = end
+        while probe < len(text) and text[probe] in " \t\r\n":
+            probe += 1
+        if probe < len(text) and text[probe] in "([{":
+            closing = delimiters.get(probe)
+            if closing is not None:
+                end = closing + 1
+        items.append(text[match.start() : end])
+        index = end
+    return items
+
+
+def rust_attributes_apply_test(
+    prefix: str, aliases: frozenset[str] = frozenset()
+) -> bool:
+    """Return whether an attached attribute applies a test attribute."""
     for attribute in RUST_ATTRIBUTE.finditer(prefix):
-        if rust_meta_applies_test(attribute.group("meta")):
+        if rust_meta_applies_test(attribute.group("meta"), aliases):
             return True
     return False
 
@@ -699,6 +778,7 @@ def rust_macro_invocation_applies_test(
     definition_start: int,
     body_opening: int,
     delimiters: dict[int, int],
+    aliases: frozenset[str] = frozenset(),
 ) -> bool:
     """Return whether a forwarding macro is invoked with test metadata."""
     definition_end = delimiters.get(body_opening)
@@ -720,16 +800,20 @@ def rust_macro_invocation_applies_test(
         closing = delimiters.get(opening)
         if closing is None:
             continue
-        arguments = split_rust_meta_items(code[opening + 1 : closing])
+        body = code[opening + 1 : closing]
+        arguments = split_rust_meta_items(body)
         if forwarded_positions is None:
-            candidates = arguments
+            candidates = rust_top_level_meta_items(body)
         else:
             candidates = [
                 arguments[position]
                 for position in sorted(forwarded_positions)
                 if position < len(arguments)
             ]
-        if any(rust_meta_applies_test(candidate) for candidate in candidates):
+        if any(
+            rust_meta_applies_test(candidate, aliases)
+            for candidate in candidates
+        ):
             return True
     return False
 
@@ -1788,11 +1872,14 @@ def named_tests(
     return bindings
 
 
-def rust_test_invariant_tags(text: str) -> list[tuple[str, int]]:
+def rust_test_invariant_tags(
+    text: str, module_prefix: tuple[str, ...] = ()
+) -> list[tuple[str, int]]:
     """Return distinct INV tags and declaration lines from Rust tests."""
     found: dict[str, int] = {}
     code = mask_rust_non_code(text)
     module_spans = rust_inline_module_spans(code)
+    aliases = rust_test_attribute_aliases(code)
     for declaration in RUST_TEST_DECLARATION.finditer(code):
         raw_prefix = text[
             declaration.start("prefix") : declaration.end("prefix")
@@ -1800,7 +1887,7 @@ def rust_test_invariant_tags(text: str) -> list[tuple[str, int]]:
         code_prefix = declaration.group("prefix")
         if (
             RUST_TEST_ATTRIBUTE.search(code_prefix) is None
-            and not rust_cfg_attr_has_test(code_prefix)
+            and not rust_attributes_apply_test(code_prefix, aliases)
         ):
             continue
         if rust_item_is_disabled(code_prefix):
@@ -1810,7 +1897,12 @@ def rust_test_invariant_tags(text: str) -> list[tuple[str, int]]:
             module_spans, declaration.start()
         )
         material = "\n".join(
-            [doc_comments, *module_names, declaration.group("name")]
+            [
+                doc_comments,
+                *module_prefix,
+                *module_names,
+                declaration.group("name"),
+            ]
         )
         declaration_line = line_number(text, declaration.start("name"))
         for tag in INVARIANT_TAG.finditer(material):
@@ -1819,23 +1911,100 @@ def rust_test_invariant_tags(text: str) -> list[tuple[str, int]]:
     return sorted(found.items())
 
 
+def rust_module_child(
+    declaring: Path, name: str, attributes: str
+) -> Path | None:
+    """Resolve one out-of-line `mod name;` declaration to its source file.
+
+    Child modules of a crate root or a `mod.rs` live beside their declaring
+    file; children of any other file live in a directory named for it. Both
+    directories are offered in that order so the resolution needs no crate
+    metadata, and an explicit `#[path]` names its own file.
+    """
+    if declaring.name in RUST_CRATE_ROOT_NAMES:
+        directories = [declaring.parent]
+    else:
+        directories = [declaring.parent / declaring.stem, declaring.parent]
+    explicit = RUST_PATH_ATTRIBUTE.search(attributes)
+    if explicit is not None:
+        relatives = [explicit.group("path")]
+    else:
+        relatives = [f"{name}.rs", f"{name}/mod.rs"]
+    for directory in directories:
+        for relative in relatives:
+            candidate = directory / relative
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def rust_module_prefixes(
+    sources: list[Path], text_cache: dict[Path, str]
+) -> dict[Path, tuple[str, ...]]:
+    """Return the out-of-line module names that prefix each file's test names.
+
+    A file several declarations reach keeps the shortest path to it, breaking
+    ties in sorted source order, so the result never depends on filesystem
+    iteration order. A file no declaration reaches is its own root.
+    """
+    children: dict[Path, list[tuple[str, Path]]] = {}
+    declared: set[Path] = set()
+    for source in sources:
+        text = text_cache[source]
+        code = mask_rust_non_code(text)
+        for module in RUST_OUT_OF_LINE_MODULE.finditer(code):
+            # Masking preserves offsets but blanks string literals, so the
+            # `#[path]` destination is read back from the raw source.
+            attributes = text[
+                module.start("attributes") : module.end("attributes")
+            ]
+            child = rust_module_child(
+                source, module.group("name"), attributes
+            )
+            if child is None or child == source:
+                continue
+            children.setdefault(source, []).append(
+                (module.group("name"), child)
+            )
+            declared.add(child)
+
+    prefixes: dict[Path, tuple[str, ...]] = {}
+    pending = [(source, ()) for source in sources if source not in declared]
+    while pending:
+        source, prefix = pending.pop(0)
+        if source in prefixes:
+            continue
+        prefixes[source] = prefix
+        for name, child in children.get(source, []):
+            if child not in prefixes:
+                pending.append((child, (*prefix, name)))
+    return prefixes
+
+
 def rust_invariant_test_files(
     root: Path, text_cache: dict[Path, str] | None = None
 ) -> dict[tuple[str, str], int]:
     """Discover every repository Rust test file carrying an INV tag."""
     if text_cache is None:
         text_cache = {}
-    found: dict[tuple[str, str], int] = {}
-    for source in sorted(root.rglob("*.rs")):
-        if ".git" in source.parts or "target" in source.parts:
-            continue
-        source_label = repository_path(root, source)
+    sources = [
+        source
+        for source in sorted(root.rglob("*.rs"))
+        if ".git" not in source.parts and "target" not in source.parts
+    ]
+    for source in sources:
         if source not in text_cache:
             text_cache[source] = source.read_text(
                 encoding="utf-8", errors="replace"
             )
-        text = text_cache[source]
-        for invariant, line in rust_test_invariant_tags(text):
+    prefixes = rust_module_prefixes(sources, text_cache)
+    found: dict[tuple[str, str], int] = {}
+    for source in sources:
+        source_label = repository_path(root, source)
+        tags = rust_test_invariant_tags(
+            text_cache[source], prefixes.get(source, ())
+        )
+        for invariant, line in tags:
             found[(invariant, source_label)] = line
     return found
 
@@ -1850,6 +2019,7 @@ def check_rust_test_generation(root: Path) -> list[Violation]:
         text = source.read_text(encoding="utf-8", errors="replace")
         code = mask_rust_non_code(text)
         delimiters = rust_matching_delimiters(code)
+        aliases = rust_test_attribute_aliases(code)
         for macro in RUST_MACRO_RULES.finditer(code):
             opening = macro.start("opening")
             closing = delimiters.get(opening)
@@ -1858,13 +2028,14 @@ def check_rust_test_generation(root: Path) -> list[Violation]:
             body = code[opening + 1 : closing]
             if (
                 RUST_TEST_ATTRIBUTE.search(body) is None
-                and not rust_cfg_attr_has_test(body)
+                and not rust_attributes_apply_test(body, aliases)
                 and not rust_macro_invocation_applies_test(
                     code,
                     macro.group("name"),
                     macro.start(),
                     opening,
                     delimiters,
+                    aliases,
                 )
             ):
                 continue

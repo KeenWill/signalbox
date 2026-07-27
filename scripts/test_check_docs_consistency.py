@@ -506,6 +506,68 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("src/uncited.rs", failures[0].message)
 
+    def test_reverse_discovers_out_of_line_module_path(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            '#[path = "generic.rs"]\nmod inv_001;\n', encoding="utf-8"
+        )
+        (self.root / "src/generic.rs").write_text(
+            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/generic.rs", failures[0].message)
+
+    def test_reverse_discovers_nested_out_of_line_module_path(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            "mod inv_001;\n", encoding="utf-8"
+        )
+        (self.root / "src/inv_001").mkdir()
+        (self.root / "src/inv_001/mod.rs").write_text(
+            "mod deeper;\n", encoding="utf-8"
+        )
+        (self.root / "src/inv_001/deeper.rs").write_text(
+            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/inv_001/deeper.rs", failures[0].message)
+
+    def test_reverse_discovers_aliased_test_attribute(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "use tokio::test as async_test;\n\n"
+            "#[async_test]\n"
+            "async fn s01_inv_001_aliased_attribute() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_renaming_a_non_test_import_declares_no_test(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "use crate::support::latest as newest;\n\n"
+            "#[newest]\n"
+            "fn s01_inv_001_not_a_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_reverse_discovers_cfg_attr_test(self) -> None:
         (self.root / "src/uncited.rs").write_text(
             "#[cfg_attr(test, test)]\n"
@@ -655,6 +717,43 @@ class DocsConsistencyTests(unittest.TestCase):
             "`macro_rules! named` emits or forwards a test attribute",
             failures[0].message,
         )
+
+    def test_non_comma_forwarding_matcher_is_rejected(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! forwarded {\n"
+            "    ($name:ident => $attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "forwarded!(s01_inv_001_generated => test);\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "`macro_rules! forwarded` emits or forwards a test attribute",
+            failures[0].message,
+        )
+
+    def test_unknown_binding_keeps_nested_metadata_nested(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! documented {\n"
+            "    ($name:ident => $attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        struct $name;\n"
+            "    };\n"
+            "}\n"
+            "documented!(Item => cfg_attr(test, derive(Clone)));\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
 
     def test_repeated_forwarding_matcher_inspects_every_argument(self) -> None:
         (self.root / "src/generated.rs").write_text(
