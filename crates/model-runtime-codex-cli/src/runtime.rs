@@ -412,6 +412,8 @@ async fn execute_process<C: Clone + Send + Sync>(
         .arg("shell_tool")
         .arg("--disable")
         .arg("unified_exec")
+        .arg("--disable")
+        .arg("skill_search")
         .arg("--config")
         .arg("project_doc_max_bytes=0")
         .arg("--sandbox")
@@ -696,25 +698,34 @@ async fn execute_process<C: Clone + Send + Sync>(
     let status = match reaped_status {
         Some(status) => status,
         None => {
-            let exit_wait = wait_for_exit_without_reaping(child.id());
-            tokio::pin!(exit_wait);
-            let exit_ready = tokio::select! {
-                biased;
-                result = &mut exit_wait => result,
-                () = &mut *cancellation, if !terminal_observed => {
-                    interrupt_then_kill(
-                        &mut child,
-                        remaining_interrupt_grace(prepared.interrupt_grace, deadline),
-                    )
-                    .await;
-                    redacting_sink.finish();
-                    return decoder.boundary_loss(LossCause::CancellationRequested);
-                },
-                () = tokio::time::sleep_until(deadline) => {
-                    force_kill(&mut child).await;
-                    redacting_sink.finish();
-                    return decoder.boundary_loss(timeout_cause());
-                },
+            // The blocking waiter cannot be ready on its first poll — it must
+            // schedule onto the blocking pool — so an already-fired control
+            // signal would win the select below even though the leader's
+            // definitive status is already waitable. Probe synchronously
+            // first, so an already-exited leader keeps its exit evidence.
+            let exit_ready = if leader_exited_without_reaping(child.id()) {
+                Ok(())
+            } else {
+                let exit_wait = wait_for_exit_without_reaping(child.id());
+                tokio::pin!(exit_wait);
+                tokio::select! {
+                    biased;
+                    result = &mut exit_wait => result,
+                    () = &mut *cancellation, if !terminal_observed => {
+                        interrupt_then_kill(
+                            &mut child,
+                            remaining_interrupt_grace(prepared.interrupt_grace, deadline),
+                        )
+                        .await;
+                        redacting_sink.finish();
+                        return decoder.boundary_loss(LossCause::CancellationRequested);
+                    },
+                    () = tokio::time::sleep_until(deadline) => {
+                        force_kill(&mut child).await;
+                        redacting_sink.finish();
+                        return decoder.boundary_loss(timeout_cause());
+                    },
+                }
             };
             if let Err(error) = exit_ready {
                 force_kill(&mut child).await;

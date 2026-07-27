@@ -259,9 +259,10 @@ fn credential_value_bounds(
 /// opaque content. The scan is bounded by the text it is given: a container
 /// still open at the end of the text reports the text's end, so the stateless
 /// redactor suppresses the unterminated value whole and the stateful sink
-/// holds it as an unterminated credential candidate.
+/// holds it as an unterminated credential candidate; a mismatched structural
+/// close is malformed and reports the text's end the same way.
 fn structural_value_end(text: &str, value_start: usize) -> usize {
-    let mut depth = 0_usize;
+    let mut expected_closers = Vec::new();
     let mut in_string = false;
     let mut escaped = false;
     for (offset, character) in text[value_start..].char_indices() {
@@ -276,10 +277,16 @@ fn structural_value_end(text: &str, value_start: usize) -> usize {
         } else {
             match character {
                 '"' => in_string = true,
-                '{' | '[' => depth += 1,
+                '{' => expected_closers.push('}'),
+                '[' => expected_closers.push(']'),
                 '}' | ']' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
+                    // A close that does not match its opener is malformed;
+                    // resuming after it could release text that still belongs
+                    // to the credential value, so suppress through the end.
+                    if expected_closers.pop() != Some(character) {
+                        return text.len();
+                    }
+                    if expected_closers.is_empty() {
                         return value_start + offset + character.len_utf8();
                     }
                 }
@@ -640,6 +647,7 @@ fn stream_candidate_starts_at_zero(text: &str) -> bool {
         })
         || json_credential_value_at_start(text).is_some()
         || unterminated_json_key_start(text) == Some(0)
+        || json_credential_key_awaiting_colon(text) == Some(0)
 }
 
 fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
@@ -687,6 +695,9 @@ fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
     if let Some(start) = unterminated_json_key_start(text) {
         earliest = Some(earliest.map_or(start, |current| current.min(start)));
     }
+    if let Some(start) = json_credential_key_awaiting_colon(text) {
+        earliest = Some(earliest.map_or(start, |current| current.min(start)));
+    }
     earliest
 }
 
@@ -730,6 +741,37 @@ fn unterminated_json_key_start(text: &str) -> Option<usize> {
             return Some(start);
         }
         offset = start + 1;
+    }
+    None
+}
+
+/// Finds a complete credential-bearing JSON key whose member is still
+/// awaiting its colon: the text ends with the quoted key followed only by
+/// optional whitespace. The stateless member scan accepts whitespace between
+/// key and colon, so streamed text split there could otherwise release the
+/// key and let a later delta deliver the value unredacted.
+fn json_credential_key_awaiting_colon(text: &str) -> Option<usize> {
+    let mut offset = 0;
+    while let Some(relative_start) = text[offset..].find('"') {
+        let start = offset + relative_start;
+        if !(start == 0 || json_key_can_start_at(text, start)) {
+            offset = start + 1;
+            continue;
+        }
+        let key_end = quoted_value_end(text, start + 1, '"');
+        if key_end == text.len() {
+            return None;
+        }
+        let encoded_key = &text[start..=key_end];
+        if let Ok(key) = serde_json::from_str::<String>(encoded_key)
+            && credential_key(&key)
+            && text[key_end + 1..]
+                .chars()
+                .all(|character| character.is_whitespace())
+        {
+            return Some(start);
+        }
+        offset = key_end + 1;
     }
     None
 }
@@ -923,6 +965,20 @@ mod tests {
         assert!(!output.contains(STRUCTURED_OBJECT_SECRET_VALUE));
     }
 
+    /// INV-035: a mismatched structural close is malformed and cannot release
+    /// the remainder of a credential container as safe text.
+    #[test]
+    fn inv_035_suppresses_a_mismatched_structural_credential_close() {
+        let fixture = format!(
+            r#"{{"credential":{{"value":"{STRUCTURED_OBJECT_SECRET_VALUE}"],"tail":"{STRUCTURED_ARRAY_SECRET_ONE}"}}"#
+        );
+        let output = redact_text(&fixture);
+
+        assert_eq!(output, r#"{"credential":[redacted]"#);
+        assert!(!output.contains(STRUCTURED_OBJECT_SECRET_VALUE));
+        assert!(!output.contains(STRUCTURED_ARRAY_SECRET_ONE));
+    }
+
     /// INV-035: a structured authorization header value spanning lines is
     /// consumed through its structural close, not only to the line end.
     #[test]
@@ -971,6 +1027,69 @@ mod tests {
         assert_eq!(
             unsafe_stream_suffix_start(r#"{"credential":{"value":"#),
             Some(1)
+        );
+    }
+
+    /// INV-035: a complete credential key still awaiting its colon is held
+    /// as a candidate rather than released before its value arrives.
+    #[test]
+    fn inv_035_stream_redaction_holds_a_credential_key_awaiting_its_colon() {
+        assert_eq!(
+            unsafe_stream_suffix_start(r#"safe {"credential" "#),
+            Some(6)
+        );
+        assert!(stream_candidate_starts_at_zero(r#""credential" "#));
+    }
+
+    /// INV-035: a JSON member split between its key and a whitespace-led
+    /// colon cannot be reconstructed from the emitted deltas.
+    #[test]
+    fn inv_035_stream_redaction_redacts_a_member_split_before_its_colon() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: r#"{"credential" "#.to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: format!(r#": "{STRUCTURED_OBJECT_SECRET_VALUE}"}}"#),
+                },
+            });
+            sink.finish();
+        }
+
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: "{".to_string(),
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: REDACTED.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 1,
+                        text: REDACTED.to_string(),
+                    },
+                },
+            ]
         );
     }
 

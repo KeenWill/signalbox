@@ -103,7 +103,15 @@ impl<C: Clone> EventDecoder<C> {
                 ));
             }
             let stream_error = stream_error.clone();
-            let _: TurnFailed = decode(value)?;
+            let event: TurnFailed = decode(value)?;
+            // Only the echo closes the turn: a trailer carrying a different
+            // failure contradicts the recorded terminal and fails closed
+            // rather than silently keeping either message.
+            if event.error.message != stream_error {
+                return Err(DecodeFailure::new(
+                    "Codex contradicted its stream error with a different turn.failed failure",
+                ));
+            }
             self.terminal = Some(CliTerminal::Failed(stream_error));
             return Ok(());
         }

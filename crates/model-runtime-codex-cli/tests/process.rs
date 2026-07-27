@@ -90,6 +90,7 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
     assert!(result.argv.contains("--ignore-rules"));
     assert!(result.argv.contains("--disable\nshell_tool"));
     assert!(result.argv.contains("--disable\nunified_exec"));
+    assert!(result.argv.contains("--disable\nskill_search"));
     assert!(result.argv.contains("--config\nproject_doc_max_bytes=0"));
     assert!(result.argv.contains(RESOLVED_TARGET));
     assert!(result.prompt.contains(scenario));
@@ -656,6 +657,18 @@ async fn a_turn_failed_echo_after_a_stream_error_keeps_the_typed_provider_error(
 #[tokio::test]
 async fn a_completion_trailer_after_a_stream_error_still_fails_closed() {
     assert_error_scenario("error_then_turn_completed", ProviderErrorKind::Unrecognized).await;
+}
+
+/// A syntactically valid `turn.failed` trailer carrying a different failure
+/// than the stream error it follows is a contradiction, not the lifecycle
+/// echo, and fails closed instead of silently keeping either message.
+#[tokio::test]
+async fn a_contradictory_turn_failed_trailer_still_fails_closed() {
+    assert_error_scenario(
+        "error_then_contradictory_turn_failed",
+        ProviderErrorKind::Unrecognized,
+    )
+    .await;
 }
 
 #[tokio::test]
