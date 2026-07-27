@@ -5405,11 +5405,17 @@ impl RunnerEnrollment {
         allowed_classes: impl IntoIterator<Item = RunnerCapabilityClass>,
     ) -> Self;
     pub fn revoke(self) -> Result<Self, RunnerDomainError>;
+    pub fn revoke_in_place(&mut self) -> Result<(), RunnerDomainError>;
     pub fn register(
         &self,
         advertisement: RunnerAdvertisement,
         catalog: &RunnerCatalog,
     ) -> Result<ValidatedRunnerRegistration, RunnerDomainError>;
+    pub fn prepare_registration(
+        &self,
+        advertisement: RunnerAdvertisement,
+        catalog: &RunnerCatalog,
+    ) -> Result<PreparedRunnerRegistration, RunnerDomainError>;
     pub fn reconstitute(
         input: RunnerEnrollmentReconstitutionInput,
     ) -> Result<Self, RunnerDomainError>;
@@ -5419,6 +5425,11 @@ pub struct RunnerEnrollmentReconstitutionInput {
     /* public complete typed facts, including independently recorded optional last registration revision */
 }
 // enrollment accessors include allowed_classes().
+pub struct PreparedRunnerRegistration { /* private */ }
+impl PreparedRunnerRegistration {
+    pub const fn registration(&self) -> &ValidatedRunnerRegistration;
+    pub fn commit(self) -> Result<ValidatedRunnerRegistration, RunnerDomainError>;
+}
 pub struct ValidatedRunnerRegistration { /* private */ }
 pub struct ValidatedRunnerRegistrationReconstitutionInput {
     /* public complete typed catalog-validation facts, including exact revision */
@@ -5439,6 +5450,7 @@ impl ValidatedRunnerRegistration {
     pub fn workspaces(&self) -> impl Iterator<Item = WorkspaceCapability> + '_;
     pub fn reconstitute(
         enrollment: &RunnerEnrollment,
+        catalog: &RunnerCatalog,
         input: ValidatedRunnerRegistrationReconstitutionInput,
     ) -> Result<Self, RunnerDomainError>;
 }
@@ -6470,8 +6482,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: replace_session_defaults                   | 13                   |
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
-| domain: runner                                     | 52                   |
-| **signalbox-domain total**                         | **509 (+1 free fn)** |
+| domain: runner                                     | 53                   |
+| **signalbox-domain total**                         | **510 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

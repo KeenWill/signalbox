@@ -484,12 +484,17 @@ impl RunnerEnrollment {
     }
 
     pub fn revoke(mut self) -> Result<Self, RunnerDomainError> {
+        self.revoke_in_place()?;
+        Ok(self)
+    }
+
+    pub fn revoke_in_place(&mut self) -> Result<(), RunnerDomainError> {
         if self.state != RunnerEnrollmentState::Active {
             return Err(RunnerDomainError::InvalidState);
         }
         self.state = RunnerEnrollmentState::Revoked;
         self.registration_active.store(false, Ordering::Release);
-        Ok(self)
+        Ok(())
     }
 
     pub fn register(
@@ -497,6 +502,14 @@ impl RunnerEnrollment {
         advertisement: RunnerAdvertisement,
         catalog: &RunnerCatalog,
     ) -> Result<ValidatedRunnerRegistration, RunnerDomainError> {
+        self.prepare_registration(advertisement, catalog)?.commit()
+    }
+
+    pub fn prepare_registration(
+        &self,
+        advertisement: RunnerAdvertisement,
+        catalog: &RunnerCatalog,
+    ) -> Result<PreparedRunnerRegistration, RunnerDomainError> {
         if self.state != RunnerEnrollmentState::Active {
             return Err(RunnerDomainError::EnrollmentRevoked);
         }
@@ -556,25 +569,25 @@ impl RunnerEnrollment {
             };
             profiles.insert(name, policy.clone());
         }
-        let prior_revision = self
-            .registration_revision
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |revision| {
-                revision.checked_add(1)
-            })
-            .map_err(|_| RunnerDomainError::GenerationExhausted)?;
-        let revision = RunnerGeneration::try_from_u64(prior_revision + 1)
+        let prior_revision = self.registration_revision.load(Ordering::Acquire);
+        let revision = prior_revision
+            .checked_add(1)
+            .and_then(RunnerGeneration::try_from_u64)
             .ok_or(RunnerDomainError::GenerationExhausted)?;
-        Ok(ValidatedRunnerRegistration {
-            enrollment: self.enrollment,
-            runner: self.runner,
-            authentication: self.authentication,
-            classes: advertisement.classes,
-            tools,
-            profiles,
-            workspaces: advertisement.workspaces,
-            revision,
-            current_revision: Arc::clone(&self.registration_revision),
-            enrollment_active: Arc::clone(&self.registration_active),
+        Ok(PreparedRunnerRegistration {
+            expected_revision: prior_revision,
+            registration: ValidatedRunnerRegistration {
+                enrollment: self.enrollment,
+                runner: self.runner,
+                authentication: self.authentication,
+                classes: advertisement.classes,
+                tools,
+                profiles,
+                workspaces: advertisement.workspaces,
+                revision,
+                current_revision: Arc::clone(&self.registration_revision),
+                enrollment_active: Arc::clone(&self.registration_active),
+            },
         })
     }
 
@@ -623,6 +636,35 @@ impl RunnerEnrollment {
                 input.state == RunnerEnrollmentState::Active,
             )),
         })
+    }
+}
+
+/// One validated registration awaiting its authoritative commit point.
+#[derive(Debug)]
+pub struct PreparedRunnerRegistration {
+    expected_revision: u64,
+    registration: ValidatedRunnerRegistration,
+}
+
+impl PreparedRunnerRegistration {
+    pub const fn registration(&self) -> &ValidatedRunnerRegistration {
+        &self.registration
+    }
+
+    pub fn commit(self) -> Result<ValidatedRunnerRegistration, RunnerDomainError> {
+        if !self.registration.enrollment_active.load(Ordering::Acquire) {
+            return Err(RunnerDomainError::EnrollmentRevoked);
+        }
+        self.registration
+            .current_revision
+            .compare_exchange(
+                self.expected_revision,
+                self.registration.revision.get(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| RunnerDomainError::RegistrationChanged)?;
+        Ok(self.registration)
     }
 }
 
@@ -736,6 +778,7 @@ impl ValidatedRunnerRegistration {
 
     pub fn reconstitute(
         enrollment: &RunnerEnrollment,
+        catalog: &RunnerCatalog,
         input: ValidatedRunnerRegistrationReconstitutionInput,
     ) -> Result<Self, RunnerDomainError> {
         if enrollment.enrollment != input.enrollment
@@ -751,32 +794,18 @@ impl ValidatedRunnerRegistration {
             input.profiles.iter().map(|profile| profile.name.clone()),
             input.workspaces.clone(),
         );
-        let available_tools: BTreeSet<_> =
-            input.tools.iter().map(|tool| tool.name.clone()).collect();
-        let validation_profiles = input
-            .profiles
-            .iter()
-            .map(|profile| {
-                CredentialProfilePolicy::try_new(
-                    profile.name.clone(),
-                    profile
-                        .approvals()
-                        .filter(|(tool, _)| available_tools.contains(tool))
-                        .map(|(tool, approval)| (tool.clone(), approval)),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let profiles = input
-            .profiles
-            .iter()
-            .map(|profile| (profile.name.clone(), profile.clone()))
+        let stored_tool_count = input.tools.len();
+        let stored_tools: BTreeMap<_, _> = input
+            .tools
+            .into_iter()
+            .map(|tool| (tool.name.clone(), tool))
             .collect();
-        let catalog = RunnerCatalog::try_new(
-            input.classes,
-            input.tools,
-            validation_profiles,
-            input.workspaces,
-        )?;
+        let stored_profile_count = input.profiles.len();
+        let stored_profiles: BTreeMap<_, _> = input
+            .profiles
+            .into_iter()
+            .map(|profile| (profile.name.clone(), profile))
+            .collect();
         let historical_authority = RunnerEnrollment {
             enrollment: enrollment.enrollment,
             runner: enrollment.runner,
@@ -787,9 +816,18 @@ impl ValidatedRunnerRegistration {
             registration_active: Arc::new(AtomicBool::new(true)),
         };
         let mut registration = historical_authority
-            .register(advertisement, &catalog)
-            .map_err(|_| RunnerDomainError::CorruptStoredFacts)?;
-        registration.profiles = profiles;
+            .prepare_registration(advertisement, catalog)
+            .map_err(|_| RunnerDomainError::CorruptStoredFacts)?
+            .registration;
+        if stored_tools.len() != stored_tool_count
+            || stored_profiles.len() != stored_profile_count
+            || registration.classes != input.classes
+            || registration.tools != stored_tools
+            || registration.profiles != stored_profiles
+            || registration.workspaces != input.workspaces
+        {
+            return Err(RunnerDomainError::CorruptStoredFacts);
+        }
         registration.revision = revision;
         registration.current_revision = Arc::clone(&enrollment.registration_revision);
         registration.enrollment_active = Arc::clone(&enrollment.registration_active);

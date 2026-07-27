@@ -519,11 +519,11 @@ async fn stored_pin_fixture(
 > {
     insert_session(pool).await?;
     insert_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -970,11 +970,11 @@ fn assert_one_store_succeeds_and_one_conflicts(
 async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let store = RunnerProtocolStore::new(pool.clone());
-    let expected_enrollment = enrollment();
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let mut expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let stored = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
 
     let loaded_enrollment = store
@@ -1005,18 +1005,86 @@ async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
             offer_request(),
         )
         .expect("the loaded registration shares its loaded enrollment authority");
-    let revoked_enrollment = store
-        .revoke_enrollment(expected_enrollment.enrollment())
-        .await?
-        .expect("the inserted enrollment can be revoked");
+    assert_eq!(loaded_enrollment, expected_enrollment);
+    assert!(store.revoke_enrollment(&mut expected_enrollment).await?);
     let historical_registration = store
-        .load_registration(&revoked_enrollment, stored.revision())
+        .load_registration(&expected_enrollment, stored.revision())
         .await?
         .expect("revocation preserves historical validated registration");
 
-    assert_eq!(loaded_enrollment, expected_enrollment);
     assert_eq!(loaded_registration, stored);
     assert_eq!(historical_registration, stored);
+    let revoked_placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+        },
+    );
+    let revoked = revoked_placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            stored.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/revoked".to_owned())
+                .expect("the revoked fixture directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect_err("durable revocation closes the exact caller-held enrollment fence");
+    assert_eq!(revoked, RunnerDomainError::EnrollmentRevoked);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_failed_registration_write_preserves_prior_authority()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let prior = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    sqlx::query(
+        "ALTER TABLE runner_registration
+         ADD CONSTRAINT reject_registration_insert_for_test
+         CHECK (registration_revision < 2)",
+    )
+    .execute(&pool)
+    .await?;
+    let rejected = store
+        .register(&expected_enrollment, expanded_advertisement())
+        .await
+        .expect_err("a synthetic storage failure rejects the replacement");
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+        },
+    );
+    let _retained = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            prior.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/retained".to_owned())
+                .expect("the retained fixture directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("failed persistence cannot retire the prior registration");
+    let RunnerProtocolStoreError::Database(_) = rejected else {
+        panic!("the synthetic constraint must reject the durable write")
+    };
+
     drop(pool);
     Ok(())
 }
@@ -1025,14 +1093,14 @@ async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
 #[ignore = "requires Docker"]
 async fn s30_inv042_historical_registration_load_remains_stale() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let historical = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     store
-        .register(&expected_enrollment, expanded_advertisement(), &catalog())
+        .register(&expected_enrollment, expanded_advertisement())
         .await?;
     let loaded_enrollment = store
         .load_enrollment(expected_enrollment.enrollment())
@@ -1072,7 +1140,7 @@ async fn s30_inv042_historical_registration_load_remains_stale() -> Result<(), B
 #[ignore = "requires Docker"]
 async fn s30_inv042_orphan_revocation_audit_cannot_commit() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let mut malformed = pool.begin().await?;
@@ -1114,12 +1182,10 @@ async fn s30_inv042_orphan_revocation_audit_cannot_commit() -> Result<(), Box<dy
 async fn s30_inv042_historical_enrollment_audit_rechecks_its_own_revision()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let store = RunnerProtocolStore::new(pool.clone());
-    let expected_enrollment = enrollment();
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let mut expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
-    store
-        .revoke_enrollment(expected_enrollment.enrollment())
-        .await?;
+    store.revoke_enrollment(&mut expected_enrollment).await?;
     let corrupted_history = sqlx::query(
         "INSERT INTO runner_enrollment_audit_allowed_class
             (enrollment_id, revision, capability_class)
@@ -1143,7 +1209,7 @@ async fn s30_inv042_current_registration_gates_new_leases() -> Result<(), Box<dy
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
     let expanded_registration = store
-        .register(&expected_enrollment, expanded_advertisement(), &catalog())
+        .register(&expected_enrollment, expanded_advertisement())
         .await?;
     let retained_tool_lease = pin
         .placement
@@ -1162,7 +1228,7 @@ async fn s30_inv042_current_registration_gates_new_leases() -> Result<(), Box<dy
     terminalize_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, SECOND_LATER_LEASE_PHYSICAL_ATTEMPT).await?;
     let narrowed_registration = store
-        .register(&expected_enrollment, narrowed_advertisement(), &catalog())
+        .register(&expected_enrollment, narrowed_advertisement())
         .await?;
     let stale_registration = pin
         .placement
@@ -1190,11 +1256,11 @@ async fn s31_inv042_current_registration_preserves_complete_placement() -> Resul
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(&expected_enrollment, expanded_advertisement(), &catalog())
+        .register(&expected_enrollment, expanded_advertisement())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -1221,7 +1287,7 @@ async fn s31_inv042_current_registration_preserves_complete_placement() -> Resul
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, PROFILELESS_PHYSICAL_ATTEMPT).await?;
     let current_registration = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     let stale_snapshot = pin
         .placement
@@ -1248,11 +1314,11 @@ async fn s31_inv042_current_registration_preserves_profile() -> Result<(), Box<d
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     let directory = RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
         .expect("the fixture working directory is valid");
@@ -1280,11 +1346,7 @@ async fn s31_inv042_current_registration_preserves_profile() -> Result<(), Box<d
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
     let current_registration = store
-        .register(
-            &expected_enrollment,
-            profileless_advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, profileless_advertisement())
         .await?;
     let profile_stale = pin
         .placement
@@ -1311,11 +1373,11 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     let repository = WorkspaceRepositoryKey::try_new("signalbox".to_owned())
         .expect("the repository key is valid");
@@ -1352,11 +1414,7 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
     let current_registration = store
-        .register(
-            &expected_enrollment,
-            workspaceless_advertisement(),
-            &catalog(),
-        )
+        .register(&expected_enrollment, workspaceless_advertisement())
         .await?;
     let workspace_stale = pin
         .placement
@@ -1393,13 +1451,9 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
     .bind(expected_enrollment.enrollment().into_uuid())
     .fetch_one(&mut *blocker)
     .await?;
-    let replacement_store = RunnerProtocolStore::new(pool.clone());
-    let daemon_catalog = catalog();
-    let mut replacement = Box::pin(replacement_store.register(
-        &expected_enrollment,
-        narrowed_advertisement(),
-        &daemon_catalog,
-    ));
+    let replacement_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let mut replacement =
+        Box::pin(replacement_store.register(&expected_enrollment, narrowed_advertisement()));
     tokio::time::timeout(LOCK_WAIT_PROBE, &mut replacement)
         .await
         .expect_err("registration replacement must wait for enrollment authority");
@@ -1424,7 +1478,7 @@ async fn s30_inv042_current_registration_head_cannot_rewind() -> Result<(), Box<
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, initial, _) = stored_pin_fixture(&pool).await?;
     store
-        .register(&expected_enrollment, expanded_advertisement(), &catalog())
+        .register(&expected_enrollment, expanded_advertisement())
         .await?;
     let rewound_head = sqlx::query(
         "UPDATE runner_current_registration
@@ -1517,11 +1571,11 @@ async fn s30_inv042_registration_inventories_reject_truncate() -> Result<(), Box
 async fn s30_inv042_appended_registration_must_advance_current_head() -> Result<(), Box<dyn Error>>
 {
     let (_container, pool) = migrated_postgres().await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     let mut malformed = pool.begin().await?;
     clone_registration_without_advancing_head(&mut malformed, expected_enrollment.enrollment())
@@ -1571,8 +1625,8 @@ async fn s31_inv004_inv043_concurrent_attempt_binding_has_one_lease_lineage()
             },
         )
         .expect("the second lease candidate is valid in isolation");
-    let first_store = RunnerProtocolStore::new(pool.clone());
-    let second_store = RunnerProtocolStore::new(pool.clone());
+    let first_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let second_store = RunnerProtocolStore::new(pool.clone(), catalog());
     let (first, second) = tokio::join!(
         first_store.store_lease(&first_lease),
         second_store.store_lease(&second_lease)
@@ -1927,11 +1981,11 @@ async fn s32_inv045_replaced_grant_is_not_a_current_revocation_target() -> Resul
 async fn s30_inv044_first_placement_record_is_created_unpinned() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session_for(&pool, uuid(FOREIGN_SESSION)).await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     let malformed_first = sqlx::query(
         "INSERT INTO runner_session_placement_record
@@ -2016,11 +2070,11 @@ async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), 
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -2249,11 +2303,11 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     let request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
@@ -2431,11 +2485,11 @@ async fn s32_inv045_pin_grant_requires_complete_registration_inventory()
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(&expected_enrollment, expanded_advertisement(), &catalog())
+        .register(&expected_enrollment, expanded_advertisement())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -2531,7 +2585,7 @@ async fn s32_inv044_loaded_placement_retains_reconciliation_registration()
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, historical, pin) = stored_pin_fixture(&pool).await?;
     let current = store
-        .register(&expected_enrollment, narrowed_advertisement(), &catalog())
+        .register(&expected_enrollment, narrowed_advertisement())
         .await?;
     let loaded = store
         .load_placement(SessionId::from_uuid(uuid(SESSION)))
@@ -3085,12 +3139,10 @@ async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Resul
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let first_enrollment = enrollment();
     store.insert_enrollment(&first_enrollment).await?;
-    let first_registration = store
-        .register(&first_enrollment, advertisement(), &catalog())
-        .await?;
+    let first_registration = store.register(&first_enrollment, advertisement()).await?;
     let request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
         working_directory: WorkingDirectorySelection::RunnerDefault,
@@ -3120,9 +3172,7 @@ async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Resul
         .await?;
     let second_enrollment = replacement_enrollment();
     store.insert_enrollment(&second_enrollment).await?;
-    let second_registration = store
-        .register(&second_enrollment, advertisement(), &catalog())
-        .await?;
+    let second_registration = store.register(&second_enrollment, advertisement()).await?;
     let replacement = lost
         .replace_lost_runner(
             request,
@@ -3160,12 +3210,10 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let first_enrollment = enrollment();
     store.insert_enrollment(&first_enrollment).await?;
-    let first_registration = store
-        .register(&first_enrollment, advertisement(), &catalog())
-        .await?;
+    let first_registration = store.register(&first_enrollment, advertisement()).await?;
     let profiled_request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
         working_directory: WorkingDirectorySelection::RunnerDefault,
@@ -3198,9 +3246,7 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
         .await?;
     let second_enrollment = replacement_enrollment();
     store.insert_enrollment(&second_enrollment).await?;
-    let second_registration = store
-        .register(&second_enrollment, advertisement(), &catalog())
-        .await?;
+    let second_registration = store.register(&second_enrollment, advertisement()).await?;
     let profile_free = first_lost
         .replace_lost_runner(
             SessionRunnerPlacementRequest {
@@ -3263,9 +3309,7 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
         [class()],
     );
     store.insert_enrollment(&later_enrollment).await?;
-    let later_registration = store
-        .register(&later_enrollment, advertisement(), &catalog())
-        .await?;
+    let later_registration = store.register(&later_enrollment, advertisement()).await?;
     let later = second_lost
         .replace_lost_runner(
             profiled_request,
@@ -3366,11 +3410,11 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
 async fn s32_inv044_worktree_pin_requires_provisioned_facts() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -3486,11 +3530,11 @@ async fn s31_inv004_inv043_idempotent_claimed_loss_retires_physical_attempt()
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_external_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), idempotent_catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(&expected_enrollment, advertisement(), &idempotent_catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -3558,11 +3602,11 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     let request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
@@ -3809,11 +3853,11 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     let request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
@@ -4100,11 +4144,11 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
 async fn s30_inv001_reconstitution_rejects_cross_wired_registration() -> Result<(), Box<dyn Error>>
 {
     let (_container, pool) = migrated_postgres().await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let stored = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     sqlx::query("ALTER TABLE runner_registration DISABLE TRIGGER ALL")
         .execute(&pool)
@@ -4135,14 +4179,54 @@ async fn s30_inv001_reconstitution_rejects_cross_wired_registration() -> Result<
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s30_inv001_reconstitution_rejects_noncanonical_tool_schema() -> Result<(), Box<dyn Error>>
-{
+async fn s30_inv042_reconstitution_requires_trusted_catalog_declarations()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let stored = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    sqlx::query("ALTER TABLE runner_registration_tool DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_registration_tool
+            SET model_input_schema = $4
+          WHERE enrollment_id = $1
+            AND registration_revision = $2
+            AND tool_name = $3",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(Decimal::from(stored.revision().get()))
+    .bind(tool("inspect").as_str())
+    .bind(r#"{"different":0}"#)
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_registration_tool ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let error = store
+        .load_registration(&expected_enrollment, stored.revision())
+        .await
+        .expect_err("stored declarations cannot bootstrap their own catalog authority");
+
+    assert_store_domain_error(error, RunnerDomainError::CorruptStoredFacts);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv001_reconstitution_rejects_noncanonical_tool_schema() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let stored = store
+        .register(&expected_enrollment, advertisement())
         .await?;
     sqlx::query("ALTER TABLE runner_registration_tool DISABLE TRIGGER ALL")
         .execute(&pool)
@@ -4173,11 +4257,11 @@ async fn s30_inv001_reconstitution_rejects_noncanonical_tool_schema() -> Result<
 async fn s30_inv042_idempotent_registration_tool_requires_runner_only_locus()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let stored = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     sqlx::query(
         "ALTER TABLE runner_registration_tool
@@ -4216,11 +4300,11 @@ async fn s30_inv042_idempotent_registration_tool_requires_runner_only_locus()
 async fn s30_inv042_registration_tool_requires_selector_discriminator() -> Result<(), Box<dyn Error>>
 {
     let (_container, pool) = migrated_postgres().await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let stored = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     sqlx::query(
         "ALTER TABLE runner_registration_tool
@@ -4258,11 +4342,11 @@ async fn s30_inv042_registration_tool_requires_selector_discriminator() -> Resul
 async fn s30_inv042_registration_profile_approval_requires_tool_name_shape()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let stored = store
-        .register(&expected_enrollment, advertisement(), &catalog())
+        .register(&expected_enrollment, advertisement())
         .await?;
     sqlx::query(
         "ALTER TABLE runner_registration_profile_approval
@@ -4301,7 +4385,7 @@ async fn s30_inv042_registration_profile_approval_requires_tool_name_shape()
 #[ignore = "requires Docker"]
 async fn s30_inv001_reconstitution_rejects_cross_wired_enrollment() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let store = RunnerProtocolStore::new(pool.clone());
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     sqlx::query("ALTER TABLE runner_enrollment DISABLE TRIGGER ALL")

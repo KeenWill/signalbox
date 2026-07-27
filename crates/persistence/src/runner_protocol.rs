@@ -9,6 +9,7 @@ use std::{
     error::Error,
     fmt,
     num::NonZeroU64,
+    sync::Arc,
 };
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -16,7 +17,7 @@ use signalbox_domain::{
     CredentialDispatchAuthorization, CredentialProfileGrant,
     CredentialProfileGrantReconstitutionInput, CredentialProfileGrantState, CredentialProfileName,
     CredentialProfilePolicy, CredentialToolApproval, PinnedRunnerPlacement, ProvisionedWorkspace,
-    RunnerAuthenticationId, RunnerCapabilityClass, RunnerClaimedAttemptReplacement,
+    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
     RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
     RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerId,
     RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseLoss,
@@ -127,14 +128,23 @@ impl StoredSessionRunnerPlacement {
 }
 
 /// PostgreSQL adapter for runner-protocol state.
+struct RegistrationAuthority<'a> {
+    stored: &'a StoredValidatedRunnerRegistration,
+    catalog: &'a RunnerCatalog,
+}
+
 #[derive(Clone, Debug)]
 pub struct RunnerProtocolStore {
     pool: PgPool,
+    catalog: Arc<RunnerCatalog>,
 }
 
 impl RunnerProtocolStore {
-    pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, catalog: RunnerCatalog) -> Self {
+        Self {
+            pool,
+            catalog: Arc::new(catalog),
+        }
     }
 
     /// Inserts one active logical enrollment and its exact allowed classes.
@@ -210,31 +220,37 @@ impl RunnerProtocolStore {
     /// Applies terminal enrollment revocation under the enrollment row lock.
     pub async fn revoke_enrollment(
         &self,
-        enrollment: RunnerEnrollmentId,
-    ) -> Result<Option<RunnerEnrollment>, RunnerProtocolStoreError> {
+        enrollment: &mut RunnerEnrollment,
+    ) -> Result<bool, RunnerProtocolStoreError> {
+        let enrollment_id = enrollment.enrollment();
         let mut transaction = self.pool.begin().await?;
         let locked = sqlx::query(RUNNER_ENROLLMENT)
-            .bind(enrollment.into_uuid())
+            .bind(enrollment_id.into_uuid())
             .fetch_optional(&mut *transaction)
             .await?;
         if locked.is_none() {
             transaction.rollback().await?;
-            return Ok(None);
+            return Ok(false);
         }
-        let current = load_enrollment_in(transaction.as_mut(), enrollment)
+        let canonical = load_enrollment_in(transaction.as_mut(), enrollment_id)
             .await?
             .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
-        let runner = current.runner();
-        let authentication = current.authentication();
-        let classes: Vec<_> = current.allowed_classes().cloned().collect();
-        let revoked = current.revoke().map_err(RunnerProtocolStoreError::Domain)?;
+        if canonical != *enrollment {
+            transaction.rollback().await?;
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ));
+        }
+        let runner = enrollment.runner();
+        let authentication = enrollment.authentication();
+        let classes: Vec<_> = enrollment.allowed_classes().cloned().collect();
         sqlx::query(
             "INSERT INTO runner_enrollment_audit
                 (enrollment_id, revision, runner_id,
                  authentication_reference_id, allowed_class_count, state_kind)
              VALUES ($1, 2, $2, $3, $4, 'revoked')",
         )
-        .bind(enrollment.into_uuid())
+        .bind(enrollment_id.into_uuid())
         .bind(runner.into_uuid())
         .bind(authentication.into_uuid())
         .bind(count_decimal(classes.len())?)
@@ -246,7 +262,7 @@ impl RunnerProtocolStore {
                     (enrollment_id, revision, capability_class)
                  VALUES ($1, 2, $2)",
             )
-            .bind(enrollment.into_uuid())
+            .bind(enrollment_id.into_uuid())
             .bind(class.as_str())
             .execute(&mut *transaction)
             .await?;
@@ -256,11 +272,14 @@ impl RunnerProtocolStore {
                 SET revision = 2, state_kind = 'revoked'
               WHERE enrollment_id = $1",
         )
-        .bind(enrollment.into_uuid())
+        .bind(enrollment_id.into_uuid())
         .execute(&mut *transaction)
         .await?;
         commit_mutation(transaction).await?;
-        Ok(Some(revoked))
+        enrollment
+            .revoke_in_place()
+            .map_err(RunnerProtocolStoreError::Domain)?;
+        Ok(true)
     }
 
     /// Validates and appends one complete availability advertisement.
@@ -268,7 +287,6 @@ impl RunnerProtocolStore {
         &self,
         enrollment: &RunnerEnrollment,
         advertisement: signalbox_domain::RunnerAdvertisement,
-        catalog: &signalbox_domain::RunnerCatalog,
     ) -> Result<StoredValidatedRunnerRegistration, RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
         let enrollment_id = enrollment.enrollment();
@@ -289,8 +307,8 @@ impl RunnerProtocolStore {
                 RunnerDomainError::CorrelationMismatch,
             ));
         }
-        let registration = enrollment
-            .register(advertisement, catalog)
+        let pending = enrollment
+            .prepare_registration(advertisement, &self.catalog)
             .map_err(RunnerProtocolStoreError::Domain)?;
         let previous: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
             .bind(enrollment_id.into_uuid())
@@ -302,7 +320,13 @@ impl RunnerProtocolStore {
             )?,
             None => RunnerRegistrationRevision::first(),
         };
-        insert_registration(&mut transaction, revision, &registration).await?;
+        if pending.registration().revision().get() != revision.get() {
+            transaction.rollback().await?;
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::RegistrationChanged,
+            ));
+        }
+        insert_registration(&mut transaction, revision, pending.registration()).await?;
         sqlx::query(
             "INSERT INTO runner_current_registration
                 (enrollment_id, registration_revision)
@@ -315,6 +339,7 @@ impl RunnerProtocolStore {
         .execute(&mut *transaction)
         .await?;
         commit_mutation(transaction).await?;
+        let registration = pending.commit().map_err(RunnerProtocolStoreError::Domain)?;
         Ok(StoredValidatedRunnerRegistration {
             revision,
             registration,
@@ -333,6 +358,7 @@ impl RunnerProtocolStore {
             enrollment.enrollment(),
             revision,
             Some(enrollment),
+            &self.catalog,
         )
         .await?;
         transaction.commit().await?;
@@ -360,6 +386,7 @@ impl RunnerProtocolStore {
                     enrollment.enrollment(),
                     decode_registration_revision(revision)?,
                     Some(enrollment),
+                    &self.catalog,
                 )
                 .await?
             }
@@ -408,7 +435,10 @@ impl RunnerProtocolStore {
                 event_ordinal,
                 placement,
                 grant,
-                registration,
+                RegistrationAuthority {
+                    stored: registration,
+                    catalog: &self.catalog,
+                },
                 grant_origin.ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?,
             )
             .await?;
@@ -469,7 +499,10 @@ impl RunnerProtocolStore {
                 event_ordinal,
                 &pin.placement,
                 grant,
-                registration,
+                RegistrationAuthority {
+                    stored: registration,
+                    catalog: &self.catalog,
+                },
                 grant_origin.ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?,
             )
             .await?;
@@ -530,9 +563,10 @@ impl RunnerProtocolStore {
             return Ok(None);
         };
         let event_ordinal = decode_u64(row.get("event_ordinal"))?;
-        let registration = load_placement_registration(transaction.as_mut(), &row).await?;
+        let registration =
+            load_placement_registration(transaction.as_mut(), &row, &self.catalog).await?;
         let grant = if registration.is_some() {
-            load_grant_for_placement(transaction.as_mut(), &row).await?
+            load_grant_for_placement(transaction.as_mut(), &row, &self.catalog).await?
         } else {
             None
         };
@@ -945,6 +979,7 @@ impl RunnerProtocolStore {
             runner_enrollment_id(row.get("registration_enrollment_id")),
             decode_registration_revision(row.get("registration_revision"))?,
             None,
+            &self.catalog,
         )
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
@@ -1230,6 +1265,7 @@ async fn load_registration_in(
     enrollment: RunnerEnrollmentId,
     revision: RunnerRegistrationRevision,
     authority: Option<&RunnerEnrollment>,
+    catalog: &RunnerCatalog,
 ) -> Result<Option<StoredValidatedRunnerRegistration>, RunnerProtocolStoreError> {
     let row = sqlx::query(
         "SELECT *
@@ -1339,6 +1375,7 @@ async fn load_registration_in(
         .collect::<Result<BTreeSet<_>, _>>()?;
     let registration = ValidatedRunnerRegistration::reconstitute(
         authority,
+        catalog,
         ValidatedRunnerRegistrationReconstitutionInput {
             enrollment: runner_enrollment_id(row.get("enrollment_id")),
             revision: RunnerGeneration::try_from_u64(revision.get())
@@ -1546,9 +1583,11 @@ async fn insert_grant_if_new(
     placement_event: u64,
     placement: &SessionRunnerPlacement,
     grant: &CredentialProfileGrant,
-    registration: &StoredValidatedRunnerRegistration,
+    authority: RegistrationAuthority<'_>,
     grant_origin: Decimal,
 ) -> Result<(), RunnerProtocolStoreError> {
+    let registration = authority.stored;
+    let catalog = authority.catalog;
     let historical_registration;
     let tombstone = matches!(
         placement.state(),
@@ -1585,6 +1624,7 @@ async fn insert_grant_if_new(
             runner_enrollment_id(row.get("registration_enrollment_id")),
             decode_registration_revision(row.get("registration_revision"))?,
             None,
+            catalog,
         )
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
@@ -1789,6 +1829,7 @@ async fn insert_grant_if_new(
 async fn load_placement_registration(
     connection: &mut PgConnection,
     row: &PgRow,
+    catalog: &RunnerCatalog,
 ) -> Result<Option<StoredValidatedRunnerRegistration>, RunnerProtocolStoreError> {
     let enrollment = row.try_get::<Option<Uuid>, _>("registration_enrollment_id")?;
     let revision = row.try_get::<Option<Decimal>, _>("registration_revision")?;
@@ -1799,6 +1840,7 @@ async fn load_placement_registration(
             runner_enrollment_id(enrollment),
             decode_registration_revision(revision)?,
             None,
+            catalog,
         )
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)
@@ -1923,6 +1965,7 @@ fn decode_grant_lineage(
 async fn load_grant_for_placement(
     connection: &mut PgConnection,
     placement: &PgRow,
+    catalog: &RunnerCatalog,
 ) -> Result<Option<CredentialProfileGrant>, RunnerProtocolStoreError> {
     let origin =
         placement.try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?;
@@ -1976,6 +2019,7 @@ async fn load_grant_for_placement(
         runner_enrollment_id(row.get("registration_enrollment_id")),
         decode_registration_revision(row.get("registration_revision"))?,
         None,
+        catalog,
     )
     .await?
     .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;

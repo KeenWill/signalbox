@@ -35,15 +35,17 @@ an authentication secret. Enrollment is either active or revoked. Revocation is
 terminal and makes later registration invalid. Complete reconstitution rejects
 mismatched enrollment, runner, authentication, allowed class inventory, optional
 last issued registration revision, or lifecycle state rather than repairing it.
-Revocation flips the enrollment-shared active fence, so an existing validated
-registration becomes non-current for later leases, reconciliation, runner
-replacement, or grant replacement. A lease offer rechecks the active enrollment
-and its exact enrollment, runner, and authentication-reference correlations; a
-lease already offered is unaffected. The Postgres admission trigger locks the
-current enrollment and placement heads before accepting even a direct lease-row
-insert, so concurrent revocation, runner loss, or runner replacement wins before
-the stale offer can commit. Enrollment audit-class evidence rejects row mutation
-and statement-level truncation.
+Durable revocation commits first and then flips the exact caller-held
+enrollment-shared active fence, so an existing validated registration becomes
+non-current for later leases, reconciliation, runner replacement, or grant
+replacement. A failed durable revocation leaves that caller-held fence active. A
+lease offer rechecks the active enrollment and its exact enrollment, runner, and
+authentication-reference correlations; a lease already offered is unaffected.
+The Postgres admission trigger locks the current enrollment and placement heads
+before accepting even a direct lease-row insert, so concurrent revocation,
+runner loss, or runner replacement wins before the stale offer can commit.
+Enrollment audit-class evidence rejects row mutation and statement-level
+truncation.
 
 A registration carries availability claims only:
 
@@ -56,14 +58,16 @@ It carries no permission default, effect class, placement declaration, approval
 posture, or credential value. Registration validates the advertisement against
 both the enrollment's allowed capability classes and the daemon-side catalog. An
 unknown or disallowed claim rejects the complete registration. A valid
-registration retains the exact advertised subset, attaches the
-daemon-authoritative declarations, and advances the enrollment-owned current
-registration revision. Complete enrollment reconstitution restores the optional
-last issued revision from independently matching stored facts; the next
-successful registration advances it instead of reusing a prior revision.
-Retained copies of every prior registration become stale and cannot authorize a
-later lease, reconciliation, or grant-bearing placement transition. Omitting a
-formerly advertised capability removes its availability from the new
+registration retains the exact advertised subset and attaches the
+daemon-authoritative declarations. The persistence adapter stages this checked
+registration, commits its complete durable rows and current head, and only then
+advances the enrollment-owned current registration revision; a failed durable
+write leaves the prior registration current. Complete enrollment reconstitution
+restores the optional last issued revision from independently matching stored
+facts; the next successful registration advances it instead of reusing a prior
+revision. Retained copies of every prior registration become stale and cannot
+authorize a later lease, reconciliation, or grant-bearing placement transition.
+Omitting a formerly advertised capability removes its availability from the new
 registration, but never changes its daemon-side policy. A pinned session never
 inherits additions from re-registration. If a new registration omits a
 runner-required capability in that session's pinned snapshot, no later lease is
@@ -84,8 +88,12 @@ vocabulary; the implemented arm is `WorktreePerSession`.
 
 The owner-editable catalog is validated into one `RunnerCatalog` domain value.
 It contains allowed capability classes, complete runner-tool declarations,
-credential-profile policies, and allowed workspace capabilities. Duplicate
-names, a credential policy naming an undeclared tool, or an internally
+credential-profile policies, and allowed workspace capabilities. The persistence
+adapter owns this catalog independently of stored registration rows.
+Registration reconstitution compares every stored class, tool declaration,
+profile policy, and workspace capability with that trusted catalog and rejects
+any difference; stored declarations cannot bootstrap their own authority.
+Duplicate names, a credential policy naming an undeclared tool, or an internally
 inconsistent placement declaration rejects the complete catalog.
 Configuration-file parsing and replacement are later application work; the
 domain value is independent of TOML.
