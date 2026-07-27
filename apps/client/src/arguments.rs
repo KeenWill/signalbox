@@ -42,6 +42,13 @@ pub(crate) enum Command {
         session_id: CanonicalUuid,
         command_id: Option<CommandId>,
         defaults_version: Option<CanonicalU64>,
+        queue: bool,
+        turn_id: Option<CanonicalUuid>,
+    },
+    Steer {
+        session_id: CanonicalUuid,
+        command_id: Option<CommandId>,
+        turn_id: Option<CanonicalUuid>,
     },
     Model {
         session_id: CanonicalUuid,
@@ -188,6 +195,8 @@ enum CliCommand {
     Search(SearchArguments),
     /// Submit standard input and print the reply after completion.
     Send(SendArguments),
+    /// Steer the active turn with standard-input content.
+    Steer(SteerArguments),
     /// Install a new forward-only session model-defaults epoch.
     Model(ModelArguments),
     /// Print one authoritative session transcript.
@@ -463,6 +472,31 @@ struct SendArguments {
         value_parser = canonical_u64
     )]
     defaults_version: Option<CanonicalU64>,
+    /// Queue this input behind the exact active turn instead of requiring an
+    /// idle session slot.
+    #[arg(long)]
+    queue: bool,
+    /// Exact expected active turn paired with queued-input recovery values.
+    #[arg(
+        long,
+        value_name = "UUID",
+        requires_all = ["queue", "command_id", "defaults_version"],
+        value_parser = canonical_uuid
+    )]
+    turn: Option<CanonicalUuid>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct SteerArguments {
+    /// Session whose active turn should receive standard-input steering.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(long, value_name = "UUID", requires = "turn", value_parser = command_id)]
+    command_id: Option<CommandId>,
+    /// Exact expected active turn paired with a recovery command identity.
+    #[arg(long, value_name = "UUID", requires = "command_id", value_parser = canonical_uuid)]
+    turn: Option<CanonicalUuid>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -728,10 +762,34 @@ pub(crate) fn parse(
                 after_session_id: arguments.after,
             })
         }
-        CliCommand::Send(arguments) => Command::Send {
+        CliCommand::Send(arguments) => {
+            if arguments.queue
+                && !matches!(
+                    (
+                        arguments.command_id,
+                        arguments.defaults_version,
+                        arguments.turn,
+                    ),
+                    (None, None, None) | (Some(_), Some(_), Some(_))
+                )
+            {
+                return Err(UsageError(Cli::command().error(
+                    ErrorKind::ArgumentConflict,
+                    "queued send recovery requires --command-id, --defaults-version, and --turn together",
+                )));
+            }
+            Command::Send {
+                session_id: arguments.session_id,
+                command_id: arguments.command_id,
+                defaults_version: arguments.defaults_version,
+                queue: arguments.queue,
+                turn_id: arguments.turn,
+            }
+        }
+        CliCommand::Steer(arguments) => Command::Steer {
             session_id: arguments.session_id,
             command_id: arguments.command_id,
-            defaults_version: arguments.defaults_version,
+            turn_id: arguments.turn,
         },
         CliCommand::Model(arguments) => Command::Model {
             session_id: arguments.session_id,
@@ -1109,6 +1167,101 @@ mod tests {
             ),
             Ok(ParseOutcome::Run(super::Arguments {
                 command: Command::Send { .. },
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn queued_send_accepts_fresh_intent_without_recovery_values() {
+        const SESSION: &str = "00000000-0000-0000-0000-000000000001";
+
+        assert!(matches!(
+            parse(["send", SESSION, "--queue"].map(Into::into)),
+            Ok(ParseOutcome::Run(super::Arguments {
+                command: Command::Send {
+                    queue: true,
+                    turn_id: None,
+                    ..
+                },
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn queued_send_recovery_requires_command_defaults_and_turn_together() {
+        const SESSION: &str = "00000000-0000-0000-0000-000000000001";
+        const TURN: &str = "00000000-0000-0000-0000-000000000002";
+
+        assert!(
+            parse(
+                [
+                    "send",
+                    SESSION,
+                    "--queue",
+                    "--command-id",
+                    SESSION,
+                    "--defaults-version",
+                    "1",
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+        assert!(parse(["send", SESSION, "--queue", "--turn", TURN].map(Into::into)).is_err());
+        assert!(matches!(
+            parse(
+                [
+                    "send",
+                    SESSION,
+                    "--queue",
+                    "--command-id",
+                    SESSION,
+                    "--defaults-version",
+                    "1",
+                    "--turn",
+                    TURN,
+                ]
+                .map(Into::into)
+            ),
+            Ok(ParseOutcome::Run(super::Arguments {
+                command: Command::Send {
+                    queue: true,
+                    turn_id: Some(_),
+                    ..
+                },
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn steer_recovery_requires_command_and_turn_together() {
+        const SESSION: &str = "00000000-0000-0000-0000-000000000001";
+        const TURN: &str = "00000000-0000-0000-0000-000000000002";
+
+        assert!(matches!(
+            parse(["steer", SESSION].map(Into::into)),
+            Ok(ParseOutcome::Run(super::Arguments {
+                command: Command::Steer {
+                    command_id: None,
+                    turn_id: None,
+                    ..
+                },
+                ..
+            }))
+        ));
+        assert!(parse(["steer", SESSION, "--command-id", SESSION].map(Into::into)).is_err());
+        assert!(parse(["steer", SESSION, "--turn", TURN].map(Into::into)).is_err());
+        assert!(matches!(
+            parse(["steer", SESSION, "--command-id", SESSION, "--turn", TURN,].map(Into::into)),
+            Ok(ParseOutcome::Run(super::Arguments {
+                command: Command::Steer {
+                    command_id: Some(_),
+                    turn_id: Some(_),
+                    ..
+                },
                 ..
             }))
         ));

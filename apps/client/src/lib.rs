@@ -21,10 +21,10 @@ use rustix::{
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportFormat,
-    ConversationImportSource, ErrorCode, InputContent, MAX_FRAME_BYTES, ModelCallDisposition,
-    ModelCallState, ModelSelection, ReviewPassSnapshot, ReviewRunSnapshot, ServerFrame,
-    ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_server_line,
-    encode_server_line,
+    ConversationImportSource, ErrorCode, InputContent, InputDelivery, MAX_FRAME_BYTES,
+    ModelCallDisposition, ModelCallState, ModelSelection, ReviewPassSnapshot, ReviewRunSnapshot,
+    ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState,
+    decode_server_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -138,7 +138,10 @@ async fn execute(
 ) -> Result<(), ClientError> {
     let input = if matches!(
         arguments.command,
-        Command::Send { .. } | Command::Reconcile { .. } | Command::Stop { .. }
+        Command::Send { .. }
+            | Command::Steer { .. }
+            | Command::Reconcile { .. }
+            | Command::Stop { .. }
     ) {
         Some(read_input(stdin)?)
     } else {
@@ -158,6 +161,7 @@ async fn execute(
         | Command::List
         | Command::Search(_)
         | Command::Send { .. }
+        | Command::Steer { .. }
         | Command::Model { .. }
         | Command::Transcript { .. }
         | Command::Follow { .. }
@@ -200,14 +204,40 @@ async fn execute(
             session_id,
             command_id,
             defaults_version,
+            queue,
+            turn_id,
         } => {
             let input = input.ok_or(ClientError::Input("standard-input content was not read"))?;
+            let delivery = if queue {
+                SendDeliverySelection::Queue {
+                    expected_active_turn_id: turn_id,
+                }
+            } else {
+                SendDeliverySelection::StartWhenIdle
+            };
             send(
                 &mut client,
                 &mut output,
                 session_id,
                 command_id,
                 defaults_version,
+                delivery,
+                input,
+            )
+            .await
+        }
+        Command::Steer {
+            session_id,
+            command_id,
+            turn_id,
+        } => {
+            let input = input.ok_or(ClientError::Input("standard-input content was not read"))?;
+            steer(
+                &mut client,
+                &mut output,
+                session_id,
+                command_id,
+                turn_id,
                 input,
             )
             .await
@@ -958,12 +988,21 @@ async fn search(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SendDeliverySelection {
+    StartWhenIdle,
+    Queue {
+        expected_active_turn_id: Option<CanonicalUuid>,
+    },
+}
+
 async fn send(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
     session_id: CanonicalUuid,
     command_id: Option<CommandId>,
     defaults_version: Option<CanonicalU64>,
+    delivery: SendDeliverySelection,
     content: String,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
@@ -973,19 +1012,85 @@ async fn send(
             &command_id.into_uuid().hyphenated().to_string(),
         )?;
     }
+    let delivery = match delivery {
+        SendDeliverySelection::StartWhenIdle => None,
+        SendDeliverySelection::Queue {
+            expected_active_turn_id,
+        } => {
+            let expected_active_turn = match expected_active_turn_id {
+                Some(turn_id) => turn_id,
+                None => observe_active_turn(client, session_id).await?,
+            };
+            output.recovery_value("turn", &expected_active_turn.to_string())?;
+            Some(InputDelivery::Queue {
+                expected_active_turn_id: expected_active_turn,
+            })
+        }
+    };
     let defaults_version =
         resolve_defaults_version(client, output, session_id, defaults_version).await?;
 
-    let turn_id = submit_input(
+    let receipt = submit_input(
         client,
         command_id,
         session_id,
         InputContent::new(content),
-        defaults_version,
+        Some(defaults_version),
+        delivery,
     )
     .await?;
+    let SubmitInputReceipt::Turn { turn_id } = receipt else {
+        return Err(ClientError::Protocol("send returned a steering receipt").mutation());
+    };
 
     await_and_report_turn(client, output, session_id, turn_id).await
+}
+
+async fn steer(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+    command_id: Option<CommandId>,
+    turn_id: Option<CanonicalUuid>,
+    content: String,
+) -> Result<(), ClientError> {
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let expected_active_turn = match turn_id {
+        Some(turn_id) => turn_id,
+        None => observe_active_turn(client, session_id).await?,
+    };
+    output.recovery_value("turn", &expected_active_turn.to_string())?;
+
+    let receipt = submit_input(
+        client,
+        command_id,
+        session_id,
+        InputContent::new(content),
+        None,
+        Some(InputDelivery::Steer {
+            expected_active_turn_id: expected_active_turn,
+        }),
+    )
+    .await?;
+    let SubmitInputReceipt::Steering {
+        accepted_input_id,
+        acceptance_position,
+        source_turn_id,
+    } = receipt
+    else {
+        return Err(ClientError::Protocol("steer returned a turn-origin receipt").mutation());
+    };
+    if source_turn_id != expected_active_turn {
+        return Err(ClientError::Protocol("steer returned another source turn").mutation());
+    }
+    output.steering_submitted(accepted_input_id, acceptance_position, source_turn_id)?;
+    Ok(())
 }
 
 /// Supplies the owner reconciliation decision a turn parked on an ambiguous
@@ -1079,7 +1184,7 @@ async fn observe_active_turn(
     let mut snapshot = transcript(client, session_id).await?;
     snapshot
         .active_turn()?
-        .ok_or(ClientError::Input("the session has no active turn to stop"))
+        .ok_or(ClientError::Input("the session has no active turn"))
 }
 
 async fn resolve_defaults_version(
@@ -1173,19 +1278,33 @@ async fn decide(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SubmitInputReceipt {
+    Turn {
+        turn_id: CanonicalUuid,
+    },
+    Steering {
+        accepted_input_id: CanonicalUuid,
+        acceptance_position: u64,
+        source_turn_id: CanonicalUuid,
+    },
+}
+
 async fn submit_input(
     client: &mut ProcessClient,
     command_id: CommandId,
     session_id: CanonicalUuid,
     content: InputContent,
-    defaults_version: CanonicalU64,
-) -> Result<CanonicalUuid, ClientError> {
+    expected_defaults_version: Option<CanonicalU64>,
+    delivery: Option<InputDelivery>,
+) -> Result<SubmitInputReceipt, ClientError> {
     let mut connection = client
         .mutation_request(ClientRequest::SubmitInput {
             command_id,
             session_id,
             content,
-            expected_defaults_version: defaults_version,
+            expected_defaults_version,
+            delivery,
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
@@ -1193,7 +1312,17 @@ async fn submit_input(
             session_id: submitted_session,
             turn_id,
             ..
-        } if submitted_session == session_id => Ok(turn_id),
+        } if submitted_session == session_id => Ok(SubmitInputReceipt::Turn { turn_id }),
+        ServerMessage::SteeringSubmitted {
+            session_id: submitted_session,
+            accepted_input_id,
+            acceptance_position,
+            source_turn_id,
+        } if submitted_session == session_id => Ok(SubmitInputReceipt::Steering {
+            accepted_input_id,
+            acceptance_position: acceptance_position.value(),
+            source_turn_id,
+        }),
         ServerMessage::Error {
             code,
             message,
@@ -2034,11 +2163,12 @@ mod tests {
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, FrameEncodeError,
-        InputContent, ModelCallDisposition, ModelCallState, ModelSelection, ReviewFindingInput,
-        ReviewFindingSnapshot, ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle,
-        ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow,
-        ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState,
-        decode_client_line, encode_server_line,
+        InputContent, InputDelivery, ModelCallDisposition, ModelCallState, ModelSelection,
+        ProtocolVersion, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
+        ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot, ReviewRunLifecycle,
+        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
+        SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
+        encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -2050,7 +2180,7 @@ mod tests {
     use super::{
         MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
         MAX_REVIEW_FINDINGS_PER_RUN, ProcessClient, ReviewCommand, SessionMetadataPageRequest,
-        SnapshotSelection, TurnTerminal, collect_import_paths, create, decide,
+        SnapshotSelection, SubmitInputReceipt, TurnTerminal, collect_import_paths, create, decide,
         model_call_recovery_transition, open_scanned_import_source, read_input, reconcile_turn,
         review, run, search, socket_path, stop_turn, submit_input, terminal_event_state,
         terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
@@ -2756,7 +2886,8 @@ mod tests {
             CommandId::try_from_uuid(Uuid::from_u128(1))?,
             CanonicalUuid::from_uuid(Uuid::from_u128(2)),
             InputContent::new(String::from("queued content")),
-            CanonicalU64::new(1),
+            Some(CanonicalU64::new(1)),
+            None,
         )
         .await;
 
@@ -2771,6 +2902,9 @@ mod tests {
         let listener = UnixListener::bind(&socket)?;
         let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
         let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+        let content = InputContent::new(String::from("queued content"));
+        let expected_content = content.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
             let (reader, mut writer) = stream.into_split();
@@ -2778,13 +2912,16 @@ mod tests {
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert!(matches!(
+            assert_eq!(
                 request.request(),
-                ClientRequest::SubmitInput {
-                    session_id: requested_session,
-                    ..
-                } if *requested_session == session_id
-            ));
+                &ClientRequest::SubmitInput {
+                    command_id,
+                    session_id,
+                    content: expected_content,
+                    expected_defaults_version: Some(CanonicalU64::new(1)),
+                    delivery: None,
+                }
+            );
             let response = ServerFrame::try_new_for_version(
                 request.version(),
                 request.request_id(),
@@ -2811,13 +2948,97 @@ mod tests {
         let mut client = ProcessClient::new(socket);
         let submitted_turn = submit_input(
             &mut client,
-            CommandId::try_from_uuid(Uuid::from_u128(4))?,
+            command_id,
             session_id,
-            InputContent::new(String::from("queued content")),
-            CanonicalU64::new(1),
+            content,
+            Some(CanonicalU64::new(1)),
+            None,
         )
         .await?;
-        assert_eq!(submitted_turn, turn_id);
+        assert_eq!(submitted_turn, SubmitInputReceipt::Turn { turn_id });
+        server.await??;
+        Ok(())
+    }
+
+    async fn serve_steering_submit(
+        listener: UnixListener,
+        session_id: CanonicalUuid,
+        source_turn_id: CanonicalUuid,
+        accepted_input_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        let (stream, mut writer) = listener.accept().await?.0.into_split();
+        let mut reader = BufReader::new(stream);
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).await?;
+        let request = decode_client_line(&line).map_err(io::Error::other)?;
+        assert_eq!(request.version(), ProtocolVersion::Thirteen);
+        assert_eq!(
+            request.request(),
+            &ClientRequest::SubmitInput {
+                command_id: CommandId::try_from_uuid(Uuid::from_u128(4))
+                    .map_err(io::Error::other)?,
+                session_id,
+                content: InputContent::new(String::from("steering content")),
+                expected_defaults_version: None,
+                delivery: Some(InputDelivery::Steer {
+                    expected_active_turn_id: source_turn_id,
+                }),
+            }
+        );
+        let response = ServerFrame::try_new_for_version(
+            request.version(),
+            request.request_id(),
+            ServerMessage::SteeringSubmitted {
+                session_id,
+                accepted_input_id,
+                acceptance_position: CanonicalU64::new(2),
+                source_turn_id,
+            },
+        )
+        .map_err(io::Error::other)?;
+        writer
+            .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+            .await?;
+        Ok(())
+    }
+
+    /// INV-033: steering uses the configuration-free version-thirteen request
+    /// and returns its typed accepted-input/source-turn receipt.
+    #[tokio::test]
+    async fn inv033_submit_steering_uses_the_exact_v13_exchange() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let source_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let accepted_input_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let server = tokio::spawn(serve_steering_submit(
+            listener,
+            session_id,
+            source_turn_id,
+            accepted_input_id,
+        ));
+
+        let mut client = ProcessClient::new(socket);
+        let receipt = submit_input(
+            &mut client,
+            CommandId::try_from_uuid(Uuid::from_u128(4))?,
+            session_id,
+            InputContent::new(String::from("steering content")),
+            None,
+            Some(InputDelivery::Steer {
+                expected_active_turn_id: source_turn_id,
+            }),
+        )
+        .await?;
+        assert_eq!(
+            receipt,
+            SubmitInputReceipt::Steering {
+                accepted_input_id,
+                acceptance_position: 2,
+                source_turn_id,
+            }
+        );
         server.await??;
         Ok(())
     }

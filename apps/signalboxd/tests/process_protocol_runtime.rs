@@ -48,9 +48,9 @@ use signalbox_persistence::{
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationImportFormat,
     ConversationImportSource, CurrentModelCallState, ErrorCode, ImportedContentKind,
-    ImportedSourceSpeaker, ImportedSpeaker, InputContent, MetadataActor, ModelSelection,
-    ProtocolVersion, RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
-    SessionMetadata, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
+    ImportedSourceSpeaker, ImportedSpeaker, InputContent, InputDelivery, MetadataActor,
+    ModelSelection, ProtocolVersion, RejectionDetail, RequestId, ServerFrame, ServerMessage,
+    SessionEvent, SessionMetadata, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
     decode_server_line, encode_client_line,
 };
 use signalboxd::{
@@ -363,6 +363,33 @@ impl RunningRuntime {
         self.socket_directory.socket()
     }
 
+    async fn restart(&mut self) -> Result<usize, Box<dyn Error>> {
+        self.shutdown.send(true)?;
+        timeout(Duration::from_secs(10), &mut self.runtime_task).await???;
+
+        let mut scan = StartupScanService::new(
+            UuidV7StartupScanIdGenerator,
+            PostgresStartupScanRepository::new(self.pool.clone()),
+        );
+        let recovered_turn_count = scan.execute().await?.recovered_turn_count();
+
+        let listener = LocalProcessListener::bind(self.socket())?;
+        let sweep = PostgresEligibilitySweep::new(self.pool.clone());
+        let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+        let runtime = ProcessRuntime::new(
+            listener,
+            self.pool.clone(),
+            eligibility_nudge,
+            InProcessToolDispatchGate::default(),
+            HubModelConfiguration::parse(MODEL_CONFIGURATION)?,
+        );
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        self.shutdown = shutdown;
+        self.runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
+        self._work_source = work_source;
+        Ok(recovered_turn_count)
+    }
+
     async fn stop(self) -> Result<(), Box<dyn Error>> {
         self.shutdown.send(true)?;
         timeout(Duration::from_secs(10), self.runtime_task).await???;
@@ -408,7 +435,8 @@ async fn submit_first_input(
                 command_id: command()?,
                 session_id,
                 content: InputContent::new(content),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
@@ -459,6 +487,98 @@ fn submitted_session(message: &ServerMessage) -> CanonicalUuid {
     match message {
         ServerMessage::InputSubmitted { session_id, .. } => *session_id,
         message => panic!("fixture expected input-submitted, got {message:?}"),
+    }
+}
+
+#[track_caller]
+fn transcript_snapshot_start_cursor(
+    message: &ServerMessage,
+    expected_session: CanonicalUuid,
+) -> u64 {
+    match message {
+        ServerMessage::TranscriptSnapshotStart { session_id, cursor }
+            if *session_id == expected_session =>
+        {
+            cursor.value()
+        }
+        message => panic!("fixture expected transcript-snapshot start, got {message:?}"),
+    }
+}
+
+#[track_caller]
+fn transcript_turn_projection(message: &ServerMessage) -> (CanonicalUuid, u64, TurnState) {
+    match message {
+        ServerMessage::TranscriptTurn {
+            turn_id,
+            acceptance_position,
+            state,
+        } => (*turn_id, acceptance_position.value(), state.clone()),
+        message => panic!("fixture expected transcript-turn projection, got {message:?}"),
+    }
+}
+
+#[track_caller]
+fn submitted_input_identity(
+    message: &ServerMessage,
+    expected_session: CanonicalUuid,
+    expected_position: u64,
+) -> CanonicalUuid {
+    match message {
+        ServerMessage::InputSubmitted {
+            session_id,
+            accepted_input_id,
+            acceptance_position,
+            ..
+        } if *session_id == expected_session
+            && acceptance_position.value() == expected_position =>
+        {
+            *accepted_input_id
+        }
+        message => panic!("fixture expected input-submitted receipt, got {message:?}"),
+    }
+}
+
+#[track_caller]
+fn transcript_snapshot_end_facts(message: &ServerMessage) -> (CanonicalUuid, u64, u64, u64) {
+    match message {
+        ServerMessage::TranscriptSnapshotEnd {
+            session_id,
+            cursor,
+            turn_count,
+            entry_count,
+        } => (
+            *session_id,
+            cursor.value(),
+            turn_count.value(),
+            entry_count.value(),
+        ),
+        message => panic!("fixture expected transcript-snapshot end, got {message:?}"),
+    }
+}
+
+#[track_caller]
+fn input_accepted_event_facts(
+    message: &ServerMessage,
+) -> (u64, CanonicalUuid, CanonicalUuid, u64, InputContent) {
+    match message {
+        ServerMessage::SessionEvent {
+            cursor,
+            session_id,
+            event:
+                SessionEvent::InputAccepted {
+                    accepted_input_id,
+                    acceptance_position,
+                    content,
+                    ..
+                },
+        } => (
+            cursor.value(),
+            *session_id,
+            *accepted_input_id,
+            acceptance_position.value(),
+            content.clone(),
+        ),
+        message => panic!("fixture expected input-accepted event, got {message:?}"),
     }
 }
 
@@ -790,7 +910,8 @@ async fn s33_inv012_inv033_inv046_submit_replay_precedes_mutable_history_gate()
                 command_id: command()?,
                 session_id,
                 content: InputContent::new(String::from("first model turn")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
@@ -826,7 +947,8 @@ async fn s33_inv012_inv033_inv046_submit_replay_precedes_mutable_history_gate()
         command_id: replayed_command,
         session_id,
         content: InputContent::new(String::from("second model turn")),
-        expected_defaults_version: CanonicalU64::new(2),
+        expected_defaults_version: Some(CanonicalU64::new(2)),
+        delivery: None,
     };
     connection
         .request_version(ProtocolVersion::Five, 4, replayed_request.clone())
@@ -863,7 +985,8 @@ async fn s33_inv012_inv033_inv046_submit_replay_precedes_mutable_history_gate()
                 command_id: unseen_command,
                 session_id,
                 content: InputContent::new(String::from("must remain gated")),
-                expected_defaults_version: CanonicalU64::new(2),
+                expected_defaults_version: Some(CanonicalU64::new(2)),
+                delivery: None,
             },
         )
         .await?;
@@ -1544,7 +1667,8 @@ async fn s28_version_one_submit_rejects_imported_session_without_mutation()
                 command_id: command()?,
                 session_id,
                 content: InputContent::new(String::from("must not mutate")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
@@ -1582,19 +1706,14 @@ async fn s28_version_two_submit_accepts_imported_session_continuation() -> Resul
                 command_id: command()?,
                 session_id,
                 content: InputContent::new(String::from("native continuation")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
     let accepted = response_within(&mut upgraded_submit).await?;
     assert_eq!(accepted.version(), ProtocolVersion::Two);
-    assert!(matches!(
-        accepted.message(),
-        ServerMessage::InputSubmitted {
-            session_id: submitted,
-            ..
-        } if *submitted == session_id
-    ));
+    assert_eq!(submitted_session(accepted.message()), session_id);
 
     drop(upgraded_submit);
     runtime.stop().await
@@ -1614,7 +1733,8 @@ async fn process_runtime_rejects_oversized_submitted_input() -> Result<(), Box<d
                 command_id: command()?,
                 session_id,
                 content: InputContent::new("x".repeat(OVERSIZED_SUBMITTED_INPUT_BYTES)),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
@@ -1738,22 +1858,17 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
                 command_id: command()?,
                 session_id,
                 content: InputContent::new(String::from("work while the ambiguity is unresolved")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
-    assert!(
-        matches!(
-            response_within(&mut connection).await?.message(),
-            ServerMessage::Error {
-                code: ErrorCode::Rejected,
-                detail,
-                ..
-            } if detail.value() == Some(RejectionDetail::ActiveTurnPresent {
-                session_id,
-                active_turn_id: parked_turn_id,
-            })
-        ),
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::ActiveTurnPresent {
+            session_id,
+            active_turn_id: parked_turn_id,
+        },
         "an ambiguity wait must keep refusing ordinary input while it holds the slot"
     );
 
@@ -1781,31 +1896,22 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
         )
         .await?;
     let start = response_within(&mut connection).await?;
-    assert!(matches!(
-        start.message(),
-        ServerMessage::TranscriptSnapshotStart {
-            session_id: snapshot_session,
-            ..
-        } if *snapshot_session == session_id
-    ));
+    transcript_snapshot_start_cursor(start.message(), session_id);
     let reconciled_turn = response_within(&mut connection).await?;
+    let (projected_reconciled_turn, reconciled_position, reconciled_state) =
+        transcript_turn_projection(reconciled_turn.message());
+    assert_eq!(projected_reconciled_turn, parked_turn_id);
+    assert_eq!(reconciled_position, 1);
     assert!(matches!(
-        reconciled_turn.message(),
-        ServerMessage::TranscriptTurn {
-            turn_id,
-            acceptance_position,
-            state: TurnState::ReconciliationRequired { .. },
-        } if *turn_id == parked_turn_id && acceptance_position.value() == 1
+        reconciled_state,
+        TurnState::ReconciliationRequired { .. }
     ));
     let successor_turn = response_within(&mut connection).await?;
-    assert!(matches!(
-        successor_turn.message(),
-        ServerMessage::TranscriptTurn {
-            turn_id,
-            acceptance_position,
-            state: TurnState::Queued { .. },
-        } if *turn_id == successor_turn_id && acceptance_position.value() == 2
-    ));
+    let (projected_successor_turn, successor_position, successor_state) =
+        transcript_turn_projection(successor_turn.message());
+    assert_eq!(projected_successor_turn, successor_turn_id);
+    assert_eq!(successor_position, 2);
+    assert!(matches!(successor_state, TurnState::Queued { .. }));
 
     drop(connection);
     runtime.stop().await
@@ -2092,15 +2198,8 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
     follow
         .request(5, ClientRequest::FollowSession { session_id })
         .await?;
-    let follow_cursor = match follow.response().await?.message() {
-        ServerMessage::TranscriptSnapshotStart {
-            session_id: snapshot_session,
-            cursor,
-        } if *snapshot_session == session_id => cursor.value(),
-        message => {
-            return Err(io::Error::other(format!("unexpected follow start: {message:?}")).into());
-        }
-    };
+    let follow_start = follow.response().await?;
+    let follow_cursor = transcript_snapshot_start_cursor(follow_start.message(), session_id);
 
     // The exact-limit queued content keeps the snapshot writer blocked after
     // its start frame. Commit the next update before draining the snapshot so
@@ -2112,73 +2211,43 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
                 command_id: command()?,
                 session_id,
                 content: InputContent::new("second input".to_owned()),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
-    let second_accepted_input = match commands.response().await?.message() {
-        ServerMessage::InputSubmitted {
-            session_id: submitted_session,
-            accepted_input_id,
-            acceptance_position,
-            ..
-        } if *submitted_session == session_id && acceptance_position.value() == 2 => {
-            *accepted_input_id
-        }
-        message => {
-            return Err(io::Error::other(format!("unexpected second submit: {message:?}")).into());
-        }
-    };
+    let second_submit = commands.response().await?;
+    let second_accepted_input = submitted_input_identity(second_submit.message(), session_id, 2);
 
     let queued_turn = response_within(&mut follow).await?;
-    assert!(matches!(
-        queued_turn.message(),
-        ServerMessage::TranscriptTurn {
-            turn_id,
-            acceptance_position,
-            state:
-                TurnState::Queued {
-                    accepted_input_id,
-                    content: projected_content,
-                },
-        } if *turn_id == first_turn
-            && acceptance_position.value() == 1
-            && *accepted_input_id == first_accepted_input
-            && projected_content.as_str() == first_content
-    ));
+    let (projected_turn, projected_position, projected_state) =
+        transcript_turn_projection(queued_turn.message());
+    assert_eq!(projected_turn, first_turn);
+    assert_eq!(projected_position, 1);
+    assert_eq!(
+        projected_state,
+        TurnState::Queued {
+            accepted_input_id: first_accepted_input,
+            content: InputContent::new(first_content),
+        }
+    );
     let snapshot_end = response_within(&mut follow).await?;
-    assert!(matches!(
-        snapshot_end.message(),
-        ServerMessage::TranscriptSnapshotEnd {
-            session_id: snapshot_session,
-            cursor,
-            turn_count,
-            entry_count,
-        } if *snapshot_session == session_id
-            && cursor.value() == follow_cursor
-            && turn_count.value() == 1
-            && entry_count.value() == 0
-    ));
+    assert_eq!(
+        transcript_snapshot_end_facts(snapshot_end.message()),
+        (session_id, follow_cursor, 1, 0)
+    );
 
     let followed = response_within(&mut follow).await?;
-    assert!(matches!(
-        followed.message(),
-        ServerMessage::SessionEvent {
-            cursor,
-            session_id: event_session,
-            event:
-                SessionEvent::InputAccepted {
-                    accepted_input_id,
-                    acceptance_position,
-                    content,
-                    ..
-                },
-        } if cursor.value() > follow_cursor
-            && *event_session == session_id
-            && *accepted_input_id == second_accepted_input
-            && acceptance_position.value() == 2
-            && content.as_str() == "second input"
-    ));
+    let (event_cursor, event_session, event_input, event_position, event_content) =
+        input_accepted_event_facts(followed.message());
+    assert!(event_cursor > follow_cursor);
+    assert_eq!(event_session, session_id);
+    assert_eq!(event_input, second_accepted_input);
+    assert_eq!(event_position, 2);
+    assert_eq!(
+        event_content,
+        InputContent::new(String::from("second input"))
+    );
 
     drop(commands);
     drop(follow);
@@ -2690,11 +2759,12 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
     );
 
     let parked = read_transcript_messages(&mut connection, 4, session_id).await?;
-    assert!(matches!(
+    assert_eq!(
         turn_state_of(&parked, parked_turn_id),
-        TurnState::ActiveAwaitingToolApproval { tool_request_id }
-            if tool_request_id == pending_request_id
-    ));
+        TurnState::ActiveAwaitingToolApproval {
+            tool_request_id: pending_request_id,
+        }
+    );
     assert_eq!(
         tool_use_entry_names(&parked, pending_request_id),
         vec![String::from("confirmed")],
@@ -2748,7 +2818,8 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 command_id: command()?,
                 session_id,
                 content: InputContent::new(String::from("ordinary later work")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
@@ -3030,7 +3101,8 @@ async fn inv012_decide_tool_request_replays_equally_and_refuses_conflicting_reus
                 command_id: submit_command,
                 session_id,
                 content: InputContent::new(String::from("claims a submit identity")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
@@ -3158,5 +3230,170 @@ async fn s10_decide_tool_request_refuses_an_already_resolved_request() -> Result
     );
 
     drop(connection);
+    runtime.stop().await
+}
+
+async fn submit_queued_input(
+    connection: &mut Connection,
+    request_id: u64,
+    session_id: CanonicalUuid,
+    expected_active_turn_id: CanonicalUuid,
+    acceptance_position: u64,
+    content: &str,
+) -> Result<CanonicalUuid, Box<dyn Error>> {
+    connection
+        .request_version(
+            ProtocolVersion::Thirteen,
+            request_id,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(content.to_owned()),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: Some(InputDelivery::Queue {
+                    expected_active_turn_id,
+                }),
+            },
+        )
+        .await?;
+    accepted_successor_turn(connection, session_id, acceptance_position).await
+}
+
+async fn activate_expected_turn(
+    pool: &PgPool,
+    session: SessionId,
+    expected_turn: CanonicalUuid,
+) -> Result<(), Box<dyn Error>> {
+    let mut service = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    match service.execute(session).await? {
+        StartEligibleTurnOutcome::Activated(activated)
+            if activated.turn().into_uuid() == expected_turn.into_uuid() =>
+        {
+            Ok(())
+        }
+        StartEligibleTurnOutcome::Activated(activated) => Err(io::Error::other(format!(
+            "activated turn {} instead of expected {expected_turn}",
+            activated.turn().into_uuid()
+        ))
+        .into()),
+        StartEligibleTurnOutcome::NoEligibleTurn => {
+            Err(io::Error::other("the expected queued turn was not eligible").into())
+        }
+    }
+}
+
+/// S08: version-thirteen steering against an idle session is a durable-submit
+/// refusal with the exact expected turn, never an internal daemon error.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s08_steering_without_an_active_turn_is_a_typed_rejection() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let expected_active_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(0x1301));
+
+    connection
+        .request_version(
+            ProtocolVersion::Thirteen,
+            2,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(String::from("steer no turn")),
+                expected_defaults_version: None,
+                delivery: Some(InputDelivery::Steer {
+                    expected_active_turn_id,
+                }),
+            },
+        )
+        .await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::NoActiveTurn {
+            session_id,
+            expected_active_turn_id,
+        }
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S09: two after-current-turn inputs accepted through protocol version
+/// thirteen stay queued until the occupied slot terminalizes, then activate in
+/// immutable acceptance order.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s09_queued_inputs_deliver_in_acceptance_order_after_the_active_turn()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, active_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("active request")).await?;
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    activate_turn(&runtime.pool, session).await?;
+
+    let first_queued_turn = submit_queued_input(
+        &mut connection,
+        3,
+        session_id,
+        active_turn_id,
+        2,
+        "first queued request",
+    )
+    .await?;
+    let second_queued_turn = submit_queued_input(
+        &mut connection,
+        4,
+        session_id,
+        active_turn_id,
+        3,
+        "second queued request",
+    )
+    .await?;
+    assert_ne!(first_queued_turn, second_queued_turn);
+
+    let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+    complete_active_text_turn(&runtime.pool, session, targets.clone()).await?;
+    activate_expected_turn(&runtime.pool, session, first_queued_turn).await?;
+    complete_active_text_turn(&runtime.pool, session, targets).await?;
+    activate_expected_turn(&runtime.pool, session, second_queued_turn).await?;
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S03: an acknowledged after-current-turn input remains durable across an
+/// actual process stop, startup scan, and listener restart, then activates as
+/// the exact queued turn after the abandoned active turn is recovered.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s03_queued_input_survives_process_restart_and_startup_scan() -> Result<(), Box<dyn Error>>
+{
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, active_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("active request")).await?;
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    activate_turn(&runtime.pool, session).await?;
+    let queued_turn_id = submit_queued_input(
+        &mut connection,
+        3,
+        session_id,
+        active_turn_id,
+        2,
+        "durable queued request",
+    )
+    .await?;
+    drop(connection);
+
+    assert_eq!(runtime.restart().await?, 1);
+    activate_expected_turn(&runtime.pool, session, queued_turn_id).await?;
+
     runtime.stop().await
 }

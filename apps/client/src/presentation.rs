@@ -116,6 +116,18 @@ impl<'a> Output<'a> {
         writeln!(self.stdout, "{session_id}")
     }
 
+    pub(crate) fn steering_submitted(
+        &mut self,
+        accepted_input_id: CanonicalUuid,
+        acceptance_position: u64,
+        source_turn_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "accepted_input={accepted_input_id} position={acceptance_position} source_turn={source_turn_id}"
+        )
+    }
+
     pub(crate) fn session_defaults_replaced(
         &mut self,
         session_id: CanonicalUuid,

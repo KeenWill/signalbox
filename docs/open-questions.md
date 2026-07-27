@@ -349,10 +349,9 @@ questions below remain open.
   backpressure, and redaction rules, remain undecided. The implemented durable
   transition relay is owned by [process-protocol](spec/process-protocol.md).
   Blocks live-token display. (S02, S24)
-- **Process-protocol operation expansion.** The interrupt treatment now crosses
-  the wire as `stop_turn` and the canonical tool decision as
-  `decide_tool_request` ([process-protocol](spec/process-protocol.md)); the
-  next-safe-point and after-current delivery treatments and administrative
+- **Process-protocol operation expansion.** The interrupt, canonical tool
+  decision, next-safe-point steering, and after-current queue treatments now
+  cross the wire ([process-protocol](spec/process-protocol.md)); administrative
   operations still need their owning product slices and exact wire projections.
   Blocks only those operations. (S01–S10)
 - **Persistence implementation within the accepted relational baseline.**

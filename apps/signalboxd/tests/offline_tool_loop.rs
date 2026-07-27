@@ -6,9 +6,10 @@
 
 use std::{
     error::Error,
-    fmt,
+    fmt, fs,
+    os::unix::fs::PermissionsExt,
     sync::{Arc, Mutex},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use signalbox_application::{
@@ -49,6 +50,10 @@ use signalbox_persistence::{
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
     submit_input::SubmitInputRepository, tool_loop::PostgresToolLoopRepository,
 };
+use signalbox_process_protocol::{
+    CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent, InputDelivery,
+    ProtocolVersion, RequestId, ServerMessage, decode_server_line, encode_client_line,
+};
 use signalboxd::{
     ActivatedTurnExecution, CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
     CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME, CHANGE_REQUEST_FILE_PATCH_NAME,
@@ -58,16 +63,24 @@ use signalboxd::{
     ChangeRequestSummaryResult, ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult,
     CiJobLogResult, CodeHostOperation, CodeHostResult, CodeHostResultCompleteness,
     CodeHostTransport, CodeHostTransportFailure, DaemonTools, FilePatchResult,
-    PostgresProviderModelExecution, PostgresProviderToolLoopExecution, PostgresSessionStatusWriter,
+    HubModelConfiguration, LocalProcessListener, PostgresProviderModelExecution,
+    PostgresProviderToolLoopExecution, PostgresSessionStatusWriter, ProcessRuntime,
     RerunFailedJobsResult, ReviewThread, ReviewThreadComment, ReviewThreadFields,
     ReviewThreadResolution, ReviewThreadsResult, SessionStatusWrite, SessionStatusWriteOutcome,
     SessionStatusWriter, ThreadReplyResult, ThreadResolveResult, WebFetchBodyCompleteness,
     WebFetchRequest, WebFetchResponse, WebFetchTransport, WebFetchTransportFailure,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
+use tempfile::tempdir;
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
+    sync::watch,
+    time::timeout,
 };
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
@@ -77,6 +90,16 @@ const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const FIXTURE_ID_SEED: u128 = 0x3100;
 const DECISION_COMMAND_ID: u128 = 0x3110;
 const OFFLINE_CODE_HOST_TOKEN: &[u8] = b"offline-code-host-token";
+const PROCESS_MODEL_CONFIGURATION: &str = r#"
+version = 1
+
+[[models]]
+selection_id = "00000000-0000-0000-0000-000000000001"
+target_id = "00000000-0000-0000-0000-000000000002"
+provider = "anthropic"
+provider_model = "fixture-model"
+max_output_tokens = 64
+"#;
 
 #[derive(Clone, Debug)]
 struct RecordingScriptedModel {
@@ -2628,8 +2651,73 @@ async fn s02_s10_inv006_failed_continuation_call_admits_and_runs_later_turn()
     Ok(())
 }
 
-/// S02 / S08 / S10 / INV-016 / INV-036: a NextSafePoint input accepted while
-/// a tool round is parked is consumed by the continuation call, the
+async fn submit_steering_through_process(
+    fixture: &ToolLoopFixture,
+    command_id: u128,
+    content: &str,
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+    let socket = directory.path().join("hub.sock");
+    let listener = LocalProcessListener::bind(&socket)?;
+    let sweep = PostgresEligibilitySweep::new(fixture.pool.clone());
+    let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let runtime = ProcessRuntime::new(
+        listener,
+        fixture.pool.clone(),
+        eligibility_nudge,
+        fixture.tool_dispatch_gate.clone(),
+        HubModelConfiguration::parse(PROCESS_MODEL_CONFIGURATION)?,
+    );
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
+
+    let stream = UnixStream::connect(&socket).await?;
+    let (reader, mut writer) = stream.into_split();
+    let frame = ClientFrame::try_new_for_version(
+        ProtocolVersion::Thirteen,
+        RequestId::try_new(1)?,
+        ClientRequest::SubmitInput {
+            command_id: CommandId::try_from_uuid(Uuid::from_u128(command_id))?,
+            session_id: CanonicalUuid::from_uuid(fixture.session.into_uuid()),
+            content: InputContent::new(content.to_owned()),
+            expected_defaults_version: None,
+            delivery: Some(InputDelivery::Steer {
+                expected_active_turn_id: CanonicalUuid::from_uuid(fixture.turn.into_uuid()),
+            }),
+        },
+    )?;
+    writer.write_all(&encode_client_line(&frame)?).await?;
+    let mut reader = BufReader::new(reader);
+    let mut line = Vec::new();
+    reader.read_until(b'\n', &mut line).await?;
+    let response = decode_server_line(&line)?.message().clone();
+
+    drop(reader);
+    drop(writer);
+    shutdown.send(true)?;
+    timeout(Duration::from_secs(10), runtime_task).await???;
+    match response {
+        ServerMessage::SteeringSubmitted {
+            session_id,
+            acceptance_position,
+            source_turn_id,
+            ..
+        } if session_id.into_uuid() == fixture.session.into_uuid()
+            && acceptance_position.value() == 2
+            && source_turn_id.into_uuid() == fixture.turn.into_uuid() =>
+        {
+            Ok(())
+        }
+        message => Err(std::io::Error::other(format!(
+            "unexpected pending-steering receipt: {message:?}"
+        ))
+        .into()),
+    }
+}
+
+/// S02 / S08 / S10 / INV-016 / INV-036: a NextSafePoint input accepted through
+/// process protocol version thirteen while a tool round is parked is consumed by the continuation call, the
 /// steering-bearing continuation completes the turn, and the committed shape
 /// reloads through the scheduling projection — the startup scan completes and
 /// the next submit activates and runs.
@@ -2657,34 +2745,7 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_completes()
         .await?;
     let request = fixture.wait_for_requests(1).await?[0];
 
-    let sweep = PostgresEligibilitySweep::new(fixture.pool.clone());
-    let (nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
-    let mut submit = SubmitInputService::new(
-        UuidV7SubmitInputIdGenerator,
-        SubmitInputRepository::new(fixture.pool.clone()),
-        nudge,
-        fixture.tool_dispatch_gate.clone(),
-    );
-    let steering = submit
-        .execute(SubmitInputRequest::try_new(
-            DurableCommandId::from_uuid(Uuid::from_u128(0x3610)),
-            fixture.session,
-            UserContent::try_text(String::from("steer the parked tool round"))
-                .expect("fixture steering content is admitted"),
-            DeliveryRequest::NextSafePoint {
-                expected_active_turn: fixture.turn,
-            },
-        )?)
-        .await?;
-    assert!(
-        matches!(
-            steering,
-            SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
-                SubmitInputAppliedResult::PendingSteering(_)
-            ))
-        ),
-        "a safe-point input against the parked round is accepted as pending steering"
-    );
+    submit_steering_through_process(&fixture, 0x3610, "steer the parked tool round").await?;
 
     fixture
         .decide(request, ToolApprovalDecision::Approve)

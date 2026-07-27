@@ -87,9 +87,9 @@ use signalbox_process_protocol::{
     FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError,
     IMPORTED_TRANSCRIPT_PROTOCOL_VERSION, ImportedContentKind,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
-    ImportedSpeaker, InputContent, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter,
-    ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection, ProtocolVersion,
-    RejectionDetail, RequestId, ReviewDiffSide as WireReviewDiffSide,
+    ImportedSpeaker, InputContent, InputDelivery, MAX_FRAME_BYTES, MetadataActor,
+    MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection,
+    ProtocolVersion, RejectionDetail, RequestId, ReviewDiffSide as WireReviewDiffSide,
     ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingDisposition as WireReviewFindingDisposition, ReviewFindingInput,
     ReviewFindingSnapshot, ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle,
@@ -680,6 +680,7 @@ where
             session_id,
             content,
             expected_defaults_version,
+            delivery,
         } => {
             handle_submit_input(
                 writer,
@@ -689,6 +690,7 @@ where
                 session_id,
                 content,
                 expected_defaults_version,
+                delivery,
                 &services.pool,
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
@@ -3882,7 +3884,8 @@ async fn handle_submit_input<Writer>(
     command_id: uuid::Uuid,
     session_id: CanonicalUuid,
     content: InputContent,
-    expected_defaults_version: CanonicalU64,
+    expected_defaults_version: Option<CanonicalU64>,
+    delivery: Option<InputDelivery>,
     pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
@@ -3918,17 +3921,6 @@ where
             }
         }
     }
-    let Some(expected_version) =
-        SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
-    else {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::InvalidRequest),
-        )
-        .await;
-    };
     let Ok(content) = admitted_user_content(content) else {
         return write_error(
             writer,
@@ -3938,17 +3930,39 @@ where
         )
         .await;
     };
-    let request = SubmitInputRequest::try_new(
-        command_id,
-        session,
-        content,
-        DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: PerInputConfigurationChoices::new(
-                expected_version,
-                ModelSelectionOverride::UseSessionDefault,
-            ),
-        },
-    );
+    let expected_version = expected_defaults_version
+        .and_then(|version| SessionConfigurationDefaultsVersion::try_from_u64(version.value()));
+    let configuration = || {
+        expected_version.map(|version| {
+            PerInputConfigurationChoices::new(version, ModelSelectionOverride::UseSessionDefault)
+        })
+    };
+    let delivery = match delivery {
+        None | Some(InputDelivery::StartWhenIdle {}) => configuration()
+            .map(|configuration| DeliveryRequest::StartWhenNoActiveTurn { configuration }),
+        Some(InputDelivery::Steer {
+            expected_active_turn_id,
+        }) if expected_version.is_none() => Some(DeliveryRequest::NextSafePoint {
+            expected_active_turn: TurnId::from_uuid(expected_active_turn_id.into_uuid()),
+        }),
+        Some(InputDelivery::Queue {
+            expected_active_turn_id,
+        }) => configuration().map(|configuration| DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: TurnId::from_uuid(expected_active_turn_id.into_uuid()),
+            configuration,
+        }),
+        Some(InputDelivery::Steer { .. }) => None,
+    };
+    let Some(delivery) = delivery else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let request = SubmitInputRequest::try_new(command_id, session, content, delivery);
     let Ok(request) = request else {
         return write_error(
             writer,
@@ -4274,13 +4288,18 @@ where
             .await
         }
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::PendingSteering(_),
+            SubmitInputAppliedResult::PendingSteering(result),
         ))) => {
-            write_error(
+            write_message(
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                ServerMessage::SteeringSubmitted {
+                    session_id,
+                    accepted_input_id: wire_uuid(result.accepted_input().into_uuid()),
+                    acceptance_position: CanonicalU64::new(result.acceptance_position().as_u64()),
+                    source_turn_id: wire_uuid(result.binding().source_turn().into_uuid()),
+                },
             )
             .await
         }
@@ -5758,7 +5777,7 @@ impl ProtocolError {
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1 through 11"
+                    "the protocol version is unsupported; supported versions: 1 through 8, 10, 11, and 13"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
@@ -6486,7 +6505,7 @@ mod tests {
         assert!(
             ProtocolError::without_detail(ErrorCode::UnsupportedVersion)
                 .message
-                .contains("1 through 11")
+                .contains("1 through 8, 10, 11, and 13")
         );
     }
 
