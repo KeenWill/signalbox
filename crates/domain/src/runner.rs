@@ -16,7 +16,7 @@ use crate::{
     RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId, SessionId,
     ToolArgumentsKind, ToolAttemptDispatchCorrelation, ToolAttemptId, ToolBatch,
     ToolBatchExecutionFailure, ToolDecisionSource, ToolEffectClass, ToolName,
-    ToolPermissionDefault, ToolRequestId,
+    ToolPermissionDefault,
 };
 
 const NAME_MAX_BYTES: usize = 64;
@@ -759,9 +759,8 @@ pub struct RunnerLeaseOfferRequest {
 
 #[derive(Debug, Eq, PartialEq)]
 struct ClaimedAttemptReplacementEvidence {
-    retired: ToolAttemptId,
-    replacement: ToolAttemptId,
-    request: ToolRequestId,
+    source: RunnerLeaseCorrelation,
+    replacement: ToolAttemptDispatchCorrelation,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1294,9 +1293,8 @@ impl RunnerLeaseRetryAuthority {
             RunnerToolAttemptAuthorization::try_new(replacement.approved, replacement.authorized)?;
         authorization.retry_evidence = Some(RunnerRetryAttemptEvidence::Claimed(
             ClaimedAttemptReplacementEvidence {
-                retired: replacement.retired.attempt(),
-                replacement: authorization.authorized.correlation().attempt(),
-                request: authorization.approved.request().id(),
+                source: self.source.correlation.clone(),
+                replacement: authorization.authorized.correlation(),
             },
         ));
         Ok(RunnerClaimedAttemptReplacement {
@@ -1530,10 +1528,9 @@ impl SessionRunnerPlacement {
                 return Err(RunnerDomainError::AttemptIdentityReuse);
             }
             (Some(claimed), Some(RunnerRetryAttemptEvidence::Claimed(replacement)))
-                if replacement.retired == claimed
-                    && replacement.replacement == attempt.attempt()
-                    && replacement.request == lost.dispatch.request()
-                    && attempt.request() == lost.dispatch.request() => {}
+                if replacement.source == lost.correlation()
+                    && replacement.source.dispatch.attempt() == claimed
+                    && replacement.replacement == attempt => {}
             (Some(_), _) => return Err(RunnerDomainError::CorrelationMismatch),
             (None, Some(RunnerRetryAttemptEvidence::Unclaimed { dispatch: source }))
                 if attempt == lost.dispatch && source == lost.dispatch => {}
@@ -3450,6 +3447,43 @@ mod tests {
         );
         assert_eq!(replacement.attempt(), retry_attempt);
         assert_eq!(replacement.tool(), &expected_tool);
+    }
+
+    #[test]
+    fn s31_inv043_claimed_retry_rejects_cross_wired_lost_lease_correlation() {
+        let (registration, placement, grant, offered) =
+            offered("inspect", tool_attempt_id(ATTEMPT));
+        let correlation = offered.correlation();
+        let claimed = offered
+            .claim(correlation)
+            .expect("the exact first lease is claimed");
+        let source_loss = claimed.lose().expect("the claimed pure lease may be lost");
+        let prepared = source_loss
+            .retry()
+            .expect("the source loss carries retry authority")
+            .prepare_claimed_attempt(
+                claimed_batch("inspect", RunnerToolEffectClass::Pure),
+                tool_attempt_id(RETRY_ATTEMPT),
+            )
+            .expect("the source loss prepares its exact replacement");
+        let (_, _, authorization) = prepared.into_parts();
+        let mut cross_wired_input = borrowed_lease_reconstitution_input(source_loss.lost());
+        cross_wired_input.lease = runner_lease_id(LEASE + 1);
+        cross_wired_input.recorded_correlation.lease = runner_lease_id(LEASE + 1);
+        let cross_wired_loss =
+            RunnerLease::reconstitute_loss(cross_wired_input, &registration, None)
+                .expect("the distinct complete loss is internally consistent");
+
+        assert_eq!(
+            placement.offer_retry(
+                &enrollment_for_registration(&registration),
+                &registration,
+                grant.as_ref(),
+                cross_wired_loss,
+                authorization,
+            ),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
     }
 
     #[test]

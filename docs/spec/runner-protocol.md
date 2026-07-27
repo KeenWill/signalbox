@@ -225,17 +225,20 @@ Generation exhaustion, reuse of any current or retired attempt identity for
 either claimed replacement or ordinary preparation, and a standalone
 same-request authorization for claimed retry all fail closed. A claimed
 replacement must retire the complete original session, turn, issuing turn
-attempt, request, physical attempt, dispatch generation, and effect fence.
-`RunnerLeaseLoss` has sealed construction, so only `RunnerLease::lose` or
-`RunnerLease::reconstitute_loss` over an already-lost checked projection can
-produce retry or crash-classification authority. Re-leasing continues one
-logical tool request and lease lineage. Its successor `RunnerGeneration` is
-distinct from the fresh physical attempt's `ToolDispatchGeneration`, which
-starts at `first()` under the tool-loop law. Every repeated physical execution
-therefore has its own attempt identity and record as required by INV-004.
-Side-effecting loss composes with the existing physical-attempt ambiguity
-machinery; this domain slice does not duplicate or overwrite that attempt's
-outcome (INV-004, INV-025, INV-026, INV-043).
+attempt, request, physical attempt, dispatch generation, and effect fence. Its
+private evidence retains the complete source lease correlation and complete
+replacement dispatch; the re-lease transition compares both without truncating
+them to shared request or attempt identities. `RunnerLeaseLoss` has sealed
+construction, so only `RunnerLease::lose` or `RunnerLease::reconstitute_loss`
+over an already-lost checked projection can produce retry or
+crash-classification authority. Re-leasing continues one logical tool request
+and lease lineage. Its successor `RunnerGeneration` is distinct from the fresh
+physical attempt's `ToolDispatchGeneration`, which starts at `first()` under the
+tool-loop law. Every repeated physical execution therefore has its own attempt
+identity and record as required by INV-004. Side-effecting loss composes with
+the existing physical-attempt ambiguity machinery; this domain slice does not
+duplicate or overwrite that attempt's outcome (INV-004, INV-025, INV-026,
+INV-043).
 
 The lease aggregate contains no channel handle or process-local connection
 state. A reconnecting registration cannot recreate, complete, or discard a lease
