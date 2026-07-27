@@ -69,7 +69,7 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn push(
         &mut self,
         line: &[u8],
-        sink: &mut (dyn ObservationSink<C> + Send),
+        sink: &mut RedactingSink<'_, C>,
     ) -> Result<(), DecodeFailure> {
         match &self.terminal {
             Some(CliTerminal::Completed | CliTerminal::Failed(_)) => {
@@ -123,8 +123,14 @@ impl<C: Clone> EventDecoder<C> {
                         "thread.started carries an empty or duplicate thread id",
                     ));
                 }
-                self.exchange.provider_request_id =
-                    Some(ProviderRequestId::new(redact_text(&event.thread_id)));
+                // Sanitized against the held lookbehind before the
+                // ExchangeEstablished observation (which flushes it), so a
+                // thread id that extends a credential marker held from a
+                // drifted earlier reasoning delta is suppressed instead of
+                // escaping in the observation and terminal exchange facts.
+                self.exchange.provider_request_id = Some(ProviderRequestId::new(
+                    sink.redact_terminal_failure_text(&event.thread_id),
+                ));
                 sink.observe(Observation {
                     correlation: self.correlation.clone(),
                     fact: ObservationFact::ExchangeEstablished(self.exchange.clone()),

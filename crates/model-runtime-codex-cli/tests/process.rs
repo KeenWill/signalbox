@@ -1599,6 +1599,32 @@ async fn stderr_deadline_preserves_a_pre_existing_kill_signal_exit() {
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-stderr-kill-group"));
 }
 
+/// INV-035: a `thread_id` that continues a credential marker held from a
+/// drifted earlier reasoning delta is sanitized against the held state, so it
+/// escapes neither the `ExchangeEstablished` observation nor the terminal
+/// exchange facts.
+#[cfg(unix)]
+#[tokio::test]
+async fn inv_035_drifted_thread_id_is_redacted_against_held_state() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = reasoning_before_thread_started_cli(temporary.path());
+    let runtime = runtime(temporary.path(), executable);
+    let prepared = prepare(
+        &runtime,
+        operation("drift", DeliveryMode::Streamed, OperationShape::Text),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let diagnostic = format!("{:?}{:?}", report.evidence, observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
+}
+
 /// INV-035 / evidence: a leader that wrote a classifiable stderr failure,
 /// closed stderr, and exited nonzero keeps that failure's typed kind at the
 /// stdout-cleanup deadline — even while a descendant holds stdout open —
@@ -2345,6 +2371,33 @@ printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cache
         cache_write = fixtures::CACHE_CREATION_INPUT_TOKENS,
         output = fixtures::OUTPUT_TOKENS,
     )
+}
+
+/// Scripts a CLI whose reasoning (ending in a credential marker) drifts ahead
+/// of `thread.started`, whose `thread_id` is an opaque continuation of that
+/// marker. Exercises the held-state sanitization of the thread id.
+#[cfg(unix)]
+fn reasoning_before_thread_started_cli(directory: &Path) -> std::path::PathBuf {
+    let envelope_text = format!(
+        r#"{{\"outcome\":\"completed\",\"text\":\"{}\",\"tool_calls\":[]}}"#,
+        fixtures::BUFFERED_ANSWER
+    );
+    let script = format!(
+        r#"#!/bin/sh
+printf '%s\n' '{{"type":"turn.started"}}'
+printf '%s\n' '{{"type":"item.completed","item":{{"id":"reason-drift","type":"reasoning","text":"Authorization:"}}}}'
+printf '%s\n' '{{"type":"thread.started","thread_id":" {authorization}"}}'
+printf '%s\n' '{{"type":"item.completed","item":{{"id":"message-offline-1","type":"agent_message","text":"{envelope_text}"}}}}'
+printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cached_input_tokens":{cache_read},"cache_write_input_tokens":{cache_write},"output_tokens":{output},"reasoning_output_tokens":3}}}}'
+"#,
+        authorization = fixtures::SENSITIVE_SPLIT_AUTHORIZATION,
+        envelope_text = envelope_text,
+        input = fixtures::INPUT_TOKENS,
+        cache_read = fixtures::CACHE_READ_INPUT_TOKENS,
+        cache_write = fixtures::CACHE_CREATION_INPUT_TOKENS,
+        output = fixtures::OUTPUT_TOKENS,
+    );
+    script_cli(directory, "reasoning-drift-codex", &script)
 }
 
 /// Scripts a CLI that writes a classifiable credential-rejection to stderr,
