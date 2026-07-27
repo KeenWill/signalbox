@@ -390,9 +390,11 @@ fn selected_or(value: Option<String>, fallback: &str) -> String {
 
 #[test]
 fn smoke_variable_selection_prefers_a_populated_override() {
+    let override_value = "codex-override".to_string();
+
     assert_eq!(
-        selected_or(Some("codex-override".to_string()), DEFAULT_EXECUTABLE),
-        "codex-override"
+        selected_or(Some(override_value.clone()), DEFAULT_EXECUTABLE),
+        override_value
     );
 }
 
@@ -445,7 +447,16 @@ fn resolved_executable(
         return current_directory.join(path).to_string_lossy().into_owned();
     }
     std::env::split_paths(search)
-        .map(|directory| directory.join(executable))
+        .map(|directory| {
+            // A relative or empty PATH element denotes a directory under the
+            // caller's working directory; anchor it so the returned path
+            // satisfies the adapter's absolute-executable requirement.
+            if directory.is_absolute() {
+                directory.join(executable)
+            } else {
+                current_directory.join(directory).join(executable)
+            }
+        })
         .find(|candidate| executable_file(candidate))
         .unwrap_or_else(|| {
             panic!(
@@ -457,16 +468,20 @@ fn resolved_executable(
         .into_owned()
 }
 
-/// Mirrors shell `PATH` lookup: a regular file that carries no execute bit is
-/// skipped, so a non-executable shadow cannot hide the real executable in a
-/// later directory.
+/// Mirrors shell `PATH` lookup: a regular file the current process cannot
+/// execute — checked with effective credentials, not merely any execute bit —
+/// is skipped, so a non-executable shadow cannot hide the real executable in
+/// a later directory.
 #[cfg(unix)]
 fn executable_file(candidate: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
     candidate.is_file()
-        && std::fs::metadata(candidate)
-            .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+        && rustix::fs::accessat(
+            rustix::fs::CWD,
+            candidate,
+            rustix::fs::Access::EXEC_OK,
+            rustix::fs::AtFlags::EACCESS,
+        )
+        .is_ok()
 }
 
 #[cfg(not(unix))]
@@ -491,20 +506,11 @@ fn executable_resolution_passes_an_absolute_path_through() {
 #[test]
 fn executable_resolution_anchors_a_relative_path_to_the_working_directory() {
     let directory = tempfile::tempdir().expect("resolution fixture directory is created");
+    let relative = "tooling/codex-relative";
 
-    let resolved = resolved_executable(
-        "tooling/codex-relative",
-        directory.path(),
-        std::ffi::OsStr::new(""),
-    );
+    let resolved = resolved_executable(relative, directory.path(), std::ffi::OsStr::new(""));
 
-    assert_eq!(
-        resolved,
-        directory
-            .path()
-            .join("tooling/codex-relative")
-            .to_string_lossy()
-    );
+    assert_eq!(resolved, directory.path().join(relative).to_string_lossy());
 }
 
 /// Writes an executable fixture file and returns its path.
@@ -532,6 +538,46 @@ fn executable_resolution_finds_a_bare_command_on_the_search_path() {
         .expect("the fixture search path joins");
 
     let resolved = resolved_executable("codex-on-path", empty.path(), &search);
+
+    assert_eq!(resolved, on_path.to_string_lossy());
+}
+
+/// A file whose only execute bit belongs to "other" is not executable by
+/// its owner, so it cannot shadow the runnable executable in a later
+/// directory, exactly as normal PATH lookup skips it.
+#[cfg(unix)]
+#[test]
+fn executable_resolution_skips_an_other_only_execute_bit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let shadowing = tempfile::tempdir().expect("resolution fixture directory is created");
+    let populated = tempfile::tempdir().expect("resolution fixture directory is created");
+    let shadow = shadowing.path().join("codex-other-only");
+    std::fs::write(&shadow, "#!/bin/sh\n").expect("the other-only shadow file is written");
+    let mut permissions = std::fs::metadata(&shadow)
+        .expect("the other-only shadow file has metadata")
+        .permissions();
+    permissions.set_mode(0o004 | 0o001);
+    std::fs::set_permissions(&shadow, permissions).expect("the shadow keeps only the other bits");
+    let on_path = executable_fixture(populated.path(), "codex-other-only");
+    let search = std::env::join_paths([shadowing.path(), populated.path()])
+        .expect("the fixture search path joins");
+
+    let resolved = resolved_executable("codex-other-only", shadowing.path(), &search);
+
+    assert_eq!(resolved, on_path.to_string_lossy());
+}
+
+/// A relative PATH element is anchored to the working directory, so the
+/// returned candidate satisfies the adapter's absolute-path requirement.
+#[cfg(unix)]
+#[test]
+fn executable_resolution_anchors_a_relative_search_entry() {
+    let working = tempfile::tempdir().expect("resolution fixture directory is created");
+    std::fs::create_dir(working.path().join("bin")).expect("the relative bin directory is created");
+    let on_path = executable_fixture(&working.path().join("bin"), "codex-rel");
+
+    let resolved = resolved_executable("codex-rel", working.path(), std::ffi::OsStr::new("bin"));
 
     assert_eq!(resolved, on_path.to_string_lossy());
 }
