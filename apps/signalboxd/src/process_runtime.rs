@@ -71,7 +71,8 @@ use signalbox_persistence::{
         ProcessImportedContentKind, ProcessImportedSourceSpeaker,
         ProcessModelCallRecoveryPrecondition, ProcessModelSelection, ProcessReadError,
         ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionAncestry,
-        ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptTurn, ProcessTurnState,
+        ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptModelCallUsage,
+        ProcessTranscriptTurn, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
@@ -87,10 +88,10 @@ use signalbox_process_protocol::{
     FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError,
     IMPORTED_TRANSCRIPT_PROTOCOL_VERSION, ImportedContentKind,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
-    ImportedSpeaker, InputContent, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter,
-    ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection, ProtocolVersion,
-    RejectionDetail, RequestId, ReviewDiffSide as WireReviewDiffSide,
-    ReviewExternalObjectKind as WireReviewExternalObjectKind,
+    ImportedSpeaker, InputContent, MAX_FRAME_BYTES, MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
+    MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
+    ModelSelection as WireModelSelection, ProtocolVersion, RejectionDetail, RequestId,
+    ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingDisposition as WireReviewFindingDisposition, ReviewFindingInput,
     ReviewFindingSnapshot, ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle,
     ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot,
@@ -4812,6 +4813,9 @@ async fn spool_transcript(
     )
     .await
     .map_err(TranscriptSpoolError::Spool)?;
+    let carries_model_call_usage = version.as_u64() >= MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION;
+    let mut model_calls_ended = false;
+    let mut model_call_count = 0_u64;
     while let Some(item) = reader
         .next_item()
         .await
@@ -4824,7 +4828,32 @@ async fn spool_transcript(
                     .map_err(SnapshotSpoolError::from_connection)
                     .map_err(TranscriptSpoolError::Spool)?;
             }
+            ProcessTranscriptItem::ModelCallUsage(usage) => {
+                if carries_model_call_usage {
+                    write_model_call_usage(
+                        &mut file,
+                        version,
+                        request_id,
+                        model_call_count,
+                        &usage,
+                    )
+                    .await
+                    .map_err(SnapshotSpoolError::from_connection)
+                    .map_err(TranscriptSpoolError::Spool)?;
+                }
+                model_call_count = model_call_count
+                    .checked_add(1)
+                    .ok_or(SnapshotSpoolError::EncodeInvariant)
+                    .map_err(TranscriptSpoolError::Spool)?;
+            }
             ProcessTranscriptItem::Entry(entry) => {
+                if carries_model_call_usage && !model_calls_ended {
+                    write_model_calls_end(&mut file, version, request_id, model_call_count)
+                        .await
+                        .map_err(SnapshotSpoolError::from_connection)
+                        .map_err(TranscriptSpoolError::Spool)?;
+                    model_calls_ended = true;
+                }
                 write_transcript_entry(&mut file, version, request_id, &entry)
                     .await
                     .map_err(SnapshotSpoolError::from_connection)
@@ -4836,6 +4865,12 @@ async fn spool_transcript(
         .summary()
         .ok_or(SnapshotSpoolError::EncodeInvariant)
         .map_err(TranscriptSpoolError::Spool)?;
+    if carries_model_call_usage && !model_calls_ended {
+        write_model_calls_end(&mut file, version, request_id, model_call_count)
+            .await
+            .map_err(SnapshotSpoolError::from_connection)
+            .map_err(TranscriptSpoolError::Spool)?;
+    }
     write_spool_message(
         &mut file,
         version,
@@ -4914,6 +4949,58 @@ where
             turn_id: wire_uuid(turn.turn().into_uuid()),
             acceptance_position: CanonicalU64::new(turn.acceptance_position()),
             state: wire_turn_state(turn.state()),
+        },
+    )
+    .await
+}
+
+async fn write_model_call_usage<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    model_call_index: u64,
+    evidence: &ProcessTranscriptModelCallUsage,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let usage = evidence.usage();
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::TranscriptModelCallUsage {
+            model_call_index: CanonicalU64::new(model_call_index),
+            turn_id: wire_uuid(evidence.turn().into_uuid()),
+            model_call_id: wire_uuid(evidence.call().into_uuid()),
+            usage: ModelCallTokenUsage {
+                input_tokens: usage.input_tokens().map(CanonicalU64::new),
+                output_tokens: usage.output_tokens().map(CanonicalU64::new),
+                cache_creation_input_tokens: usage
+                    .cache_creation_input_tokens()
+                    .map(CanonicalU64::new),
+                cache_read_input_tokens: usage.cache_read_input_tokens().map(CanonicalU64::new),
+            },
+        },
+    )
+    .await
+}
+
+async fn write_model_calls_end<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    model_call_count: u64,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::TranscriptModelCallsEnd {
+            model_call_count: CanonicalU64::new(model_call_count),
         },
     )
     .await

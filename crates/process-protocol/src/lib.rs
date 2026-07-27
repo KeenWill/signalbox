@@ -50,6 +50,12 @@ pub const IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION: u64 = 10;
 /// The review-workflow protocol version.
 pub const REVIEW_WORKFLOW_PROTOCOL_VERSION: u64 = 11;
 
+/// The provider-reported model-call token-usage protocol version.
+///
+/// Versions twelve and thirteen were reserved by concurrent protocol work
+/// when this version was selected.
+pub const MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION: u64 = 14;
+
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProtocolVersion {
@@ -73,6 +79,8 @@ pub enum ProtocolVersion {
     Ten,
     /// Review-workflow command and read vocabulary.
     Eleven,
+    /// Provider-reported model-call token-usage vocabulary.
+    Fourteen,
 }
 
 impl ProtocolVersion {
@@ -89,6 +97,7 @@ impl ProtocolVersion {
             Self::Eight => TURN_CONTROL_PROTOCOL_VERSION,
             Self::Ten => IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION,
             Self::Eleven => REVIEW_WORKFLOW_PROTOCOL_VERSION,
+            Self::Fourteen => MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
         }
     }
 
@@ -104,6 +113,7 @@ impl ProtocolVersion {
             TURN_CONTROL_PROTOCOL_VERSION => Some(Self::Eight),
             IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION => Some(Self::Ten),
             REVIEW_WORKFLOW_PROTOCOL_VERSION => Some(Self::Eleven),
+            MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION => Some(Self::Fourteen),
             _ => None,
         }
     }
@@ -653,6 +663,28 @@ impl ContentFragment {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Provider-reported token fields for one terminal model call.
+///
+/// Every field is required on the wire but independently nullable. A null is
+/// unreported evidence; a reported zero is encoded as the canonical string
+/// `"0"`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCallTokenUsage {
+    /// Provider-reported input-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub input_tokens: Option<CanonicalU64>,
+    /// Provider-reported output-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub output_tokens: Option<CanonicalU64>,
+    /// Provider-reported cache-creation input-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub cache_creation_input_tokens: Option<CanonicalU64>,
+    /// Provider-reported cache-read input-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub cache_read_input_tokens: Option<CanonicalU64>,
 }
 
 impl TryFrom<String> for ContentFragment {
@@ -2653,6 +2685,22 @@ pub enum ServerMessage {
         /// Exact lifecycle state.
         state: TurnState,
     },
+    /// Exact provider-reported token fields for one terminal model call.
+    TranscriptModelCallUsage {
+        /// Zero-based model-call evidence index in this snapshot.
+        model_call_index: CanonicalU64,
+        /// Turn that owns the terminal model call.
+        turn_id: CanonicalUuid,
+        /// Immutable model-call identity.
+        model_call_id: CanonicalUuid,
+        /// Exact independently nullable provider fields.
+        usage: ModelCallTokenUsage,
+    },
+    /// Completes the model-call evidence section of one transcript snapshot.
+    TranscriptModelCallsEnd {
+        /// Number of preceding model-call usage messages.
+        model_call_count: CanonicalU64,
+    },
     /// One non-text frontier member.
     TranscriptEntry {
         /// Zero-based frontier member index.
@@ -2804,6 +2852,9 @@ impl ServerMessage {
     pub const fn minimum_protocol_version(&self) -> u64 {
         match self {
             Self::TranscriptTurn { state, .. } => state.minimum_protocol_version(),
+            Self::TranscriptModelCallUsage { .. } | Self::TranscriptModelCallsEnd { .. } => {
+                MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION
+            }
             Self::TranscriptEntry { entry, .. } => entry.minimum_protocol_version(),
             Self::TranscriptTextEntry { entry, .. } => entry.minimum_protocol_version(),
             Self::SessionEvent { event, .. } => event.minimum_protocol_version(),
@@ -3099,7 +3150,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, 6, 7, 8, 10, and 11",
+                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, and 14",
             ),
         }
     }
@@ -3310,7 +3361,7 @@ fn probe_header(
     }
     if !matches!(
         version_spelling,
-        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "10" | "11"
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "10" | "11" | "14"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -3424,6 +3475,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "8" => Some(ProtocolVersion::Eight),
         "10" => Some(ProtocolVersion::Ten),
         "11" => Some(ProtocolVersion::Eleven),
+        "14" => Some(ProtocolVersion::Fourteen),
         _ => None,
     }
 }
@@ -3472,10 +3524,11 @@ mod tests {
         InputContent, MAX_CONTENT_FRAGMENT_BYTES, MAX_JSON_CONTAINER_DEPTH,
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
-        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MetadataActor, MetadataLastWriter,
-        ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
-        RejectionDetail, RequestId, ReviewTargetSubject, SESSION_METADATA_PROTOCOL_VERSION,
-        ServerFrame, ServerMessage, SessionEvent, SessionMetadata, ToolBatchState, ToolDecision,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
+        MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState,
+        ModelCallTokenUsage, ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail,
+        RequestId, ReviewTargetSubject, SESSION_METADATA_PROTOCOL_VERSION, ServerFrame,
+        ServerMessage, SessionEvent, SessionMetadata, ToolBatchState, ToolDecision,
         TranscriptEntry, TranscriptTextEntry, TurnState, decode_client_line, decode_server_line,
         encode_client_line, encode_server_line,
     };
@@ -3559,7 +3612,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1, 2, 3, 4, 5, 6, 7, 8, 10, and 11")
+                .contains("supported versions are 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, and 14")
         );
     }
 
@@ -4441,6 +4494,50 @@ mod tests {
         assert_eq!(frame.version(), ProtocolVersion::Eleven);
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
+    }
+
+    /// INV-033: version fourteen adds exact required-nullable token evidence
+    /// without admitting it in the preceding retained vocabulary.
+    #[test]
+    fn inv033_version_fourteen_model_call_usage_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let message = ServerMessage::TranscriptModelCallUsage {
+            model_call_index: CanonicalU64::new(0),
+            turn_id: uuid(2),
+            model_call_id: uuid(3),
+            usage: ModelCallTokenUsage {
+                input_tokens: Some(CanonicalU64::new(10)),
+                output_tokens: Some(CanonicalU64::new(0)),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(CanonicalU64::new(4)),
+            },
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::Eleven, request_id, message.clone()),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+
+        let frame =
+            ServerFrame::try_new_for_version(ProtocolVersion::Fourteen, request_id, message)?;
+        let encoded = encode_server_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            format!(
+                "{{\"version\":{MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION},\"request_id\":\"1\",\"message\":{{\"type\":\"transcript_model_call_usage\",\"model_call_index\":\"0\",\"turn_id\":\"00000000-0000-0000-0000-000000000002\",\"model_call_id\":\"00000000-0000-0000-0000-000000000003\",\"usage\":{{\"input_tokens\":\"10\",\"output_tokens\":\"0\",\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":\"4\"}}}}}}\n"
+            )
+        );
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn version_fourteen_usage_rejects_an_omitted_evidence_field() {
+        let error = decode_server_line(&line(
+            r#"{"version":14,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null}}}"#,
+        ))
+        .expect_err("required-nullable evidence fields cannot be omitted");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
     }
 
     /// INV-033: a version-ten imported-frontier request rejects position zero.

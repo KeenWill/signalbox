@@ -2617,7 +2617,38 @@ pub enum ModelCallAuthorizationFailure { CallMissing, CallIsNotPrepared, Attempt
 pub struct ModelCallAuthorizationError { /* private */ }
 pub struct AuthorizedModelCall { /* private */ }
 pub struct IssuedModelCallCorrelation { /* private */ }
+impl IssuedModelCallCorrelation {
+    // accessors: session(), turn(), attempt(), call(), target(), frontier()
+    pub fn bind_terminal_observation(
+        self,
+        observation: ModelCallTerminalObservation,
+    ) -> CorrelatedModelCallTerminalObservation;
+    pub fn bind_terminal_observation_with_usage(
+        self,
+        observation: ModelCallTerminalObservation,
+        usage: ProviderReportedTokenUsage,
+    ) -> CorrelatedModelCallTerminalObservation;
+}
+pub struct ProviderReportedTokenUsage { /* private */ }
+impl ProviderReportedTokenUsage {
+    pub const fn unreported() -> Self;
+    pub const fn with_input_tokens(self, input_tokens: Option<u64>) -> Self;
+    pub const fn with_output_tokens(self, output_tokens: Option<u64>) -> Self;
+    pub const fn with_cache_creation_input_tokens(
+        self,
+        cache_creation_input_tokens: Option<u64>,
+    ) -> Self;
+    pub const fn with_cache_read_input_tokens(
+        self,
+        cache_read_input_tokens: Option<u64>,
+    ) -> Self;
+    // accessors: input_tokens(), output_tokens(),
+    // cache_creation_input_tokens(), cache_read_input_tokens()
+}
 pub struct CorrelatedModelCallTerminalObservation { /* private */ }
+impl CorrelatedModelCallTerminalObservation {
+    // accessors: call(), correlation(), observation(), usage()
+}
 
 pub enum ModelCallTerminalObservation {
     Completed { assistant_text: Vec<AssistantText> },
@@ -6552,7 +6583,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: turn_eligibility                           | 28                   |
 | domain: turn_attempt                               | 13                   |
 | domain: model_call                                 | 12                   |
-| domain: model_execution                            | 49                   |
+| domain: model_execution                            | 50                   |
 | domain: context_frontier                           | 6                    |
 | domain: semantic_entry                             | 4                    |
 | domain: tool                                       | 38                   |
@@ -6565,7 +6596,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 51                   |
-| **signalbox-domain total**                         | **507 (+1 free fn)** |
+| **signalbox-domain total**                         | **508 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

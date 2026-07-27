@@ -47,6 +47,16 @@ The predecessor matrix:
   what was externally done, and rewriting it would let later facts silently
   change that record.
 
+The same terminal transition stores the provider's four token-usage fields —
+input, output, cache-creation input, and cache-read input — on the `model_call`
+row. Each field is independently nullable: null means the provider did not
+report that field, while a reported zero remains zero. Calls closed from
+`ProvenUnsent`, `CancellationConfirmed`, capability failure, or restart recovery
+have all four fields unreported because no provider usage evidence exists.
+Historical rows likewise remain unreported. The terminal-row immutability rule
+makes this evidence write-once; no later path estimates, normalizes, or corrects
+it.
+
 Storage enforces the matrix durably
 (`crates/persistence/migrations/202607220001_model_call_execution.sql`): the
 `model_call_changes_are_guarded` trigger rejects any insert whose state is not
@@ -333,6 +343,15 @@ with a `ToolUse` finish become the normalized proposals owned by
 stage closed because no durable semantic representation exists. Scripted
 providers declare their exact terminal observation; nothing is inferred from
 timing or injected I/O errors.
+
+For `Completed`, `Refused`, `ProviderError`, and `BoundaryLoss`, the bridge also
+copies the runtime terminal evidence's final absorbed `TokenUsage` fields into
+the correlated observation verbatim. Classification does not derive usage from
+the disposition, content, context, or provider family. The observation commit
+stores those fields atomically with the terminal disposition. A commit-ambiguity
+reread returns `AlreadyCommitted` only when the durable disposition, closure,
+and every independently nullable usage field equal the retained observation;
+different or newly absent usage is conflicting evidence, not an equal replay.
 
 ### Provider-target identity
 

@@ -57,8 +57,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — thirty files, `202607180001` through
-`202607280202` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — thirty-three files, `202607180001` through
+`202607290001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -119,7 +119,10 @@ Implemented table families (across the forward-only migrations):
 - `model_call` (execution state owned by
   [model-call-execution](model-call-execution.md), its turn-level
   provider-target pin on `turn_lifecycle`, and its pinned
-  `credential_reference`);
+  `credential_reference`); migration `202607290001` adds four independently
+  nullable full-`u64` token-usage columns. A nonterminal row must keep all four
+  null, and the ordinary terminal update installs the exact provider-reported
+  fields alongside the disposition before terminal-row immutability applies;
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_delta`,
   plus the resolved `context_frontier_member` compatibility projection;
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
@@ -433,11 +436,14 @@ The scheduling load proves its own completeness — it counts
 than trusting whichever rows a filter returned. It also walks the union of the
 required frontier prefix chains once, loads each reachable header and delta
 once, and reconstitutes shared prefixes without rebuilding their complete
-membership. A process transcript read likewise opens one database cursor over
-one resolution of the selected frontier chain, validates its declared count and
-contiguous positions while advancing, and decodes at most one entry row at a
-time. Active-phase, terminal-evidence, and acceptance-tail validation semantics
-are owned by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
+membership. A process transcript read likewise yields acceptance-ordered turns,
+then every terminal model call in turn-acceptance and call-identity order, then
+opens one database cursor over one resolution of the selected frontier chain. It
+validates declared counts and contiguous positions while advancing and decodes
+at most one row at a time. The model-call phase decodes every nullable token
+field through the full-range ordinal boundary; null remains absence.
+Active-phase, terminal-evidence, and acceptance-tail validation semantics are
+owned by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired

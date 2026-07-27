@@ -1583,7 +1583,9 @@ fn write_assistant_texts(
                     selected_entry = false;
                 }
             }
-            SnapshotRecord::Turn(_) | SnapshotRecord::Content(_) => {}
+            SnapshotRecord::Turn(_)
+            | SnapshotRecord::ModelCallUsage(_)
+            | SnapshotRecord::Content(_) => {}
         }
     }
     Ok(())

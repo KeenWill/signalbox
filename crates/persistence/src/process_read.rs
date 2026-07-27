@@ -310,6 +310,62 @@ pub struct ProcessTranscriptTurn {
     state: ProcessTurnState,
 }
 
+/// Exact provider-reported token fields for one terminal model call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessModelCallTokenUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+}
+
+impl ProcessModelCallTokenUsage {
+    /// Returns the provider-reported input-token count.
+    pub const fn input_tokens(self) -> Option<u64> {
+        self.input_tokens
+    }
+
+    /// Returns the provider-reported output-token count.
+    pub const fn output_tokens(self) -> Option<u64> {
+        self.output_tokens
+    }
+
+    /// Returns the provider-reported cache-creation input-token count.
+    pub const fn cache_creation_input_tokens(self) -> Option<u64> {
+        self.cache_creation_input_tokens
+    }
+
+    /// Returns the provider-reported cache-read input-token count.
+    pub const fn cache_read_input_tokens(self) -> Option<u64> {
+        self.cache_read_input_tokens
+    }
+}
+
+/// One terminal model call's provider-reported token evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessTranscriptModelCallUsage {
+    turn: TurnId,
+    call: ModelCallId,
+    usage: ProcessModelCallTokenUsage,
+}
+
+impl ProcessTranscriptModelCallUsage {
+    /// Returns the owning turn.
+    pub const fn turn(self) -> TurnId {
+        self.turn
+    }
+
+    /// Returns the terminal model-call identity.
+    pub const fn call(self) -> ModelCallId {
+        self.call
+    }
+
+    /// Returns the exact independently optional provider fields.
+    pub const fn usage(self) -> ProcessModelCallTokenUsage {
+        self.usage
+    }
+}
+
 impl ProcessTranscriptTurn {
     /// Returns the immutable turn identity.
     pub const fn turn(&self) -> TurnId {
@@ -555,6 +611,7 @@ pub struct ProcessTranscriptSnapshot {
     session: SessionId,
     cursor: u64,
     turns: Vec<ProcessTranscriptTurn>,
+    model_call_usage: Vec<ProcessTranscriptModelCallUsage>,
     entries: Vec<ProcessTranscriptEntry>,
 }
 
@@ -574,6 +631,11 @@ impl ProcessTranscriptSnapshot {
         &self.turns
     }
 
+    /// Borrows terminal model-call usage in turn and call identity order.
+    pub fn model_call_usage(&self) -> &[ProcessTranscriptModelCallUsage] {
+        &self.model_call_usage
+    }
+
     /// Borrows the latest semantic frontier in member order.
     pub fn entries(&self) -> &[ProcessTranscriptEntry] {
         &self.entries
@@ -585,6 +647,8 @@ impl ProcessTranscriptSnapshot {
 pub enum ProcessTranscriptItem {
     /// One turn in acceptance order.
     Turn(ProcessTranscriptTurn),
+    /// One terminal model call's provider-reported token evidence.
+    ModelCallUsage(ProcessTranscriptModelCallUsage),
     /// One semantic entry in frontier order.
     Entry(ProcessTranscriptEntry),
 }
@@ -596,6 +660,7 @@ pub struct ProcessTranscriptSummary {
     session: SessionId,
     cursor: u64,
     turn_count: u64,
+    model_call_count: u64,
     entry_count: u64,
 }
 
@@ -613,6 +678,11 @@ impl ProcessTranscriptSummary {
     /// Returns the exact number of yielded turns.
     pub const fn turn_count(&self) -> u64 {
         self.turn_count
+    }
+
+    /// Returns the exact number of yielded terminal model calls.
+    pub const fn model_call_count(&self) -> u64 {
+        self.model_call_count
     }
 
     /// Returns the exact number of yielded semantic entries.
@@ -637,6 +707,10 @@ pub struct ProcessTranscriptReader {
     turn_count: u64,
     next_turn_after: Option<u64>,
     turns_complete: bool,
+    expected_model_call_count: u64,
+    model_call_count: u64,
+    next_model_call_after: Option<(u64, ModelCallId)>,
+    model_calls_complete: bool,
     entry_count: Option<u64>,
     next_entry_index: u64,
     summary: Option<ProcessTranscriptSummary>,
@@ -659,7 +733,8 @@ impl ProcessTranscriptReader {
         self.summary
     }
 
-    /// Yields one turn or entry without retaining prior decoded rows.
+    /// Yields one turn, model-call usage record, or entry without retaining
+    /// prior decoded rows.
     pub async fn next_item(&mut self) -> Result<Option<ProcessTranscriptItem>, ProcessReadError> {
         if self.summary.is_some() {
             return Ok(None);
@@ -707,7 +782,28 @@ impl ProcessTranscriptReader {
                 return Err(ProcessReadCorruption::Inconsistent("turn execution lineage").into());
             }
             self.turns_complete = true;
+        }
+
+        if !self.model_calls_complete {
             let session = self.session;
+            let next_model_call_after = self.next_model_call_after;
+            let row =
+                load_next_model_call_usage(self.transaction_mut()?, session, next_model_call_after)
+                    .await?;
+            if let Some(row) = row {
+                let (acceptance_position, usage) = decode_model_call_usage(&row)?;
+                self.next_model_call_after = Some((acceptance_position, usage.call()));
+                self.model_call_count = self.model_call_count.checked_add(1).ok_or(
+                    ProcessReadCorruption::InvalidOrdinal("transcript model-call count"),
+                )?;
+                return Ok(Some(ProcessTranscriptItem::ModelCallUsage(usage)));
+            }
+            if self.model_call_count != self.expected_model_call_count {
+                return Err(
+                    ProcessReadCorruption::Inconsistent("terminal model-call ordering").into(),
+                );
+            }
+            self.model_calls_complete = true;
             let latest_frontier = self.latest_frontier;
             self.entry_count = Some(match latest_frontier {
                 Some(frontier) => {
@@ -754,6 +850,7 @@ impl ProcessTranscriptReader {
             session: self.session,
             cursor: self.cursor,
             turn_count: self.turn_count,
+            model_call_count: self.model_call_count,
             entry_count,
         });
         Ok(None)
@@ -1016,10 +1113,12 @@ impl ProcessReadRepository {
             return Ok(None);
         };
         let mut turns = Vec::new();
+        let mut model_call_usage = Vec::new();
         let mut entries = Vec::new();
         while let Some(item) = reader.next_item().await? {
             match item {
                 ProcessTranscriptItem::Turn(turn) => turns.push(turn),
+                ProcessTranscriptItem::ModelCallUsage(usage) => model_call_usage.push(usage),
                 ProcessTranscriptItem::Entry(entry) => entries.push(entry),
             }
         }
@@ -1030,6 +1129,7 @@ impl ProcessReadRepository {
             session: summary.session(),
             cursor: summary.cursor(),
             turns,
+            model_call_usage,
             entries,
         }))
     }
@@ -1076,6 +1176,8 @@ impl ProcessReadRepository {
             load_checked_imported_seed_frontier(&mut transaction, requested_session).await?;
         let expected_turn_count =
             load_transcript_turn_count(&mut transaction, requested_session).await?;
+        let expected_model_call_count =
+            load_terminal_model_call_count(&mut transaction, requested_session).await?;
         Ok(Some(ProcessTranscriptReader {
             transaction: Some(transaction),
             session: requested_session,
@@ -1090,6 +1192,10 @@ impl ProcessReadRepository {
             turn_count: 0,
             next_turn_after: None,
             turns_complete: false,
+            expected_model_call_count,
+            model_call_count: 0,
+            next_model_call_after: None,
+            model_calls_complete: false,
             entry_count: None,
             next_entry_index: 0,
             summary: None,
@@ -1322,6 +1428,100 @@ async fn load_transcript_turn_count(
             .await?;
     u64::try_from(count)
         .map_err(|_| ProcessReadCorruption::InvalidOrdinal("transcript turn count").into())
+}
+
+async fn load_terminal_model_call_count(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+) -> Result<u64, ProcessReadError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM model_call
+          WHERE session_id = $1
+            AND state_kind = 'terminal'",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_one(&mut **transaction)
+    .await?;
+    u64::try_from(count)
+        .map_err(|_| ProcessReadCorruption::InvalidOrdinal("transcript model-call count").into())
+}
+
+async fn load_next_model_call_usage(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+    after: Option<(u64, ModelCallId)>,
+) -> Result<Option<PgRow>, ProcessReadError> {
+    sqlx::query(
+        "SELECT
+            turn.acceptance_position,
+            call.turn_id,
+            call.model_call_id,
+            call.usage_input_tokens,
+            call.usage_output_tokens,
+            call.usage_cache_creation_input_tokens,
+            call.usage_cache_read_input_tokens
+           FROM model_call AS call
+           JOIN turn_lifecycle AS turn
+             ON turn.turn_id = call.turn_id
+            AND turn.session_id = call.session_id
+          WHERE call.session_id = $1
+            AND call.state_kind = 'terminal'
+            AND (
+                $2::numeric IS NULL
+                OR turn.acceptance_position > $2
+                OR (
+                    turn.acceptance_position = $2
+                    AND call.model_call_id > $3
+                )
+            )
+          ORDER BY turn.acceptance_position, call.model_call_id
+          LIMIT 1",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(after.map(|(position, _)| Decimal::from(position)))
+    .bind(after.map(|(_, call)| call.into_uuid()))
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(Into::into)
+}
+
+fn decode_model_call_usage(
+    row: &PgRow,
+) -> Result<(u64, ProcessTranscriptModelCallUsage), ProcessReadError> {
+    let acceptance_position = decode_positive(
+        required(row, "acceptance_position")?,
+        "model-call turn acceptance position",
+    )?;
+    let input_tokens = row
+        .try_get::<Option<Decimal>, _>("usage_input_tokens")?
+        .map(|value| decode_nonnegative(value, "model-call input tokens"))
+        .transpose()?;
+    let output_tokens = row
+        .try_get::<Option<Decimal>, _>("usage_output_tokens")?
+        .map(|value| decode_nonnegative(value, "model-call output tokens"))
+        .transpose()?;
+    let cache_creation_input_tokens = row
+        .try_get::<Option<Decimal>, _>("usage_cache_creation_input_tokens")?
+        .map(|value| decode_nonnegative(value, "model-call cache-creation input tokens"))
+        .transpose()?;
+    let cache_read_input_tokens = row
+        .try_get::<Option<Decimal>, _>("usage_cache_read_input_tokens")?
+        .map(|value| decode_nonnegative(value, "model-call cache-read input tokens"))
+        .transpose()?;
+    Ok((
+        acceptance_position,
+        ProcessTranscriptModelCallUsage {
+            turn: TurnId::from_uuid(required(row, "turn_id")?),
+            call: ModelCallId::from_uuid(required(row, "model_call_id")?),
+            usage: ProcessModelCallTokenUsage {
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+            },
+        },
+    ))
 }
 
 async fn load_next_transcript_turn(

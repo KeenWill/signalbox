@@ -17,7 +17,7 @@ use signalbox_application::{
 use signalbox_domain::{
     AssistantResponsePart, AssistantText, AuthorizedModelCall, ContextFrontierId,
     FrozenModelSelection, ModelCallId, ModelCallTerminalObservation, NormalizedToolArguments,
-    ResolvedProviderTarget, SessionId, ToolArgumentsKind,
+    ProviderReportedTokenUsage, ResolvedProviderTarget, SessionId, ToolArgumentsKind,
     ToolCallProposal as DomainToolCallProposal, ToolExecutionErrorKind, ToolName as DomainToolName,
     ToolResultContent, ToolUsingAssistantResponse, TurnAttemptId, TurnId,
 };
@@ -813,6 +813,7 @@ where
                 None,
             ));
         }
+        let usage = provider_reported_token_usage(&report.evidence);
         let classified = classify_terminal(
             report.evidence,
             &observations.observations,
@@ -824,7 +825,7 @@ where
         report_classified_outcome(correlation, &classified);
         Ok(authorized
             .observation_correlation()
-            .bind_terminal_observation(classified.observation))
+            .bind_terminal_observation_with_usage(classified.observation, usage))
     }
 }
 
@@ -1307,6 +1308,23 @@ fn reported_model(evidence: &TerminalEvidence) -> Option<&ProviderReportedModel>
     }
 }
 
+fn provider_reported_token_usage(evidence: &TerminalEvidence) -> ProviderReportedTokenUsage {
+    let usage = match evidence {
+        TerminalEvidence::Completed(value) => value.usage,
+        TerminalEvidence::Refused(value) => value.usage,
+        TerminalEvidence::ProviderError(value) => value.usage,
+        TerminalEvidence::BoundaryLoss(value) => value.usage,
+        TerminalEvidence::CancellationConfirmed(_) | TerminalEvidence::ProvenUnsent(_) => {
+            return ProviderReportedTokenUsage::unreported();
+        }
+    };
+    ProviderReportedTokenUsage::unreported()
+        .with_input_tokens(usage.input_tokens)
+        .with_output_tokens(usage.output_tokens)
+        .with_cache_creation_input_tokens(usage.cache_creation_input_tokens)
+        .with_cache_read_input_tokens(usage.cache_read_input_tokens)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -1337,7 +1355,7 @@ mod tests {
     use super::{
         AcceptanceObservations, RuntimeModelCatalog, RuntimeModelCatalogError,
         RuntimeModelDefinition, classify_terminal, decode_checked_raw_json,
-        render_runtime_messages,
+        provider_reported_token_usage, render_runtime_messages,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -1456,6 +1474,37 @@ mod tests {
             content,
             usage: TokenUsage::unreported(),
         })
+    }
+
+    #[test]
+    fn terminal_usage_mapping_preserves_each_provider_field_exactly() {
+        let reported_usage = TokenUsage {
+            input_tokens: Some(120),
+            output_tokens: Some(0),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(80),
+        };
+        let evidence = TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::Text(String::from("complete"))],
+            usage: reported_usage,
+        });
+
+        let usage = provider_reported_token_usage(&evidence);
+
+        assert_eq!(usage.input_tokens(), reported_usage.input_tokens);
+        assert_eq!(usage.output_tokens(), reported_usage.output_tokens);
+        assert_eq!(
+            usage.cache_creation_input_tokens(),
+            reported_usage.cache_creation_input_tokens
+        );
+        assert_eq!(
+            usage.cache_read_input_tokens(),
+            reported_usage.cache_read_input_tokens
+        );
     }
 
     #[track_caller]
