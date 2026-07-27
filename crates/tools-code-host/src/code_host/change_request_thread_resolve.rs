@@ -1,28 +1,31 @@
 //! `change_request_thread_resolve` registry declaration and typed arguments.
 
 use signalbox_domain::NormalizedToolArguments;
+use signalbox_tool_contract::ToolContract;
 
 use super::{
     CodeHostOperation,
-    arguments::{CodeHostOpaqueId, InvalidCodeHostArguments, object, take_string},
+    arguments::{CodeHostOpaqueId, InvalidCodeHostArguments, decode as decode_arguments},
 };
 
 /// Registry declaration effect posture: mutation, `Confirm`, and
 /// `ExternalEffect`; dispatch loss is commit-ambiguous.
 pub(super) const NAME: &str = "change_request_thread_resolve";
 pub(super) const DESCRIPTION: &str = "Resolves one exact GitHub review-thread node.";
-pub(super) const SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "thread_id": {"type": "string", "description": "Opaque review-thread node identity."}
-    },
-    "required": ["thread_id"],
-    "additionalProperties": false
-}"#;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadResolveArguments {
+    /// Opaque review-thread node identity.
     thread_id: CodeHostOpaqueId,
+}
+
+pub(super) struct Contract;
+
+impl ToolContract for Contract {
+    type Arguments = ThreadResolveArguments;
+    const NAME: &'static str = NAME;
+    const DESCRIPTION: &'static str = DESCRIPTION;
 }
 
 impl ThreadResolveArguments {
@@ -35,9 +38,5 @@ impl ThreadResolveArguments {
 pub(super) fn decode(
     arguments: &NormalizedToolArguments,
 ) -> Result<CodeHostOperation, InvalidCodeHostArguments> {
-    let mut object = object(arguments, 1)?;
-    let thread_id = CodeHostOpaqueId::try_new(take_string(&mut object, "thread_id")?)?;
-    Ok(CodeHostOperation::ThreadResolve(ThreadResolveArguments {
-        thread_id,
-    }))
+    decode_arguments(arguments).map(CodeHostOperation::ThreadResolve)
 }

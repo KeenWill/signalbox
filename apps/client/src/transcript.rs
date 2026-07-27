@@ -45,6 +45,26 @@ impl TranscriptSnapshot {
         Ok(None)
     }
 
+    /// Returns the turn holding the session's single active slot, or `None`
+    /// when every turn is queued or terminal.
+    pub(crate) fn active_turn(&mut self) -> Result<Option<CanonicalUuid>, ClientError> {
+        let mut replay = self.replay()?;
+        for record in &mut replay {
+            if let SnapshotRecord::Turn(turn) = record?
+                && matches!(
+                    turn.state,
+                    TurnState::ActiveRunning { .. }
+                        | TurnState::ActiveAwaitingModelCallRecovery { .. }
+                        | TurnState::ActiveAwaitingToolApproval { .. }
+                        | TurnState::ActiveAwaitingToolRecovery { .. }
+                )
+            {
+                return Ok(Some(turn.turn_id));
+            }
+        }
+        Ok(None)
+    }
+
     #[cfg(test)]
     pub(crate) fn from_messages(
         cursor: u64,
