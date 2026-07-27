@@ -27,7 +27,7 @@ use crate::{
 /// Structural equality and hashing exclude `command_id` and include every
 /// other caller-supplied semantic field. The command identifier is looked up
 /// separately at the owner-global durable-command boundary.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ReplaceSessionDefaults {
     command_id: DurableCommandId,
     session: SessionId,
@@ -66,9 +66,9 @@ impl ReplaceSessionDefaults {
         self.expected_current_version
     }
 
-    /// Returns the complete replacement defaults.
-    pub const fn replacement(&self) -> SessionConfigurationDefaults {
-        self.replacement
+    /// Borrows the complete replacement defaults.
+    pub const fn replacement(&self) -> &SessionConfigurationDefaults {
+        &self.replacement
     }
 
     /// Prepares the authoritative rejection for a target proven absent by the
@@ -111,40 +111,43 @@ impl ReplaceSessionDefaults {
         let current_version = current_defaults.version();
 
         if self.expected_current_version != current_version {
+            let result = ReplaceSessionDefaultsResult::Rejected(
+                ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(
+                    ReplaceSessionDefaultsCurrentVersionMismatch {
+                        session: self.session,
+                        expected: self.expected_current_version,
+                        current: current_version,
+                    },
+                ),
+            );
             return Ok(PreparedReplaceSessionDefaults {
                 command: self,
-                result: ReplaceSessionDefaultsResult::Rejected(
-                    ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(
-                        ReplaceSessionDefaultsCurrentVersionMismatch {
-                            session: self.session,
-                            expected: self.expected_current_version,
-                            current: current_version,
-                        },
-                    ),
-                ),
+                result,
             });
         }
 
-        let Some(installed) = current_defaults.replace(self.replacement) else {
+        let Some(installed) = current_defaults.replace(self.replacement.clone()) else {
+            let result = ReplaceSessionDefaultsResult::Rejected(
+                ReplaceSessionDefaultsRejectedResult::VersionExhausted(
+                    ReplaceSessionDefaultsVersionExhausted {
+                        session: self.session,
+                        current: current_version,
+                    },
+                ),
+            );
             return Ok(PreparedReplaceSessionDefaults {
                 command: self,
-                result: ReplaceSessionDefaultsResult::Rejected(
-                    ReplaceSessionDefaultsRejectedResult::VersionExhausted(
-                        ReplaceSessionDefaultsVersionExhausted {
-                            session: self.session,
-                            current: current_version,
-                        },
-                    ),
-                ),
+                result,
             });
         };
 
+        let result = ReplaceSessionDefaultsResult::Applied(ReplaceSessionDefaultsAppliedResult {
+            session: self.session,
+            installed,
+        });
         Ok(PreparedReplaceSessionDefaults {
             command: self,
-            result: ReplaceSessionDefaultsResult::Applied(ReplaceSessionDefaultsAppliedResult {
-                session: self.session,
-                installed,
-            }),
+            result,
         })
     }
 }
@@ -170,7 +173,7 @@ impl std::hash::Hash for ReplaceSessionDefaults {
 }
 
 /// The terminal typed result for one defaults-replacement command.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ReplaceSessionDefaultsResult {
     /// The replacement was installed as the next immutable version.
     Applied(ReplaceSessionDefaultsAppliedResult),
@@ -183,7 +186,7 @@ pub enum ReplaceSessionDefaultsResult {
 /// Private fields and the absence of a public constructor prevent a raw
 /// session/version tuple from claiming application. Live preparation and
 /// complete reconstitution are the only producers.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ReplaceSessionDefaultsAppliedResult {
     session: SessionId,
     installed: VersionedSessionConfigurationDefaults,
@@ -275,7 +278,7 @@ impl ReplaceSessionDefaultsVersionExhausted {
 /// The command and terminal result are coupled so persistence cannot
 /// accidentally record a result prepared for another payload. This value is
 /// not evidence that the command or its effects committed.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PreparedReplaceSessionDefaults {
     command: ReplaceSessionDefaults,
     result: ReplaceSessionDefaultsResult,
@@ -287,13 +290,13 @@ impl PreparedReplaceSessionDefaults {
         &self.command
     }
 
-    /// Returns the exact terminal result to record atomically.
-    pub const fn result(&self) -> ReplaceSessionDefaultsResult {
-        self.result
+    /// Borrows the exact terminal result to record atomically.
+    pub const fn result(&self) -> &ReplaceSessionDefaultsResult {
+        &self.result
     }
 
     /// Consumes the candidate into its correlated transaction inputs.
-    pub const fn into_parts(self) -> (ReplaceSessionDefaults, ReplaceSessionDefaultsResult) {
+    pub fn into_parts(self) -> (ReplaceSessionDefaults, ReplaceSessionDefaultsResult) {
         (self.command, self.result)
     }
 }
@@ -302,7 +305,7 @@ impl PreparedReplaceSessionDefaults {
 ///
 /// This is an adapter/caller correlation failure, not an authoritative
 /// command rejection, and therefore does not claim the command identifier.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ReplaceSessionDefaultsPreparationError {
     command: ReplaceSessionDefaults,
     provided_session: SessionId,
@@ -320,12 +323,12 @@ impl ReplaceSessionDefaultsPreparationError {
     }
 
     /// Returns both unchanged correlation inputs.
-    pub const fn into_parts(self) -> (ReplaceSessionDefaults, SessionId) {
+    pub fn into_parts(self) -> (ReplaceSessionDefaults, SessionId) {
         (self.command, self.provided_session)
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum ReplaceSessionDefaultsReconstitutionFacts {
     Applied {
         result_session: SessionId,
@@ -353,7 +356,7 @@ enum ReplaceSessionDefaultsReconstitutionFacts {
 /// Constructors accept only checked domain values. Persistence remains
 /// responsible for decoding record encodings and selecting the constructor
 /// matching the closed stored result discriminator.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ReplaceSessionDefaultsReconstitutionInput {
     command: ReplaceSessionDefaults,
     facts: ReplaceSessionDefaultsReconstitutionFacts,
@@ -442,12 +445,70 @@ impl ReplaceSessionDefaultsReconstitutionInput {
         self,
     ) -> Result<ReconstitutedReplaceSessionDefaults, ReplaceSessionDefaultsReconstitutionError>
     {
-        let fail = |failure| ReplaceSessionDefaultsReconstitutionError {
-            input: Box::new(self),
-            failure,
-        };
+        if let Some(failure) = self.validation_failure() {
+            return Err(ReplaceSessionDefaultsReconstitutionError {
+                input: Box::new(self),
+                failure,
+            });
+        }
 
         let result = match self.facts {
+            ReplaceSessionDefaultsReconstitutionFacts::Applied {
+                result_session,
+                result_version,
+                defaults,
+                ..
+            } => ReplaceSessionDefaultsResult::Applied(ReplaceSessionDefaultsAppliedResult {
+                session: result_session,
+                installed: VersionedSessionConfigurationDefaults::reconstitute(
+                    result_version,
+                    defaults,
+                ),
+            }),
+            ReplaceSessionDefaultsReconstitutionFacts::RejectedSessionNotFound {
+                result_session,
+            } => ReplaceSessionDefaultsResult::Rejected(
+                ReplaceSessionDefaultsRejectedResult::SessionNotFound(
+                    ReplaceSessionDefaultsSessionNotFound {
+                        session: result_session,
+                    },
+                ),
+            ),
+            ReplaceSessionDefaultsReconstitutionFacts::RejectedCurrentVersionMismatch {
+                result_session,
+                result_expected,
+                result_current,
+            } => ReplaceSessionDefaultsResult::Rejected(
+                ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(
+                    ReplaceSessionDefaultsCurrentVersionMismatch {
+                        session: result_session,
+                        expected: result_expected,
+                        current: result_current,
+                    },
+                ),
+            ),
+            ReplaceSessionDefaultsReconstitutionFacts::RejectedVersionExhausted {
+                result_session,
+                result_current,
+            } => ReplaceSessionDefaultsResult::Rejected(
+                ReplaceSessionDefaultsRejectedResult::VersionExhausted(
+                    ReplaceSessionDefaultsVersionExhausted {
+                        session: result_session,
+                        current: result_current,
+                    },
+                ),
+            ),
+        };
+
+        Ok(ReconstitutedReplaceSessionDefaults {
+            command: self.command,
+            result,
+        })
+    }
+
+    /// Applies every fail-closed agreement check without consuming the input.
+    fn validation_failure(&self) -> Option<ReplaceSessionDefaultsReconstitutionFailure> {
+        match &self.facts {
             ReplaceSessionDefaultsReconstitutionFacts::Applied {
                 result_session,
                 result_version,
@@ -455,120 +516,87 @@ impl ReplaceSessionDefaultsReconstitutionInput {
                 defaults_version,
                 defaults,
             } => {
-                if result_session != self.command.session {
-                    return Err(fail(
+                if *result_session != self.command.session {
+                    return Some(
                         ReplaceSessionDefaultsReconstitutionFailure::ResultSessionMismatch,
-                    ));
+                    );
                 }
-                if defaults_session != self.command.session {
-                    return Err(fail(
+                if *defaults_session != self.command.session {
+                    return Some(
                         ReplaceSessionDefaultsReconstitutionFailure::DefaultsSessionMismatch,
-                    ));
+                    );
                 }
                 if result_version != defaults_version {
-                    return Err(fail(
+                    return Some(
                         ReplaceSessionDefaultsReconstitutionFailure::ResultVersionMismatch,
-                    ));
+                    );
                 }
-                if self.command.expected_current_version.checked_next() != Some(defaults_version) {
-                    return Err(fail(
+                if self.command.expected_current_version.checked_next() != Some(*defaults_version) {
+                    return Some(
                         ReplaceSessionDefaultsReconstitutionFailure::InstalledVersionIsNotSuccessor,
-                    ));
+                    );
                 }
-                if defaults != self.command.replacement {
-                    return Err(fail(
+                if *defaults != self.command.replacement {
+                    return Some(
                         ReplaceSessionDefaultsReconstitutionFailure::StoredDefaultsMismatch,
-                    ));
+                    );
                 }
-
-                ReplaceSessionDefaultsResult::Applied(ReplaceSessionDefaultsAppliedResult {
-                    session: result_session,
-                    installed: VersionedSessionConfigurationDefaults::reconstitute(
-                        result_version,
-                        defaults,
-                    ),
-                })
+                None
             }
             ReplaceSessionDefaultsReconstitutionFacts::RejectedSessionNotFound {
                 result_session,
             } => {
-                if result_session != self.command.session {
-                    return Err(fail(
+                if *result_session != self.command.session {
+                    return Some(
                         ReplaceSessionDefaultsReconstitutionFailure::ResultSessionMismatch,
-                    ));
+                    );
                 }
-                ReplaceSessionDefaultsResult::Rejected(
-                    ReplaceSessionDefaultsRejectedResult::SessionNotFound(
-                        ReplaceSessionDefaultsSessionNotFound {
-                            session: result_session,
-                        },
-                    ),
-                )
+                None
             }
             ReplaceSessionDefaultsReconstitutionFacts::RejectedCurrentVersionMismatch {
                 result_session,
                 result_expected,
                 result_current,
             } => {
-                if result_session != self.command.session {
-                    return Err(fail(
+                if *result_session != self.command.session {
+                    return Some(
                         ReplaceSessionDefaultsReconstitutionFailure::ResultSessionMismatch,
-                    ));
+                    );
                 }
-                if result_expected != self.command.expected_current_version {
-                    return Err(fail(
+                if *result_expected != self.command.expected_current_version {
+                    return Some(
                         ReplaceSessionDefaultsReconstitutionFailure::ResultExpectedVersionMismatch,
-                    ));
+                    );
                 }
                 if result_current == result_expected {
-                    return Err(fail(
+                    return Some(
                         ReplaceSessionDefaultsReconstitutionFailure::RejectedVersionsAreEqual,
-                    ));
+                    );
                 }
-                ReplaceSessionDefaultsResult::Rejected(
-                    ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(
-                        ReplaceSessionDefaultsCurrentVersionMismatch {
-                            session: result_session,
-                            expected: result_expected,
-                            current: result_current,
-                        },
-                    ),
-                )
+                None
             }
             ReplaceSessionDefaultsReconstitutionFacts::RejectedVersionExhausted {
                 result_session,
                 result_current,
             } => {
-                if result_session != self.command.session {
-                    return Err(fail(
+                if *result_session != self.command.session {
+                    return Some(
                         ReplaceSessionDefaultsReconstitutionFailure::ResultSessionMismatch,
-                    ));
+                    );
                 }
-                if result_current != self.command.expected_current_version {
-                    return Err(fail(
+                if *result_current != self.command.expected_current_version {
+                    return Some(
                         ReplaceSessionDefaultsReconstitutionFailure::ResultExpectedVersionMismatch,
-                    ));
+                    );
                 }
                 if result_current.checked_next().is_some() {
-                    return Err(fail(
+                    return Some(
                         ReplaceSessionDefaultsReconstitutionFailure::ResultVersionIsNotExhausted,
-                    ));
+                    );
                 }
-                ReplaceSessionDefaultsResult::Rejected(
-                    ReplaceSessionDefaultsRejectedResult::VersionExhausted(
-                        ReplaceSessionDefaultsVersionExhausted {
-                            session: result_session,
-                            current: result_current,
-                        },
-                    ),
-                )
+                None
             }
-        };
-
-        Ok(ReconstitutedReplaceSessionDefaults {
-            command: self.command,
-            result,
-        })
+        }
     }
 }
 
@@ -628,7 +656,7 @@ impl ReplaceSessionDefaultsReconstitutionError {
 /// facts.
 ///
 /// This value authorizes no insert, pointer update, repair, or command claim.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ReconstitutedReplaceSessionDefaults {
     command: ReplaceSessionDefaults,
     result: ReplaceSessionDefaultsResult,
@@ -640,9 +668,9 @@ impl ReconstitutedReplaceSessionDefaults {
         &self.command
     }
 
-    /// Returns the reconstructed terminal result.
-    pub const fn result(&self) -> ReplaceSessionDefaultsResult {
-        self.result
+    /// Borrows the reconstructed terminal result.
+    pub const fn result(&self) -> &ReplaceSessionDefaultsResult {
+        &self.result
     }
 }
 
@@ -704,7 +732,7 @@ mod tests {
     /// [`ReplaceSessionDefaultsReconstitutionInput::applied`] field for field
     /// so a test perturbs exactly the named facts it cares about
     /// (`docs/agents/testing-style.md`, rules 4 and 5).
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     struct AppliedFacts {
         result_session: crate::SessionId,
         result_version: SessionConfigurationDefaultsVersion,
@@ -727,7 +755,7 @@ mod tests {
                 result_version: installed,
                 defaults_session: command.session(),
                 defaults_version: installed,
-                defaults: command.replacement(),
+                defaults: command.replacement().clone(),
             }
         }
 
@@ -777,6 +805,7 @@ mod tests {
         let current = session(target, 1);
         let replacement = command_expecting(target, 1);
         let prepared = replacement
+            .clone()
             .prepare_against(&current)
             .expect("the supplied session matches");
 
@@ -785,7 +814,7 @@ mod tests {
         };
         assert_eq!(applied.session(), target);
         assert_eq!(applied.installed().version(), version(2));
-        assert_eq!(applied.installed().defaults(), &replacement.replacement());
+        assert_eq!(applied.installed().defaults(), replacement.replacement());
         assert_eq!(
             current.current_configuration_defaults().version(),
             version(1)
@@ -853,7 +882,7 @@ mod tests {
         let target = session_id(1);
         let command = command_expecting(target, 1);
         let reconstructed = AppliedFacts::matching(&command)
-            .reconstitute(command)
+            .reconstitute(command.clone())
             .expect("matching complete facts reconstruct");
 
         assert_eq!(reconstructed.command(), &command);
@@ -862,7 +891,7 @@ mod tests {
         };
         assert_eq!(applied.session(), target);
         assert_eq!(applied.installed().version(), version(2));
-        assert_eq!(applied.installed().defaults(), &command.replacement());
+        assert_eq!(applied.installed().defaults(), command.replacement());
     }
 
     /// S01 / INV-008 / INV-012: equal replay of an earlier applied command
@@ -901,9 +930,9 @@ mod tests {
 
         let cross_wired_result = AppliedFacts {
             result_session: another_session,
-            ..matching
+            ..matching.clone()
         }
-        .reconstitute(command)
+        .reconstitute(command.clone())
         .expect_err("a cross-wired result session must fail")
         .failure();
         assert_eq!(
@@ -913,9 +942,9 @@ mod tests {
 
         let cross_wired_defaults_owner = AppliedFacts {
             defaults_session: another_session,
-            ..matching
+            ..matching.clone()
         }
-        .reconstitute(command)
+        .reconstitute(command.clone())
         .expect_err("a cross-wired defaults owner must fail")
         .failure();
         assert_eq!(
@@ -925,9 +954,9 @@ mod tests {
 
         let torn_result_version = AppliedFacts {
             result_version: version(3),
-            ..matching
+            ..matching.clone()
         }
-        .reconstitute(command)
+        .reconstitute(command.clone())
         .expect_err("the result and selected record must name one version")
         .failure();
         assert_eq!(
@@ -938,9 +967,9 @@ mod tests {
         let skipped_successor = AppliedFacts {
             result_version: version(3),
             defaults_version: version(3),
-            ..matching
+            ..matching.clone()
         }
-        .reconstitute(command)
+        .reconstitute(command.clone())
         .expect_err("an installed version must be the checked successor")
         .failure();
         assert_eq!(
@@ -950,13 +979,35 @@ mod tests {
 
         let replaced_defaults = AppliedFacts {
             defaults: defaults(3),
-            ..matching
+            ..matching.clone()
         }
-        .reconstitute(command)
+        .reconstitute(command.clone())
         .expect_err("stored defaults must match the command replacement")
         .failure();
         assert_eq!(
             replaced_defaults,
+            ReplaceSessionDefaultsReconstitutionFailure::StoredDefaultsMismatch
+        );
+
+        // S34 / INV-046: a stored install diverging from the command's
+        // replacement only in its optional system prompt is the same
+        // fail-closed defaults mismatch.
+        let prompt_diverged = AppliedFacts {
+            defaults: SessionConfigurationDefaults::complete(
+                command.replacement().model(),
+                command.replacement().dangerous_tool_auto_approval(),
+                Some(
+                    crate::SessionSystemPrompt::try_new(String::from("exact session instructions"))
+                        .expect("test prompt is admissible"),
+                ),
+            ),
+            ..matching.clone()
+        }
+        .reconstitute(command.clone())
+        .expect_err("a prompt-only divergence must fail closed")
+        .failure();
+        assert_eq!(
+            prompt_diverged,
             ReplaceSessionDefaultsReconstitutionFailure::StoredDefaultsMismatch
         );
 
@@ -1018,7 +1069,7 @@ mod tests {
 
         let mismatch =
             ReplaceSessionDefaultsReconstitutionInput::rejected_current_version_mismatch(
-                command,
+                command.clone(),
                 target,
                 version(1),
                 version(2),
@@ -1032,10 +1083,12 @@ mod tests {
             )
         ));
 
-        let missing =
-            ReplaceSessionDefaultsReconstitutionInput::rejected_session_not_found(command, target)
-                .reconstitute()
-                .expect("a correlated missing-session result reconstructs");
+        let missing = ReplaceSessionDefaultsReconstitutionInput::rejected_session_not_found(
+            command.clone(),
+            target,
+        )
+        .reconstitute()
+        .expect("a correlated missing-session result reconstructs");
         assert!(matches!(
             missing.result(),
             ReplaceSessionDefaultsResult::Rejected(
@@ -1045,7 +1098,7 @@ mod tests {
 
         let equal_versions =
             ReplaceSessionDefaultsReconstitutionInput::rejected_current_version_mismatch(
-                command,
+                command.clone(),
                 target,
                 version(1),
                 version(1),
@@ -1059,7 +1112,7 @@ mod tests {
 
         let wrong_expected =
             ReplaceSessionDefaultsReconstitutionInput::rejected_current_version_mismatch(
-                command,
+                command.clone(),
                 target,
                 version(2),
                 version(3),
@@ -1072,7 +1125,7 @@ mod tests {
         );
 
         let not_exhausted = ReplaceSessionDefaultsReconstitutionInput::rejected_version_exhausted(
-            command,
+            command.clone(),
             target,
             version(1),
         )

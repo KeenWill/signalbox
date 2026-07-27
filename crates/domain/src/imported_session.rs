@@ -178,16 +178,29 @@ impl CreateSessionFromImportedFrontier {
     where
         NextSemanticEntryId: FnMut() -> SemanticTranscriptEntryId,
     {
-        let fail = |failure| CreateSessionFromImportedFrontierPreparationError {
-            rejected: Box::new((self, session, seed_frontier, failure)),
-        };
+        fn fail(
+            command: CreateSessionFromImportedFrontier,
+            session: SessionId,
+            seed_frontier: ContextFrontierId,
+            failure: CreateSessionFromImportedFrontierPreparationFailure,
+        ) -> CreateSessionFromImportedFrontierPreparationError {
+            CreateSessionFromImportedFrontierPreparationError {
+                rejected: Box::new((command, session, seed_frontier, failure)),
+            }
+        }
         if imported_conversation.id() != self.imported_conversation() {
             return Err(fail(
+                self,
+                session,
+                seed_frontier,
                 CreateSessionFromImportedFrontierPreparationFailure::ImportedConversationMismatch,
             ));
         }
         let Some(prefix) = imported_conversation.prefix(self.imported_frontier()) else {
             return Err(fail(
+                self,
+                session,
+                seed_frontier,
                 CreateSessionFromImportedFrontierPreparationFailure::ImportedFrontierNotFound,
             ));
         };
@@ -203,6 +216,9 @@ impl CreateSessionFromImportedFrontier {
             .find(|entry| !seen.insert(*entry))
         {
             return Err(fail(
+                self,
+                session,
+                seed_frontier,
                 CreateSessionFromImportedFrontierPreparationFailure::DuplicateSemanticEntryIdentity {
                     entry,
                 },
@@ -239,6 +255,9 @@ impl CreateSessionFromImportedFrontier {
                     entry,
                 } = error.rejection();
                 return Err(fail(
+                    self,
+                    session,
+                    seed_frontier,
                     CreateSessionFromImportedFrontierPreparationFailure::DuplicateSemanticEntryIdentity {
                         entry: entry.entry(),
                     },
@@ -560,9 +579,9 @@ impl BoundedImportedSessionReconstitutionInput {
         self.defaults_version
     }
 
-    /// Returns the selected complete defaults.
-    pub const fn defaults(&self) -> SessionConfigurationDefaults {
-        self.defaults
+    /// Borrows the selected complete defaults.
+    pub const fn defaults(&self) -> &SessionConfigurationDefaults {
+        &self.defaults
     }
 
     /// Borrows all candidate seed records.
@@ -990,9 +1009,9 @@ impl ImportedSessionReconstitutionInput {
         self.defaults_version
     }
 
-    /// Returns the selected complete defaults.
-    pub const fn defaults(&self) -> SessionConfigurationDefaults {
-        self.defaults
+    /// Borrows the selected complete defaults.
+    pub const fn defaults(&self) -> &SessionConfigurationDefaults {
+        &self.defaults
     }
 
     /// Borrows the supplied immutable imported aggregate.
@@ -1198,7 +1217,7 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
                 CreateSessionFromImportedFrontierReconstitutionFailure::DefaultsVersionIsNotFirst,
             ));
         }
-        if self.command.initial_configuration_defaults() != self.defaults {
+        if *self.command.initial_configuration_defaults() != self.defaults {
             return Err(fail(
                 self,
                 CreateSessionFromImportedFrontierReconstitutionFailure::DefaultsMismatch,
@@ -1267,9 +1286,9 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
         self.defaults_version
     }
 
-    /// Returns the stored initial defaults.
-    pub const fn defaults(&self) -> SessionConfigurationDefaults {
-        self.defaults
+    /// Borrows the stored initial defaults.
+    pub const fn defaults(&self) -> &SessionConfigurationDefaults {
+        &self.defaults
     }
 
     /// Borrows the supplied immutable imported aggregate.
@@ -1503,6 +1522,7 @@ mod tests {
         let command = command_for(&conversation);
         let mut next = 10_u128;
         let prepared = command
+            .clone()
             .prepare(&conversation, session_id(3), context_frontier_id(4), || {
                 let identity = semantic_transcript_entry_id(next);
                 next += 1;
@@ -1551,6 +1571,7 @@ mod tests {
         prepared: &PreparedCreateSessionFromImportedFrontier,
     ) -> CreateSessionFromImportedFrontierReconstitutionInput {
         let (seeds, snapshots, semantic_entries) = projection_inputs(prepared);
+        let defaults = command.initial_configuration_defaults().clone();
         CreateSessionFromImportedFrontierReconstitutionInput::new(
             command,
             prepared.applied_result().session(),
@@ -1558,7 +1579,7 @@ mod tests {
             prepared.session().provenance(),
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
-            command.initial_configuration_defaults(),
+            defaults,
             conversation.clone(),
             seeds,
             snapshots,
@@ -1579,7 +1600,7 @@ mod tests {
             SessionConfigurationDefaultsVersion::first(),
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
-            prepared.command().initial_configuration_defaults(),
+            prepared.command().initial_configuration_defaults().clone(),
             conversation.clone(),
             seeds,
             snapshots,
@@ -1604,7 +1625,7 @@ mod tests {
             SessionConfigurationDefaultsVersion::first(),
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
-            prepared.command().initial_configuration_defaults(),
+            prepared.command().initial_configuration_defaults().clone(),
             vec![ImportedSessionSeedReconstitutionInput::new(
                 seed.session(),
                 seed.seed_frontier(),
@@ -1806,7 +1827,7 @@ mod tests {
     #[test]
     fn s28_inv003_inv008_inv012_inv039_creation_reconstitutes_complete_seed() {
         let (conversation, command, prepared) = prepared_fixture();
-        let input = creation_input(&conversation, command, &prepared);
+        let input = creation_input(&conversation, command.clone(), &prepared);
 
         let reconstituted = input
             .reconstitute()
@@ -2307,14 +2328,14 @@ mod tests {
     fn s28_inv002_inv003_inv008_inv012_inv039_creation_corruption_matrix_is_complete() {
         let (conversation, command, prepared) = prepared_fixture();
 
-        let mut result_mismatch = creation_input(&conversation, command, &prepared);
+        let mut result_mismatch = creation_input(&conversation, command.clone(), &prepared);
         result_mismatch.result_session = session_id(99);
         assert_creation_reconstitution_failure(
             result_mismatch,
             CreateSessionFromImportedFrontierReconstitutionFailure::SessionResultMismatch,
         );
 
-        let mut provenance_mismatch = creation_input(&conversation, command, &prepared);
+        let mut provenance_mismatch = creation_input(&conversation, command.clone(), &prepared);
         provenance_mismatch.provenance = SessionCreationProvenance::new(
             SessionCreationCause::OwnerInitiated,
             TranscriptAncestry::ImportedConversation {
@@ -2327,14 +2348,16 @@ mod tests {
             CreateSessionFromImportedFrontierReconstitutionFailure::ProvenanceMismatch,
         );
 
-        let mut defaults_session_mismatch = creation_input(&conversation, command, &prepared);
+        let mut defaults_session_mismatch =
+            creation_input(&conversation, command.clone(), &prepared);
         defaults_session_mismatch.defaults_session = session_id(99);
         assert_creation_reconstitution_failure(
             defaults_session_mismatch,
             CreateSessionFromImportedFrontierReconstitutionFailure::DefaultsSessionMismatch,
         );
 
-        let mut defaults_version_mismatch = creation_input(&conversation, command, &prepared);
+        let mut defaults_version_mismatch =
+            creation_input(&conversation, command.clone(), &prepared);
         defaults_version_mismatch.defaults_version = SessionConfigurationDefaultsVersion::first()
             .checked_next()
             .expect("version one has a successor");
@@ -2343,7 +2366,7 @@ mod tests {
             CreateSessionFromImportedFrontierReconstitutionFailure::DefaultsVersionIsNotFirst,
         );
 
-        let mut defaults_mismatch = creation_input(&conversation, command, &prepared);
+        let mut defaults_mismatch = creation_input(&conversation, command.clone(), &prepared);
         defaults_mismatch.defaults = defaults(99);
         assert_creation_reconstitution_failure(
             defaults_mismatch,

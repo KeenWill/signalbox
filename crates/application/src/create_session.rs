@@ -44,7 +44,7 @@ impl Error for InvalidDurableCommandId {}
 /// The request deliberately has no cause or ancestry input: this slice fixes
 /// them to `OwnerInitiated` and `None`. Its private fields ensure sentinel
 /// command identities cannot reach the use case through this boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateSessionRequest {
     command_id: DurableCommandId,
     initial_configuration_defaults: SessionConfigurationDefaults,
@@ -74,9 +74,9 @@ impl CreateSessionRequest {
         self.command_id
     }
 
-    /// Returns the complete initial model-selection defaults.
-    pub const fn initial_configuration_defaults(&self) -> SessionConfigurationDefaults {
-        self.initial_configuration_defaults
+    /// Borrows the complete initial model-selection defaults.
+    pub const fn initial_configuration_defaults(&self) -> &SessionConfigurationDefaults {
+        &self.initial_configuration_defaults
     }
 }
 
@@ -280,7 +280,7 @@ mod tests {
                 SessionCreationCause::OwnerInitiated,
                 TranscriptAncestry::None,
             ),
-            request.initial_configuration_defaults(),
+            request.initial_configuration_defaults().clone(),
         )
         .prepare(candidate)
         .expect("the fixed baseline command prepares against a fresh candidate")
@@ -436,13 +436,13 @@ mod tests {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
             .expect("ordinary command identity is admitted");
         let candidate = session_id(3);
-        let recorded = receipt_for(request, candidate);
+        let recorded = receipt_for(request.clone(), candidate);
         let mut service = CreateSessionService::new(
             FakeSessionIds::new([candidate]),
             FakeTransaction::returning([Ok(CreateSessionOutcome::Applied(recorded))]),
         );
 
-        let outcome = run_ready(service.execute(request))
+        let outcome = run_ready(service.execute(request.clone()))
             .expect("fake transaction applies the first handling");
 
         let CreateSessionOutcome::Applied(applied) = outcome else {
@@ -485,7 +485,7 @@ mod tests {
             .expect("ordinary command identity is admitted");
         let winner = session_id(3);
         let replay_candidate = session_id(4);
-        let recorded = receipt_for(request, winner);
+        let recorded = receipt_for(request.clone(), winner);
         let mut service = CreateSessionService::new(
             FakeSessionIds::new([winner, replay_candidate]),
             FakeTransaction::returning([
@@ -494,7 +494,8 @@ mod tests {
             ]),
         );
 
-        let first = run_ready(service.execute(request)).expect("first invocation applies creation");
+        let first =
+            run_ready(service.execute(request.clone())).expect("first invocation applies creation");
         let replay = run_ready(service.execute(request)).expect("equal replay succeeds");
 
         assert_eq!(replay, first, "equal replay must return the first receipt");
@@ -523,16 +524,20 @@ mod tests {
         let mut service = CreateSessionService::new(
             FakeSessionIds::new([winner, session_id(5)]),
             FakeTransaction::returning([
-                Ok(CreateSessionOutcome::Applied(receipt_for(first, winner))),
+                Ok(CreateSessionOutcome::Applied(receipt_for(
+                    first.clone(),
+                    winner,
+                ))),
                 Ok(CreateSessionOutcome::ConflictingReuse {
                     command_id: command,
                 }),
             ]),
         );
 
-        let _ = run_ready(service.execute(first)).expect("first invocation applies creation");
-        let conflict =
-            run_ready(service.execute(conflicting)).expect("typed conflict is a terminal outcome");
+        let _ =
+            run_ready(service.execute(first.clone())).expect("first invocation applies creation");
+        let conflict = run_ready(service.execute(conflicting.clone()))
+            .expect("typed conflict is a terminal outcome");
 
         assert_eq!(
             conflict,

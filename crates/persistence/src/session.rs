@@ -177,6 +177,7 @@ pub(crate) async fn load_session_from_connection(
             v.direct_model_selection_id,
             v.model_alias_id,
             v.dangerous_tool_auto_approval,
+            v.system_prompt,
             seed.session_id AS seed_session_id,
             seed.seed_context_frontier_id,
             seed_frontier.owning_session_id AS seed_frontier_session_id,
@@ -242,6 +243,7 @@ fn decode_complete(
         row.try_get("direct_model_selection_id")?,
         row.try_get("model_alias_id")?,
         required(&row, "dangerous_tool_auto_approval")?,
+        row.try_get("system_prompt")?,
     )?;
 
     SessionReconstitutionInput::new(
@@ -337,6 +339,7 @@ fn decode_selection(
     direct: Option<Uuid>,
     alias: Option<Uuid>,
     dangerous_tool_auto_approval: String,
+    system_prompt: Option<String>,
 ) -> Result<SessionConfigurationDefaults, SessionRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
         ("direct", Some(value), None) => {
@@ -361,10 +364,15 @@ fn decode_selection(
                 value: dangerous_tool_auto_approval,
             })
         })?;
-    Ok(
-        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
-            model,
-            dangerous_tool_auto_approval,
-        ),
-    )
+    let system_prompt = system_prompt
+        .map(|value| {
+            signalbox_domain::SessionSystemPrompt::try_new(value)
+                .map_err(|_| SessionCorruption::Inconsistent("system prompt admission"))
+        })
+        .transpose()?;
+    Ok(SessionConfigurationDefaults::complete(
+        model,
+        dangerous_tool_auto_approval,
+        system_prompt,
+    ))
 }
