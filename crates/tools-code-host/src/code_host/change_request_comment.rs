@@ -1,12 +1,13 @@
 //! `change_request_comment` registry declaration and typed arguments.
 
 use signalbox_domain::NormalizedToolArguments;
+use signalbox_tool_contract::ToolContract;
 
 use super::{
     CodeHostOperation,
     arguments::{
         CodeHostChangeRequestNumber, CodeHostCommentBody, CodeHostRepository,
-        InvalidCodeHostArguments, object, take_positive_id, take_string,
+        InvalidCodeHostArguments, decode as decode_arguments,
     },
 };
 
@@ -14,22 +15,24 @@ use super::{
 /// `ExternalEffect`; dispatch loss is commit-ambiguous.
 pub(super) const NAME: &str = "change_request_comment";
 pub(super) const DESCRIPTION: &str = "Posts one top-level comment to a GitHub change request.";
-pub(super) const SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "repository": {"type": "string", "description": "Exact owner/repository spelling."},
-        "number": {"type": "integer", "minimum": 1, "description": "Change-request number."},
-        "body": {"type": "string", "description": "Exact nonempty comment body."}
-    },
-    "required": ["repository", "number", "body"],
-    "additionalProperties": false
-}"#;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ChangeRequestCommentArguments {
+    /// Exact owner/repository spelling.
     repository: CodeHostRepository,
+    /// Change-request number.
     number: CodeHostChangeRequestNumber,
+    /// Exact nonempty comment body.
     body: CodeHostCommentBody,
+}
+
+pub(super) struct Contract;
+
+impl ToolContract for Contract {
+    type Arguments = ChangeRequestCommentArguments;
+    const NAME: &'static str = NAME;
+    const DESCRIPTION: &'static str = DESCRIPTION;
 }
 
 impl ChangeRequestCommentArguments {
@@ -52,13 +55,5 @@ impl ChangeRequestCommentArguments {
 pub(super) fn decode(
     arguments: &NormalizedToolArguments,
 ) -> Result<CodeHostOperation, InvalidCodeHostArguments> {
-    let mut object = object(arguments, 3)?;
-    let repository = CodeHostRepository::try_new(take_string(&mut object, "repository")?)?;
-    let number = CodeHostChangeRequestNumber::try_new(take_positive_id(&mut object, "number")?)?;
-    let body = CodeHostCommentBody::try_new(take_string(&mut object, "body")?)?;
-    Ok(CodeHostOperation::Comment(ChangeRequestCommentArguments {
-        repository,
-        number,
-        body,
-    }))
+    decode_arguments(arguments).map(CodeHostOperation::Comment)
 }
