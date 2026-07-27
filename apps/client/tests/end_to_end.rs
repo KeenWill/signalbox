@@ -37,17 +37,28 @@ use signalbox_persistence::{
     local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
     scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
 };
+use signalbox_process_protocol::{
+    CanonicalUuid, ClientFrame, ClientRequest, CommandId, ProtocolVersion, RequestId,
+    ServerMessage, SessionMetadata, decode_server_line, encode_client_line,
+};
 use signalboxd::{
     ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSupervisor,
     FileCredentialAccess, HubModelConfiguration, LocalProcessListener,
-    PostgresProviderModelExecution, ProcessRuntime,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
-use tokio::{io::AsyncWriteExt, process::Command, sync::watch, time::timeout};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
+    process::Command,
+    sync::watch,
+    task::JoinHandle,
+    time::timeout,
+};
 use uuid::Uuid;
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
@@ -156,6 +167,119 @@ async fn run_client(
     Ok(child.wait_with_output().await?)
 }
 
+/// The direct model selection every metadata-search fixture session carries:
+/// the first selection `IMPORT_MODEL_CONFIGURATION` defines, since the search
+/// verb reads metadata and never depends on which model a session selected.
+const SEARCH_FIXTURE_SELECTION: &str = "00000000-0000-0000-0000-000000000001";
+
+/// The process server the metadata-search tests drive. They start no turn, so
+/// the fixture runs the process boundary without a scheduler or provider.
+struct MetadataSearchRuntime {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    socket_directory: SocketDirectory,
+    shutdown: watch::Sender<bool>,
+    process_task: JoinHandle<Result<(), ProcessRuntimeError>>,
+    _work_source: InProcessEligibilityWorkSource<PostgresEligibilitySweep>,
+}
+
+impl MetadataSearchRuntime {
+    async fn start() -> Result<Self, Box<dyn Error>> {
+        let (container, pool) = postgres().await?;
+        let socket_directory = SocketDirectory::create()?;
+        let sweep = PostgresEligibilitySweep::new(pool.clone());
+        let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+        let listener = LocalProcessListener::bind(socket_directory.socket())?;
+        let process_runtime = ProcessRuntime::new(
+            listener,
+            pool.clone(),
+            eligibility_nudge,
+            InProcessToolDispatchGate::default(),
+            HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+        );
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
+        Ok(Self {
+            container,
+            pool,
+            socket_directory,
+            shutdown,
+            process_task,
+            _work_source: work_source,
+        })
+    }
+
+    fn socket(&self) -> PathBuf {
+        self.socket_directory.socket().to_owned()
+    }
+
+    async fn stop(self) -> Result<(), Box<dyn Error>> {
+        self.shutdown.send(true)?;
+        timeout(Duration::from_secs(10), self.process_task).await???;
+        self.pool.close().await;
+        self.socket_directory.cleanup()?;
+        drop(self.container);
+        Ok(())
+    }
+}
+
+/// Creates one fixture session through the shipped terminal verb and returns
+/// its canonical identity text.
+async fn create_fixture_session(socket: PathBuf) -> Result<String, Box<dyn Error>> {
+    let created = run_client(
+        socket,
+        vec![
+            String::from("create"),
+            String::from("--model"),
+            String::from(SEARCH_FIXTURE_SELECTION),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        created.status.success(),
+        "create failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let session_id = String::from_utf8(created.stdout)?.trim().to_owned();
+    Uuid::parse_str(&session_id)?;
+    Ok(session_id)
+}
+
+/// Installs one complete metadata snapshot through the version-four process
+/// request, which no terminal verb exposes.
+async fn replace_fixture_metadata(
+    socket: &Path,
+    session_id: &str,
+    metadata: SessionMetadata,
+) -> Result<(), Box<dyn Error>> {
+    let stream = UnixStream::connect(socket).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let frame = ClientFrame::try_new_for_version(
+        ProtocolVersion::Four,
+        RequestId::try_new(1)?,
+        ClientRequest::ReplaceSessionMetadata {
+            command_id: CommandId::try_from_uuid(Uuid::now_v7())?,
+            session_id: CanonicalUuid::from_uuid(Uuid::parse_str(session_id)?),
+            metadata,
+        },
+    )?;
+    writer.write_all(&encode_client_line(&frame)?).await?;
+    let mut line = Vec::new();
+    reader.read_until(b'\n', &mut line).await?;
+    let response = decode_server_line(&line)?;
+    assert!(
+        matches!(
+            response.message(),
+            ServerMessage::SessionMetadataReplaced { .. }
+        ),
+        "the metadata fixture must commit: {:?}",
+        response.message()
+    );
+    Ok(())
+}
+
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     while !*shutdown.borrow_and_update() {
         if shutdown.changed().await.is_err() {
@@ -172,6 +296,228 @@ fn required_environment(name: &'static str) -> Result<OsString, Box<dyn Error>> 
         )
         .into()
     })
+}
+
+/// S25: the terminal search verb lists only the sessions that satisfy every
+/// named filter, excluding one that fails the title query and one that fails
+/// the required tag.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s25_terminal_client_search_lists_only_sessions_matching_every_filter()
+-> Result<(), Box<dyn Error>> {
+    let runtime = MetadataSearchRuntime::start().await?;
+    let matching_session = create_fixture_session(runtime.socket()).await?;
+    let other_title_session = create_fixture_session(runtime.socket()).await?;
+    let other_tag_session = create_fixture_session(runtime.socket()).await?;
+    replace_fixture_metadata(
+        &runtime.socket(),
+        &matching_session,
+        SessionMetadata::try_new(
+            Some(String::from("Active plan")),
+            vec![String::from("daily"), String::from("plan")],
+            Vec::new(),
+            false,
+        )?,
+    )
+    .await?;
+    replace_fixture_metadata(
+        &runtime.socket(),
+        &other_title_session,
+        SessionMetadata::try_new(
+            Some(String::from("Retired plan")),
+            vec![String::from("daily")],
+            Vec::new(),
+            false,
+        )?,
+    )
+    .await?;
+    replace_fixture_metadata(
+        &runtime.socket(),
+        &other_tag_session,
+        SessionMetadata::try_new(
+            Some(String::from("Active plan")),
+            vec![String::from("weekly")],
+            Vec::new(),
+            false,
+        )?,
+    )
+    .await?;
+
+    let searched = run_client(
+        runtime.socket(),
+        vec![
+            String::from("search"),
+            String::from("--title"),
+            String::from("Active"),
+            String::from("--tag"),
+            String::from("daily"),
+        ],
+        None,
+    )
+    .await?;
+
+    assert!(
+        searched.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&searched.stderr)
+    );
+    assert!(searched.stderr.is_empty());
+    let listed = String::from_utf8(searched.stdout)?;
+    assert_eq!(listed.lines().count(), 1);
+    assert!(listed.contains(&format!(
+        "{matching_session} archived=false defaults_version=1 \
+         model={SEARCH_FIXTURE_SELECTION} dangerous_tool_auto_approval=disabled \
+         last_writer=owner updated_at_unix_micros="
+    )));
+    assert!(listed.contains(" tags=daily,plan title=Active plan\n"));
+    assert!(!listed.contains(&other_title_session));
+    assert!(!listed.contains(&other_tag_session));
+
+    runtime.stop().await
+}
+
+/// S25: archiving removes a session from the default search view, and the
+/// explicit switch restores it while naming its archive state.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s25_terminal_client_search_lists_an_archived_session_only_when_requested()
+-> Result<(), Box<dyn Error>> {
+    let runtime = MetadataSearchRuntime::start().await?;
+    let active_session = create_fixture_session(runtime.socket()).await?;
+    let archived_session = create_fixture_session(runtime.socket()).await?;
+    replace_fixture_metadata(
+        &runtime.socket(),
+        &active_session,
+        SessionMetadata::try_new(
+            Some(String::from("Active plan")),
+            vec![String::from("daily")],
+            Vec::new(),
+            false,
+        )?,
+    )
+    .await?;
+    replace_fixture_metadata(
+        &runtime.socket(),
+        &archived_session,
+        SessionMetadata::try_new(
+            Some(String::from("Archived plan")),
+            vec![String::from("daily")],
+            Vec::new(),
+            true,
+        )?,
+    )
+    .await?;
+
+    let default_view = run_client(
+        runtime.socket(),
+        vec![
+            String::from("search"),
+            String::from("--tag"),
+            String::from("daily"),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        default_view.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&default_view.stderr)
+    );
+    assert!(default_view.stderr.is_empty());
+    let default_listed = String::from_utf8(default_view.stdout)?;
+    assert_eq!(default_listed.lines().count(), 1);
+    assert!(default_listed.contains(&active_session));
+    assert!(!default_listed.contains(&archived_session));
+
+    let archived_view = run_client(
+        runtime.socket(),
+        vec![
+            String::from("search"),
+            String::from("--tag"),
+            String::from("daily"),
+            String::from("--include-archived"),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        archived_view.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&archived_view.stderr)
+    );
+    assert!(archived_view.stderr.is_empty());
+    let archived_listed = String::from_utf8(archived_view.stdout)?;
+    assert_eq!(archived_listed.lines().count(), 2);
+    assert!(archived_listed.contains(&active_session));
+    assert!(archived_listed.contains(&format!("{archived_session} archived=true")));
+
+    runtime.stop().await
+}
+
+/// A bounded page never truncates silently: a page that reached its limit
+/// prints the exact cursor that continues it, and the next page carries none.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn terminal_client_search_prints_the_cursor_that_continues_a_full_page()
+-> Result<(), Box<dyn Error>> {
+    let runtime = MetadataSearchRuntime::start().await?;
+    let first_created = create_fixture_session(runtime.socket()).await?;
+    let second_created = create_fixture_session(runtime.socket()).await?;
+
+    let first_page = run_client(
+        runtime.socket(),
+        vec![
+            String::from("search"),
+            String::from("--limit"),
+            String::from("1"),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        first_page.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&first_page.stderr)
+    );
+    let first_listed = String::from_utf8(first_page.stdout)?;
+    assert_eq!(first_listed.lines().count(), 1);
+    let first_page_session = first_listed
+        .split(' ')
+        .next()
+        .expect("each row begins with its session identity")
+        .to_owned();
+    assert_eq!(
+        String::from_utf8(first_page.stderr)?,
+        format!("next_after_session_id={first_page_session}\n")
+    );
+
+    let second_page = run_client(
+        runtime.socket(),
+        vec![
+            String::from("search"),
+            String::from("--limit"),
+            String::from("1"),
+            String::from("--after"),
+            first_page_session.clone(),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        second_page.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&second_page.stderr)
+    );
+    assert!(second_page.stderr.is_empty());
+    let second_listed = String::from_utf8(second_page.stdout)?;
+    assert_eq!(second_listed.lines().count(), 1);
+    assert!(!second_listed.contains(&first_page_session));
+
+    let both_pages = format!("{first_listed}{second_listed}");
+    assert!(both_pages.contains(&first_created));
+    assert!(both_pages.contains(&second_created));
+
+    runtime.stop().await
 }
 
 /// S28 / INV-038: the shipped terminal verb reads one named file and exposes

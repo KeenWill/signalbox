@@ -4,9 +4,16 @@ use clap::{
     ArgGroup, Args as ClapArgs, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind,
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, CommandId, ConversationImportFormat, ModelSelection,
+    CanonicalU64, CanonicalUuid, CommandId, ConversationImportFormat,
+    MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
+    MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, ModelSelection,
 };
 use uuid::Uuid;
+
+use crate::{MAX_METADATA_PAGE_SIZE, MIN_METADATA_PAGE_SIZE, SessionMetadataPageRequest};
+
+/// The specification's ordinary default metadata page size.
+const DEFAULT_SEARCH_RESULT_LIMIT: &str = "50";
 
 #[derive(Debug)]
 pub(crate) struct Arguments {
@@ -22,6 +29,7 @@ pub(crate) enum Command {
         command_id: Option<CommandId>,
     },
     List,
+    Search(SessionMetadataPageRequest),
     Send {
         session_id: CanonicalUuid,
         command_id: Option<CommandId>,
@@ -99,6 +107,8 @@ enum CliCommand {
     Create(CreateArguments),
     /// List current sessions.
     List,
+    /// Read one filtered page of current session metadata.
+    Search(SearchArguments),
     /// Submit standard input and print the reply after completion.
     Send(SendArguments),
     /// Install a new forward-only session model-defaults epoch.
@@ -131,6 +141,30 @@ struct CreateArguments {
     /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct SearchArguments {
+    /// Require an exact case-sensitive title substring.
+    #[arg(long, value_name = "SUBSTRING", value_parser = metadata_filter_text)]
+    title: Option<String>,
+    /// Require an exact tag; repeat the option to require every named tag.
+    #[arg(long = "tag", value_name = "TAG", value_parser = metadata_filter_text)]
+    tags: Vec<String>,
+    /// Include archived sessions, which the default view excludes.
+    #[arg(long)]
+    include_archived: bool,
+    /// Read at most this many results, from 1 through 100.
+    #[arg(
+        long,
+        value_name = "COUNT",
+        default_value = DEFAULT_SEARCH_RESULT_LIMIT,
+        value_parser = metadata_page_size
+    )]
+    limit: CanonicalU64,
+    /// Continue after the exact session identity a prior page printed.
+    #[arg(long, value_name = "SESSION", value_parser = canonical_uuid)]
+    after: Option<CanonicalUuid>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -288,6 +322,58 @@ pub(crate) fn parse(
             command_id: arguments.command_id,
         },
         CliCommand::List => Command::List,
+        CliCommand::Search(arguments) => {
+            let mut distinct = arguments.tags.clone();
+            distinct.sort();
+            distinct.dedup();
+            if distinct.len() != arguments.tags.len() {
+                return Err(UsageError(Cli::command().error(
+                    ErrorKind::ArgumentConflict,
+                    "search requires distinct --tag values",
+                )));
+            }
+            if arguments.tags.len() > MAX_SESSION_METADATA_REQUIRED_TAGS {
+                return Err(UsageError(Cli::command().error(
+                    ErrorKind::TooManyValues,
+                    format!(
+                        "search admits at most {MAX_SESSION_METADATA_REQUIRED_TAGS} --tag values"
+                    ),
+                )));
+            }
+            if arguments
+                .tags
+                .iter()
+                .any(|tag| tag.len() > MAX_SESSION_METADATA_INDEXED_UTF8_BYTES)
+            {
+                return Err(UsageError(Cli::command().error(
+                    ErrorKind::ValueValidation,
+                    format!(
+                        "each --tag value carries at most \
+                         {MAX_SESSION_METADATA_INDEXED_UTF8_BYTES} UTF-8 bytes"
+                    ),
+                )));
+            }
+            let filter_utf8_bytes = arguments.tags.iter().map(String::len).fold(
+                arguments.title.as_deref().map_or(0, str::len),
+                usize::saturating_add,
+            );
+            if filter_utf8_bytes > MAX_SESSION_METADATA_TOTAL_UTF8_BYTES {
+                return Err(UsageError(Cli::command().error(
+                    ErrorKind::ValueValidation,
+                    format!(
+                        "the --title query and --tag values carry at most \
+                         {MAX_SESSION_METADATA_TOTAL_UTF8_BYTES} UTF-8 bytes together"
+                    ),
+                )));
+            }
+            Command::Search(SessionMetadataPageRequest {
+                required_tags: arguments.tags,
+                title_contains: arguments.title,
+                include_archived: arguments.include_archived,
+                page_size: arguments.limit,
+                after_session_id: arguments.after,
+            })
+        }
         CliCommand::Send(arguments) => Command::Send {
             session_id: arguments.session_id,
             command_id: arguments.command_id,
@@ -360,6 +446,27 @@ fn command_id(value: &str) -> Result<CommandId, String> {
         .map_err(|_| "command UUID uses a reserved value".to_owned())
 }
 
+fn metadata_filter_text(value: &str) -> Result<String, String> {
+    if value.is_empty() {
+        return Err("metadata filter text must not be empty".to_owned());
+    }
+    if value.contains('\0') {
+        return Err("metadata filter text must not contain U+0000".to_owned());
+    }
+    Ok(value.to_owned())
+}
+
+fn metadata_page_size(value: &str) -> Result<CanonicalU64, String> {
+    let parsed = canonical_u64(value)?;
+    if !(MIN_METADATA_PAGE_SIZE..=MAX_METADATA_PAGE_SIZE).contains(&parsed.value()) {
+        return Err(format!(
+            "the result limit must be from {MIN_METADATA_PAGE_SIZE} through \
+             {MAX_METADATA_PAGE_SIZE}"
+        ));
+    }
+    Ok(parsed)
+}
+
 fn canonical_u64(value: &str) -> Result<CanonicalU64, String> {
     if value.is_empty()
         || (value.len() > 1 && value.starts_with('0'))
@@ -377,11 +484,16 @@ fn canonical_u64(value: &str) -> Result<CanonicalU64, String> {
 mod tests {
     use std::{ffi::OsString, path::Path};
 
-    use signalbox_process_protocol::ConversationImportFormat;
+    use signalbox_process_protocol::{
+        CanonicalU64, CanonicalUuid, ConversationImportFormat,
+        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
+    };
+    use uuid::Uuid;
 
     use super::{
         Arguments, Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome,
-        parse,
+        SessionMetadataPageRequest, parse,
     };
 
     #[test]
@@ -456,6 +568,141 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn search_defaults_to_the_ordinary_non_archived_page() {
+        let parsed = parse(["search"].map(Into::into)).expect("the bare search verb parses");
+
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the successful search parse runs the client");
+        };
+        let Command::Search(page) = arguments.command else {
+            panic!("the successful search parse selects the search command");
+        };
+        assert_eq!(
+            page,
+            SessionMetadataPageRequest {
+                required_tags: Vec::new(),
+                title_contains: None,
+                include_archived: false,
+                page_size: CanonicalU64::new(50),
+                after_session_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn search_carries_every_named_filter_to_one_bounded_page() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let parsed = parse(
+            [
+                "search",
+                "--title",
+                "Active plan",
+                "--tag",
+                "daily",
+                "--tag",
+                "plan",
+                "--include-archived",
+                "--limit",
+                "1",
+                "--after",
+                session,
+            ]
+            .map(Into::into),
+        )
+        .expect("every named search filter parses");
+
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the successful search parse runs the client");
+        };
+        let Command::Search(page) = arguments.command else {
+            panic!("the successful search parse selects the search command");
+        };
+        assert_eq!(
+            page,
+            SessionMetadataPageRequest {
+                required_tags: vec![String::from("daily"), String::from("plan")],
+                title_contains: Some(String::from("Active plan")),
+                include_archived: true,
+                page_size: CanonicalU64::new(1),
+                after_session_id: Some(CanonicalUuid::from_uuid(
+                    Uuid::parse_str(session).expect("the fixture session is canonical UUID text")
+                )),
+            }
+        );
+    }
+
+    #[test]
+    fn search_rejects_a_result_limit_outside_the_admitted_page_bound() {
+        assert!(parse(["search", "--limit", "0"].map(Into::into)).is_err());
+        assert!(parse(["search", "--limit", "101"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn search_rejects_empty_filter_text() {
+        assert!(parse(["search", "--title", ""].map(Into::into)).is_err());
+        assert!(parse(["search", "--tag", ""].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn nul_in_search_filter_text_is_rejected() {
+        assert!(parse(["search", "--title", "before\0after"].map(Into::into)).is_err());
+        assert!(parse(["search", "--tag", "before\0after"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn search_rejects_a_repeated_tag_before_socket_use() {
+        assert!(parse(["search", "--tag", "daily", "--tag", "daily"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn search_rejects_more_required_tags_than_the_process_filter_admits() {
+        let admitted = search_requiring_tags(MAX_SESSION_METADATA_REQUIRED_TAGS);
+        let one_tag_beyond = search_requiring_tags(MAX_SESSION_METADATA_REQUIRED_TAGS + 1);
+
+        assert!(parse(admitted).is_ok());
+        assert!(parse(one_tag_beyond).is_err());
+    }
+
+    #[test]
+    fn search_rejects_a_required_tag_beyond_the_indexed_byte_bound() {
+        let admitted = "t".repeat(MAX_SESSION_METADATA_INDEXED_UTF8_BYTES);
+        let one_byte_beyond = "t".repeat(MAX_SESSION_METADATA_INDEXED_UTF8_BYTES + 1);
+
+        assert!(parse(["search", "--tag", admitted.as_str()].map(Into::into)).is_ok());
+        assert!(parse(["search", "--tag", one_byte_beyond.as_str()].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn search_rejects_filter_text_beyond_the_aggregate_byte_bound() {
+        let whole_bound_title = "t".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES);
+
+        assert!(parse(["search", "--title", whole_bound_title.as_str()].map(Into::into)).is_ok());
+        assert!(
+            parse(
+                [
+                    "search",
+                    "--title",
+                    whole_bound_title.as_str(),
+                    "--tag",
+                    "daily",
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+    }
+
+    /// One `search` invocation requiring the given number of distinct tags.
+    fn search_requiring_tags(tags: usize) -> Vec<OsString> {
+        let mut values = vec![OsString::from("search")];
+        for tag in 0..tags {
+            values.push(OsString::from("--tag"));
+            values.push(OsString::from(tag.to_string()));
+        }
+        values
     }
 
     #[test]

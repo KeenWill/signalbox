@@ -6,8 +6,9 @@ use std::{
 
 use signalbox_process_protocol::{
     CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ImportedContentKind,
-    ImportedSourceSpeaker, ImportedSpeaker, ModelCallDisposition, ModelCallState, SessionEvent,
-    ToolBatchState, TranscriptEntry, TranscriptTextEntry, TurnState,
+    ImportedSourceSpeaker, ImportedSpeaker, MetadataActor, MetadataLastWriter,
+    ModelCallDisposition, ModelCallState, SessionEvent, ToolBatchState, TranscriptEntry,
+    TranscriptTextEntry, TurnState,
 };
 
 use crate::{
@@ -52,6 +53,34 @@ pub(crate) enum SnapshotSelection {
 #[derive(Default)]
 struct SnapshotSelectionContext {
     requests: HashSet<CanonicalUuid>,
+}
+
+/// One complete metadata summary as the search verb presents it.
+pub(crate) struct SessionMetadataRow<'a> {
+    pub(crate) session_id: CanonicalUuid,
+    pub(crate) defaults_version: u64,
+    pub(crate) selection: &'a str,
+    pub(crate) dangerous_tool_auto_approval: bool,
+    pub(crate) archived: bool,
+    pub(crate) last_writer: Option<MetadataLastWriter>,
+    pub(crate) tags: &'a [String],
+    pub(crate) title: Option<&'a str>,
+}
+
+/// What one process-derived text field may carry unescaped, given where it
+/// sits in the output that carries it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextField {
+    /// Flowing text that owns the lines it is written to, so U+000A is its
+    /// content rather than a delimiter.
+    Flowing,
+    /// The last named value on its line: a line feed inside it would forge a
+    /// following line, and nothing else delimits it.
+    TrailingOnLine,
+    /// A value delimited within its line: the space that ends its field and
+    /// the comma that separates it from a sibling are escaped too, so the
+    /// field states its exact values.
+    DelimitedOnLine,
 }
 
 pub(crate) struct Output<'a> {
@@ -172,6 +201,42 @@ impl<'a> Output<'a> {
             self.stdout,
             "{session_id} defaults_version={defaults_version} {selection}"
         )
+    }
+
+    pub(crate) fn session_metadata_summary(
+        &mut self,
+        row: &SessionMetadataRow<'_>,
+    ) -> io::Result<()> {
+        let tags = row
+            .tags
+            .iter()
+            .map(|tag| self.render_field(tag, TextField::DelimitedOnLine))
+            .collect::<Vec<_>>()
+            .join(",");
+        let title = row
+            .title
+            .map(|title| self.render_field(title, TextField::TrailingOnLine));
+        writeln!(
+            self.stdout,
+            "{} archived={} defaults_version={} {} dangerous_tool_auto_approval={} \
+             last_writer={} updated_at_unix_micros={} tags={tags} title={}",
+            row.session_id,
+            row.archived,
+            row.defaults_version,
+            row.selection,
+            dangerous_tool_auto_approval_label(row.dangerous_tool_auto_approval),
+            last_writer_actor_label(row.last_writer),
+            last_writer_micros_label(row.last_writer),
+            title.unwrap_or_default()
+        )
+    }
+
+    pub(crate) fn next_page_cursor(
+        &mut self,
+        next_after_session_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(self.stderr, "next_after_session_id={next_after_session_id}")?;
+        self.stderr.flush()
     }
 
     pub(crate) fn snapshot(
@@ -674,10 +739,14 @@ impl<'a> Output<'a> {
     }
 
     fn render(&self, value: &str) -> String {
+        self.render_field(value, TextField::Flowing)
+    }
+
+    fn render_field(&self, value: &str, field: TextField) -> String {
         if self.raw {
             value.to_owned()
         } else {
-            control_safe(value)
+            control_safe(value, field)
         }
     }
 }
@@ -1014,11 +1083,42 @@ const fn failed_model_call_disposition(disposition: FailedModelCallDisposition) 
     }
 }
 
-fn control_safe(value: &str) -> String {
+const fn dangerous_tool_auto_approval_label(dangerous_tool_auto_approval: bool) -> &'static str {
+    if dangerous_tool_auto_approval {
+        "approve-all"
+    } else {
+        "disabled"
+    }
+}
+
+const fn last_writer_actor_label(last_writer: Option<MetadataLastWriter>) -> &'static str {
+    match last_writer {
+        Some(last_writer) => match last_writer.actor() {
+            MetadataActor::Owner {} => "owner",
+        },
+        None => "none",
+    }
+}
+
+fn last_writer_micros_label(last_writer: Option<MetadataLastWriter>) -> String {
+    match last_writer {
+        Some(last_writer) => last_writer.updated_at_unix_micros().value().to_string(),
+        None => String::from("none"),
+    }
+}
+
+fn control_safe(value: &str, field: TextField) -> String {
     let mut rendered = String::with_capacity(value.len());
     for character in value.chars() {
         let code = character as u32;
-        if character != '\n' && (code <= 0x1f || (0x7f..=0x9f).contains(&code)) {
+        let preserved_line_feed = character == '\n' && field == TextField::Flowing;
+        let control = code <= 0x1f || (0x7f..=0x9f).contains(&code);
+        // A delimited field escapes the introducer too, so every backslash in
+        // its output opens an escape this renderer wrote and the field decodes
+        // back to the exact values it was given.
+        let delimiter =
+            matches!(character, ' ' | ',' | '\\') && field == TextField::DelimitedOnLine;
+        if delimiter || (control && !preserved_line_feed) {
             rendered.push_str(&format!("\\u{{{code:x}}}"));
         } else {
             rendered.push(character);
@@ -1035,12 +1135,13 @@ mod tests {
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ContentFragment, CurrentModelCall, CurrentModelCallState,
         FailedModelCallDisposition, FailedTerminalModelCall, ImportedContentKind,
-        ImportedSourceSpeaker, ImportedSpeaker, InputContent, ModelCallState, ServerMessage,
-        SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
+        ImportedSourceSpeaker, ImportedSpeaker, InputContent, MetadataActor, MetadataLastWriter,
+        ModelCallState, ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry,
+        TurnState,
     };
     use uuid::Uuid;
 
-    use super::{Output, SnapshotSelection, control_safe};
+    use super::{Output, SessionMetadataRow, SnapshotSelection, TextField, control_safe};
     use crate::{
         error::ClientError,
         transcript::{SnapshotIdentitySet, TranscriptSnapshot},
@@ -1049,10 +1150,166 @@ mod tests {
     #[test]
     fn terminal_safe_text_preserves_line_feed_and_escapes_c0_del_and_c1() {
         assert_eq!(
-            control_safe("a\n\t\u{1b}\u{7f}\u{85}z"),
+            control_safe("a\n\t\u{1b}\u{7f}\u{85}z", TextField::Flowing),
             "a\n\\u{9}\\u{1b}\\u{7f}\\u{85}z"
         );
-        assert_eq!(control_safe("café\u{1f980}"), "café\u{1f980}");
+        assert_eq!(
+            control_safe("café\u{1f980}", TextField::Flowing),
+            "café\u{1f980}"
+        );
+    }
+
+    #[test]
+    fn terminal_safe_trailing_field_escapes_line_feed_and_keeps_its_spaces() {
+        assert_eq!(
+            control_safe("a\n\t\u{1b}\u{7f}\u{85}z", TextField::TrailingOnLine),
+            "a\\u{a}\\u{9}\\u{1b}\\u{7f}\\u{85}z"
+        );
+        assert_eq!(
+            control_safe("café, and a space\u{1f980}", TextField::TrailingOnLine),
+            "café, and a space\u{1f980}"
+        );
+    }
+
+    #[test]
+    fn terminal_safe_delimited_field_escapes_the_space_and_comma_that_delimit_it() {
+        assert_eq!(
+            control_safe("a\n\t\u{1b}\u{7f}\u{85}z", TextField::DelimitedOnLine),
+            "a\\u{a}\\u{9}\\u{1b}\\u{7f}\\u{85}z"
+        );
+        assert_eq!(
+            control_safe("café, and a space\u{1f980}", TextField::DelimitedOnLine),
+            "café\\u{2c}\\u{20}and\\u{20}a\\u{20}space\u{1f980}"
+        );
+    }
+
+    #[test]
+    fn terminal_safe_delimited_field_distinguishes_written_escape_text_from_an_escape() {
+        let comma = control_safe(",", TextField::DelimitedOnLine);
+        let escape_text_for_a_comma = control_safe("\\u{2c}", TextField::DelimitedOnLine);
+
+        assert_eq!(comma, "\\u{2c}");
+        assert_eq!(escape_text_for_a_comma, "\\u{5c}u{2c}");
+        assert_ne!(comma, escape_text_for_a_comma);
+    }
+
+    #[test]
+    fn search_renders_one_complete_written_metadata_row() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .session_metadata_summary(&SessionMetadataRow {
+                session_id: wire_uuid(1),
+                defaults_version: 2,
+                selection: "model=00000000-0000-0000-0000-000000000003",
+                dangerous_tool_auto_approval: true,
+                archived: true,
+                last_writer: Some(MetadataLastWriter::new(
+                    CanonicalU64::new(1_753_484_400_000_000),
+                    MetadataActor::Owner {},
+                )),
+                tags: &[String::from("daily"), String::from("plan")],
+                title: Some("Active plan"),
+            })
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            00000000-0000-0000-0000-000000000001 archived=true defaults_version=2 model=00000000-0000-0000-0000-000000000003 dangerous_tool_auto_approval=approve-all last_writer=owner updated_at_unix_micros=1753484400000000 tags=daily,plan title=Active plan
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn search_renders_the_unwritten_metadata_row_with_named_absences() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .session_metadata_summary(&SessionMetadataRow {
+                session_id: wire_uuid(1),
+                defaults_version: 1,
+                selection: "alias=00000000-0000-0000-0000-000000000002",
+                dangerous_tool_auto_approval: false,
+                archived: false,
+                last_writer: None,
+                tags: &[],
+                title: None,
+            })
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            00000000-0000-0000-0000-000000000001 archived=false defaults_version=1 alias=00000000-0000-0000-0000-000000000002 dangerous_tool_auto_approval=disabled last_writer=none updated_at_unix_micros=none tags= title=
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn search_title_and_tags_cannot_forge_another_row() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .session_metadata_summary(&SessionMetadataRow {
+                session_id: wire_uuid(1),
+                defaults_version: 1,
+                selection: "model=00000000-0000-0000-0000-000000000003",
+                dangerous_tool_auto_approval: false,
+                archived: false,
+                last_writer: None,
+                tags: &[String::from("first\nsecond")],
+                title: Some("forged\n00000000-0000-0000-0000-000000000002 archived=false"),
+            })
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            00000000-0000-0000-0000-000000000001 archived=false defaults_version=1 model=00000000-0000-0000-0000-000000000003 dangerous_tool_auto_approval=disabled last_writer=none updated_at_unix_micros=none tags=first\u{a}second title=forged\u{a}00000000-0000-0000-0000-000000000002 archived=false
+        "#]]
+        .assert_eq(&rendered);
+        assert_eq!(rendered.lines().count(), 1);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn search_tags_state_their_exact_boundaries() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .session_metadata_summary(&SessionMetadataRow {
+                session_id: wire_uuid(1),
+                defaults_version: 1,
+                selection: "model=00000000-0000-0000-0000-000000000003",
+                dangerous_tool_auto_approval: false,
+                archived: false,
+                last_writer: None,
+                tags: &[String::from("one,tag title=forged"), String::from("second")],
+                title: Some("Active plan"),
+            })
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            00000000-0000-0000-0000-000000000001 archived=false defaults_version=1 model=00000000-0000-0000-0000-000000000003 dangerous_tool_auto_approval=disabled last_writer=none updated_at_unix_micros=none tags=one\u{2c}tag\u{20}title=forged,second title=Active plan
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn search_prints_its_continuation_cursor_to_standard_error() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .next_page_cursor(wire_uuid(1))
+            .expect("in-memory output cannot fail");
+
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).expect("rendered output is UTF-8"),
+            "next_after_session_id=00000000-0000-0000-0000-000000000001\n"
+        );
     }
 
     #[test]
