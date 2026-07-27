@@ -722,6 +722,36 @@ BEFORE UPDATE OR DELETE ON runner_registration_workspace
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE TRIGGER runner_registration_rejects_truncate
+BEFORE TRUNCATE ON runner_registration
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER runner_registration_class_rejects_truncate
+BEFORE TRUNCATE ON runner_registration_class
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER runner_registration_tool_rejects_truncate
+BEFORE TRUNCATE ON runner_registration_tool
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER runner_registration_profile_rejects_truncate
+BEFORE TRUNCATE ON runner_registration_profile
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER runner_registration_profile_approval_rejects_truncate
+BEFORE TRUNCATE ON runner_registration_profile_approval
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER runner_registration_workspace_rejects_truncate
+BEFORE TRUNCATE ON runner_registration_workspace
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
+
 CREATE FUNCTION guard_runner_registration_insert()
 RETURNS trigger
 LANGUAGE plpgsql

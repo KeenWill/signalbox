@@ -20,16 +20,15 @@ use signalbox_domain::{
     RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
     RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerId,
     RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseLoss,
-    RunnerLeaseNoExecutionProof, RunnerLeaseNoExecutionProofReconstitutionInput,
-    RunnerLeaseReconstitutionInput, RunnerLeaseState, RunnerSelector, RunnerToolDeclaration,
-    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId,
-    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolDispatchGeneration, ToolName, ToolPermissionDefault, ToolRequestId,
-    TurnAttemptId, TurnId, ValidatedRunnerRegistration,
-    ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceCapability,
-    WorkspaceRepositoryKey, WorkspaceRequirement,
+    RunnerLeaseNoExecutionProof, RunnerLeaseReconstitutionInput, RunnerLeaseState, RunnerSelector,
+    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
+    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
+    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
+    SessionRunnerPlacementState, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId, ToolDispatchGeneration,
+    ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
+    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
+    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -325,11 +324,17 @@ impl RunnerProtocolStore {
     /// Loads one exact historical validated registration.
     pub async fn load_registration(
         &self,
-        enrollment: RunnerEnrollmentId,
+        enrollment: &RunnerEnrollment,
         revision: RunnerRegistrationRevision,
     ) -> Result<Option<StoredValidatedRunnerRegistration>, RunnerProtocolStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
-        let loaded = load_registration_in(transaction.as_mut(), enrollment, revision).await?;
+        let loaded = load_registration_in(
+            transaction.as_mut(),
+            enrollment.enrollment(),
+            revision,
+            Some(enrollment),
+        )
+        .await?;
         transaction.commit().await?;
         Ok(loaded)
     }
@@ -337,7 +342,7 @@ impl RunnerProtocolStore {
     /// Loads the current validated registration for an enrollment.
     pub async fn load_current_registration(
         &self,
-        enrollment: RunnerEnrollmentId,
+        enrollment: &RunnerEnrollment,
     ) -> Result<Option<StoredValidatedRunnerRegistration>, RunnerProtocolStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
         let revision: Option<Decimal> = sqlx::query_scalar(
@@ -345,15 +350,16 @@ impl RunnerProtocolStore {
                FROM runner_current_registration
               WHERE enrollment_id = $1",
         )
-        .bind(enrollment.into_uuid())
+        .bind(enrollment.enrollment().into_uuid())
         .fetch_optional(transaction.as_mut())
         .await?;
         let loaded = match revision {
             Some(revision) => {
                 load_registration_in(
                     transaction.as_mut(),
-                    enrollment,
+                    enrollment.enrollment(),
                     decode_registration_revision(revision)?,
+                    Some(enrollment),
                 )
                 .await?
             }
@@ -869,6 +875,7 @@ impl RunnerProtocolStore {
             transaction.as_mut(),
             runner_enrollment_id(row.get("registration_enrollment_id")),
             decode_registration_revision(row.get("registration_revision"))?,
+            None,
         )
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
@@ -909,23 +916,32 @@ impl RunnerProtocolStore {
                         generation: decode_dispatch_generation(row.get("dispatch_generation"))?,
                     },
                 );
-                RunnerLeaseNoExecutionProof::reconstitute(
-                    RunnerLeaseNoExecutionProofReconstitutionInput {
-                        correlation: RunnerLeaseCorrelation {
-                            lease: runner_lease_id(row.get("lease_id")),
-                            runner: runner_id(row.get("runner_id")),
-                            tool: tool_name(row.get("tool_name"))?,
-                            dispatch,
-                            generation: decode_generation(row.get("generation"))?,
-                        },
-                        recorded_correlation: loaded.correlation(),
-                    },
-                )
-                .map_err(RunnerProtocolStoreError::Domain)
+                Ok::<_, RunnerProtocolStoreError>(RunnerLeaseCorrelation {
+                    lease: runner_lease_id(row.get("lease_id")),
+                    runner: runner_id(row.get("runner_id")),
+                    tool: tool_name(row.get("tool_name"))?,
+                    dispatch,
+                    generation: decode_generation(row.get("generation"))?,
+                })
             })
             .transpose()?;
+        let retry_prepared: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM runner_claimed_retry_attempt_authority
+                  WHERE source_lease_id = $1 AND source_generation = $2
+                 UNION ALL
+                 SELECT 1
+                   FROM runner_lease_generation
+                  WHERE lease_id = $1 AND predecessor_generation = $2
+             )",
+        )
+        .bind(lease.into_uuid())
+        .bind(Decimal::from(generation.get()))
+        .fetch_one(&self.pool)
+        .await?;
         loaded
-            .into_reconstituted_loss(no_execution.as_ref(), false)
+            .into_reconstituted_loss(no_execution, retry_prepared)
             .map(Some)
             .map_err(RunnerProtocolStoreError::Domain)
     }
@@ -1134,6 +1150,7 @@ async fn load_registration_in(
     connection: &mut PgConnection,
     enrollment: RunnerEnrollmentId,
     revision: RunnerRegistrationRevision,
+    authority: Option<&RunnerEnrollment>,
 ) -> Result<Option<StoredValidatedRunnerRegistration>, RunnerProtocolStoreError> {
     let row = sqlx::query(
         "SELECT *
@@ -1151,6 +1168,12 @@ async fn load_registration_in(
     let canonical = load_enrollment_in(connection, enrollment)
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
+    let authority = authority.unwrap_or(&canonical);
+    if canonical != *authority {
+        return Err(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::CorruptStoredFacts,
+        ));
+    }
     let class_rows = sqlx::query(
         "SELECT capability_class
            FROM runner_registration_class
@@ -1236,9 +1259,11 @@ async fn load_registration_in(
         .map(|row| decode_workspace(row.get("workspace_kind")))
         .collect::<Result<BTreeSet<_>, _>>()?;
     let registration = ValidatedRunnerRegistration::reconstitute(
-        &canonical,
+        authority,
         ValidatedRunnerRegistrationReconstitutionInput {
             enrollment: runner_enrollment_id(row.get("enrollment_id")),
+            revision: RunnerGeneration::try_from_u64(revision.get())
+                .ok_or(RunnerProtocolCorruption::GenerationExhausted)?,
             runner: runner_id(row.get("runner_id")),
             authentication: runner_authentication_id(row.get("authentication_reference_id")),
             classes,
@@ -1480,6 +1505,7 @@ async fn insert_grant_if_new(
             transaction.as_mut(),
             runner_enrollment_id(row.get("registration_enrollment_id")),
             decode_registration_revision(row.get("registration_revision"))?,
+            None,
         )
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
@@ -1693,6 +1719,7 @@ async fn load_placement_registration(
             connection,
             runner_enrollment_id(enrollment),
             decode_registration_revision(revision)?,
+            None,
         )
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)
@@ -1869,6 +1896,7 @@ async fn load_grant_for_placement(
         connection,
         runner_enrollment_id(row.get("registration_enrollment_id")),
         decode_registration_revision(row.get("registration_revision"))?,
+        None,
     )
     .await?
     .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;

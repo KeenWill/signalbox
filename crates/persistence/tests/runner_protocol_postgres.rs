@@ -934,20 +934,88 @@ async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
         .await?
         .expect("the inserted enrollment is present");
     let loaded_registration = store
-        .load_registration(expected_enrollment.enrollment(), stored.revision())
+        .load_registration(&loaded_enrollment, stored.revision())
         .await?
         .expect("the validated registration is present");
-    store
+    let loaded_placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+        },
+    );
+    let _loaded_pin = loaded_placement
+        .pin_and_offer_lease(
+            &loaded_enrollment,
+            loaded_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/loaded".to_owned())
+                .expect("the loaded fixture directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the loaded registration shares its loaded enrollment authority");
+    let revoked_enrollment = store
         .revoke_enrollment(expected_enrollment.enrollment())
-        .await?;
+        .await?
+        .expect("the inserted enrollment can be revoked");
     let historical_registration = store
-        .load_registration(expected_enrollment.enrollment(), stored.revision())
+        .load_registration(&revoked_enrollment, stored.revision())
         .await?
         .expect("revocation preserves historical validated registration");
 
     assert_eq!(loaded_enrollment, expected_enrollment);
     assert_eq!(loaded_registration, stored);
     assert_eq!(historical_registration, stored);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_historical_registration_load_remains_stale() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let historical = store
+        .register(&expected_enrollment, advertisement(), &catalog())
+        .await?;
+    store
+        .register(&expected_enrollment, expanded_advertisement(), &catalog())
+        .await?;
+    let loaded_enrollment = store
+        .load_enrollment(expected_enrollment.enrollment())
+        .await?
+        .expect("the enrollment with its advanced head is present");
+    let loaded_historical = store
+        .load_registration(&loaded_enrollment, historical.revision())
+        .await?
+        .expect("the historical registration remains readable");
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+        },
+    );
+    let rejected = placement
+        .pin_and_offer_lease(
+            &loaded_enrollment,
+            loaded_historical.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/stale".to_owned())
+                .expect("the stale fixture directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect_err("a historical registration cannot regain current authority");
+
+    assert_eq!(rejected, RunnerDomainError::RegistrationChanged);
     drop(pool);
     Ok(())
 }
@@ -1337,6 +1405,46 @@ async fn s30_inv042_current_registration_head_rejects_truncate() -> Result<(), B
         .expect_err("the registration head cannot be truncated");
 
     assert_check_violation(truncated);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_registration_inventories_reject_truncate() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, _) = stored_pin_fixture(&pool).await?;
+    let registration = sqlx::query("TRUNCATE runner_registration CASCADE")
+        .execute(&pool)
+        .await
+        .expect_err("the registration record cannot be truncated");
+    let classes = sqlx::query("TRUNCATE runner_registration_class CASCADE")
+        .execute(&pool)
+        .await
+        .expect_err("the registration class inventory cannot be truncated");
+    let tools = sqlx::query("TRUNCATE runner_registration_tool CASCADE")
+        .execute(&pool)
+        .await
+        .expect_err("the registration tool inventory cannot be truncated");
+    let profiles = sqlx::query("TRUNCATE runner_registration_profile CASCADE")
+        .execute(&pool)
+        .await
+        .expect_err("the registration profile inventory cannot be truncated");
+    let approvals = sqlx::query("TRUNCATE runner_registration_profile_approval CASCADE")
+        .execute(&pool)
+        .await
+        .expect_err("the registration profile approvals cannot be truncated");
+    let workspaces = sqlx::query("TRUNCATE runner_registration_workspace CASCADE")
+        .execute(&pool)
+        .await
+        .expect_err("the registration workspace inventory cannot be truncated");
+
+    assert_check_violation(registration);
+    assert_check_violation(classes);
+    assert_check_violation(tools);
+    assert_check_violation(profiles);
+    assert_check_violation(approvals);
+    assert_check_violation(workspaces);
     drop(pool);
     Ok(())
 }
@@ -3353,6 +3461,20 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
     );
     let prepared_replacement =
         authorize_fixture_claimed_retry(&store, &lost, ToolEffectClass::EffectFree).await?;
+    let consumed_loss = store
+        .load_lease_loss(
+            RunnerLeaseId::from_uuid(uuid(LEASE)),
+            RunnerGeneration::one(),
+        )
+        .await?
+        .expect("the consumed durable loss remains readable");
+    let duplicate_preparation = consumed_loss
+        .retry()
+        .expect("the consumed loss retains its retry identity")
+        .prepare_claimed_attempt(
+            claimed_batch_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::EffectFree),
+            ToolAttemptId::from_uuid(uuid(RETRY_ATTEMPT)),
+        );
     insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
     let (_batch, _retired, retry_authorization) = prepared_replacement.into_parts();
     let retry = pin
@@ -3380,6 +3502,7 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
     .fetch_all(&pool)
     .await?;
 
+    assert_eq!(duplicate_preparation, Err(RunnerDomainError::InvalidState));
     assert_eq!(reconstituted, retry);
     assert_eq!(batch_attempts, vec![retry.attempt().into_uuid()]);
     drop(pool);
@@ -3391,20 +3514,47 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
 async fn s31_inv043_unclaimed_retry_authority_survives_reconstitution() -> Result<(), Box<dyn Error>>
 {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
-    let offered = duplicate_lease(&pin.lease, registration.registration());
-    let correlation = offered.correlation();
-    let proof = signalbox_domain::RunnerLeaseNoExecutionProof::reconstitute(
-        signalbox_domain::RunnerLeaseNoExecutionProofReconstitutionInput {
-            correlation: correlation.clone(),
-            recorded_correlation: correlation,
-        },
+    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let correlation = pin.lease.correlation();
+    let mut durable_loss = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, $2, 2, 'lost_unclaimed')",
     )
-    .expect("the independent durable fence facts produce no-execution proof");
-    let loss = offered
-        .lose_unclaimed(&proof)
-        .expect("the exact proof seals the unclaimed loss");
-    store.store_lease_loss(&loss).await?;
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .execute(&mut *durable_loss)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_lease_event
+            SET event_ordinal = 2
+          WHERE lease_id = $1 AND generation = $2",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .execute(&mut *durable_loss)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_no_execution_proof
+            (lease_id, generation, attempt_id, session_id,
+             runner_id, tool_name, turn_id,
+             issuing_turn_attempt_id, request_id, dispatch_generation)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .bind(correlation.dispatch.attempt().into_uuid())
+    .bind(correlation.dispatch.session().into_uuid())
+    .bind(correlation.runner.into_uuid())
+    .bind(correlation.tool.as_str())
+    .bind(correlation.dispatch.turn().into_uuid())
+    .bind(correlation.dispatch.issuing_attempt().into_uuid())
+    .bind(correlation.dispatch.request().into_uuid())
+    .bind(Decimal::from(correlation.dispatch.generation().as_u64()))
+    .execute(&mut *durable_loss)
+    .await?;
+    durable_loss.commit().await?;
     let restored = store
         .load_lease_loss(
             RunnerLeaseId::from_uuid(uuid(LEASE)),
@@ -3804,7 +3954,7 @@ async fn s30_inv001_reconstitution_rejects_cross_wired_registration() -> Result<
         .await?;
 
     let error = store
-        .load_registration(expected_enrollment.enrollment(), stored.revision())
+        .load_registration(&expected_enrollment, stored.revision())
         .await
         .expect_err("cross-wired canonical identity fails closed");
 

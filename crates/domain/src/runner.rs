@@ -744,6 +744,7 @@ impl ValidatedRunnerRegistration {
         {
             return Err(RunnerDomainError::CorruptStoredFacts);
         }
+        let revision = input.revision;
         let advertisement = RunnerAdvertisement::new(
             input.classes.clone(),
             input.tools.iter().map(|tool| tool.name.clone()),
@@ -789,6 +790,9 @@ impl ValidatedRunnerRegistration {
             .register(advertisement, &catalog)
             .map_err(|_| RunnerDomainError::CorruptStoredFacts)?;
         registration.profiles = profiles;
+        registration.revision = revision;
+        registration.current_revision = Arc::clone(&enrollment.registration_revision);
+        registration.enrollment_active = Arc::clone(&enrollment.registration_active);
         Ok(registration)
     }
 }
@@ -797,6 +801,7 @@ impl ValidatedRunnerRegistration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedRunnerRegistrationReconstitutionInput {
     pub enrollment: RunnerEnrollmentId,
+    pub revision: RunnerGeneration,
     pub runner: RunnerId,
     pub authentication: RunnerAuthenticationId,
     pub classes: BTreeSet<RunnerCapabilityClass>,
@@ -954,24 +959,6 @@ impl RunnerLeaseNoExecutionProof {
     pub const fn correlation(&self) -> &RunnerLeaseCorrelation {
         &self.correlation
     }
-
-    pub fn reconstitute(
-        input: RunnerLeaseNoExecutionProofReconstitutionInput,
-    ) -> Result<Self, RunnerDomainError> {
-        if input.correlation != input.recorded_correlation {
-            return Err(RunnerDomainError::CorruptStoredFacts);
-        }
-        Ok(Self {
-            correlation: input.correlation,
-        })
-    }
-}
-
-/// Complete independently stored facts for one no-execution proof.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RunnerLeaseNoExecutionProofReconstitutionInput {
-    pub correlation: RunnerLeaseCorrelation,
-    pub recorded_correlation: RunnerLeaseCorrelation,
 }
 
 /// One fenced runner lease.
@@ -1178,7 +1165,7 @@ impl RunnerLease {
     pub fn reconstitute_loss(
         input: RunnerLeaseReconstitutionInput,
         registration: &ValidatedRunnerRegistration,
-        no_execution: Option<&RunnerLeaseNoExecutionProof>,
+        no_execution: Option<RunnerLeaseCorrelation>,
     ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
         let retry_prepared = input.retry_prepared;
         Self::reconstitute(input, registration)?
@@ -1187,18 +1174,22 @@ impl RunnerLease {
 
     pub fn into_reconstituted_loss(
         self,
-        no_execution: Option<&RunnerLeaseNoExecutionProof>,
+        no_execution: Option<RunnerLeaseCorrelation>,
         retry_prepared: bool,
     ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
-        let proof_matches =
-            no_execution.is_some_and(|proof| proof.correlation == self.correlation());
+        let proof_matches = no_execution
+            .as_ref()
+            .is_some_and(|correlation| *correlation == self.correlation());
         match (self.state, proof_matches, no_execution.is_some()) {
             (RunnerLeaseState::LostUnclaimed, true, true)
             | (
                 RunnerLeaseState::LostExecutionPossible | RunnerLeaseState::LostClaimed,
                 false,
                 false,
-            ) => self.into_loss_consequence(no_execution.cloned(), retry_prepared),
+            ) => self.into_loss_consequence(
+                no_execution.map(|correlation| RunnerLeaseNoExecutionProof { correlation }),
+                retry_prepared,
+            ),
             _ => Err(RunnerDomainError::InvalidState),
         }
     }
@@ -5251,8 +5242,9 @@ mod tests {
             .generation();
         let input = borrowed_lease_reconstitution_input(loss.lost());
 
-        let restored = RunnerLease::reconstitute_loss(input, &registration, Some(&proof))
-            .expect("complete lost facts and proof restore the checked consequence");
+        let restored =
+            RunnerLease::reconstitute_loss(input, &registration, Some(proof.correlation().clone()))
+                .expect("complete lost facts and proof restore the checked consequence");
 
         assert_eq!(
             restored
