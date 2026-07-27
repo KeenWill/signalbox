@@ -155,6 +155,32 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
     }
 }
 
+/// Spawns the version probe, retrying briefly on `ETXTBSY`. A freshly written
+/// fixture executable can transiently report "text file busy" when a
+/// concurrent test thread forks with the still-open write descriptor
+/// inherited across the exec; the parent's own write handle is already closed,
+/// so a short bounded retry clears the race without masking a real failure.
+async fn spawn_probe(
+    command: &mut tokio::process::Command,
+    executable: &str,
+) -> tokio::process::Child {
+    for _ in 0..50 {
+        match command.spawn() {
+            Ok(child) => return child,
+            Err(error) if error.raw_os_error() == Some(libc_etxtbsy()) => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("`{executable} --version` could not be spawned: {error}"),
+        }
+    }
+    panic!("`{executable} --version` stayed text-file-busy across retries")
+}
+
+/// `ETXTBSY` without pulling in a libc dependency for a test-only retry.
+fn libc_etxtbsy() -> i32 {
+    26
+}
+
 /// Fails closed: an unreadable, unparsable, or mismatched version is a smoke
 /// failure, never a skip. A skip here would quietly retire the only check that
 /// binds this evidence to a specific executable.
@@ -171,7 +197,7 @@ async fn assert_pinned_version(executable: &str) {
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
     }
-    let child = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         // Discarded rather than reported: a version probe has no need to
@@ -180,9 +206,8 @@ async fn assert_pinned_version(executable: &str) {
         .stderr(Stdio::null())
         // Dropping the timed-out future drops the child, which kills and reaps
         // it, so an unbounded probe cannot linger.
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap_or_else(|error| panic!("`{executable} --version` could not be spawned: {error}"));
+        .kill_on_drop(true);
+    let child = spawn_probe(&mut command, executable).await;
     let output = tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output())
         .await
         .unwrap_or_else(|_| {
