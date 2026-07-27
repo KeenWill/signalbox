@@ -580,7 +580,6 @@ class DocsConsistencyTests(unittest.TestCase):
             failures[0].message,
         )
 
-
     def test_attribute_forwarding_macro_is_rejected(self) -> None:
         (self.root / "src/generated.rs").write_text(
             "macro_rules! invariant_test {\n"
@@ -617,6 +616,68 @@ class DocsConsistencyTests(unittest.TestCase):
         )
 
         self.assertEqual(run_checks(self.root), [])
+
+    def test_test_named_argument_outside_the_forwarded_position_is_allowed(
+        self,
+    ) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! named {\n"
+            "    ($name:ident, $attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "named!(test, allow(dead_code));\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_test_metadata_in_the_forwarded_position_is_rejected(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! named {\n"
+            "    ($name:ident, $attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "named!(s01_inv_001_generated, test);\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "`macro_rules! named` emits or forwards a test attribute",
+            failures[0].message,
+        )
+
+    def test_repeated_forwarding_matcher_inspects_every_argument(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! many {\n"
+            "    ($name:ident, $($attr:meta),*) => {\n"
+            "        $(#[$attr])*\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "many!(s01_inv_001_generated, test);\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "`macro_rules! many` emits or forwards a test attribute",
+            failures[0].message,
+        )
 
     def test_cfg_predicate_test_token_does_not_mark_function_as_test(self) -> None:
         (self.root / "src/context.rs").write_text(
@@ -1764,7 +1825,7 @@ class DocsConsistencyTests(unittest.TestCase):
         self.assertIn("positive decimal", messages)
         self.assertIn("missing", messages)
 
-    def test_verification_ref_requires_reachable_pull_request(self) -> None:
+    def test_verification_ref_requires_integrated_pull_request(self) -> None:
         (self.root / "docs/spec/example.md").write_text(
             "# Example\n\n"
             "Verified through PR #99 (`agent/missing`).\n\n"
@@ -1780,7 +1841,10 @@ class DocsConsistencyTests(unittest.TestCase):
             failure_categories(failures),
             ["spec-verification-history"],
         )
-        self.assertIn("no merge commit reachable from HEAD", failures[0].message)
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
 
     def test_verification_ref_requires_exact_merged_branch(self) -> None:
         (self.root / "docs/spec/example.md").write_text(
@@ -1826,7 +1890,10 @@ class DocsConsistencyTests(unittest.TestCase):
             failure_categories(failures),
             ["spec-verification-history"],
         )
-        self.assertIn("no merge commit reachable from HEAD", failures[0].message)
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
 
     def test_local_branch_does_not_override_known_pr_history(self) -> None:
         run_git(self.root, "checkout", "-q", "-b", "agent/wrong")
@@ -1849,7 +1916,7 @@ class DocsConsistencyTests(unittest.TestCase):
             f"names `{self.merged_pr_branch}`", failures[0].message
         )
 
-    def test_verification_ref_rejects_merge_unreachable_from_head(self) -> None:
+    def test_verification_ref_rejects_merge_outside_integration(self) -> None:
         run_git(self.root, "checkout", "-q", "-b", "isolated-base")
         run_git(self.root, "checkout", "-q", "-b", "agent/unreachable")
         (self.root / "unreachable-marker").write_text(
@@ -1883,7 +1950,91 @@ class DocsConsistencyTests(unittest.TestCase):
             failure_categories(failures),
             ["spec-verification-history"],
         )
-        self.assertIn("no merge commit reachable from HEAD", failures[0].message)
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
+
+    def test_head_branch_merge_is_not_integration_provenance(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/head")
+        run_git(self.root, "checkout", "-q", "-b", "agent/spoof")
+        (self.root / "spoof-marker").write_text(
+            "PR 99 fixture\n", encoding="utf-8"
+        )
+        run_git(self.root, "add", "spoof-marker")
+        run_git(self.root, "commit", "-q", "-m", "spoof fixture")
+        run_git(self.root, "checkout", "-q", "agent/head")
+        run_git(
+            self.root,
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge pull request #99 from owner/agent/spoof",
+            "agent/spoof",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/spoof`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
+
+    def test_remote_integration_ref_outranks_the_local_branch(self) -> None:
+        run_git(
+            self.root,
+            "update-ref",
+            "refs/remotes/origin/main",
+            git_output(self.root, "rev-parse", "HEAD"),
+        )
+        run_git(self.root, "checkout", "-q", "-b", "agent/late")
+        (self.root / "late-marker").write_text(
+            "PR 99 fixture\n", encoding="utf-8"
+        )
+        run_git(self.root, "add", "late-marker")
+        run_git(self.root, "commit", "-q", "-m", "late fixture")
+        run_git(self.root, "checkout", "-q", "main")
+        run_git(
+            self.root,
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge pull request #99 from owner/agent/late",
+            "agent/late",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/late`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
 
     def test_one_local_in_flight_ref_may_match_checkout_branch(self) -> None:
         run_git(self.root, "checkout", "-q", "-b", "agent/in-flight")
@@ -1994,7 +2145,10 @@ class DocsConsistencyTests(unittest.TestCase):
             failure_categories(failures),
             ["spec-verification-history"],
         )
-        self.assertIn("no merge commit reachable from HEAD", failures[0].message)
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
 
     def test_non_pull_request_github_event_disables_local_exception(self) -> None:
         event = self.root / "event.json"

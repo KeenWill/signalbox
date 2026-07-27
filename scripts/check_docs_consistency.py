@@ -284,10 +284,21 @@ RUST_MACRO_RULES = re.compile(
     r"[ \t\r\n]*(?P<opening>[\(\[\{])"
 )
 RUST_FORWARDED_ATTRIBUTE = re.compile(r"#\[[^\]]*\$[^\]]*\]", re.DOTALL)
+RUST_METAVARIABLE = re.compile(rf"\$(?P<name>{RUST_IDENTIFIER_PATTERN})")
+RUST_METAVARIABLE_BINDING = re.compile(
+    rf"\$(?P<name>{RUST_IDENTIFIER_PATTERN})[ \t\r\n]*:"
+    rf"[ \t\r\n]*{RUST_IDENTIFIER_PATTERN}"
+)
+RUST_METAVARIABLE_REPETITION = re.compile(r"\$[ \t\r\n]*[\(\[\{]")
 PULL_REQUEST_MERGE = re.compile(
     r"^Merge pull request #(?P<number>[1-9][0-9]*) from "
     r"[^/\s]+/(?P<branch>[^\r\n]+)$",
     re.MULTILINE,
+)
+INTEGRATION_BRANCH = "main"
+INTEGRATION_REFS = (
+    f"refs/remotes/origin/{INTEGRATION_BRANCH}",
+    f"refs/heads/{INTEGRATION_BRANCH}",
 )
 
 
@@ -581,17 +592,124 @@ def rust_matching_delimiters(code: str) -> dict[int, int]:
     return pairs
 
 
+def rust_macro_rule_spans(
+    code: str, body_start: int, body_end: int, delimiters: dict[int, int]
+) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """Return the matcher and transcriber spans of each `macro_rules` rule.
+
+    An empty result means the definition does not read as a plain sequence of
+    ``(matcher) => {transcriber};`` rules, which callers treat as unknown
+    rather than as a definition without rules.
+    """
+    rules: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    index = body_start
+    while index < body_end:
+        while index < body_end and code[index] in " \t\r\n;":
+            index += 1
+        if index >= body_end:
+            return rules
+        if code[index] not in "([{":
+            return []
+        matcher_end = delimiters.get(index)
+        if matcher_end is None or matcher_end >= body_end:
+            return []
+        matcher = (index + 1, matcher_end)
+        index = matcher_end + 1
+        while index < body_end and code[index] in " \t\r\n":
+            index += 1
+        if not code.startswith("=>", index):
+            return []
+        index += 2
+        while index < body_end and code[index] in " \t\r\n":
+            index += 1
+        if index >= body_end or code[index] not in "([{":
+            return []
+        transcriber_end = delimiters.get(index)
+        if transcriber_end is None or transcriber_end >= body_end:
+            return []
+        rules.append((matcher, (index + 1, transcriber_end)))
+        index = transcriber_end + 1
+    return rules
+
+
+def rust_forwarded_metavariables(transcriber: str) -> set[str]:
+    """Return the metavariable names one transcriber places inside attributes."""
+    names: set[str] = set()
+    for attribute in RUST_FORWARDED_ATTRIBUTE.finditer(transcriber):
+        for metavariable in RUST_METAVARIABLE.finditer(attribute.group(0)):
+            names.add(metavariable.group("name"))
+    return names
+
+
+def rust_matcher_argument_positions(matcher: str) -> dict[str, int] | None:
+    """Return each metavariable's argument position in a plain list matcher.
+
+    ``None`` means the matcher does not read as a comma-separated list whose
+    metavariable fragments are exactly one binding each, so no position can be
+    attributed to a forwarded metavariable.
+    """
+    if RUST_METAVARIABLE_REPETITION.search(matcher) is not None:
+        return None
+    positions: dict[str, int] = {}
+    if not matcher.strip():
+        return positions
+    for position, fragment in enumerate(split_rust_meta_items(matcher)):
+        binding = RUST_METAVARIABLE_BINDING.fullmatch(fragment.strip())
+        if binding is None:
+            if RUST_METAVARIABLE.search(fragment) is not None:
+                return None
+            continue
+        if binding.group("name") in positions:
+            return None
+        positions[binding.group("name")] = position
+    return positions
+
+
+def rust_forwarded_argument_positions(
+    code: str, body_start: int, body_end: int, delimiters: dict[int, int]
+) -> set[int] | None:
+    """Return the invocation positions a macro forwards into its attributes.
+
+    ``None`` means the binding between a forwarded metavariable and one
+    invocation argument is not determinable, so every argument is inspected.
+    """
+    rules = rust_macro_rule_spans(code, body_start, body_end, delimiters)
+    if not rules:
+        return None
+    positions: set[int] = set()
+    for (matcher_start, matcher_end), (body_open, body_close) in rules:
+        forwarded = rust_forwarded_metavariables(code[body_open:body_close])
+        if not forwarded:
+            continue
+        bound = rust_matcher_argument_positions(
+            code[matcher_start:matcher_end]
+        )
+        if bound is None:
+            return None
+        for metavariable in forwarded:
+            if metavariable not in bound:
+                return None
+            positions.add(bound[metavariable])
+    return positions
+
+
 def rust_macro_invocation_applies_test(
     code: str,
     name: str,
     definition_start: int,
-    definition_end: int,
+    body_opening: int,
     delimiters: dict[int, int],
 ) -> bool:
     """Return whether a forwarding macro is invoked with test metadata."""
+    definition_end = delimiters.get(body_opening)
+    if definition_end is None:
+        return False
     definition_body = code[definition_start:definition_end]
     if RUST_FORWARDED_ATTRIBUTE.search(definition_body) is None:
         return False
+    forwarded_positions = rust_forwarded_argument_positions(
+        code, body_opening + 1, definition_end, delimiters
+    )
     invocation_pattern = re.compile(
         rf"\b{re.escape(name)}![ \t\r\n]*(?P<opening>[\(\[\{{])"
     )
@@ -603,7 +721,15 @@ def rust_macro_invocation_applies_test(
         if closing is None:
             continue
         arguments = split_rust_meta_items(code[opening + 1 : closing])
-        if any(rust_meta_applies_test(argument) for argument in arguments):
+        if forwarded_positions is None:
+            candidates = arguments
+        else:
+            candidates = [
+                arguments[position]
+                for position in sorted(forwarded_positions)
+                if position < len(arguments)
+            ]
+        if any(rust_meta_applies_test(candidate) for candidate in candidates):
             return True
     return False
 
@@ -1737,7 +1863,7 @@ def check_rust_test_generation(root: Path) -> list[Violation]:
                     code,
                     macro.group("name"),
                     macro.start(),
-                    closing,
+                    opening,
                     delimiters,
                 )
             ):
@@ -2124,12 +2250,50 @@ def verification_is_negated(text: str, offset: int) -> bool:
     return VERIFICATION_NEGATION.search(preceding) is not None
 
 
-def reachable_pull_request_branches(
+def integration_history_ref(root: Path) -> str | None:
+    """Return the protected integration ref this checkout resolves, if any."""
+    for reference in INTEGRATION_REFS:
+        result = subprocess.run(
+            [
+                "git",
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                f"{reference}^{{commit}}",
+            ],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return reference
+    return None
+
+
+def integration_pull_request_branches(
     root: Path,
 ) -> tuple[dict[int, set[str]], str | None]:
-    """Read GitHub merge subjects reachable from the checked-out HEAD."""
+    """Read GitHub merge subjects from the integration first-parent history.
+
+    Provenance is read only from the protected branch's own first-parent
+    chain, which no branch under review can extend: a merge a head branch
+    contributes is reachable from ``HEAD`` but never appears there.
+    """
+    reference = integration_history_ref(root)
+    if reference is None:
+        return {}, (
+            f"no `{INTEGRATION_BRANCH}` integration branch resolves in this "
+            "checkout"
+        )
     result = subprocess.run(
-        ["git", "log", "HEAD", "--format=%H%x1f%P%x1f%s%x1e"],
+        [
+            "git",
+            "log",
+            "--first-parent",
+            reference,
+            "--format=%H%x1f%P%x1f%s%x1e",
+        ],
         cwd=root,
         check=False,
         capture_output=True,
@@ -2239,7 +2403,7 @@ def inherited_verification_identities(
 
 def check_spec_verification_references(root: Path) -> list[Violation]:
     violations: list[Violation] = []
-    reachable_branches, history_error = reachable_pull_request_branches(root)
+    integration_branches, history_error = integration_pull_request_branches(root)
     event_pull_request, event_base_sha, event_error = github_pull_request_event()
     github_event_present = "GITHUB_EVENT_PATH" in os.environ
     checkout_branch = current_checkout_branch(root)
@@ -2271,8 +2435,8 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                 branch = token.group(2)
                 line = line_number(text, candidate_start)
                 historical_match = (
-                    number in reachable_branches
-                    and branch in reachable_branches[number]
+                    number in integration_branches
+                    and branch in integration_branches[number]
                 )
                 event_match = event_pull_request == (number, branch)
                 local_match = (
@@ -2280,7 +2444,7 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                 )
                 inherited_match = (number, branch) in inherited_identities
                 in_flight_match = (
-                    number not in reachable_branches
+                    number not in integration_branches
                     and (event_match or local_match)
                 )
                 if historical_match or inherited_match:
@@ -2292,21 +2456,27 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     if in_flight_identity == candidate_identity:
                         continue
                 if history_error is not None:
-                    message = f"cannot inspect reachable HEAD history: {history_error}"
+                    message = (
+                        f"cannot inspect the `{INTEGRATION_BRANCH}` "
+                        f"integration history: {history_error}"
+                    )
                 elif event_error is not None:
                     message = f"cannot inspect GitHub pull-request event: {event_error}"
                 elif in_flight_match:
                     message = "only one unmerged verification PR identity is permitted"
-                elif number not in reachable_branches:
-                    message = f"PR #{number} has no merge commit reachable from HEAD"
+                elif number not in integration_branches:
+                    message = (
+                        f"PR #{number} has no merge commit in the "
+                        f"`{INTEGRATION_BRANCH}` integration history"
+                    )
                 else:
                     actual = ", ".join(
                         f"`{candidate}`"
-                        for candidate in sorted(reachable_branches[number])
+                        for candidate in sorted(integration_branches[number])
                     )
                     message = (
                         f"PR #{number} names branch `{branch}`, but its "
-                        f"reachable merge commit names {actual}"
+                        f"`{INTEGRATION_BRANCH}` merge commit names {actual}"
                     )
                 violations.append(
                     Violation(
