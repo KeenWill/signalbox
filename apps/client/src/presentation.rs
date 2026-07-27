@@ -6,8 +6,8 @@ use std::{
 use signalbox_process_protocol::{
     CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ImportedContentKind,
     ImportedSourceSpeaker, ImportedSpeaker, MetadataActor, MetadataLastWriter,
-    ModelCallDisposition, ModelCallState, SessionEvent, ToolBatchState, TranscriptEntry,
-    TranscriptTextEntry, TurnState,
+    ModelCallDisposition, ModelCallState, SessionEvent, ToolBatchState, ToolDecision,
+    TranscriptEntry, TranscriptTextEntry, TurnState,
 };
 
 use crate::{
@@ -153,6 +153,21 @@ impl<'a> Output<'a> {
         writeln!(
             self.stdout,
             "{session_id} defaults_version={defaults_version} {selection}"
+        )
+    }
+
+    pub(crate) fn tool_request_decided(
+        &mut self,
+        tool_request_id: CanonicalUuid,
+        decision: &ToolDecision,
+    ) -> io::Result<()> {
+        let decision = match decision {
+            ToolDecision::Approve {} => "approve",
+            ToolDecision::Deny { .. } => "deny",
+        };
+        writeln!(
+            self.stdout,
+            "tool_request={tool_request_id} decision={decision}"
         )
     }
 

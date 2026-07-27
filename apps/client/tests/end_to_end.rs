@@ -8,7 +8,7 @@ use std::{
     env,
     error::Error,
     ffi::OsString,
-    fs,
+    fmt, fs,
     io::{self, ErrorKind},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -17,20 +17,24 @@ use std::{
 };
 
 use signalbox_application::{
+    ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
-    ModelCallCredentialReference, SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService,
-    UuidV7StartEligibleTurnIdGenerator,
+    ModelCallCredentialReference, OperatorFailureClass, SchedulerLoop, SchedulerLoopExit,
+    StartEligibleTurnService, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
+    ToolExecutorEvidence, ToolInputSchema, UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
-    DirectModelSelection, ModelTargetCatalog, ModelTargetDefinition, ProviderModelIdentity,
-    ResolvedProviderTarget,
+    DirectModelSelection, ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    ProviderModelIdentity, ResolvedProviderTarget, ToolEffectClass, ToolExecutionErrorDetail,
+    ToolName, ToolPermissionDefault,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
 };
 use signalbox_model_runtime::{
     AssistantPart, CompletionEvidence, CompletionFinish, CredentialReference, ExchangeFacts,
-    ProviderReportedModel, Script, ScriptedModel, TerminalEvidence, TokenUsage,
+    ProviderReportedModel, Script, ScriptedModel, TerminalEvidence, TokenUsage, ToolCallId,
+    ToolCallProposal as RuntimeToolCallProposal, ToolName as RuntimeToolName,
 };
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
@@ -827,6 +831,284 @@ max_output_tokens = 64
     let transcript = String::from_utf8(transcript.stdout)?;
     assert!(transcript.contains("offline user request"));
     assert!(transcript.contains("offline assistant reply"));
+    assert!(transcript.contains("turn_completed"));
+
+    shutdown.send(true)?;
+    assert_eq!(
+        timeout(Duration::from_secs(10), scheduler_task).await??,
+        SchedulerLoopExit::Shutdown
+    );
+    timeout(Duration::from_secs(10), process_task).await???;
+    pool.close().await;
+    socket_directory.cleanup()?;
+    drop(container);
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CompletingFixtureExecutor;
+
+#[derive(Debug)]
+struct FixtureExecutorError;
+
+impl fmt::Display for FixtureExecutorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("the completing fixture executor cannot fail")
+    }
+}
+
+impl Error for FixtureExecutorError {}
+
+impl ClassifyOperatorFailure for FixtureExecutorError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        }
+    }
+}
+
+impl ToolExecutor for CompletingFixtureExecutor {
+    type Error = FixtureExecutorError;
+
+    async fn execute(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+        let name = invocation.request().name().as_str().to_owned();
+        Ok(invocation.bind(ToolExecutorEvidence::CompletedText(format!(
+            "completed:{name}"
+        ))))
+    }
+}
+
+/// Runs `transcript` until the session's turn parks on its approval wait, then
+/// returns the pending request identity printed for the approver.
+async fn wait_for_pending_approval(
+    socket: &Path,
+    session_id: &str,
+) -> Result<String, Box<dyn Error>> {
+    timeout(Duration::from_secs(20), async {
+        loop {
+            let transcript = run_client(
+                socket.to_owned(),
+                vec![String::from("transcript"), session_id.to_owned()],
+                None,
+            )
+            .await?;
+            if transcript.status.success() {
+                let rendered = String::from_utf8(transcript.stdout)?;
+                if let Some(request) = rendered.lines().find_map(|line| {
+                    line.split_once("state=active_awaiting_tool_approval request=")
+                        .map(|(_, request)| request.trim().to_owned())
+                }) {
+                    if !rendered.contains("assistant_tool_use") {
+                        return Err::<String, Box<dyn Error>>(
+                            io::Error::other(
+                                "the awaiting transcript must render the proposing tool use",
+                            )
+                            .into(),
+                        );
+                    }
+                    return Ok(request);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| io::Error::other("the fixture turn never parked on its approval wait"))?
+}
+
+/// S10 / INV-032: while one client's `send` keeps waiting on the approval
+/// wait, a second client reads the pending request from the transcript and
+/// approves it; the tool executes, the continuation round completes, and the
+/// waiting `send` prints the final scripted reply.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn terminal_client_approval_from_a_second_client_completes_a_waiting_send()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = postgres().await?;
+    let socket_directory = SocketDirectory::create()?;
+    let selection_uuid = Uuid::from_u128(0x9301);
+    let target_uuid = Uuid::from_u128(0x9302);
+    let selection = DirectModelSelection::from_uuid(selection_uuid);
+    let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(target_uuid));
+    let model_configuration = HubModelConfiguration::parse(&format!(
+        r#"
+version = 1
+
+[[models]]
+selection_id = "{selection_uuid}"
+target_id = "{target_uuid}"
+provider = "anthropic"
+provider_model = "scripted-approval"
+max_output_tokens = 64
+"#
+    ))?;
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("the fixture target definition is unique");
+    let runtime_models =
+        RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
+            target,
+            String::from("scripted-approval"),
+            64,
+        )
+        .expect("the fixture runtime definition is valid")])
+        .expect("the fixture runtime target is unique");
+    let runtime = ScriptedModel::following([
+        Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("scripted-approval")),
+            finish: CompletionFinish::ToolUse,
+            content: vec![AssistantPart::ToolCall(RuntimeToolCallProposal {
+                id: ToolCallId::new(String::from("fixture-call-0")),
+                name: RuntimeToolName::new("confirmed_probe"),
+                arguments_json: String::from("{}"),
+            })],
+            usage: TokenUsage::unreported(),
+        })),
+        Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("scripted-approval")),
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::Text(String::from("approved tool reply"))],
+            usage: TokenUsage::unreported(),
+        })),
+    ]);
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+    let tool_catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+        ToolDefinition::new(
+            ToolName::try_new(String::from("confirmed_probe"))
+                .expect("the fixture tool name is valid"),
+            String::from("Runs the confirm-classified fixture probe."),
+            ToolInputSchema::try_new(String::from(
+                r#"{"additionalProperties":true,"type":"object"}"#,
+            ))
+            .expect("the fixture schema is valid"),
+            ToolPermissionDefault::Confirm,
+            ToolEffectClass::EffectFree,
+        ),
+        |_arguments: &NormalizedToolArguments| Ok::<(), ToolExecutionErrorDetail>(()),
+    )])
+    .expect("the fixture tool declaration is unique");
+
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let tool_dispatch_gate = InProcessToolDispatchGate::default();
+    let listener = LocalProcessListener::bind(socket_directory.socket())?;
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        tool_dispatch_gate.clone(),
+        model_configuration,
+    );
+    let (execution, fatal_execution) = FatalExecutionSupervisor::new(
+        PostgresProviderModelExecution::new(
+            PostgresModelCallRepository::new(
+                pool.clone(),
+                targets,
+                ModelCallCredentialReference::new("scripted-approval"),
+            ),
+            InProcessAttemptDispatchGate::default(),
+            provider,
+        )
+        .with_tool_loop(tool_dispatch_gate, tool_catalog, CompletingFixtureExecutor),
+    );
+    let pass = ActivatedTurnPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(pool.clone()),
+        ),
+        execution,
+    );
+    let mut scheduler = SchedulerLoop::new(work_source, pass);
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let process_task = tokio::spawn(process_runtime.run(shutdown_receiver.clone()));
+    let scheduler_task = tokio::spawn(async move {
+        scheduler
+            .run_until(wait_for_shutdown(shutdown_receiver))
+            .await
+    });
+
+    let create = timeout(
+        Duration::from_secs(20),
+        run_client(
+            socket_directory.socket().to_owned(),
+            vec![
+                String::from("create"),
+                String::from("--model"),
+                selection.into_uuid().hyphenated().to_string(),
+            ],
+            None,
+        ),
+    )
+    .await??;
+    assert!(create.status.success());
+    let session_id = String::from_utf8(create.stdout)?.trim().to_owned();
+
+    let send_socket = socket_directory.socket().to_owned();
+    let send_session = session_id.clone();
+    let waiting_send = tokio::spawn(async move {
+        run_client(
+            send_socket,
+            vec![String::from("send"), send_session],
+            Some(String::from("use the confirmed probe")),
+        )
+        .await
+        .map_err(|error| io::Error::other(error.to_string()))
+    });
+
+    let pending_request = wait_for_pending_approval(socket_directory.socket(), &session_id).await?;
+    Uuid::parse_str(&pending_request)?;
+
+    let approve = timeout(
+        Duration::from_secs(20),
+        run_client(
+            socket_directory.socket().to_owned(),
+            vec![
+                String::from("approve"),
+                session_id.clone(),
+                pending_request.clone(),
+            ],
+            None,
+        ),
+    )
+    .await??;
+    assert!(
+        approve.status.success(),
+        "approve failed: {}",
+        String::from_utf8_lossy(&approve.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(approve.stdout)?,
+        format!("tool_request={pending_request} decision=approve\n")
+    );
+    assert!(String::from_utf8(approve.stderr)?.starts_with("command_id="));
+
+    let send = timeout(Duration::from_secs(30), waiting_send).await???;
+    assert!(
+        send.status.success(),
+        "send failed: {}",
+        String::from_utf8_lossy(&send.stderr)
+    );
+    assert_eq!(String::from_utf8(send.stdout)?, "approved tool reply\n");
+    assert!(!fatal_execution.is_triggered());
+
+    let transcript = run_client(
+        socket_directory.socket().to_owned(),
+        vec![String::from("transcript"), session_id],
+        None,
+    )
+    .await?;
+    assert!(transcript.status.success());
+    let transcript = String::from_utf8(transcript.stdout)?;
+    assert!(transcript.contains("name=confirmed_probe"));
+    assert!(transcript.contains("content=completed:confirmed_probe"));
+    assert!(transcript.contains("approved tool reply"));
     assert!(transcript.contains("turn_completed"));
 
     shutdown.send(true)?;

@@ -17,7 +17,9 @@ code-host credential path is verified through PR #270
 (`agent/tool-batch-tier1`); and the owner reconciliation decision that releases
 an ambiguity wait, together with the startup scan's separate report of sessions
 holding their slot for that decision, were verified through PR #281
-(`agent/turn-reconciliation-recovery`). [docs/invariants.md](../invariants.md)
+(`agent/turn-reconciliation-recovery`). The finite startup scan and removal of
+the superseded steering blocker were verified through PR #291
+(`agent/turn-control-verbs`). [docs/invariants.md](../invariants.md)
 remains the law catalog; INV tags below reference its rows without restating
 them. Designed lifecycle behavior that has no committed code path appears only
 under [Open edges](#open-edges). Sibling pages named in scope deferrals below
@@ -390,10 +392,13 @@ delivery outcomes implemented here are:
   until eligibility.
 - `Interrupt` targeting the active turn atomically accepts a configured
   immediate-successor origin, constructs the exact `AppliedInterruptProof`, and
-  applies the predecessor transition (INV-029, INV-037). Before any terminal
-  transition releases the slot, the same transaction reclassifies every pending
-  steering input against the interrupted turn as an ordered queued successor
-  origin. Call, attempt, and turn terminalization follow
+  applies the predecessor transition (INV-029, INV-037). The version-eight
+  `stop_turn` request in [process-protocol](process-protocol.md#client-requests)
+  is the client surface that submits this delivery; it adds no authority beyond
+  the treatment specified here. Before any terminal transition releases the
+  slot, the same transaction reclassifies every pending steering input against
+  the interrupted turn as an ordered queued successor origin. Call, attempt, and
+  turn terminalization follow
   [model-call-execution](model-call-execution.md#terminal-outcomes). A matching
   interrupt against `AwaitingRecoveryDecision` preserves the already terminal
   ambiguous call and ended attempt, records the new proof on the turn's

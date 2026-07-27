@@ -11,15 +11,17 @@ use signalbox_domain::{
     NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
 };
 
-use crate::tool_contract::{ToolContract, ToolContractCompileError, compile_contract_definition};
+use signalbox_tool_contract::{
+    ToolContract, ToolContractCompileError, compile_contract_definition,
+};
 
-pub(crate) const ECHO_NAME: &str = "echo";
+pub const ECHO_NAME: &str = "echo";
 const INVALID_ARGUMENTS_DETAIL: &str = "expected an object containing exactly one text string";
 
 /// Typed `echo` argument shape; decoder and rendered schema share it.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct EchoArguments {
+pub struct EchoArguments {
     /// Exact text to return.
     #[expect(dead_code, reason = "execution returns the canonical argument text")]
     text: String,
