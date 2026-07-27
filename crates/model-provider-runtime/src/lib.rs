@@ -23,11 +23,11 @@ use signalbox_domain::{
 };
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
-    CredentialAccessFailure, CredentialReference, LossCause, MessagePart, ModelOperation,
-    ModelRuntime, ModelSettings, Observation, ObservationFact, ObservationSink, PreparationFailure,
-    PreparationOutcome, ProviderErrorKind, ProviderReportedModel, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, ToolCallId, ToolCallProposal, ToolDefinition, ToolName as RuntimeToolName,
-    ToolResultRecord, UnsentCause,
+    CredentialAccessFailure, CredentialReference, DeliveryMode, LossCause, MessagePart,
+    ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact, ObservationSink,
+    PreparationFailure, PreparationOutcome, ProviderErrorKind, ProviderReportedModel,
+    RequestedTarget, ResolvedTarget, TerminalEvidence, ToolCallId, ToolCallProposal,
+    ToolDefinition, ToolName as RuntimeToolName, ToolResultRecord, UnsentCause,
 };
 
 /// The longest provider-reported model identity retained for operator
@@ -38,6 +38,75 @@ use signalbox_model_runtime::{
 const DIAGNOSTIC_MODEL_IDENTITY_LIMIT: usize = 128;
 
 const MODEL_IDENTITY_CHANGE_MESSAGE: &str = "Signalbox session event: your model identity is now";
+
+/// One already-redacted provider text fragment for ephemeral presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderTextDelta {
+    session: SessionId,
+    turn: TurnId,
+    call: ModelCallId,
+    part_index: u32,
+    text: String,
+}
+
+impl ProviderTextDelta {
+    fn new(
+        session: SessionId,
+        turn: TurnId,
+        call: ModelCallId,
+        part_index: u32,
+        text: String,
+    ) -> Self {
+        Self {
+            session,
+            turn,
+            call,
+            part_index,
+            text,
+        }
+    }
+
+    /// Returns the session whose active turn produced this fragment.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the active turn that produced this fragment.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Returns the correlated model call that produced this fragment.
+    pub const fn call(&self) -> ModelCallId {
+        self.call
+    }
+
+    /// Returns the provider part position this fragment extends.
+    pub const fn part_index(&self) -> u32 {
+        self.part_index
+    }
+
+    /// Borrows the already-redacted provider text.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+/// Best-effort presentation sink for already-redacted provider text deltas.
+///
+/// Delivery is additive and has no effect on terminal evidence collection or
+/// classification. Implementations must not block model execution.
+pub trait ProviderTextDeltaSink: Send + Sync {
+    /// Offers one correlated fragment for ephemeral presentation.
+    fn publish(&self, delta: ProviderTextDelta);
+}
+
+#[derive(Debug)]
+struct DiscardProviderTextDeltas;
+
+impl ProviderTextDeltaSink for DiscardProviderTextDeltas {
+    fn publish(&self, _delta: ProviderTextDelta) {}
+}
 
 /// One exact provider-model spelling and baseline request limit for a durable
 /// domain target.
@@ -603,13 +672,22 @@ impl ClassifyOperatorFailure for RuntimeModelCallProviderError {
 pub struct RuntimeModelCallProvider<R> {
     runtime: Arc<R>,
     models: RuntimeModelCatalog,
+    text_deltas: Arc<dyn ProviderTextDeltaSink>,
 }
 
 struct AcceptanceObservations<AcceptancePossible, Correlation> {
     expected_correlation: Correlation,
     correlation_mismatch: bool,
     acceptance_possible: Option<AcceptancePossible>,
+    text_deltas: Option<ProviderTextDeltaContext>,
     observations: Vec<Observation<Correlation>>,
+}
+
+struct ProviderTextDeltaContext {
+    session: SessionId,
+    turn: TurnId,
+    call: ModelCallId,
+    sink: Arc<dyn ProviderTextDeltaSink>,
 }
 
 impl<AcceptancePossible, Correlation> ObservationSink<Correlation>
@@ -629,6 +707,17 @@ where
         {
             acceptance_possible();
         }
+        if let (Some(context), ObservationFact::TextDelta { index, text }) =
+            (&self.text_deltas, &observation.fact)
+        {
+            context.sink.publish(ProviderTextDelta::new(
+                context.session,
+                context.turn,
+                context.call,
+                *index,
+                text.clone(),
+            ));
+        }
         self.observations.push(observation);
     }
 }
@@ -639,7 +728,18 @@ impl<R> RuntimeModelCallProvider<R> {
         Self {
             runtime: Arc::new(runtime),
             models,
+            text_deltas: Arc::new(DiscardProviderTextDeltas),
         }
+    }
+
+    /// Delivers already-redacted provider text observations to an ephemeral
+    /// presentation sink while preserving the evidence path unchanged.
+    pub fn with_text_delta_sink(
+        mut self,
+        text_deltas: impl ProviderTextDeltaSink + 'static,
+    ) -> Self {
+        self.text_deltas = Arc::new(text_deltas);
+        self
     }
 }
 
@@ -648,6 +748,7 @@ impl<R> Clone for RuntimeModelCallProvider<R> {
         Self {
             runtime: Arc::clone(&self.runtime),
             models: self.models.clone(),
+            text_deltas: Arc::clone(&self.text_deltas),
         }
     }
 }
@@ -728,6 +829,7 @@ where
             ModelSettings::new(definition.max_output_tokens()),
         );
         runtime_operation.tools = tools;
+        runtime_operation.delivery = DeliveryMode::Streamed;
         match self
             .runtime
             .prepare(runtime_operation, CancellationSignal::when(cancellation))
@@ -795,6 +897,12 @@ where
             expected_correlation: correlation,
             correlation_mismatch: false,
             acceptance_possible: Some(acceptance_possible),
+            text_deltas: Some(ProviderTextDeltaContext {
+                session: capability.binding.session,
+                turn: capability.binding.turn,
+                call: capability.binding.call,
+                sink: Arc::clone(&self.text_deltas),
+            }),
             observations: Vec::new(),
         };
         let report = self
@@ -1310,7 +1418,7 @@ fn reported_model(evidence: &TerminalEvidence) -> Option<&ProviderReportedModel>
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -1335,9 +1443,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AcceptanceObservations, RuntimeModelCatalog, RuntimeModelCatalogError,
-        RuntimeModelDefinition, classify_terminal, decode_checked_raw_json,
-        render_runtime_messages,
+        AcceptanceObservations, ProviderTextDelta, ProviderTextDeltaContext, ProviderTextDeltaSink,
+        RuntimeModelCatalog, RuntimeModelCatalogError, RuntimeModelDefinition, classify_terminal,
+        decode_checked_raw_json, render_runtime_messages,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -1604,6 +1712,7 @@ mod tests {
             acceptance_possible: Some(move || {
                 callback_count.fetch_add(1, Ordering::SeqCst);
             }),
+            text_deltas: None,
             observations: Vec::new(),
         };
 
@@ -1638,6 +1747,7 @@ mod tests {
             acceptance_possible: Some(move || {
                 callback_count.fetch_add(1, Ordering::SeqCst);
             }),
+            text_deltas: None,
             observations: Vec::new(),
         };
 
@@ -1649,6 +1759,71 @@ mod tests {
         assert_eq!(release_count.load(Ordering::SeqCst), 0);
         assert!(sink.correlation_mismatch);
         assert!(sink.acceptance_possible.is_some());
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordedTextDeltas(Arc<Mutex<Vec<ProviderTextDelta>>>);
+
+    impl ProviderTextDeltaSink for RecordedTextDeltas {
+        fn publish(&self, delta: ProviderTextDelta) {
+            self.0
+                .lock()
+                .expect("the fixture delta recorder is not poisoned")
+                .push(delta);
+        }
+    }
+
+    /// INV-035: correctly correlated text crosses the bridge exactly as the
+    /// adapter sink supplied it, while cross-wired text stays on the evidence
+    /// path and never reaches presentation delivery.
+    #[test]
+    fn inv035_text_delta_delivery_is_additive_and_correlation_checked() {
+        let recorded = RecordedTextDeltas::default();
+        let mut sink = AcceptanceObservations {
+            expected_correlation: call(),
+            correlation_mismatch: false,
+            acceptance_possible: Some(|| {}),
+            text_deltas: Some(ProviderTextDeltaContext {
+                session: SessionId::from_uuid(Uuid::from_u128(10)),
+                turn: TurnId::from_uuid(Uuid::from_u128(11)),
+                call: call(),
+                sink: Arc::new(recorded.clone()),
+            }),
+            observations: Vec::new(),
+        };
+        let mismatched = Observation {
+            correlation: ModelCallId::from_uuid(Uuid::from_u128(2)),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: String::from("must not publish"),
+            },
+        };
+        let redacted = Observation {
+            correlation: call(),
+            fact: ObservationFact::TextDelta {
+                index: 3,
+                text: String::from("already [redacted]"),
+            },
+        };
+
+        sink.observe(mismatched.clone());
+        sink.observe(redacted.clone());
+
+        assert!(sink.correlation_mismatch);
+        assert_eq!(sink.observations, vec![mismatched, redacted]);
+        assert_eq!(
+            *recorded
+                .0
+                .lock()
+                .expect("the fixture delta recorder is not poisoned"),
+            vec![ProviderTextDelta::new(
+                SessionId::from_uuid(Uuid::from_u128(10)),
+                TurnId::from_uuid(Uuid::from_u128(11)),
+                call(),
+                3,
+                String::from("already [redacted]"),
+            )]
+        );
     }
 
     /// S02 / INV-014 / INV-025: runtime terminal evidence maps to the exact

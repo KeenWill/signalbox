@@ -10,6 +10,36 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-27 — Keep provider-text deltas ephemeral and cursorless
+
+**Context.** Both HTTP model adapters can emit credential-redacted text deltas,
+but the provider bridge requested buffered delivery and the follow protocol
+carried only transactional-outbox events. Persisting every token fragment would
+turn presentation progress into durable authority and amplify transcript-sized
+storage, while an unbounded live channel would evade the follow stream's
+existing lag and recovery discipline.
+
+**Decision.** Protocol version twelve adds a cursorless `provider_text_delta`
+message to `follow_session`. The bridge requests streamed delivery, copies only
+correctly correlated, already-redacted `TextDelta` facts to a nonblocking daemon
+sink, and leaves the ordinary observation and terminal evidence paths unchanged.
+The daemon keeps a durable-only fan-out for older versions and an ordered
+bounded composite fan-out for version twelve. Deltas enter only the composite
+fan-out; durable outbox updates enter both. A lagging or reconnecting follower
+loses deltas, accepts `resync_required`, and reads the complete durable
+transcript. No delta is stored and no migration is added.
+
+**Rejected alternatives.** Appending deltas to the transactional outbox would
+give presentation fragments durable semantics and storage cost. Re-redacting in
+the daemon would duplicate and potentially diverge from the adapter's INV-035
+boundary. Sending deltas through the sole legacy fan-out would let newer traffic
+force older clients to resynchronize. A separate unordered delta socket would
+lose the delta-before-terminal delivery order.
+
+**Affects.** The provider-runtime bridge, daemon follow fan-out, process
+protocol version twelve, terminal `follow` rendering, and the runtime-substrate
+and process-protocol specifications.
+
 ## 2026-07-26 — Renumber review-command migration after its parent advanced
 
 **Context.** The version-eleven review-command migration was introduced as

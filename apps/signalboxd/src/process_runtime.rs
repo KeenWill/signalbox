@@ -52,6 +52,7 @@ use signalbox_domain::{
     SubmitInput, SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult,
     ToolApprovalDecision, ToolDenialReason, ToolRequestId, TurnId, UserContent,
 };
+use signalbox_model_provider_runtime::{ProviderTextDelta, ProviderTextDeltaSink};
 use signalbox_persistence::{
     conversation_import::{
         ImportedConversationIdentityCollision, ImportedConversationRepository,
@@ -131,7 +132,7 @@ struct ConnectionServices {
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: Arc<HubModelConfiguration>,
-    updates: broadcast::Sender<ProcessUpdate>,
+    fanouts: ProcessFanouts,
     inbound_frame_budget: Arc<Semaphore>,
     import_budget: Arc<Semaphore>,
     review_command_budget: Arc<Semaphore>,
@@ -139,7 +140,7 @@ struct ConnectionServices {
 }
 
 /// The hub-owned local protocol runtime: one outbox dispatcher, one bounded
-/// fan-out, and one guarded Unix listener.
+/// durable and streaming fan-outs, and one guarded Unix listener.
 #[derive(Debug)]
 pub struct ProcessRuntime {
     listener: LocalProcessListener,
@@ -147,40 +148,61 @@ pub struct ProcessRuntime {
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
+    fanouts: ProcessFanouts,
+}
+
+#[derive(Clone, Debug)]
+struct ProcessFanouts {
+    durable: broadcast::Sender<ProcessUpdate>,
+    streaming: broadcast::Sender<ProcessUpdate>,
 }
 
 impl ProcessRuntime {
     /// Composes the guarded listener, fenced database, nudge, and static models.
-    pub const fn new(
+    pub fn new(
         listener: LocalProcessListener,
         pool: PgPool,
         eligibility_nudge: InProcessEligibilityNudge,
         tool_dispatch_gate: InProcessToolDispatchGate,
         model_configuration: HubModelConfiguration,
     ) -> Self {
+        let (durable_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
+        let (streaming_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         Self {
             listener,
             pool,
             eligibility_nudge,
             tool_dispatch_gate,
             model_configuration,
+            fanouts: ProcessFanouts {
+                durable: durable_updates,
+                streaming: streaming_updates,
+            },
+        }
+    }
+
+    /// Returns the nonblocking sink that places already-redacted provider text
+    /// on this runtime incarnation's ordered follow fan-out.
+    pub fn provider_text_delta_sink(&self) -> ProcessProviderTextDeltaSink {
+        ProcessProviderTextDeltaSink {
+            updates: self.fanouts.streaming.clone(),
         }
     }
 
     /// Serves requests and dispatches durable updates until `shutdown` changes
     /// to true or its sender closes.
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), ProcessRuntimeError> {
-        let (updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
+        let fanouts = self.fanouts;
         let server = serve_connections(
             &self.listener,
             self.pool.clone(),
             self.eligibility_nudge,
             self.tool_dispatch_gate,
             self.model_configuration,
-            updates.clone(),
+            fanouts.clone(),
             shutdown.clone(),
         );
-        let dispatcher = dispatch_updates(self.pool, updates, shutdown);
+        let dispatcher = dispatch_updates(self.pool, fanouts, shutdown);
         let result = tokio::try_join!(server, dispatcher);
         let cleanup = self.listener.cleanup();
 
@@ -189,9 +211,21 @@ impl ProcessRuntime {
     }
 }
 
+/// Daemon-owned nonblocking bridge from provider observations to follow streams.
+#[derive(Clone, Debug)]
+pub struct ProcessProviderTextDeltaSink {
+    updates: broadcast::Sender<ProcessUpdate>,
+}
+
+impl ProviderTextDeltaSink for ProcessProviderTextDeltaSink {
+    fn publish(&self, delta: ProviderTextDelta) {
+        let _ = self.updates.send(ProcessUpdate::ProviderTextDelta(delta));
+    }
+}
+
 async fn dispatch_updates(
     pool: PgPool,
-    updates: broadcast::Sender<ProcessUpdate>,
+    fanouts: ProcessFanouts,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessRuntimeError> {
     let dispatcher = OutboxDispatcher::new(pool);
@@ -202,7 +236,8 @@ async fn dispatch_updates(
         let outcome = dispatcher
             .dispatch_next(|event| {
                 let update = ProcessUpdate::from(event);
-                let _ = updates.send(update);
+                let _ = fanouts.durable.send(update.clone());
+                let _ = fanouts.streaming.send(update);
                 OutboxDeliveryDecision::Delivered
             })
             .await
@@ -228,7 +263,7 @@ async fn serve_connections(
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
-    updates: broadcast::Sender<ProcessUpdate>,
+    fanouts: ProcessFanouts,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessRuntimeError> {
     let snapshot_reader_capacity = snapshot_reader_capacity(pool.options().get_max_connections())
@@ -238,7 +273,7 @@ async fn serve_connections(
         eligibility_nudge,
         tool_dispatch_gate,
         model_configuration: Arc::new(model_configuration),
-        updates,
+        fanouts,
         inbound_frame_budget: Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES)),
         import_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS)),
         review_command_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS)),
@@ -753,7 +788,7 @@ where
                 request_id,
                 session_id,
                 &services.pool,
-                &services.updates,
+                &services.fanouts,
                 shutdown,
                 snapshot_permit,
             )
@@ -4644,7 +4679,7 @@ async fn handle_follow_session<Writer>(
     request_id: RequestId,
     session_id: CanonicalUuid,
     pool: &PgPool,
-    updates: &broadcast::Sender<ProcessUpdate>,
+    fanouts: &ProcessFanouts,
     mut shutdown: watch::Receiver<bool>,
     snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
@@ -4667,7 +4702,11 @@ where
             return write_process_read_error(writer, version, request_id, error).await;
         }
     }
-    let mut subscription = updates.subscribe();
+    let mut subscription = if version == ProtocolVersion::Twelve {
+        fanouts.streaming.subscribe()
+    } else {
+        fanouts.durable.subscribe()
+    };
     let snapshot_result = run_until_shutdown(
         &mut shutdown,
         spool_transcript(
@@ -4738,40 +4777,71 @@ where
             }
             Err(broadcast::error::RecvError::Closed) => return Ok(()),
         };
-        if update.cursor <= observed_cursor {
-            continue;
+        match update {
+            ProcessUpdate::Durable {
+                cursor,
+                session,
+                event,
+            } => {
+                if cursor <= observed_cursor {
+                    continue;
+                }
+                observed_cursor = cursor;
+                if session != selected_session {
+                    continue;
+                }
+                let message = ServerMessage::SessionEvent {
+                    cursor: CanonicalU64::new(cursor),
+                    session_id,
+                    event: event.wire(),
+                };
+                if version.as_u64() < message.minimum_protocol_version() {
+                    return run_until_shutdown(
+                        &mut shutdown,
+                        write_error(
+                            writer,
+                            version,
+                            request_id,
+                            ProtocolError::unsupported_version(message.minimum_protocol_version()),
+                        ),
+                    )
+                    .await
+                    .unwrap_or(Ok(()));
+                }
+                let Some(event_write) = run_until_shutdown(
+                    &mut shutdown,
+                    write_message(writer, version, request_id, message),
+                )
+                .await
+                else {
+                    return Ok(());
+                };
+                event_write?;
+            }
+            ProcessUpdate::ProviderTextDelta(delta) => {
+                if version != ProtocolVersion::Twelve || delta.session() != selected_session {
+                    continue;
+                }
+                for content in content_fragments(delta.text()) {
+                    let message = ServerMessage::ProviderTextDelta {
+                        session_id,
+                        turn_id: wire_uuid(delta.turn().into_uuid()),
+                        model_call_id: wire_uuid(delta.call().into_uuid()),
+                        part_index: CanonicalU64::new(u64::from(delta.part_index())),
+                        content,
+                    };
+                    let Some(delta_write) = run_until_shutdown(
+                        &mut shutdown,
+                        write_message(writer, version, request_id, message),
+                    )
+                    .await
+                    else {
+                        return Ok(());
+                    };
+                    delta_write?;
+                }
+            }
         }
-        observed_cursor = update.cursor;
-        if update.session != selected_session {
-            continue;
-        }
-        let message = ServerMessage::SessionEvent {
-            cursor: CanonicalU64::new(update.cursor),
-            session_id,
-            event: update.event.wire(),
-        };
-        if version.as_u64() < message.minimum_protocol_version() {
-            return run_until_shutdown(
-                &mut shutdown,
-                write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::unsupported_version(message.minimum_protocol_version()),
-                ),
-            )
-            .await
-            .unwrap_or(Ok(()));
-        }
-        let Some(event_write) = run_until_shutdown(
-            &mut shutdown,
-            write_message(writer, version, request_id, message),
-        )
-        .await
-        else {
-            return Ok(());
-        };
-        event_write?;
     }
 }
 
@@ -5758,7 +5828,7 @@ impl ProtocolError {
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1 through 11"
+                    "the protocol version is unsupported; supported versions: 1 through 8, 10, 11, and 12"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
@@ -5797,15 +5867,18 @@ impl ProtocolError {
 }
 
 #[derive(Clone, Debug)]
-struct ProcessUpdate {
-    cursor: u64,
-    session: SessionId,
-    event: ProcessUpdateEvent,
+enum ProcessUpdate {
+    Durable {
+        cursor: u64,
+        session: SessionId,
+        event: ProcessUpdateEvent,
+    },
+    ProviderTextDelta(ProviderTextDelta),
 }
 
 impl From<&DispatchedOutboxEvent> for ProcessUpdate {
     fn from(event: &DispatchedOutboxEvent) -> Self {
-        Self {
+        Self::Durable {
             cursor: event.sequence(),
             session: event.session(),
             event: ProcessUpdateEvent::from(event.kind()),
@@ -6486,7 +6559,7 @@ mod tests {
         assert!(
             ProtocolError::without_detail(ErrorCode::UnsupportedVersion)
                 .message
-                .contains("1 through 11")
+                .contains("1 through 8, 10, 11, and 12")
         );
     }
 

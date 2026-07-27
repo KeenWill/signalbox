@@ -1469,6 +1469,21 @@ async fn follow(
                         )?;
                     }
                 }
+                ServerMessage::ProviderTextDelta {
+                    session_id: delta_session,
+                    turn_id,
+                    model_call_id,
+                    part_index,
+                    content,
+                } if delta_session == session_id => {
+                    output.provider_text_delta(
+                        session_id,
+                        turn_id,
+                        model_call_id,
+                        part_index.value(),
+                        content.as_str(),
+                    )?;
+                }
                 ServerMessage::Error {
                     code: ErrorCode::ResyncRequired,
                     ..
