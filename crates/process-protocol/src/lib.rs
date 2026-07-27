@@ -723,21 +723,22 @@ impl From<SystemPromptText> for String {
 
 /// Presence-checked optional system-prompt member.
 ///
-/// Version nine requires the member: JSON null states explicitly that the
-/// complete defaults carry no prompt, and a string carries the exact bounded
-/// prompt. Versions one through six omit the member entirely; frame
+/// Versions nine and above require the member: JSON null states explicitly
+/// that the complete defaults carry no prompt, and a string carries the exact
+/// bounded prompt. Versions one through eight omit the member entirely; frame
 /// validation rejects a present member below version nine and an absent
-/// member at version nine.
+/// member at version nine and above.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SystemPromptMember(Option<Option<SystemPromptText>>);
 
 impl SystemPromptMember {
-    /// Omits the member for a frame below version nine.
+    /// Omits the member for a frame at versions one through eight.
     pub const fn absent() -> Self {
         Self(None)
     }
 
-    /// Carries the explicit version-nine null-or-text member.
+    /// Carries the explicit null-or-text member required at versions nine and
+    /// above.
     pub const fn present(value: Option<SystemPromptText>) -> Self {
         Self(Some(value))
     }
