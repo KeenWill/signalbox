@@ -1,6 +1,6 @@
 //! Hub-owned composition between turn activation and model execution.
 //!
-//! docs/spec/runtime-substrate.md makes this package the composition root.
+//! docs/spec/turn-lifecycle-and-scheduling.md owns this composition-root role.
 //! The scheduler pass below hands each complete activated-turn outcome to a
 //! fresh execution invocation; concrete provider selection remains an
 //! injected composition choice.
