@@ -224,12 +224,16 @@ retry instead requires a durable record binding the complete lost lease
 correlation to the exact fresh physical-attempt dispatch. That record is an
 idempotent reservation: if a process exits before the replacement attempt is
 stored, recovery loads the exact reserved dispatch and may replay only that
-replacement. The loss becomes durably consumed once the exact replacement
-attempt or successor lease generation exists; a different replacement cannot
-overwrite the reservation. Without the proof, losing even an `Offered` lease
-conservatively follows the execution-possible law: pure or idempotent work
-requires a fresh physical attempt, while side-effecting work requires crash
-classification.
+replacement. The replacement attempt and its successor lease generation commit
+in one transaction, and the Postgres representation rejects a reserved
+replacement attempt committed without that successor generation, so the durable
+claimed-retry states are exactly the replayable reservation and the complete
+consumed retry whose successor lease is already offered; a crash cannot strand a
+durably consumed one-shot preparation fence without its successor lease, and a
+different replacement cannot overwrite the reservation. Without the proof,
+losing even an `Offered` lease conservatively follows the execution-possible
+law: pure or idempotent work requires a fresh physical attempt, while
+side-effecting work requires crash classification.
 
 With that proof, loss before claim permits every effect class to be re-leased at
 the checked successor lease-lineage generation. Loss after claim follows the

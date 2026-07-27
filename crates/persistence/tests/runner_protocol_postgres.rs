@@ -10,12 +10,12 @@ use rust_decimal::Decimal;
 use signalbox_domain::{
     ApprovedToolRequest, ContextFrontierId, CredentialProfileGrant,
     CredentialProfileGrantReconstitutionInput, CredentialProfileName, CredentialProfilePolicy,
-    CredentialToolApproval, ModelCallId, NormalizedToolArguments, ProvisionedWorkspace,
-    ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement, RunnerAuthenticationId,
-    RunnerCapabilityClass, RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
-    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
-    RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput, RunnerSelector,
-    RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
+    CredentialToolApproval, EndedToolAttempt, ModelCallId, NormalizedToolArguments,
+    ProvisionedWorkspace, ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement,
+    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerDomainError,
+    RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId, RunnerLease,
+    RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
+    RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
     RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId, SessionRunnerPin,
     SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
     SessionRunnerPlacementRequest, ToolAdmissibleLoci, ToolApprovalResolutionReconstitutionInput,
@@ -787,6 +787,39 @@ async fn authorize_fixture_claimed_retry(
         .store_claimed_retry_attempt_authority(loss, &replacement)
         .await?;
     Ok(replacement)
+}
+
+/// Persists the atomic replacement-attempt/successor-lease pair while the
+/// fixture rows lack the approval and turn-attempt authority production data
+/// carries; the two runner-retry attempt triggers stay enabled because they
+/// are the behavior under test.
+async fn store_fixture_claimed_retry_replacement(
+    store: &RunnerProtocolStore,
+    pool: &PgPool,
+    retired: &EndedToolAttempt,
+    retry: &RunnerLease,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE tool_attempt
+         ENABLE TRIGGER tool_attempt_runner_retry_is_authorized",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE tool_attempt
+         ENABLE TRIGGER tool_attempt_replacement_commits_with_successor_lease",
+    )
+    .execute(pool)
+    .await?;
+    let stored = store.store_claimed_retry_replacement(retired, retry).await;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    stored?;
+    Ok(())
 }
 
 async fn clone_registration_without_advancing_head(
@@ -3516,10 +3549,10 @@ async fn s32_inv044_worktree_pin_requires_provisioned_facts() -> Result<(), Box<
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_inv004_inv043_fresh_retry_attempt_is_current_before_successor_lease()
+async fn s31_inv004_inv043_replacement_attempt_commits_only_with_successor_lease()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact first lease fence claims");
@@ -3544,9 +3577,57 @@ async fn s31_inv004_inv043_fresh_retry_attempt_is_current_before_successor_lease
     .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.request))
     .fetch_all(&pool)
     .await?;
-    let _replacement =
+    let replacement =
         authorize_fixture_claimed_retry(&store, &loss, ToolEffectClass::EffectFree).await?;
-    insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE tool_attempt
+         ENABLE TRIGGER tool_attempt_runner_retry_is_authorized",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE tool_attempt
+         ENABLE TRIGGER tool_attempt_replacement_commits_with_successor_lease",
+    )
+    .execute(&pool)
+    .await?;
+    let mut stranded_replacement = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO tool_attempt
+            (attempt_id, request_id, session_id, turn_id,
+             issuing_turn_attempt_id, effect_class, dispatch_generation,
+             state_kind)
+         VALUES ($1, $2, $3, $4, $5, 'effect_free', 1, 'in_flight')",
+    )
+    .bind(uuid(RETRY_PHYSICAL_ATTEMPT.attempt))
+    .bind(uuid(RETRY_PHYSICAL_ATTEMPT.request))
+    .bind(uuid(SESSION))
+    .bind(uuid(RETRY_PHYSICAL_ATTEMPT.turn))
+    .bind(uuid(RETRY_PHYSICAL_ATTEMPT.turn + RELATED_IDENTITY_OFFSET))
+    .execute(&mut *stranded_replacement)
+    .await?;
+    let stranded = stranded_replacement
+        .commit()
+        .await
+        .expect_err("a reserved replacement attempt cannot commit without its successor lease");
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let (_batch, retired, retry_authorization) = replacement.into_parts();
+    let retry = pin
+        .placement
+        .offer_retry(
+            &expected_enrollment,
+            registration.registration(),
+            pin.grant.as_ref(),
+            loss,
+            retry_authorization,
+        )
+        .expect("claimed pure work re-leases at the successor generation");
+    store_fixture_claimed_retry_replacement(&store, &pool, &retired, &retry).await?;
     let fresh_attempts: Vec<Uuid> = sqlx::query_scalar(
         "SELECT attempt_id
            FROM runner_current_tool_attempt
@@ -3556,6 +3637,7 @@ async fn s31_inv004_inv043_fresh_retry_attempt_is_current_before_successor_lease
     .fetch_all(&pool)
     .await?;
 
+    assert_check_violation(stranded);
     assert_eq!(
         retired_facts,
         (
@@ -3621,9 +3703,20 @@ async fn s31_inv004_inv043_idempotent_claimed_loss_retires_physical_attempt()
     .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
     .fetch_one(&pool)
     .await?;
-    let _replacement =
+    let replacement =
         authorize_fixture_claimed_retry(&store, &loss, ToolEffectClass::ExternalEffect).await?;
-    insert_external_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
+    let (_batch, retired, retry_authorization) = replacement.into_parts();
+    let retry = pin
+        .placement
+        .offer_retry(
+            &expected_enrollment,
+            registration.registration(),
+            pin.grant.as_ref(),
+            loss,
+            retry_authorization,
+        )
+        .expect("claimed idempotent work re-leases at the successor generation");
+    store_fixture_claimed_retry_replacement(&store, &pool, &retired, &retry).await?;
     let fresh_attempt: Uuid = sqlx::query_scalar(
         "SELECT attempt_id
            FROM runner_current_tool_attempt
@@ -3722,7 +3815,18 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
     store
         .store_claimed_retry_attempt_authority(&resumable_loss, &resumed_replacement)
         .await?;
-    insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
+    let (_batch, retired, retry_authorization) = resumed_replacement.into_parts();
+    let retry = pin
+        .placement
+        .offer_retry(
+            &expected_enrollment,
+            registration.registration(),
+            pin.grant.as_ref(),
+            resumable_loss,
+            retry_authorization,
+        )
+        .expect("claimed pure work requires a fresh physical attempt");
+    store_fixture_claimed_retry_replacement(&store, &pool, &retired, &retry).await?;
     let consumed_loss = store
         .load_lease_loss(
             RunnerLeaseId::from_uuid(uuid(LEASE)),
@@ -3737,18 +3841,6 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
             claimed_batch_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::EffectFree),
             ToolAttemptId::from_uuid(uuid(RETRY_ATTEMPT)),
         );
-    let (_batch, _retired, retry_authorization) = resumed_replacement.into_parts();
-    let retry = pin
-        .placement
-        .offer_retry(
-            &expected_enrollment,
-            registration.registration(),
-            pin.grant.as_ref(),
-            resumable_loss,
-            retry_authorization,
-        )
-        .expect("claimed pure work requires a fresh physical attempt");
-    store.store_lease(&retry).await?;
     let reconstituted = store
         .load_lease(RunnerLeaseId::from_uuid(uuid(LEASE)), retry.generation())
         .await?

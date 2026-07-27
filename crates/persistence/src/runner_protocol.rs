@@ -16,20 +16,20 @@ use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_domain::{
     CredentialDispatchAuthorization, CredentialProfileGrant,
     CredentialProfileGrantReconstitutionInput, CredentialProfileGrantState, CredentialProfileName,
-    CredentialProfilePolicy, CredentialToolApproval, PinnedRunnerPlacement, ProvisionedWorkspace,
-    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
-    RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
-    RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerId,
-    RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseLoss,
-    RunnerLeaseReconstitutionInput, RunnerLeaseState, RunnerSelector, RunnerToolDeclaration,
-    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId,
-    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolDispatchGeneration, ToolName, ToolPermissionDefault, ToolRequestId,
-    TurnAttemptId, TurnId, ValidatedRunnerRegistration,
-    ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceCapability,
-    WorkspaceRepositoryKey, WorkspaceRequirement,
+    CredentialProfilePolicy, CredentialToolApproval, EndedToolAttempt, PinnedRunnerPlacement,
+    ProvisionedWorkspace, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
+    RunnerClaimedAttemptReplacement, RunnerCredentialGrantLineage, RunnerDomainError,
+    RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentReconstitutionInput,
+    RunnerEnrollmentState, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation,
+    RunnerLeaseId, RunnerLeaseLoss, RunnerLeaseReconstitutionInput, RunnerLeaseState,
+    RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
+    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
+    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
+    SessionRunnerPlacementState, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId, ToolDispatchGeneration,
+    ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
+    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
+    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -694,7 +694,10 @@ impl RunnerProtocolStore {
         Ok(Some(revoked))
     }
 
-    /// Appends an offered lease generation or a later non-unclaimed state event.
+    /// Appends an offered lease generation or a later non-unclaimed state
+    /// event. A claimed-retry successor lease is persisted only through
+    /// [`Self::store_claimed_retry_replacement`], which commits it atomically
+    /// with the fresh replacement attempt the schema requires.
     pub async fn store_lease(&self, lease: &RunnerLease) -> Result<(), RunnerProtocolStoreError> {
         if lease.state() == RunnerLeaseState::LostUnclaimed {
             return Err(RunnerProtocolStoreError::Domain(
@@ -827,6 +830,72 @@ impl RunnerProtocolStore {
         .transpose()
     }
 
+    /// Atomically persists the exact replacement attempt together with its
+    /// successor lease generation after `offer_retry` validated the private
+    /// claimed-retry evidence. Committing them in one transaction leaves only
+    /// two durable claimed-retry states: the reservation alone, whose exact
+    /// dispatch remains replayable, or the complete consumed retry, whose
+    /// successor lease is already offered. The schema rejects a replacement
+    /// attempt committed without its successor generation, so a crash can no
+    /// longer strand the retry between them. The retired attempt is the exact
+    /// predecessor the claimed replacement produced; the reservation and
+    /// lease-generation triggers independently reject any other pairing.
+    pub async fn store_claimed_retry_replacement(
+        &self,
+        retired: &EndedToolAttempt,
+        retry: &RunnerLease,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        if retry.state() != RunnerLeaseState::Offered
+            || retry.generation() == RunnerGeneration::one()
+        {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        let dispatch = retry.correlation().dispatch;
+        let effect_matches = matches!(
+            (retry.effect(), retired.effect_class()),
+            (RunnerToolEffectClass::Pure, ToolEffectClass::EffectFree)
+                | (
+                    RunnerToolEffectClass::Idempotent,
+                    ToolEffectClass::ExternalEffect
+                )
+        );
+        if retired.session() != dispatch.session()
+            || retired.turn() != dispatch.turn()
+            || retired.issuing_attempt() != dispatch.issuing_attempt()
+            || retired.request() != dispatch.request()
+            || retired.attempt() == dispatch.attempt()
+            || !effect_matches
+        {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO tool_attempt
+                (attempt_id, request_id, session_id, turn_id,
+                 issuing_turn_attempt_id, effect_class, dispatch_generation,
+                 state_kind)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'in_flight')",
+        )
+        .bind(dispatch.attempt().into_uuid())
+        .bind(dispatch.request().into_uuid())
+        .bind(dispatch.session().into_uuid())
+        .bind(dispatch.turn().into_uuid())
+        .bind(dispatch.issuing_attempt().into_uuid())
+        .bind(match retired.effect_class() {
+            ToolEffectClass::EffectFree => "effect_free",
+            ToolEffectClass::ExternalEffect => "external_effect",
+        })
+        .bind(Decimal::from(dispatch.generation().as_u64()))
+        .execute(&mut *transaction)
+        .await?;
+        append_lease_event_in(&mut transaction, retry).await?;
+        commit_mutation(transaction).await
+    }
+
     async fn store_lease_without_proof(
         &self,
         lease: &RunnerLease,
@@ -837,53 +906,7 @@ impl RunnerProtocolStore {
             ));
         }
         let mut transaction = self.pool.begin().await?;
-        let correlation = lease.correlation();
-        let current_event = sqlx::query(RUNNER_LEASE_HEAD)
-            .bind(correlation.lease.into_uuid())
-            .bind(Decimal::from(correlation.generation.get()))
-            .fetch_optional(&mut *transaction)
-            .await?;
-        let event_ordinal = match current_event {
-            None => {
-                if lease.state() != RunnerLeaseState::Offered {
-                    return Err(RunnerProtocolStoreError::Domain(
-                        RunnerDomainError::InvalidState,
-                    ));
-                }
-                insert_lease_generation(&mut transaction, lease).await?;
-                1
-            }
-            Some(row) => {
-                require_stored_lease_identity(&row, lease)?;
-                decode_u64(row.get("event_ordinal"))?
-                    .checked_add(1)
-                    .ok_or(RunnerProtocolCorruption::GenerationExhausted)?
-            }
-        };
-        let state = encode_lease_state(lease.state());
-        sqlx::query(
-            "INSERT INTO runner_lease_event
-                (lease_id, generation, event_ordinal, state_kind)
-             VALUES ($1, $2, $3, $4)",
-        )
-        .bind(correlation.lease.into_uuid())
-        .bind(Decimal::from(correlation.generation.get()))
-        .bind(Decimal::from(event_ordinal))
-        .bind(state)
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query(
-            "INSERT INTO runner_current_lease_event
-                (lease_id, generation, event_ordinal)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (lease_id, generation)
-             DO UPDATE SET event_ordinal = EXCLUDED.event_ordinal",
-        )
-        .bind(correlation.lease.into_uuid())
-        .bind(Decimal::from(correlation.generation.get()))
-        .bind(Decimal::from(event_ordinal))
-        .execute(&mut *transaction)
-        .await?;
+        append_lease_event_in(&mut transaction, lease).await?;
         commit_mutation(transaction).await
     }
 
@@ -2040,6 +2063,62 @@ async fn load_grant_for_placement(
     )
     .map(Some)
     .map_err(RunnerProtocolStoreError::Domain)
+}
+
+/// Appends one lease generation or state event inside the caller's
+/// transaction, exactly as the standalone lease store does.
+async fn append_lease_event_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    lease: &RunnerLease,
+) -> Result<(), RunnerProtocolStoreError> {
+    let correlation = lease.correlation();
+    let current_event = sqlx::query(RUNNER_LEASE_HEAD)
+        .bind(correlation.lease.into_uuid())
+        .bind(Decimal::from(correlation.generation.get()))
+        .fetch_optional(&mut **transaction)
+        .await?;
+    let event_ordinal = match current_event {
+        None => {
+            if lease.state() != RunnerLeaseState::Offered {
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::InvalidState,
+                ));
+            }
+            insert_lease_generation(transaction, lease).await?;
+            1
+        }
+        Some(row) => {
+            require_stored_lease_identity(&row, lease)?;
+            decode_u64(row.get("event_ordinal"))?
+                .checked_add(1)
+                .ok_or(RunnerProtocolCorruption::GenerationExhausted)?
+        }
+    };
+    let state = encode_lease_state(lease.state());
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .bind(Decimal::from(event_ordinal))
+    .bind(state)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_current_lease_event
+            (lease_id, generation, event_ordinal)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (lease_id, generation)
+         DO UPDATE SET event_ordinal = EXCLUDED.event_ordinal",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .bind(Decimal::from(event_ordinal))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn insert_lease_generation(

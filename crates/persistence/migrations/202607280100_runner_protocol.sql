@@ -2447,6 +2447,47 @@ BEFORE INSERT ON tool_attempt
 FOR EACH ROW
 EXECUTE FUNCTION require_runner_retry_attempt_authority();
 
+-- A reserved claimed-retry replacement attempt commits only together with its
+-- successor lease generation. This leaves exactly two durable claimed-retry
+-- states: the reservation alone, whose exact dispatch remains replayable, or
+-- the complete consumed retry. A crash therefore cannot strand a replacement
+-- attempt whose one-shot preparation fence is durably consumed while no
+-- successor lease exists to continue the lineage.
+CREATE FUNCTION require_runner_retry_replacement_successor_lease()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    authority runner_claimed_retry_attempt_authority%ROWTYPE;
+BEGIN
+    SELECT * INTO authority
+      FROM runner_claimed_retry_attempt_authority
+     WHERE replacement_attempt_id = NEW.attempt_id;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+          FROM runner_lease_generation AS generation
+         WHERE generation.lease_id = authority.source_lease_id
+           AND generation.predecessor_generation = authority.source_generation
+           AND generation.attempt_id = NEW.attempt_id
+    )
+    THEN
+        RAISE EXCEPTION
+            'replacement attempt lacks its atomic successor lease generation'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER tool_attempt_replacement_commits_with_successor_lease
+AFTER INSERT ON tool_attempt
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_retry_replacement_successor_lease();
+
 CREATE FUNCTION guard_runner_current_lease_event()
 RETURNS trigger
 LANGUAGE plpgsql
