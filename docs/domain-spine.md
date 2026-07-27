@@ -5456,9 +5456,11 @@ impl RunnerLease {
     ) -> Result<RunnerLeaseLoss, RunnerDomainError>;
     pub fn reconstitute(
         input: RunnerLeaseReconstitutionInput,
+        registration: &ValidatedRunnerRegistration,
     ) -> Result<Self, RunnerDomainError>;
     pub fn reconstitute_loss(
         input: RunnerLeaseReconstitutionInput,
+        registration: &ValidatedRunnerRegistration,
         no_execution: Option<&RunnerLeaseNoExecutionProof>,
     ) -> Result<RunnerLeaseLoss, RunnerDomainError>;
 }
@@ -5583,6 +5585,7 @@ impl SessionRunnerPlacement {
         input: SessionRunnerPlacementReconstitutionInput,
         expected_session: SessionId,
         registration: Option<&ValidatedRunnerRegistration>,
+        profileless_tombstone: Option<&CredentialProfileGrant>,
     ) -> Result<Self, RunnerDomainError>;
     // accessors: state(), revision()
 }

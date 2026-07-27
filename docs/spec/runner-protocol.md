@@ -33,10 +33,11 @@ an authentication secret. Enrollment is either active or revoked. Revocation is
 terminal and makes later registration invalid. Complete reconstitution rejects
 mismatched enrollment, runner, authentication, allowed class inventory, optional
 last issued registration revision, or lifecycle state rather than repairing it.
-Revocation also makes an existing validated registration unable to authorize a
-later lease. A lease offer rechecks the active enrollment and its exact
-enrollment, runner, and authentication-reference correlations; a lease already
-offered is unaffected.
+Revocation flips the enrollment-shared active fence, so an existing validated
+registration becomes non-current for later leases, reconciliation, runner
+replacement, or grant replacement. A lease offer rechecks the active enrollment
+and its exact enrollment, runner, and authentication-reference correlations; a
+lease already offered is unaffected.
 
 A registration carries availability claims only:
 
@@ -55,17 +56,17 @@ registration revision. Complete enrollment reconstitution restores the optional
 last issued revision from independently matching stored facts; the next
 successful registration advances it instead of reusing a prior revision.
 Retained copies of every prior registration become stale and cannot authorize a
-later lease or grant-bearing placement transition. Omitting a formerly
-advertised capability removes its availability from the new registration, but
-never changes its daemon-side policy. A pinned session never inherits additions
-from re-registration. If a new registration omits a runner-required capability
-in that session's pinned snapshot, no later lease is authorized; an explicit
-registration-reconciliation transition marks the placement `RunnerLost` without
-rewriting its snapshot. Omitting a combined-locus tool disables runner dispatch
-for that tool but retains placement so daemon fallback remains admissible. Why:
-re-registration can narrow current availability without downgrading a
-confirmation requirement, widening authorization, or silently changing
-established affinity (INV-042, INV-044).
+later lease, reconciliation, or grant-bearing placement transition. Omitting a
+formerly advertised capability removes its availability from the new
+registration, but never changes its daemon-side policy. A pinned session never
+inherits additions from re-registration. If a new registration omits a
+runner-required capability in that session's pinned snapshot, no later lease is
+authorized; an explicit registration-reconciliation transition marks the
+placement `RunnerLost` without rewriting its snapshot. Omitting a combined-locus
+tool disables runner dispatch for that tool but retains placement so daemon
+fallback remains admissible. Why: re-registration can narrow current
+availability without downgrading a confirmation requirement, widening
+authorization, or silently changing established affinity (INV-042, INV-044).
 
 ## Advertised catalogs and daemon authority
 
@@ -180,7 +181,9 @@ runner, tool, authorized physical-attempt correlation, and lineage generation
 may claim it, producing `Claimed`; only that same correlation may complete it.
 Completion is terminal. A stale or cross-wired correlation cannot advance the
 aggregate. Complete reconstitution accepts only the closed state shapes and
-exact correlations.
+exact correlations, and requires the opaque validated registration whose
+daemon-owned declaration independently confirms the stored runner, tool, and
+three-way effect class.
 
 `LostUnclaimed` requires an opaque durable no-execution proof bound to the exact
 lease correlation; complete loss reconstitution requires the same proof. The
@@ -299,14 +302,17 @@ reconstitution facts, including the prior narrowed tool inventory and successor
 inventory. Reconstitution accepts a complete public raw-facts input and rejects
 an unpinned revision other than one, a pinned or lost state that does not match
 its current request and validated capabilities, and any stored credential-grant
-lineage whose revision is newer than the placement revision. Durable
-replacement-history verification belongs to the later persistence projection.
-Pinned or lost reconstitution validates against the exact registration snapshot
-that produced the pin and rejects any stored tool or runner-required-tool
-inventory that differs from that checked result. A current narrowed
-re-registration is reconciled separately and is not substituted for that
-historical snapshot. This domain aggregate accepts every positive placement
-revision because each is reachable through checked successor transitions.
+lineage whose revision is newer than the placement revision. A profileless
+placement with retained lineage additionally requires the exact terminally
+revoked grant tombstone for that session, runner, and revision; an omitted,
+active, or cross-wired tombstone fails closed. Durable replacement-history
+verification belongs to the later persistence projection. Pinned or lost
+reconstitution validates against the exact registration snapshot that produced
+the pin and rejects any stored tool or runner-required-tool inventory that
+differs from that checked result. A current narrowed re-registration is
+reconciled separately and is not substituted for that historical snapshot. This
+domain aggregate accepts every positive placement revision because each is
+reachable through checked successor transitions.
 
 This stack proves that replacement must be explicit and produces the typed
 change facts. Application orchestration that appends the corresponding semantic
