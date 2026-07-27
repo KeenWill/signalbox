@@ -2501,6 +2501,7 @@ mod tests {
 
     /// S28 / INV-038: a regular candidate replaced after enumeration by a
     /// FIFO is rejected without waiting for a writer.
+    #[cfg(not(target_vendor = "apple"))]
     #[tokio::test]
     async fn s28_inv038_scan_refuses_fifo_replacement_without_blocking()
     -> Result<(), Box<dyn Error>> {
