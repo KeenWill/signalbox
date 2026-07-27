@@ -1778,15 +1778,20 @@ mod tests {
     /// path and never reaches presentation delivery.
     #[test]
     fn inv035_text_delta_delivery_is_additive_and_correlation_checked() {
+        let expected_call = call();
+        let expected_session = SessionId::from_uuid(Uuid::from_u128(10));
+        let expected_turn = TurnId::from_uuid(Uuid::from_u128(11));
+        let expected_part_index = 3;
+        let expected_text = String::from("already [redacted]");
         let recorded = RecordedTextDeltas::default();
         let mut sink = AcceptanceObservations {
-            expected_correlation: call(),
+            expected_correlation: expected_call,
             correlation_mismatch: false,
             acceptance_possible: Some(|| {}),
             text_deltas: Some(ProviderTextDeltaContext {
-                session: SessionId::from_uuid(Uuid::from_u128(10)),
-                turn: TurnId::from_uuid(Uuid::from_u128(11)),
-                call: call(),
+                session: expected_session,
+                turn: expected_turn,
+                call: expected_call,
                 sink: Arc::new(recorded.clone()),
             }),
             observations: Vec::new(),
@@ -1799,10 +1804,10 @@ mod tests {
             },
         };
         let redacted = Observation {
-            correlation: call(),
+            correlation: expected_call,
             fact: ObservationFact::TextDelta {
-                index: 3,
-                text: String::from("already [redacted]"),
+                index: expected_part_index,
+                text: expected_text.clone(),
             },
         };
 
@@ -1817,11 +1822,11 @@ mod tests {
                 .lock()
                 .expect("the fixture delta recorder is not poisoned"),
             vec![ProviderTextDelta::new(
-                SessionId::from_uuid(Uuid::from_u128(10)),
-                TurnId::from_uuid(Uuid::from_u128(11)),
-                call(),
-                3,
-                String::from("already [redacted]"),
+                expected_session,
+                expected_turn,
+                expected_call,
+                expected_part_index,
+                expected_text,
             )]
         );
     }

@@ -2463,7 +2463,9 @@ async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_dur
         attach_empty_follower(runtime.socket(), ProtocolVersion::Twelve, 10, session_id).await?;
     let second_follow =
         attach_empty_follower(runtime.socket(), ProtocolVersion::Twelve, 11, session_id).await?;
-    let (script, assistant) = streamed_script(2, String::from("already [redacted] "));
+    let expected_delta_count = 2;
+    let (script, assistant) =
+        streamed_script(expected_delta_count, String::from("already [redacted] "));
     let (_, turn_id) =
         submit_first_input(&mut commands, session_id, String::from("stream this reply")).await?;
 
@@ -2481,9 +2483,9 @@ async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_dur
         read_completed_assistant(runtime.socket(), 13, session_id, turn_id).await?;
     let operations = probe.received_operations();
 
-    assert_eq!(first.delta_count, 2);
+    assert_eq!(first.delta_count, expected_delta_count);
     assert_eq!(first.text, assistant);
-    assert_eq!(second.delta_count, 2);
+    assert_eq!(second.delta_count, expected_delta_count);
     assert_eq!(second.text, assistant);
     assert_eq!(first_durable, assistant);
     assert_eq!(second_durable, assistant);

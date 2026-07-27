@@ -11,7 +11,7 @@ page states for the composition root, its telemetry, and the production
 (`agent/provider-identity-normalization`). The five persistence-repository
 families in the operator-failure inventory were verified through PR #288
 (`agent/audit-fix-docs-coherence`). The streamed-delivery bridge and ephemeral
-text-delta projection were verified through this implementing stack
+text-delta projection were verified through PR #300
 (`agent/token-level-streaming`). It covers the provider-neutral operation,
 observation, and evidence vocabulary; SSE framing; structured-output and tool
 decode; `ScriptedModel`; the two provider adapters; and the in-process

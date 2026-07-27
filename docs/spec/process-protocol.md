@@ -32,14 +32,15 @@ protocol version eleven, verified through PR #295
 (`agent/review-workflow-surface`). When this branch began, nine remained
 reserved by open PR #286 and no open pull request numbered #298 or later
 reserved another protocol version. The ephemeral provider-text surface therefore
-takes version twelve. The implementation here speaks versions one through eight,
-ten, eleven, and twelve while nine remains unsupported, and its terminal client
-selects version twelve. Its `search` verb over version four's metadata list was
-verified through PR #283 (`agent/session-search-cli`; terminal client surface
-only). This page's version-four last-writer member spelling was verified through
-PR #288 (`agent/audit-fix-docs-coherence`). This page is the normative boundary
-between a local client process and `signalboxd`; domain values, PostgreSQL
-records, and wire messages remain distinct representations.
+takes version twelve, verified through PR #300 (`agent/token-level-streaming`).
+The implementation here speaks versions one through eight, ten, eleven, and
+twelve while nine remains unsupported, and its terminal client selects version
+twelve. Its `search` verb over version four's metadata list was verified through
+PR #283 (`agent/session-search-cli`; terminal client surface only). This page's
+version-four last-writer member spelling was verified through PR #288
+(`agent/audit-fix-docs-coherence`). This page is the normative boundary between
+a local client process and `signalboxd`; domain values, PostgreSQL records, and
+wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by

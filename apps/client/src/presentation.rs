@@ -1471,24 +1471,29 @@ mod tests {
 
     #[test]
     fn provider_text_delta_is_terminal_safe_and_flushed_immediately() {
+        let session_id = wire_uuid(1);
+        let turn_id = wire_uuid(2);
+        let model_call_id = wire_uuid(3);
+        let part_index = 4;
         let mut stdout = FlushWriter::default();
         let mut stderr = Vec::new();
         Output::new(&mut stdout, &mut stderr, false)
             .provider_text_delta(
-                wire_uuid(1),
-                wire_uuid(2),
-                wire_uuid(3),
-                4,
+                session_id,
+                turn_id,
+                model_call_id,
+                part_index,
                 "first\nforged event\u{1b}",
             )
             .expect("in-memory output cannot fail");
 
         assert_eq!(
             String::from_utf8(stdout.bytes).expect("rendered output is UTF-8"),
-            "provider_text_delta session=00000000-0000-0000-0000-000000000001 \
-             turn=00000000-0000-0000-0000-000000000002 \
-             call=00000000-0000-0000-0000-000000000003 part=4 \
-             content=first\\u{a}forged event\\u{1b}\n"
+            format!(
+                "provider_text_delta session={session_id} turn={turn_id} \
+                 call={model_call_id} part={part_index} \
+                 content=first\\u{{a}}forged event\\u{{1b}}\n"
+            )
         );
         assert_eq!(stdout.flushes, 1);
         assert!(stderr.is_empty());
