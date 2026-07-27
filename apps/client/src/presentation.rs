@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     io::{self, Write},
+    path::Path,
 };
 
 use signalbox_process_protocol::{
@@ -11,6 +12,7 @@ use signalbox_process_protocol::{
 };
 
 use crate::{
+    ImportScanSummary,
     error::ClientError,
     transcript::{
         SnapshotEntry, SnapshotEntryKind, SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot,
@@ -141,6 +143,51 @@ impl<'a> Output<'a> {
         writeln!(
             self.stdout,
             "already_imported imported_conversation_id={imported_conversation_id}"
+        )
+    }
+
+    pub(crate) fn conversation_import_scan_inserted(
+        &mut self,
+        path: &Path,
+        imported_conversation_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        let path = self.render(&format!("{path:?}"));
+        writeln!(
+            self.stdout,
+            "imported path={path} imported_conversation_id={imported_conversation_id}"
+        )
+    }
+
+    pub(crate) fn conversation_import_scan_already_imported(
+        &mut self,
+        path: &Path,
+        imported_conversation_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        let path = self.render(&format!("{path:?}"));
+        writeln!(
+            self.stdout,
+            "already_imported path={path} imported_conversation_id={imported_conversation_id}"
+        )
+    }
+
+    pub(crate) fn conversation_import_scan_skipped(
+        &mut self,
+        path: &Path,
+        error: &ClientError,
+    ) -> io::Result<()> {
+        let path = self.render(&format!("{path:?}"));
+        let reason = self.render_field(&error.to_string(), TextField::TrailingOnLine);
+        writeln!(self.stdout, "skipped path={path} reason={reason}")
+    }
+
+    pub(crate) fn conversation_import_scan_summary(
+        &mut self,
+        summary: &ImportScanSummary,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "scan_summary imported={} already_imported={} skipped={}",
+            summary.imported, summary.already_imported, summary.skipped
         )
     }
 
@@ -1097,15 +1144,18 @@ fn control_safe(value: &str, field: TextField) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, Write};
+    use std::{
+        io::{self, Write},
+        path::Path,
+    };
 
     use expect_test::expect;
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ContentFragment, CurrentModelCall, CurrentModelCallState,
-        FailedModelCallDisposition, FailedTerminalModelCall, ImportedContentKind,
-        ImportedSourceSpeaker, ImportedSpeaker, InputContent, MetadataActor, MetadataLastWriter,
-        ModelCallState, ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry,
-        TurnState,
+        ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
+        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent, MetadataActor,
+        MetadataLastWriter, ModelCallState, ServerMessage, SessionEvent, TranscriptEntry,
+        TranscriptTextEntry, TurnState,
     };
     use uuid::Uuid;
 
@@ -1159,6 +1209,27 @@ mod tests {
         assert_eq!(comma, "\\u{2c}");
         assert_eq!(escape_text_for_a_comma, "\\u{5c}u{2c}");
         assert_ne!(comma, escape_text_for_a_comma);
+    }
+
+    #[test]
+    fn scan_failure_reason_cannot_forge_an_outcome_line() {
+        let error = ClientError::remote(
+            ErrorCode::Unavailable,
+            String::from("first line\nscan_summary imported=99 already_imported=99 skipped=0"),
+            ErrorDetail::none(),
+        );
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .conversation_import_scan_skipped(Path::new("conversation.jsonl"), &error)
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            skipped path="conversation.jsonl" reason=unavailable: first line\u{a}scan_summary imported=99 already_imported=99 skipped=0
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
     }
 
     #[test]

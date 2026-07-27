@@ -11,14 +11,18 @@ law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
 semantic entries and frontiers in
 [sessions-and-transcript](sessions-and-transcript.md); storage protocol and the
 outbox in [persistence-protocol](persistence-protocol.md); the typed
-model-runtime layer and daemon runtime in
-[runtime-substrate](runtime-substrate.md); model configuration and credentials
-in [configuration-and-credentials](configuration-and-credentials.md). The
+model-runtime layer in [runtime-substrate](runtime-substrate.md); daemon
+startup, scheduling, and shutdown composition in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); and model
+configuration and credentials in
+[configuration-and-credentials](configuration-and-credentials.md). The
 `apps/signalboxd` supervision and `signalbox-debug` code homes this page names
 were verified through PR #258 (`agent/signalboxd-rename`); the
 [provider-target identity](#provider-target-identity) rule and the sanitized
 model-call cause codes were verified through PR #280
-(`agent/provider-identity-normalization`). Invariant tags cite
+(`agent/provider-identity-normalization`). The complete frontier-payload
+projection and identity-before-terminal-evidence precedence were verified
+through PR #288 (`agent/audit-fix-docs-coherence`). Invariant tags cite
 [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
@@ -117,6 +121,11 @@ projects the exact frontier order into provider-neutral messages:
   input content;
 - `SteeringAcceptedInput` renders as a user message with the referenced accepted
   input's checked content;
+- `ModelIdentityChanged` renders as the structured provider-neutral identity
+  change retaining the exact selected-model UUID and bound session-defaults
+  epoch; the provider bridge later projects it as an injected user-role message
+  with the fixed `Signalbox session event: your model identity is now` prefix
+  (INV-046);
 - `AssistantText` renders as an assistant message retaining its producing-call
   provenance;
 - imported `Text` with an attested value renders with its imported user or
@@ -253,9 +262,11 @@ no effect, so retrying it cannot duplicate anything.
 Commit ambiguity has an explicit detection rule (`commit_failure_is_ambiguous`,
 `crates/persistence/src/model_execution.rs`): a database error with SQLSTATE
 08007 or 40003, or any non-database error while awaiting `COMMIT`, is ambiguous;
-a server-rejected commit is a plain non-ambiguous failure; and a unique
-violation surfacing only at `COMMIT` (the identity constraints are deferred) is
-still classified as an identity collision and retried.
+a server-rejected commit is a plain non-ambiguous failure. The identity
+constraints are immediate, so their unique violations surface during statement
+execution. `ModelCallRepositoryError::from_database` checks those named
+constraint violations before generic database or commit-ambiguity
+classification, preserving identity collision as the only retryable failure.
 
 Ambiguous commits are never resolved by replay:
 
@@ -309,11 +320,15 @@ derived) to exactly one disposition:
 | `CancellationConfirmed`                                                      | `Cancelled`   |
 | `BoundaryLoss` (loss after possible acceptance, incl. timeouts)              | `Ambiguous`   |
 
-The bridge maps `Refused` evidence unconditionally; that such evidence arises
-only from an authenticated complete exchange is the runtime layer's contract
-([runtime-substrate](runtime-substrate.md)), not rechecked here. Empty text
-blocks are dropped without creating invalid entries. Tool-call parts with a
-`ToolUse` finish become the normalized proposals owned by
+The bridge maps `Refused` evidence only after every provider-reported identity
+passes the provider-target identity rule below. A different-lineage identity
+fails the adapter stage closed as `ProviderTargetSubstituted` before terminal
+evidence is mapped, including when that evidence is `Refused`. Once identity
+validation passes, that refusal evidence arises only from an authenticated
+complete exchange by the runtime layer's contract
+([runtime-substrate](runtime-substrate.md)), not a condition rechecked here.
+Empty text blocks are dropped without creating invalid entries. Tool-call parts
+with a `ToolUse` finish become the normalized proposals owned by
 [tool-loop](tool-loop.md); thinking or redacted-thinking still fail the adapter
 stage closed because no durable semantic representation exists. Scripted
 providers declare their exact terminal observation; nothing is inferred from
