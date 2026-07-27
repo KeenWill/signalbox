@@ -24,7 +24,8 @@ ALTER TABLE durable_command
                 command_kind IN (
                     'replace_session_metadata',
                     'submit_input',
-                    'decide_tool_request'
+                    'decide_tool_request',
+                    'review_workflow'
                 )
                 AND storage_version = 1
             )
