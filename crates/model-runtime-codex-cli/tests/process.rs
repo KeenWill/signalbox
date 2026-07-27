@@ -1625,6 +1625,75 @@ async fn inv_035_drifted_thread_id_is_redacted_against_held_state() {
     assert!(diagnostic.contains("[redacted]"));
 }
 
+/// A nonzero exit is classified from the bounded raw stderr, so an error
+/// phrase sharing a line with a consumed credential marker still yields the
+/// correct typed kind while the emitted message stays sanitized.
+#[cfg(unix)]
+#[tokio::test]
+async fn stderr_is_classified_before_credential_redaction() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = stdout_holding_masked_credential_failure_cli(temporary.path());
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(10));
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let error = provider_error(&report.evidence);
+
+    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
+    assert!(
+        !error
+            .native
+            .message
+            .as_deref()
+            .expect("the failure carries a message")
+            .contains("opaque-session-secret")
+    );
+    assert_recorded_process_group_exited(
+        temporary.path().join("fake-codex-masked-credential-group"),
+    );
+}
+
+/// Work-first: a cancellation arriving after the leader has already exited
+/// nonzero keeps the definitive provider-error evidence instead of reporting
+/// cancellation loss.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancellation_after_a_nonzero_exit_keeps_provider_error() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = exited_then_cancellable_failure_cli(temporary.path());
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(10));
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let cancellation = cancel_after_record(temporary.path().join("fake-codex-cancel-exit-ready"));
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, cancellation)
+        .await;
+    let error = provider_error(&report.evidence);
+
+    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
+    assert_recorded_process_group_exited(temporary.path().join("fake-codex-cancel-exit-group"));
+}
+
 /// INV-035 / evidence: a leader that wrote a classifiable stderr failure,
 /// closed stderr, and exited nonzero keeps that failure's typed kind at the
 /// stdout-cleanup deadline — even while a descendant holds stdout open —
@@ -2400,6 +2469,37 @@ printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cache
         output = fixtures::OUTPUT_TOKENS,
     );
     script_cli(directory, "reasoning-drift-codex", &script)
+}
+
+/// Scripts a CLI whose stderr places an explicit error phrase after a
+/// line-scoped credential marker, then exits nonzero with a stdout-holding
+/// descendant. The sanitized message consumes the marker's line, so the
+/// failure can only classify correctly from the bounded raw stderr.
+#[cfg(unix)]
+fn stdout_holding_masked_credential_failure_cli(directory: &Path) -> std::path::PathBuf {
+    let script = r#"#!/bin/sh
+printf 'Authorization: opaque-session-secret authentication failed\n' >&2
+sleep 60 0<&- 2>&- &
+printf 'process_group=%s\ndescendant=%s\n' "$$" "$!" > fake-codex-masked-credential-group
+exec 2>&-
+exit 7
+"#;
+    script_cli(directory, "stderr-masked-codex", script)
+}
+
+/// Scripts a CLI that exits nonzero after a classifiable stderr while a
+/// descendant both holds stdout open and signals readiness, so a cancellation
+/// can be timed to arrive after the leader has already exited.
+#[cfg(unix)]
+fn exited_then_cancellable_failure_cli(directory: &Path) -> std::path::PathBuf {
+    let script = r#"#!/bin/sh
+printf 'authentication failed\n' >&2
+( sleep 1; printf 'ready\n' > fake-codex-cancel-exit-ready; sleep 60 ) 0<&- 2>&- &
+printf 'process_group=%s\ndescendant=%s\n' "$$" "$!" > fake-codex-cancel-exit-group
+exec 2>&-
+exit 7
+"#;
+    script_cli(directory, "cancel-after-exit-codex", script)
 }
 
 /// Scripts a CLI that writes a classifiable credential-rejection to stderr,
