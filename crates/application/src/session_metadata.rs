@@ -8,8 +8,8 @@
 use std::{collections::BTreeSet, future::Future};
 
 use signalbox_domain::{
-    Actor, DurableCommandId, ReplaceSessionMetadata as DomainReplaceSessionMetadata,
-    ReplaceSessionMetadataResult, SessionConfigurationDefaults,
+    Actor, DangerousToolAutoApproval, DurableCommandId, ModelSelectionRequest,
+    ReplaceSessionMetadata as DomainReplaceSessionMetadata, ReplaceSessionMetadataResult,
     SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
     SessionMetadataLastWriter, SessionMetadataSnapshot, ToolRequestId,
 };
@@ -351,11 +351,18 @@ pub enum SessionMetadataListQueryError {
 }
 
 /// One bounded session metadata list item.
+///
+/// The list projection deliberately carries only the current defaults
+/// version, model selection, and dangerous-tool posture — never the current
+/// epoch's optional system prompt, whose bounded content is served by the
+/// single-session defaults read alone
+/// (docs/spec/sessions-and-transcript.md).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionMetadataListItem {
     session: SessionId,
     defaults_version: SessionConfigurationDefaultsVersion,
-    defaults: SessionConfigurationDefaults,
+    model_selection: ModelSelectionRequest,
+    dangerous_tool_auto_approval: DangerousToolAutoApproval,
     title: Option<String>,
     tags: Vec<String>,
     archived: bool,
@@ -364,16 +371,19 @@ pub struct SessionMetadataListItem {
 
 impl SessionMetadataListItem {
     /// Projects list fields from a checked metadata snapshot and current
-    /// defaults facts. Attributes are deliberately dropped.
+    /// defaults facts. Attributes and the current epoch's system prompt are
+    /// deliberately dropped.
     pub fn new(
         snapshot: &SessionMetadataSnapshot,
         defaults_version: SessionConfigurationDefaultsVersion,
-        defaults: SessionConfigurationDefaults,
+        model_selection: ModelSelectionRequest,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
     ) -> Self {
         Self {
             session: snapshot.session(),
             defaults_version,
-            defaults,
+            model_selection,
+            dangerous_tool_auto_approval,
             title: snapshot.content().title().map(str::to_owned),
             tags: snapshot.content().tags().map(str::to_owned).collect(),
             archived: snapshot.content().archived(),
@@ -391,9 +401,14 @@ impl SessionMetadataListItem {
         self.defaults_version
     }
 
-    /// Returns the complete current defaults value.
-    pub const fn defaults(&self) -> SessionConfigurationDefaults {
-        self.defaults
+    /// Returns the current model-selection request.
+    pub const fn model_selection(&self) -> ModelSelectionRequest {
+        self.model_selection
+    }
+
+    /// Returns the current dangerous blanket-auto posture.
+    pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval {
+        self.dangerous_tool_auto_approval
     }
 
     /// Borrows the exact optional title.
@@ -488,7 +503,7 @@ mod tests {
 
     use signalbox_domain::{
         Actor, DirectModelSelection, ModelSelectionRequest, ReplaceSessionMetadataRejectedResult,
-        SessionMetadataUpdatedAt, ToolRequestId,
+        SessionConfigurationDefaults, SessionMetadataUpdatedAt, ToolRequestId,
     };
     use uuid::Uuid;
 
@@ -496,10 +511,9 @@ mod tests {
         DomainReplaceSessionMetadata, DurableCommandId, InvalidDurableCommandId,
         ListSessionMetadataService, LoadSessionMetadataService, ReplaceSessionMetadataOutcome,
         ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
-        ReplaceSessionMetadataTransaction, SessionConfigurationDefaults, SessionId,
-        SessionMetadataContent, SessionMetadataLastWriter, SessionMetadataListQuery,
-        SessionMetadataListQueryError, SessionMetadataLister, SessionMetadataReader,
-        SessionMetadataSnapshot,
+        ReplaceSessionMetadataTransaction, SessionId, SessionMetadataContent,
+        SessionMetadataLastWriter, SessionMetadataListQuery, SessionMetadataListQueryError,
+        SessionMetadataLister, SessionMetadataReader, SessionMetadataSnapshot,
     };
 
     fn command_id(value: u128) -> DurableCommandId {
@@ -946,11 +960,20 @@ mod tests {
         );
         let version = signalbox_domain::SessionConfigurationDefaultsVersion::try_from_u64(3)
             .expect("fixture version is positive");
-        let item = super::SessionMetadataListItem::new(&snapshot, version, defaults());
+        let item = super::SessionMetadataListItem::new(
+            &snapshot,
+            version,
+            defaults().model(),
+            defaults().dangerous_tool_auto_approval(),
+        );
 
         assert_eq!(item.session(), session);
         assert_eq!(item.defaults_version(), version);
-        assert_eq!(item.defaults(), defaults());
+        assert_eq!(item.model_selection(), defaults().model());
+        assert_eq!(
+            item.dangerous_tool_auto_approval(),
+            defaults().dangerous_tool_auto_approval()
+        );
         assert_eq!(item.title(), snapshot.content().title());
         assert_eq!(
             item.tags().collect::<Vec<_>>(),

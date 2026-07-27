@@ -137,7 +137,7 @@ async fn s28_inv038_inv039_first_imported_frontier_creation_commits_exact_seed_a
     let mut next_semantic = 0x600_u128;
     let outcome = repository
         .handle(
-            command,
+            command.clone(),
             SessionId::from_uuid(Uuid::from_u128(0x400)),
             ContextFrontierId::from_uuid(Uuid::from_u128(0x700)),
             || {
@@ -199,7 +199,7 @@ async fn s28_inv012_inv039_equal_replay_returns_recorded_session_without_generat
     let mut next_semantic = 0x610_u128;
     let first = repository
         .handle(
-            command,
+            command.clone(),
             SessionId::from_uuid(Uuid::from_u128(0x401)),
             ContextFrontierId::from_uuid(Uuid::from_u128(0x701)),
             || {
@@ -216,7 +216,7 @@ async fn s28_inv012_inv039_equal_replay_returns_recorded_session_without_generat
     let mut replay_generation = 0_u64;
     let replay = repository
         .handle(
-            command,
+            command.clone(),
             SessionId::from_uuid(Uuid::from_u128(0x402)),
             ContextFrontierId::from_uuid(Uuid::from_u128(0x702)),
             || {
@@ -271,7 +271,7 @@ async fn s28_inv002_inv008_inv038_inv039_command_load_reconstitutes_complete_che
     let mut next_semantic = 0x620_u128;
     let created = repository
         .handle(
-            command,
+            command.clone(),
             SessionId::from_uuid(Uuid::from_u128(0x403)),
             ContextFrontierId::from_uuid(Uuid::from_u128(0x703)),
             || {
@@ -303,7 +303,10 @@ async fn s28_inv002_inv008_inv038_inv039_command_load_reconstitutes_complete_che
     .bind(Uuid::from_u128(0x302))
     .fetch_one(&pool)
     .await?;
-    assert_eq!(versions, (2, 2));
+    // The defaults-bearing command families write kind-scoped storage
+    // version three since the session system prompt joined the payload
+    // (docs/spec/persistence-protocol.md).
+    assert_eq!(versions, (3, 3));
     Ok(())
 }
 
@@ -333,7 +336,7 @@ async fn s28_inv002_inv039_current_session_load_reconstitutes_imported_ancestry(
     let mut next_semantic = 0x630_u128;
     let created = repository
         .handle(
-            command,
+            command.clone(),
             SessionId::from_uuid(Uuid::from_u128(0x404)),
             ContextFrontierId::from_uuid(Uuid::from_u128(0x704)),
             || {
@@ -388,7 +391,7 @@ async fn s28_inv012_inv039_conflicting_reuse_is_typed_and_generation_free()
     let mut next_semantic = 0x640_u128;
     let created = repository
         .handle(
-            command,
+            command.clone(),
             SessionId::from_uuid(Uuid::from_u128(0x405)),
             ContextFrontierId::from_uuid(Uuid::from_u128(0x705)),
             || {
@@ -473,7 +476,7 @@ async fn s28_inv012_inv039_missing_frontier_remains_unclaimed_and_generation_fre
     assert_eq!(
         repository
             .handle(
-                missing_frontier_command,
+                missing_frontier_command.clone(),
                 SessionId::from_uuid(Uuid::from_u128(0x411)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x711)),
                 || panic!("missing frontier must not generate identities"),
@@ -522,11 +525,12 @@ async fn s28_inv001_inv012_inv039_concurrent_equal_creation_has_one_identity_con
         .execute(&mut *claim_gate)
         .await?;
 
+    let value = command.clone();
     let first = tokio::spawn(async move {
         let mut first_identity = 0x680_u128;
         first_repository
             .handle(
-                command,
+                value.clone(),
                 SessionId::from_uuid(Uuid::from_u128(0x415)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x715)),
                 || {
@@ -542,7 +546,7 @@ async fn s28_inv001_inv012_inv039_concurrent_equal_creation_has_one_identity_con
         let mut second_identity = 0x690_u128;
         second_repository
             .handle(
-                command,
+                command.clone(),
                 SessionId::from_uuid(Uuid::from_u128(0x416)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x716)),
                 || {
@@ -610,7 +614,7 @@ async fn s28_inv001_inv039_generated_session_identity_collision_is_typed()
         imported_command(0x317, &conversation, ImportedSessionRelationship::Fork);
     let error = repository
         .handle(
-            colliding_command,
+            colliding_command.clone(),
             occupied_session,
             ContextFrontierId::from_uuid(Uuid::from_u128(0x717)),
             || SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x617)),
@@ -660,7 +664,7 @@ async fn s28_inv001_inv039_generated_semantic_entry_identity_collision_is_typed(
         imported_command(0x319, &conversation, ImportedSessionRelationship::Fork);
     let error = repository
         .handle(
-            colliding_command,
+            colliding_command.clone(),
             SessionId::from_uuid(Uuid::from_u128(0x419)),
             ContextFrontierId::from_uuid(Uuid::from_u128(0x719)),
             || occupied_semantic,
@@ -710,7 +714,7 @@ async fn s28_inv001_inv039_generated_seed_frontier_identity_collision_is_typed()
         imported_command(0x31b, &conversation, ImportedSessionRelationship::Fork);
     let error = repository
         .handle(
-            colliding_command,
+            colliding_command.clone(),
             SessionId::from_uuid(Uuid::from_u128(0x41b)),
             occupied_frontier,
             || SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x61b)),
@@ -749,7 +753,7 @@ async fn s28_inv002_command_load_rejects_stored_sentinel_command_identity()
     let command = imported_command(0x31c, &conversation, ImportedSessionRelationship::Resume);
     repository
         .handle(
-            command,
+            command.clone(),
             SessionId::from_uuid(Uuid::from_u128(0x41c)),
             ContextFrontierId::from_uuid(Uuid::from_u128(0x71c)),
             || SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x61c)),

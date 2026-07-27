@@ -16,9 +16,9 @@ use signalbox_domain::{
     Actor, DirectModelSelection, DurableCommandId, ModelAlias, ModelSelectionRequest,
     ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,
     ReplaceSessionMetadataReconstitutionFailure, ReplaceSessionMetadataReconstitutionInput,
-    ReplaceSessionMetadataResult, SessionConfigurationDefaults, SessionId, SessionMetadataContent,
-    SessionMetadataContentError, SessionMetadataLastWriter, SessionMetadataSnapshot,
-    SessionMetadataUpdatedAt, ToolRequestId, TurnId,
+    ReplaceSessionMetadataResult, SessionId, SessionMetadataContent, SessionMetadataContentError,
+    SessionMetadataLastWriter, SessionMetadataSnapshot, SessionMetadataUpdatedAt, ToolRequestId,
+    TurnId,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -1038,7 +1038,7 @@ fn decode_list_item(
     let session = session_id_from_uuid(required(row, "session_id")?);
     let version = defaults_version_from_numeric(required(row, "current_version")?)
         .map_err(SessionMetadataCorruption::InvalidDefaultsVersion)?;
-    let defaults = decode_defaults(
+    let (model_selection, dangerous_tool_auto_approval) = decode_defaults(
         required(row, "model_selection_kind")?,
         row.try_get("direct_model_selection_id")?,
         row.try_get("model_alias_id")?,
@@ -1069,7 +1069,12 @@ fn decode_list_item(
         }
         SessionMetadataSnapshot::initial(session)
     };
-    Ok(SessionMetadataListItem::new(&snapshot, version, defaults))
+    Ok(SessionMetadataListItem::new(
+        &snapshot,
+        version,
+        model_selection,
+        dangerous_tool_auto_approval,
+    ))
 }
 
 fn decode_content(
@@ -1104,12 +1109,21 @@ fn decode_writer(row: &PgRow) -> Result<SessionMetadataLastWriter, SessionMetada
     Ok(SessionMetadataLastWriter::new(updated_at, actor))
 }
 
+/// Decodes the prompt-free list projection of the current defaults: exactly
+/// the selection and posture the wire summary states, never the epoch's
+/// optional system prompt (docs/spec/sessions-and-transcript.md).
 fn decode_defaults(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
     tool_approval: String,
-) -> Result<SessionConfigurationDefaults, SessionMetadataRepositoryError> {
+) -> Result<
+    (
+        ModelSelectionRequest,
+        signalbox_domain::DangerousToolAutoApproval,
+    ),
+    SessionMetadataRepositoryError,
+> {
     let model = match (kind.as_str(), direct, alias) {
         ("direct", Some(value), None) => {
             ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(value))
@@ -1134,12 +1148,7 @@ fn decode_defaults(
             field: "dangerous_tool_auto_approval",
             value: tool_approval,
         })?;
-    Ok(
-        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
-            model,
-            dangerous_tool_auto_approval,
-        ),
-    )
+    Ok((model, dangerous_tool_auto_approval))
 }
 
 struct EncodedActor {

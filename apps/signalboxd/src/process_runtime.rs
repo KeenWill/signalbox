@@ -17,14 +17,14 @@ use signalbox_application::{
     EligibilityNudge, ImportConversationError, ImportConversationOutcome,
     ImportConversationService, ImportedConversationConverter, InProcessEligibilityNudge,
     InProcessToolDispatchGate, ListSessionMetadataService, LoadSessionMetadataService,
-    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
-    ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
-    ReviewWorkflowCommand, ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult,
-    ReviewWorkflowCommandService, ReviewWorkflowOperation, ReviewWorkflowOperationKind,
-    SessionMetadataListItem, SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, SubmitInputTransaction, UuidV7CreateSessionFromImportedFrontierIdGenerator,
-    UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
-    UuidV7ToolLoopIdGenerator,
+    PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
+    ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
+    ReplaceSessionMetadataService, ReviewWorkflowCommand, ReviewWorkflowCommandOutcome,
+    ReviewWorkflowCommandResult, ReviewWorkflowCommandService, ReviewWorkflowOperation,
+    ReviewWorkflowOperationKind, SessionMetadataListItem, SessionMetadataListQuery,
+    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, SubmitInputTransaction,
+    UuidV7CreateSessionFromImportedFrontierIdGenerator, UuidV7ImportedConversationIdGenerator,
+    UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
@@ -71,7 +71,8 @@ use signalbox_persistence::{
         ProcessImportedContentKind, ProcessImportedSourceSpeaker,
         ProcessModelCallRecoveryPrecondition, ProcessModelSelection, ProcessReadError,
         ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionAncestry,
-        ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptTurn, ProcessTurnState,
+        ProcessSessionDefaultsRead, ProcessTranscriptEntry, ProcessTranscriptItem,
+        ProcessTranscriptTurn, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
@@ -96,10 +97,11 @@ use signalbox_process_protocol::{
     ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot,
     ReviewSeverity as WireReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
-    ServerFrame, ServerMessage, SessionEvent, SessionMetadata as WireSessionMetadata,
-    ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-    content_fragments, decode_client_line, encode_server_line,
-    recover_bounded_client_protocol_version, recover_bounded_client_request_id,
+    SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, ServerFrame, ServerMessage, SessionEvent,
+    SessionMetadata as WireSessionMetadata, SystemPromptMember, SystemPromptText, ToolBatchState,
+    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, content_fragments,
+    decode_client_line, encode_server_line, recover_bounded_client_protocol_version,
+    recover_bounded_client_request_id,
 };
 use sqlx::{PgPool, Row};
 use tokio::{
@@ -631,6 +633,7 @@ where
         ClientRequest::CreateSession {
             command_id,
             initial_model_selection,
+            system_prompt,
         } => {
             handle_create_session(
                 writer,
@@ -638,6 +641,7 @@ where
                 request_id,
                 command_id.into_uuid(),
                 initial_model_selection,
+                system_prompt,
                 &services.pool,
             )
             .await
@@ -816,6 +820,7 @@ where
             expected_defaults_version,
             model_selection,
             dangerous_tool_auto_approval,
+            system_prompt,
         } => {
             handle_replace_session_defaults(
                 writer,
@@ -826,8 +831,23 @@ where
                 expected_defaults_version,
                 model_selection,
                 dangerous_tool_auto_approval,
+                system_prompt,
                 &services.pool,
                 services.model_configuration.as_ref(),
+            )
+            .await
+        }
+        ClientRequest::ReadSessionDefaults {
+            session_id,
+            defaults_version,
+        } => {
+            handle_read_session_defaults(
+                writer,
+                version,
+                request_id,
+                session_id,
+                defaults_version,
+                &services.pool,
             )
             .await
         }
@@ -2849,7 +2869,7 @@ where
                 && command.imported_frontier().through_position().as_u64()
                     == through_position.value()
                 && command.relationship() == relationship
-                && command.initial_configuration_defaults() == defaults
+                && command.initial_configuration_defaults() == &defaults
             {
                 return write_message(
                     writer,
@@ -3062,14 +3082,28 @@ async fn handle_create_session<Writer>(
     request_id: RequestId,
     command_id: uuid::Uuid,
     initial_model_selection: WireModelSelection,
+    system_prompt: SystemPromptMember,
     pool: &PgPool,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
+    let Ok(system_prompt) = domain_system_prompt(system_prompt) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let request = CreateSessionRequest::try_new(
         DurableCommandId::from_uuid(command_id),
-        SessionConfigurationDefaults::new(domain_model_selection(initial_model_selection)),
+        SessionConfigurationDefaults::complete(
+            domain_model_selection(initial_model_selection),
+            DangerousToolAutoApproval::Disabled,
+            system_prompt,
+        ),
     );
     let Ok(request) = request else {
         return write_error(
@@ -3405,9 +3439,9 @@ async fn spool_session_metadata_page(
             ServerMessage::SessionMetadataSummary {
                 session_id: wire_uuid(item.session().into_uuid()),
                 defaults_version: CanonicalU64::new(item.defaults_version().as_u64()),
-                model_selection: wire_domain_model_selection(item.defaults().model()),
+                model_selection: wire_domain_model_selection(item.model_selection()),
                 dangerous_tool_auto_approval: matches!(
-                    item.defaults().dangerous_tool_auto_approval(),
+                    item.dangerous_tool_auto_approval(),
                     DangerousToolAutoApproval::ApproveAll
                 ),
                 title,
@@ -3488,6 +3522,81 @@ where
             .await
         }
         Err(error) => write_session_metadata_read_error(writer, version, request_id, error).await,
+    }
+}
+
+async fn handle_read_session_defaults<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    defaults_version: Option<CanonicalU64>,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let named_version = match defaults_version {
+        None => None,
+        Some(value) => match SessionConfigurationDefaultsVersion::try_from_u64(value.value()) {
+            Some(version) => Some(version),
+            None => {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
+        },
+    };
+    let repository = ProcessReadRepository::new(pool.clone());
+    match repository
+        .read_session_defaults(SessionId::from_uuid(session_id.into_uuid()), named_version)
+        .await
+    {
+        Ok(ProcessSessionDefaultsRead::Read(read)) => {
+            let system_prompt = match wire_system_prompt(read.defaults().system_prompt()) {
+                Some(system_prompt) => system_prompt,
+                None => return Err(ProcessConnectionError::EncodeInvariant),
+            };
+            write_message_via_spool(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionDefaults {
+                    session_id,
+                    defaults_version: CanonicalU64::new(read.version().as_u64()),
+                    model_selection: wire_domain_model_selection(read.defaults().model()),
+                    dangerous_tool_auto_approval: matches!(
+                        read.defaults().dangerous_tool_auto_approval(),
+                        DangerousToolAutoApproval::ApproveAll
+                    ),
+                    system_prompt,
+                },
+            )
+            .await
+        }
+        Ok(ProcessSessionDefaultsRead::SessionNotFound) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::NotFound),
+            )
+            .await
+        }
+        Ok(ProcessSessionDefaultsRead::VersionNotFound) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::defaults_epoch_not_found(),
+            )
+            .await
+        }
+        Err(error) => write_process_read_error(writer, version, request_id, error).await,
     }
 }
 
@@ -3624,6 +3733,7 @@ async fn handle_replace_session_defaults<Writer>(
     expected_defaults_version: CanonicalU64,
     model_selection: WireModelSelection,
     dangerous_tool_auto_approval: bool,
+    system_prompt: SystemPromptMember,
     pool: &PgPool,
     model_configuration: &HubModelConfiguration,
 ) -> Result<(), ProcessConnectionError>
@@ -3641,21 +3751,41 @@ where
         )
         .await;
     };
+    let prompt_member_is_absent = system_prompt.value().is_none();
+    let Ok(system_prompt) = domain_system_prompt(system_prompt) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let replacement_model = domain_model_selection(model_selection);
-    let replacement = SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
+    let replacement = SessionConfigurationDefaults::complete(
         replacement_model,
         if dangerous_tool_auto_approval {
             DangerousToolAutoApproval::ApproveAll
         } else {
             DangerousToolAutoApproval::Disabled
         },
+        system_prompt,
     );
     let durable_command_id = DurableCommandId::from_uuid(command_id);
+    // A member the frame could not state must not silently clear a prompt
+    // the current epoch carries; the transaction refuses that atomically
+    // under the compare-and-set lock, recording nothing.
+    let prompt_member = if prompt_member_is_absent {
+        PromptMemberStatement::Unstated
+    } else {
+        PromptMemberStatement::Stated
+    };
     let request = ReplaceSessionDefaultsRequest::try_new(
         durable_command_id,
         SessionId::from_uuid(session_id.into_uuid()),
         expected_version,
         replacement,
+        prompt_member,
     );
     let Ok(request) = request else {
         return write_error(
@@ -3706,7 +3836,15 @@ where
             applied,
         ))) => {
             let installed = applied.installed();
-            write_message(
+            let system_prompt = if version.as_u64() < SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION {
+                SystemPromptMember::absent()
+            } else {
+                SystemPromptMember::present(
+                    wire_system_prompt(installed.defaults().system_prompt())
+                        .ok_or(ProcessConnectionError::EncodeInvariant)?,
+                )
+            };
+            write_mutation_receipt_via_spool(
                 writer,
                 version,
                 request_id,
@@ -3718,6 +3856,7 @@ where
                         installed.defaults().dangerous_tool_auto_approval(),
                         DangerousToolAutoApproval::ApproveAll
                     ),
+                    system_prompt,
                 },
             )
             .await
@@ -3746,6 +3885,15 @@ where
                 }
             };
             write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
+        }
+        Ok(ReplaceSessionDefaultsOutcome::PromptRequiresStatedMember) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::unsupported_version(SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION),
+            )
+            .await
         }
         Ok(ReplaceSessionDefaultsOutcome::ConflictingReuse { .. }) => {
             write_error(
@@ -3891,6 +4039,15 @@ async fn handle_submit_input<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    let Ok(content) = admitted_user_content(content) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let session = SessionId::from_uuid(session_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
     let repository = SubmitInputRepository::new(pool.clone());
@@ -3921,15 +4078,6 @@ where
     let Some(expected_version) =
         SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
     else {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::InvalidRequest),
-        )
-        .await;
-    };
-    let Ok(content) = admitted_user_content(content) else {
         return write_error(
             writer,
             version,
@@ -5369,6 +5517,37 @@ fn wire_domain_model_selection(selection: ModelSelectionRequest) -> WireModelSel
     }
 }
 
+/// Maps the presence-checked wire member into the domain's optional bounded
+/// prompt. Frame validation already bounds the text; construction failure is
+/// a fail-closed invalid request rather than a panic.
+fn domain_system_prompt(
+    member: SystemPromptMember,
+) -> Result<Option<signalbox_domain::SessionSystemPrompt>, ()> {
+    match member.value() {
+        None | Some(None) => Ok(None),
+        Some(Some(text)) => {
+            signalbox_domain::SessionSystemPrompt::try_new(text.as_str().to_owned())
+                .map(Some)
+                .map_err(|_| ())
+        }
+    }
+}
+
+/// Maps the domain's optional bounded prompt onto the wire text type.
+///
+/// The domain admission is strictly at least as strict as the wire's, so a
+/// `None` here is fail-closed encode-invariant evidence.
+fn wire_system_prompt(
+    prompt: Option<&signalbox_domain::SessionSystemPrompt>,
+) -> Option<Option<SystemPromptText>> {
+    match prompt {
+        None => Some(None),
+        Some(value) => SystemPromptText::try_new(value.as_str().to_owned())
+            .ok()
+            .map(Some),
+    }
+}
+
 fn wire_list_metadata(
     item: &SessionMetadataListItem,
 ) -> Option<(Option<String>, Vec<String>, Option<MetadataLastWriter>)> {
@@ -5631,6 +5810,98 @@ where
     Ok(())
 }
 
+/// Writes one system-prompt-bearing message through a temporary-file spool.
+///
+/// A prompt response can approach the frame cap, so the direct
+/// `write_message` path would retain the complete encoded frame while a peer
+/// that stops reading blocks the write. Spooling first keeps per-connection
+/// heap at fixed I/O buffers, and a pre-transmission spool failure stays
+/// request-local as the ordinary `unavailable` response — never fatal daemon
+/// evidence and never peer I/O — mirroring the snapshot paths
+/// (docs/spec/process-protocol.md).
+async fn write_message_via_spool<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    message: ServerMessage,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let spool_result = spool_single_message(version, request_id, message).await;
+    let mut file = match spool_result {
+        Ok(file) => file,
+        Err(error) => {
+            return write_snapshot_spool_error(writer, version, request_id, error).await;
+        }
+    };
+    write_spooled_file(writer, &mut file).await
+}
+
+/// Writes one committed mutation receipt through a temporary-file spool.
+///
+/// The receipt's mutation has already durably committed, so a pre-transmission
+/// spool failure must answer `commit_ambiguous` — the caller retries the exact
+/// command identity to discover the recorded outcome — never `unavailable`,
+/// whose contract states no requested mutation may have committed
+/// (docs/spec/process-protocol.md).
+async fn write_mutation_receipt_via_spool<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    message: ServerMessage,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let spool_result = spool_single_message(version, request_id, message).await;
+    let mut file = match spool_result {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(
+                error = %spool_error_display(&error),
+                "committed defaults receipt spooling failed before response"
+            );
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await;
+        }
+    };
+    write_spooled_file(writer, &mut file).await
+}
+
+fn spool_error_display(error: &SnapshotSpoolError) -> String {
+    match error {
+        SnapshotSpoolError::Io(error) => error.to_string(),
+        SnapshotSpoolError::MessageRequiresVersion(required) => {
+            format!("message requires protocol version {required}")
+        }
+        SnapshotSpoolError::Encode(error) => error.to_string(),
+        SnapshotSpoolError::EncodeInvariant => String::from("encode invariant violated"),
+    }
+}
+
+/// Encodes one message into a rewound temporary-file spool, classifying every
+/// failure before the first transmitted byte as a spool failure.
+async fn spool_single_message(
+    version: ProtocolVersion,
+    request_id: RequestId,
+    message: ServerMessage,
+) -> Result<tokio::fs::File, SnapshotSpoolError> {
+    let standard_file = tempfile::tempfile().map_err(SnapshotSpoolError::Io)?;
+    let mut file = tokio::fs::File::from_std(standard_file);
+    write_spool_message(&mut file, version, request_id, message).await?;
+    file.flush().await.map_err(SnapshotSpoolError::Io)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(SnapshotSpoolError::Io)?;
+    Ok(file)
+}
+
 async fn write_spool_message(
     writer: &mut tokio::fs::File,
     version: ProtocolVersion,
@@ -5746,8 +6017,19 @@ impl ProtocolError {
                 2 => "the selected session requires protocol version 2",
                 3 => "the selected session requires protocol version 3",
                 6 => "the selected session requires protocol version 6",
+                9 => "the selected session requires protocol version 9",
                 _ => "the protocol version is unsupported",
             },
+            detail: ErrorDetail::none(),
+        }
+    }
+
+    /// The selected session exists but the named immutable defaults epoch
+    /// was never installed; the wire code remains the shared `not_found`.
+    const fn defaults_epoch_not_found() -> Self {
+        Self {
+            code: ErrorCode::NotFound,
+            message: "the requested defaults epoch was not found on the selected session",
             detail: ErrorDetail::none(),
         }
     }
