@@ -580,6 +580,26 @@ async fn execute_process<C: Clone + Send + Sync>(
                 });
             }
             ProcessStep::Cancelled => {
+                // Work-first: a leader that has already exited on its own is
+                // definitive evidence a simultaneous cancellation must not
+                // discard. Probe without reaping and, if it exited, hand the
+                // status to the exit-classification path below instead of
+                // reporting cancellation.
+                if !terminal_observed && leader_exited_without_reaping(child.id()) {
+                    kill_process_group(child.id());
+                    if let Ok(Some(status)) = child.try_wait() {
+                        child.disarm();
+                        let detail = if stderr_task.is_finished() {
+                            stderr_result((&mut stderr_task).await)
+                        } else {
+                            abort_stderr_task(&mut stderr_task).await;
+                            "Codex stderr was unavailable after cancellation".to_string()
+                        };
+                        reaped_status = Some(Ok(status));
+                        deadline_stderr = Some(detail);
+                        break;
+                    }
+                }
                 interrupt_then_kill(
                     &mut child,
                     remaining_interrupt_grace(prepared.interrupt_grace, deadline),
@@ -799,16 +819,27 @@ async fn execute_process<C: Clone + Send + Sync>(
             // continuation would otherwise keep the pair from rejoining, and
             // the continuation would survive the stateless stderr redaction.
             let stderr_detail = redacting_sink.redact_terminal_failure_text(&stderr);
-            let message = if !stderr_detail.trim().is_empty() {
-                format!("Codex CLI exited with status {status}: {stderr_detail}")
+            // The emitted message carries only sanitized stderr; the failure
+            // is classified from the bounded raw stderr so an explicit error
+            // phrase sharing a line with a consumed credential marker still
+            // reaches the classifier.
+            let (message, classification) = if !stderr_detail.trim().is_empty() {
+                (
+                    format!("Codex CLI exited with status {status}: {stderr_detail}"),
+                    format!("Codex CLI exited with status {status}: {}", stderr.trim()),
+                )
             } else if let Some(error) = input_error {
-                format!("Codex CLI exited with status {status} after stdin failed: {error}")
+                let message =
+                    format!("Codex CLI exited with status {status} after stdin failed: {error}");
+                (message.clone(), message)
             } else {
-                format!("Codex CLI exited with status {status}")
+                let message = format!("Codex CLI exited with status {status}");
+                (message.clone(), message)
             };
             // Evidence is built before the sink flushes so the failure
             // message still sees the held cross-fragment redaction state.
-            let evidence = decoder.provider_error_after_exit(&message, &redacting_sink);
+            let evidence =
+                decoder.provider_error_after_exit(&message, &classification, &redacting_sink);
             redacting_sink.finish();
             evidence
         }
@@ -918,7 +949,10 @@ async fn read_bounded_output<R: AsyncRead + Unpin>(
     if truncated {
         output.push_str("… [truncated]");
     }
-    Ok(crate::redaction::redact_text(&output))
+    // Raw bounded stderr is retained so its exit-status classification sees an
+    // error phrase that credential-marker redaction would consume; the sole
+    // exposure point statefully sanitizes it before it leaves the adapter.
+    Ok(output)
 }
 
 async fn interrupt_then_kill(child: &mut SupervisedChild, grace: Duration) {

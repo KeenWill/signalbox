@@ -219,15 +219,25 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn provider_error_after_exit(
         self,
         fallback: &str,
+        fallback_classification: &str,
         sink: &RedactingSink<'_, C>,
     ) -> TerminalEvidence {
         match self.terminal {
             Some(CliTerminal::Failed(message) | CliTerminal::Unrecoverable(message)) => {
                 provider_failure(self.exchange, self.usage, &message, sink)
             }
-            Some(CliTerminal::Completed) | None => {
-                provider_failure(self.exchange, self.usage, fallback, sink)
-            }
+            // The fallback message is already statefully sanitized, so it is
+            // classified from the bounded raw text instead: an error phrase
+            // sharing a line with a consumed credential marker must still
+            // reach the classifier even though it is absent from what leaves
+            // the adapter.
+            Some(CliTerminal::Completed) | None => provider_failure_classified(
+                self.exchange,
+                self.usage,
+                fallback,
+                fallback_classification,
+                sink,
+            ),
         }
     }
 
@@ -631,10 +641,25 @@ fn provider_failure<C: Clone>(
     message: &str,
     sink: &RedactingSink<'_, C>,
 ) -> TerminalEvidence {
+    provider_failure_classified(exchange, usage, message, message, sink)
+}
+
+/// Builds provider-failure evidence whose typed kind is classified from
+/// `classification` while the emitted native message is the stateful
+/// redaction of `message`. The two coincide except on the exit-status
+/// fallback, where the message is already sanitized and the raw stderr is the
+/// classifier input.
+fn provider_failure_classified<C: Clone>(
+    exchange: ExchangeFacts,
+    usage: TokenUsage,
+    message: &str,
+    classification: &str,
+    sink: &RedactingSink<'_, C>,
+) -> TerminalEvidence {
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
         exchange,
         reported_model: None,
-        kind: classify_error(message),
+        kind: classify_error(classification),
         native: NativeErrorFacts {
             error_token: Some("codex_cli_error".to_string()),
             error_code: None,
