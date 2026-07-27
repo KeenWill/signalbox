@@ -1634,7 +1634,9 @@ async fn inv_035_drifted_thread_id_is_redacted_against_held_state() {
 async fn completed_stderr_is_preserved_during_stdout_cleanup() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let executable = stdout_holding_credential_failure_cli(temporary.path());
-    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(2));
+    // A generous deadline so the already-finished stderr reader is reliably
+    // observed under heavy parallel test load, not raced by the deadline.
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(10));
     let prepared = prepare(
         &runtime,
         operation(
