@@ -11,11 +11,12 @@ model-identity boundary were additionally verified through PR #272
 through PR #294 (`agent/continue-imported-conversation`); the session system
 prompt was verified through PR #286 (`agent/session-system-prompt`); and the
 version-thirteen input-delivery surface and its user-reachable steering boundary
-were verified against `agent/mid-turn-steering`. The imported-conversation
-record and converter are owned by [conversation-import](conversation-import.md).
-Where a law is cited as `INV-NNN`, [invariants.md](../invariants.md) is the
-catalog of record; where mechanics owned by another decision are summarized, the
-owning sibling page is linked inline.
+were verified through PR #302 (`agent/mid-turn-steering`). The
+imported-conversation record and converter are owned by
+[conversation-import](conversation-import.md). Where a law is cited as
+`INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
+mechanics owned by another decision are summarized, the owning sibling page is
+linked inline.
 
 ## Session identity and creation provenance
 

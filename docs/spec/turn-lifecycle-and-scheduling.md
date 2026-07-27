@@ -11,8 +11,8 @@ continuation reconstitution and terminal shapes were verified through PR #292
 at the refused, reconciliation-required, and model-call recovery gates were
 verified through PR #296 (`agent/continuation-reconstitution-siblings`); the
 version-thirteen delivery surface, queued restart behavior, and protocol-driven
-continuation steering were verified against `agent/mid-turn-steering`. Code
-homes: `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
+continuation steering were verified through PR #302 (`agent/mid-turn-steering`).
+Code homes: `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,`

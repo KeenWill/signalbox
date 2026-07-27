@@ -34,14 +34,14 @@ through PR #294 (`agent/continue-imported-conversation`). The review-workflow
 surface adds protocol version eleven, verified through PR #295
 (`agent/review-workflow-surface`). The client-selectable input-delivery surface
 adds protocol version thirteen while version twelve remains taken by concurrent
-streaming work, verified against `agent/mid-turn-steering`. The implementation
-here speaks versions one through eleven and thirteen, and its terminal client
-selects version thirteen. Its `search` verb over version four's metadata list
-was verified through PR #283 (`agent/session-search-cli`; terminal client
-surface only). This page's version-four last-writer member spelling was verified
-through PR #288 (`agent/audit-fix-docs-coherence`). This page is the normative
-boundary between a local client process and `signalboxd`; domain values,
-PostgreSQL records, and wire messages remain distinct representations.
+streaming work, verified through PR #302 (`agent/mid-turn-steering`). The
+implementation here speaks versions one through eleven and thirteen, and its
+terminal client selects version thirteen. Its `search` verb over version four's
+metadata list was verified through PR #283 (`agent/session-search-cli`; terminal
+client surface only). This page's version-four last-writer member spelling was
+verified through PR #288 (`agent/audit-fix-docs-coherence`). This page is the
+normative boundary between a local client process and `signalboxd`; domain
+values, PostgreSQL records, and wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -371,7 +371,7 @@ violation returns `malformed_frame` before application construction.
 value cannot construct the corresponding application input; no currently valid
 metadata frame is intended to reach that mapping error.
 
-Versions one through eight, ten, and eleven deliberately expose only the daily
+Versions one through eleven deliberately expose only the daily
 sequential-conversation treatment for `submit_input`: if a turn is active, they
 return the typed `active_turn_present` rejection. Version thirteen maps the
 client-selected delivery object without reinterpretation: `start_when_idle` to
