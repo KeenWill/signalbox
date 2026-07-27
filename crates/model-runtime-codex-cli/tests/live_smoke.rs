@@ -164,11 +164,24 @@ async fn spawn_probe(
     command: &mut tokio::process::Command,
     executable: &str,
 ) -> tokio::process::Child {
-    for _ in 0..50 {
-        match command.spawn() {
+    spawn_with_retry(executable, || command.spawn()).await
+}
+
+const MAX_SPAWN_ATTEMPTS: usize = 50;
+const SPAWN_RETRY_DELAY: Duration = Duration::from_millis(20);
+
+/// Drives the bounded `ETXTBSY` retry over an injectable spawn, so the
+/// retry-to-success, exhaustion, and non-retryable branches are all testable
+/// without provoking a real text-file-busy race.
+async fn spawn_with_retry<F>(executable: &str, mut spawn: F) -> tokio::process::Child
+where
+    F: FnMut() -> std::io::Result<tokio::process::Child>,
+{
+    for _ in 0..MAX_SPAWN_ATTEMPTS {
+        match spawn() {
             Ok(child) => return child,
-            Err(error) if error.raw_os_error() == Some(libc_etxtbsy()) => {
-                tokio::time::sleep(Duration::from_millis(20)).await;
+            Err(error) if spawn_error_is_retryable(&error) => {
+                tokio::time::sleep(SPAWN_RETRY_DELAY).await;
             }
             Err(error) => panic!("`{executable} --version` could not be spawned: {error}"),
         }
@@ -176,9 +189,10 @@ async fn spawn_probe(
     panic!("`{executable} --version` stayed text-file-busy across retries")
 }
 
-/// `ETXTBSY` without pulling in a libc dependency for a test-only retry.
-fn libc_etxtbsy() -> i32 {
-    26
+/// A freshly written fixture executable can transiently return `ETXTBSY`; every
+/// other spawn error is a real failure that must surface immediately.
+fn spawn_error_is_retryable(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(26)
 }
 
 /// Fails closed: an unreadable, unparsable, or mismatched version is a smoke
@@ -252,6 +266,57 @@ fn version_probe_fixture(directory: &std::path::Path, script: &str) -> String {
     path.to_str()
         .expect("the version-probe path is UTF-8")
         .to_string()
+}
+
+#[test]
+fn spawn_error_etxtbsy_is_retryable() {
+    assert!(spawn_error_is_retryable(
+        &std::io::Error::from_raw_os_error(26)
+    ));
+}
+
+#[test]
+fn spawn_error_enoent_is_not_retryable() {
+    assert!(!spawn_error_is_retryable(
+        &std::io::Error::from_raw_os_error(2)
+    ));
+}
+
+/// The retry loop keeps trying through transient `ETXTBSY` and returns the
+/// child once a later attempt succeeds.
+#[tokio::test]
+async fn spawn_with_retry_succeeds_after_transient_busy() {
+    let mut attempts = 0_usize;
+    let child = spawn_with_retry("fixture", || {
+        attempts += 1;
+        if attempts < 3 {
+            Err(std::io::Error::from_raw_os_error(26))
+        } else {
+            tokio::process::Command::new("true").spawn()
+        }
+    })
+    .await;
+
+    assert_eq!(attempts, 3);
+    let status = child
+        .wait_with_output()
+        .await
+        .expect("the child is awaited");
+    assert!(status.status.success());
+}
+
+/// Persistent `ETXTBSY` exhausts the bound and fails rather than looping.
+#[tokio::test]
+#[should_panic(expected = "stayed text-file-busy")]
+async fn spawn_with_retry_gives_up_when_always_busy() {
+    let _ = spawn_with_retry("fixture", || Err(std::io::Error::from_raw_os_error(26))).await;
+}
+
+/// A non-`ETXTBSY` spawn error is not masked by the retry.
+#[tokio::test]
+#[should_panic(expected = "could not be spawned")]
+async fn spawn_with_retry_surfaces_a_non_busy_error() {
+    let _ = spawn_with_retry("fixture", || Err(std::io::Error::from_raw_os_error(2))).await;
 }
 
 /// The gate accepts an executable that reports exactly the pinned version.
