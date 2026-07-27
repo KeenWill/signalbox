@@ -1,11 +1,13 @@
 //! `change_request_ci_job_log` registry declaration and typed arguments.
 
 use signalbox_domain::NormalizedToolArguments;
+use signalbox_tool_contract::ToolContract;
 
 use super::{
     CodeHostOperation,
     arguments::{
-        CodeHostRepository, InvalidCodeHostArguments, object, take_positive_id, take_string,
+        CodeHostPositiveId, CodeHostRepository, InvalidCodeHostArguments,
+        decode as decode_arguments,
     },
 };
 
@@ -13,20 +15,22 @@ use super::{
 /// `ExternalEffect` because GitHub observes the authenticated request.
 pub(super) const NAME: &str = "change_request_ci_job_log";
 pub(super) const DESCRIPTION: &str = "Returns a bounded text prefix of one GitHub Actions job log.";
-pub(super) const SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "repository": {"type": "string", "description": "Exact owner/repository spelling."},
-        "job_id": {"type": "integer", "minimum": 1, "description": "GitHub Actions job identity."}
-    },
-    "required": ["repository", "job_id"],
-    "additionalProperties": false
-}"#;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CiJobLogArguments {
+    /// Exact owner/repository spelling.
     repository: CodeHostRepository,
-    job_id: u64,
+    /// GitHub Actions job identity.
+    job_id: CodeHostPositiveId,
+}
+
+pub(super) struct Contract;
+
+impl ToolContract for Contract {
+    type Arguments = CiJobLogArguments;
+    const NAME: &'static str = NAME;
+    const DESCRIPTION: &'static str = DESCRIPTION;
 }
 
 impl CiJobLogArguments {
@@ -37,18 +41,12 @@ impl CiJobLogArguments {
 
     /// Returns the exact GitHub Actions job identity.
     pub const fn job_id(&self) -> u64 {
-        self.job_id
+        self.job_id.get()
     }
 }
 
 pub(super) fn decode(
     arguments: &NormalizedToolArguments,
 ) -> Result<CodeHostOperation, InvalidCodeHostArguments> {
-    let mut object = object(arguments, 2)?;
-    let repository = CodeHostRepository::try_new(take_string(&mut object, "repository")?)?;
-    let job_id = take_positive_id(&mut object, "job_id")?;
-    Ok(CodeHostOperation::CiJobLog(CiJobLogArguments {
-        repository,
-        job_id,
-    }))
+    decode_arguments(arguments).map(CodeHostOperation::CiJobLog)
 }

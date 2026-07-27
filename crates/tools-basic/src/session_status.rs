@@ -19,9 +19,11 @@ use signalbox_persistence::session_metadata::{
 };
 use sqlx::PgPool;
 
-use crate::tool_contract::{ToolContract, ToolContractCompileError, compile_contract_definition};
+use signalbox_tool_contract::{
+    ToolContract, ToolContractCompileError, compile_contract_definition,
+};
 
-pub(crate) const SESSION_STATUS_UPDATE_NAME: &str = "session_status_update";
+pub const SESSION_STATUS_UPDATE_NAME: &str = "session_status_update";
 const INVALID_ARGUMENTS_DETAIL: &str =
     "expected one complete admitted title, tags, attributes, and archived snapshot";
 const SESSION_NOT_FOUND_DETAIL: &str = "session metadata target does not exist";
@@ -73,7 +75,7 @@ impl<Writer> ToolContract for SessionStatusTool<Writer> {
 /// share it. Field order is the declared `required` order.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SessionStatusUpdateArguments {
+pub struct SessionStatusUpdateArguments {
     /// Optional exact session title.
     title: SessionStatusTitle,
     /// Complete exact session tag set.

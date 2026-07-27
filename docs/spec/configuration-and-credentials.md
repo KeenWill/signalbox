@@ -299,7 +299,7 @@ Enforcement as implemented:
   request-scoped token and its JSON-string-escaped form before the result can
   cross into tool evidence. Code-host transport failures and malformed responses
   expose only fixed details, never response bodies. INV-035-tagged tests in
-  `apps/signalboxd/src/code_host/mod.rs` and
+  `crates/tools-code-host/src/code_host/mod.rs` and
   `apps/signalboxd/tests/offline_tool_loop.rs` enforce the executor and durable
   transcript boundaries.
 

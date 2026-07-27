@@ -1,12 +1,13 @@
 //! `change_request_file_patch` registry declaration and typed arguments.
 
 use signalbox_domain::NormalizedToolArguments;
+use signalbox_tool_contract::ToolContract;
 
 use super::{
     CodeHostOperation,
     arguments::{
         CodeHostChangeRequestNumber, CodeHostFilePath, CodeHostRepository,
-        InvalidCodeHostArguments, object, take_positive_id, take_string,
+        InvalidCodeHostArguments, decode as decode_arguments,
     },
 };
 
@@ -15,22 +16,24 @@ use super::{
 pub(super) const NAME: &str = "change_request_file_patch";
 pub(super) const DESCRIPTION: &str =
     "Returns the bounded code-host patch for one exact changed file.";
-pub(super) const SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "repository": {"type": "string", "description": "Exact owner/repository spelling."},
-        "number": {"type": "integer", "minimum": 1, "description": "Change-request number."},
-        "path": {"type": "string", "description": "Exact repository-relative changed path."}
-    },
-    "required": ["repository", "number", "path"],
-    "additionalProperties": false
-}"#;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FilePatchArguments {
+    /// Exact owner/repository spelling.
     repository: CodeHostRepository,
+    /// Change-request number.
     number: CodeHostChangeRequestNumber,
+    /// Exact repository-relative changed path.
     path: CodeHostFilePath,
+}
+
+pub(super) struct Contract;
+
+impl ToolContract for Contract {
+    type Arguments = FilePatchArguments;
+    const NAME: &'static str = NAME;
+    const DESCRIPTION: &'static str = DESCRIPTION;
 }
 
 impl FilePatchArguments {
@@ -53,13 +56,5 @@ impl FilePatchArguments {
 pub(super) fn decode(
     arguments: &NormalizedToolArguments,
 ) -> Result<CodeHostOperation, InvalidCodeHostArguments> {
-    let mut object = object(arguments, 3)?;
-    let repository = CodeHostRepository::try_new(take_string(&mut object, "repository")?)?;
-    let number = CodeHostChangeRequestNumber::try_new(take_positive_id(&mut object, "number")?)?;
-    let path = CodeHostFilePath::try_new(take_string(&mut object, "path")?)?;
-    Ok(CodeHostOperation::FilePatch(FilePatchArguments {
-        repository,
-        number,
-        path,
-    }))
+    decode_arguments(arguments).map(CodeHostOperation::FilePatch)
 }

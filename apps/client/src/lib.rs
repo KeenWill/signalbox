@@ -21,7 +21,7 @@ use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportFormat,
     ConversationImportSource, ErrorCode, InputContent, MAX_FRAME_BYTES, ModelCallDisposition,
     ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
-    TurnState, decode_server_line, encode_server_line,
+    ToolDecision, TurnState, decode_server_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -133,7 +133,7 @@ async fn execute(
 ) -> Result<(), ClientError> {
     let input = if matches!(
         arguments.command,
-        Command::Send { .. } | Command::Reconcile { .. }
+        Command::Send { .. } | Command::Reconcile { .. } | Command::Stop { .. }
     ) {
         Some(read_input(stdin)?)
     } else {
@@ -155,7 +155,10 @@ async fn execute(
         | Command::Model { .. }
         | Command::Transcript { .. }
         | Command::Follow { .. }
-        | Command::Reconcile { .. } => None,
+        | Command::Reconcile { .. }
+        | Command::Stop { .. }
+        | Command::Approve { .. }
+        | Command::Deny { .. } => None,
     };
     let socket = socket_path(arguments.socket, socket_environment)?;
     let mut client = ProcessClient::new(socket);
@@ -234,6 +237,55 @@ async fn execute(
                 command_id,
                 defaults_version,
                 input,
+            )
+            .await
+        }
+        Command::Stop {
+            session_id,
+            turn_id,
+            command_id,
+            defaults_version,
+        } => {
+            let input = input.ok_or(ClientError::Input("standard-input content was not read"))?;
+            stop(
+                &mut client,
+                &mut output,
+                session_id,
+                turn_id,
+                command_id,
+                defaults_version,
+                input,
+            )
+            .await
+        }
+        Command::Approve {
+            session_id,
+            tool_request_id,
+            command_id,
+        } => {
+            decide(
+                &mut client,
+                &mut output,
+                session_id,
+                tool_request_id,
+                command_id,
+                ToolDecision::Approve {},
+            )
+            .await
+        }
+        Command::Deny {
+            session_id,
+            tool_request_id,
+            reason,
+            command_id,
+        } => {
+            decide(
+                &mut client,
+                &mut output,
+                session_id,
+                tool_request_id,
+                command_id,
+                ToolDecision::Deny { reason },
             )
             .await
         }
@@ -913,6 +965,62 @@ async fn reconcile(
     await_and_report_turn(client, output, session_id, successor_turn_id).await
 }
 
+/// Requests cancellation of the exact active turn through the interrupt
+/// treatment, then continues the session with the given content.
+///
+/// The stopped turn terminalizes through the existing lifecycle — a prepared
+/// call cancels directly, an issued call first enters its durable
+/// cancellation-requested state — and the content becomes the
+/// immediate-successor turn this verb then follows to its own terminal.
+async fn stop(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+    turn_id: Option<CanonicalUuid>,
+    command_id: Option<CommandId>,
+    defaults_version: Option<CanonicalU64>,
+    content: String,
+) -> Result<(), ClientError> {
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let expected_active_turn = match turn_id {
+        Some(turn_id) => turn_id,
+        None => observe_active_turn(client, session_id).await?,
+    };
+    output.recovery_value("turn", &expected_active_turn.to_string())?;
+    let defaults_version =
+        resolve_defaults_version(client, output, session_id, defaults_version).await?;
+
+    let successor_turn_id = stop_turn(
+        client,
+        command_id,
+        session_id,
+        expected_active_turn,
+        InputContent::new(content),
+        defaults_version,
+    )
+    .await?;
+
+    await_and_report_turn(client, output, session_id, successor_turn_id).await
+}
+
+/// Reads the authoritative transcript and returns the single turn holding the
+/// session's active slot.
+async fn observe_active_turn(
+    client: &mut ProcessClient,
+    session_id: CanonicalUuid,
+) -> Result<CanonicalUuid, ClientError> {
+    let mut snapshot = transcript(client, session_id).await?;
+    snapshot
+        .active_turn()?
+        .ok_or(ClientError::Input("the session has no active turn to stop"))
+}
+
 async fn resolve_defaults_version(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
@@ -959,6 +1067,48 @@ async fn await_and_report_turn(
         TurnTerminal::Refused => Err(ClientError::TurnRefused),
         TurnTerminal::Cancelled => Err(ClientError::TurnCancelled),
         TurnTerminal::ReconciliationRequired => Err(ClientError::TurnReconciliationRequired),
+    }
+}
+
+/// Supplies one owner decision for a pending tool request and validates the
+/// exact recorded receipt.
+async fn decide(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    command_id: Option<CommandId>,
+    decision: ToolDecision,
+) -> Result<(), ClientError> {
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let mut connection = client
+        .mutation_request(ClientRequest::DecideToolRequest {
+            command_id,
+            session_id,
+            tool_request_id,
+            decision: decision.clone(),
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::ToolRequestDecided {
+            tool_request_id: decided_request,
+            decision: recorded_decision,
+        } if decided_request == tool_request_id && recorded_decision == decision => {
+            output.tool_request_decided(tool_request_id, &decision)?;
+            Ok(())
+        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("decision returned an unexpected receipt").mutation()),
     }
 }
 
@@ -1021,6 +1171,38 @@ async fn reconcile_turn(
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("reconcile returned an unexpected response").mutation()),
+    }
+}
+
+async fn stop_turn(
+    client: &mut ProcessClient,
+    command_id: CommandId,
+    session_id: CanonicalUuid,
+    expected_active_turn_id: CanonicalUuid,
+    content: InputContent,
+    defaults_version: CanonicalU64,
+) -> Result<CanonicalUuid, ClientError> {
+    let mut connection = client
+        .mutation_request(ClientRequest::StopTurn {
+            command_id,
+            session_id,
+            expected_active_turn_id,
+            content,
+            expected_defaults_version: defaults_version,
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::InputSubmitted {
+            session_id: submitted_session,
+            turn_id,
+            ..
+        } if submitted_session == session_id => Ok(turn_id),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("stop returned an unexpected response").mutation()),
     }
 }
 
@@ -1448,7 +1630,7 @@ mod tests {
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, InputContent, ModelCallDisposition,
         ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
-        TurnState, decode_client_line, encode_server_line,
+        ToolDecision, TurnState, decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -1460,9 +1642,9 @@ mod tests {
     use super::{
         MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES, ProcessClient,
         SessionMetadataPageRequest, SnapshotSelection, TurnTerminal, collect_import_paths, create,
-        model_call_recovery_transition, open_scanned_import_source, read_input, reconcile_turn,
-        run, search, socket_path, submit_input, terminal_event_state, terminal_snapshot_selection,
-        terminal_snapshot_state, tool_recovery_transition,
+        decide, model_call_recovery_transition, open_scanned_import_source, read_input,
+        reconcile_turn, run, search, socket_path, stop_turn, submit_input, terminal_event_state,
+        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -2127,6 +2309,181 @@ mod tests {
         )
         .await?;
         assert_eq!(accepted_successor, successor_turn_id);
+        server.await??;
+        Ok(())
+    }
+
+    /// INV-033: the stop verb names the exact expected active turn on the
+    /// wire and returns the accepted successor turn.
+    #[tokio::test]
+    async fn inv033_stop_turn_names_the_active_turn_and_returns_its_successor()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let active_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let successor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+        let server = tokio::spawn(async move {
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert!(matches!(
+                request.request(),
+                ClientRequest::StopTurn {
+                    session_id: requested_session,
+                    expected_active_turn_id: requested_turn,
+                    ..
+                } if *requested_session == session_id && *requested_turn == active_turn_id
+            ));
+            let response = ServerFrame::try_new_for_version(
+                request.version(),
+                request.request_id(),
+                ServerMessage::InputSubmitted {
+                    session_id,
+                    accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                    acceptance_position: CanonicalU64::new(2),
+                    turn_id: successor_turn_id,
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let accepted_successor = stop_turn(
+            &mut client,
+            CommandId::try_from_uuid(Uuid::from_u128(4))?,
+            session_id,
+            active_turn_id,
+            InputContent::new(String::from("continue after the stop")),
+            CanonicalU64::new(1),
+        )
+        .await?;
+        assert_eq!(accepted_successor, successor_turn_id);
+        server.await??;
+        Ok(())
+    }
+
+    /// INV-033: a decision verb sends the exact closed decision and validates
+    /// that the receipt echoes the same request and decision.
+    #[tokio::test]
+    async fn inv033_decide_validates_the_exact_recorded_receipt() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let tool_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let server = tokio::spawn(async move {
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert!(matches!(
+                request.request(),
+                ClientRequest::DecideToolRequest {
+                    session_id: requested_session,
+                    tool_request_id: requested_tool,
+                    decision: ToolDecision::Deny { reason },
+                    ..
+                } if *requested_session == session_id
+                    && *requested_tool == tool_request_id
+                    && reason == "writes outside the workspace"
+            ));
+            let response = ServerFrame::try_new_for_version(
+                request.version(),
+                request.request_id(),
+                ServerMessage::ToolRequestDecided {
+                    tool_request_id,
+                    decision: ToolDecision::Deny {
+                        reason: String::from("writes outside the workspace"),
+                    },
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let mut client = ProcessClient::new(socket);
+        decide(
+            &mut client,
+            &mut output,
+            session_id,
+            tool_request_id,
+            Some(CommandId::try_from_uuid(Uuid::from_u128(4))?),
+            ToolDecision::Deny {
+                reason: String::from("writes outside the workspace"),
+            },
+        )
+        .await?;
+        server.await??;
+        assert_eq!(
+            String::from_utf8(stdout)?,
+            format!("tool_request={tool_request_id} decision=deny\n")
+        );
+        assert_eq!(String::from_utf8(stderr)?, "");
+        Ok(())
+    }
+
+    /// INV-033: a receipt naming a different request or decision is a
+    /// protocol violation, never silently accepted.
+    #[tokio::test]
+    async fn inv033_decide_rejects_a_receipt_for_a_different_decision() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let tool_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let server = tokio::spawn(async move {
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            let response = ServerFrame::try_new_for_version(
+                request.version(),
+                request.request_id(),
+                ServerMessage::ToolRequestDecided {
+                    tool_request_id,
+                    decision: ToolDecision::Approve {},
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let mut client = ProcessClient::new(socket);
+        let result = decide(
+            &mut client,
+            &mut output,
+            session_id,
+            tool_request_id,
+            Some(CommandId::try_from_uuid(Uuid::from_u128(4))?),
+            ToolDecision::Deny {
+                reason: String::from("writes outside the workspace"),
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
         server.await??;
         Ok(())
     }
