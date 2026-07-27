@@ -618,12 +618,21 @@ async fn execute_process<C: Clone + Send + Sync>(
                         if exited_before_cleanup || !was_killed_by_group_cleanup(&status) =>
                     {
                         child.disarm();
-                        abort_stderr_task(&mut stderr_task).await;
-                        reaped_status = Some(Ok(status));
-                        deadline_stderr = Some(
+                        // A leader that wrote and closed stderr before exiting
+                        // leaves the reader already finished; consume it so a
+                        // classifiable failure (for example a credential
+                        // rejection) keeps its typed kind instead of degrading
+                        // to the synthetic cleanup message. Only a still-running
+                        // reader — held open by a descendant — is aborted.
+                        let stderr_detail = if stderr_task.is_finished() {
+                            stderr_result((&mut stderr_task).await)
+                        } else {
+                            abort_stderr_task(&mut stderr_task).await;
                             "Codex stderr was unavailable at the process-cleanup deadline"
-                                .to_string(),
-                        );
+                                .to_string()
+                        };
+                        reaped_status = Some(Ok(status));
+                        deadline_stderr = Some(stderr_detail);
                         break;
                     }
                     Ok(Some(_)) | Ok(None) | Err(_) => {

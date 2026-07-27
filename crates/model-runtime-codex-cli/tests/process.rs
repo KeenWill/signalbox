@@ -1599,6 +1599,46 @@ async fn stderr_deadline_preserves_a_pre_existing_kill_signal_exit() {
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-stderr-kill-group"));
 }
 
+/// INV-035 / evidence: a leader that wrote a classifiable stderr failure,
+/// closed stderr, and exited nonzero keeps that failure's typed kind at the
+/// stdout-cleanup deadline — even while a descendant holds stdout open —
+/// instead of degrading to the synthetic "stderr unavailable" message.
+#[cfg(unix)]
+#[tokio::test]
+async fn completed_stderr_is_preserved_during_stdout_cleanup() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = stdout_holding_credential_failure_cli(temporary.path());
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(2));
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let error = provider_error(&report.evidence);
+
+    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
+    assert!(
+        error
+            .native
+            .message
+            .as_deref()
+            .expect("the failure carries the stderr detail")
+            .contains("authentication failed")
+    );
+    assert_recorded_process_group_exited(
+        temporary.path().join("fake-codex-stderr-credential-group"),
+    );
+}
+
 /// The retained output-schema argument is absolute, so the child's move to
 /// the configured working root cannot re-root a relative schema path.
 #[tokio::test]
@@ -2305,6 +2345,26 @@ printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cache
         cache_write = fixtures::CACHE_CREATION_INPUT_TOKENS,
         output = fixtures::OUTPUT_TOKENS,
     )
+}
+
+/// Scripts a CLI that writes a classifiable credential-rejection to stderr,
+/// closes stderr, hands a stdout-holding descendant the pipe, and exits
+/// nonzero. The stdout-decode loop then reaches its deadline with the leader
+/// already exited and stderr already complete, exercising the branch that
+/// must consume the finished stderr instead of the synthetic cleanup message.
+#[cfg(unix)]
+fn stdout_holding_credential_failure_cli(directory: &Path) -> std::path::PathBuf {
+    let script = r#"#!/bin/sh
+printf 'authentication failed
+' >&2
+sleep 60 0<&- 2>&- &
+printf 'process_group=%s
+descendant=%s
+' "$$" "$!" > fake-codex-stderr-credential-group
+exec 2>&-
+exit 7
+"#;
+    script_cli(directory, "stderr-credential-codex", script)
 }
 
 /// Scripts a CLI that finishes a complete exchange, then keeps stdout open
