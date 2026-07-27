@@ -239,6 +239,39 @@ final class ProcessProtocolTests: XCTestCase {
       ProcessProtocolFixture.unadmittedDetailFieldDiagnostic
     )
   }
+
+  func testRejectedErrorRequiresDetailMember() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.rejectedErrorWithoutDetailFrame()
+    )
+
+    XCTAssertEqual(
+      ProcessProtocolFixture.decodingDiagnostic(in: frame.message),
+      ProcessProtocolFixture.missingErrorDetailDiagnostic
+    )
+  }
+
+  func testRejectedErrorRequiresNonNullDetail() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.rejectedErrorWithNullDetailFrame()
+    )
+
+    XCTAssertEqual(
+      ProcessProtocolFixture.decodingDiagnostic(in: frame.message),
+      ProcessProtocolFixture.nullErrorDetailDiagnostic
+    )
+  }
+
+  func testNonRejectedErrorForbidsDetailMember() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.nonRejectedErrorWithDetailFrame()
+    )
+
+    XCTAssertEqual(
+      ProcessProtocolFixture.decodingDiagnostic(in: frame.message),
+      ProcessProtocolFixture.forbiddenErrorDetailDiagnostic
+    )
+  }
 }
 
 private enum ProcessProtocolFixture {
@@ -247,6 +280,15 @@ private enum ProcessProtocolFixture {
   )
   static let unadmittedDetailFieldDiagnostic = SignalboxDecodingDiagnostic(
     message: "Invalid field value at message.detail.extra."
+  )
+  static let missingErrorDetailDiagnostic = SignalboxDecodingDiagnostic(
+    message: "Missing required field at message.detail."
+  )
+  static let nullErrorDetailDiagnostic = SignalboxDecodingDiagnostic(
+    message: "Missing required value at message.detail."
+  )
+  static let forbiddenErrorDetailDiagnostic = SignalboxDecodingDiagnostic(
+    message: "Invalid field value at message.detail."
   )
 
   static func duplicateSnapshotBoundaryMessage(
@@ -325,6 +367,56 @@ private enum ProcessProtocolFixture {
             "session_id":"\(sessionID)",
             "extra":true
           }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func rejectedErrorWithoutDetailFrame() -> Data {
+    Data(
+      """
+      {
+        "version":5,
+        "request_id":"9",
+        "message":{
+          "type":"error",
+          "code":"rejected",
+          "message":"fixture rejection"
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func rejectedErrorWithNullDetailFrame() -> Data {
+    Data(
+      """
+      {
+        "version":5,
+        "request_id":"9",
+        "message":{
+          "type":"error",
+          "code":"rejected",
+          "message":"fixture rejection",
+          "detail":null
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func nonRejectedErrorWithDetailFrame() -> Data {
+    Data(
+      """
+      {
+        "version":5,
+        "request_id":"9",
+        "message":{
+          "type":"error",
+          "code":"not_found",
+          "message":"fixture error",
+          "detail":null
         }
       }
       """.utf8

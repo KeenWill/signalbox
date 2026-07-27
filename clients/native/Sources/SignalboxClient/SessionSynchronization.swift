@@ -566,6 +566,12 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     guard followed.cursor > cursor else {
       return reportDiagnostics ? diagnosticEffects(for: followed, stage: .steady) : []
     }
+    let requiresSideSnapshot = eventRequiresSideSnapshot(followed.event)
+    if requiresSideSnapshot {
+      guard sideRefreshTriggerFitsCapacity(followed) else {
+        return sideRefreshTriggerCapacityFailure()
+      }
+    }
     if activeRefresh != nil {
       let effects = buffer(
         followed,
@@ -593,7 +599,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       ? diagnosticEffects(for: followed, stage: .steady)
       : []
     effects.append(.publishEvent(followed))
-    if eventRequiresSideSnapshot(followed.event) {
+    if requiresSideSnapshot {
       effects.append(contentsOf: beginSideRefresh(trigger: followed, generation: currentGeneration))
     }
     return effects
@@ -603,13 +609,8 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     trigger: SignalboxFollowedSessionEvent,
     generation currentGeneration: UInt64
   ) -> [SignalboxSessionSynchronizationEffect] {
-    guard policy.eventBufferCapacity.maximumEvents > 0,
-      trigger.event.retainedUTF8Bytes <= policy.eventBufferCapacity.maximumUTF8Bytes
-    else {
-      return protocolFailure(
-        stage: .steady,
-        message: "A side-snapshot trigger exceeded the configured native-client capacity."
-      )
+    guard sideRefreshTriggerFitsCapacity(trigger) else {
+      return sideRefreshTriggerCapacityFailure()
     }
     let refreshID = nextRefreshID
     nextRefreshID = nextIdentity(after: nextRefreshID)
@@ -801,9 +802,15 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     guard followed.cursor.rawValue > publishedCursor else {
       return []
     }
+    let requiresSideSnapshot = eventRequiresSideSnapshot(followed.event)
+    if requiresSideSnapshot {
+      guard sideRefreshTriggerFitsCapacity(followed) else {
+        return sideRefreshTriggerCapacityFailure()
+      }
+    }
     publishedCursor = followed.cursor.rawValue
     var effects: [SignalboxSessionSynchronizationEffect] = [.publishEvent(followed)]
-    if eventRequiresSideSnapshot(followed.event) {
+    if requiresSideSnapshot {
       effects.append(
         contentsOf: beginSideRefresh(
           trigger: followed,
@@ -812,6 +819,22 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       )
     }
     return effects
+  }
+
+  private func sideRefreshTriggerFitsCapacity(
+    _ trigger: SignalboxFollowedSessionEvent
+  ) -> Bool {
+    policy.eventBufferCapacity.maximumEvents > 0
+      && trigger.event.retainedUTF8Bytes <= policy.eventBufferCapacity.maximumUTF8Bytes
+  }
+
+  private mutating func sideRefreshTriggerCapacityFailure()
+    -> [SignalboxSessionSynchronizationEffect]
+  {
+    protocolFailure(
+      stage: .steady,
+      message: "A side-snapshot trigger exceeded the configured native-client capacity."
+    )
   }
 
   private mutating func transportEnded(
@@ -1220,11 +1243,10 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       case .recoveryRequired, .unknown:
         return false
       }
-    case .turnCompleted, .turnFailed, .turnCancelled, .turnToolReconciliationRequired,
-      .unknown:
+    case .turnCompleted, .turnFailed, .turnRefused, .turnCancelled,
+      .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
       return true
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .turnRefused,
-      .turnReconciliationRequired:
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition:
       return false
     }
   }

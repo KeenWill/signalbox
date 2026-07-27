@@ -746,6 +746,60 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testTurnRefusedRequestsSideSnapshotRefresh() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.turnRefusedEvent(
+          cursor: SynchronizationFixture.refusedCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(
+      SynchronizationFixture.effectNames(effects),
+      ["publish_event", "request_side_snapshot", "arm_deadline"]
+    )
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.steady(
+        cursor: SynchronizationFixture.refusedCursor,
+        refreshID: SynchronizationFixture.firstRefreshID
+      )
+    )
+  }
+
+  func testTurnReconciliationRequiredRequestsSideSnapshotRefresh() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.turnReconciliationRequiredEvent(
+          cursor: SynchronizationFixture.reconciliationCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(
+      SynchronizationFixture.effectNames(effects),
+      ["publish_event", "request_side_snapshot", "arm_deadline"]
+    )
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.steady(
+        cursor: SynchronizationFixture.reconciliationCursor,
+        refreshID: SynchronizationFixture.firstRefreshID
+      )
+    )
+  }
+
   func testNewerLiveEventCannotSuppressReplayQueuedBehindSideSnapshot() throws {
     let triggerCursor = SynchronizationFixture.sideRefreshTriggerCursor
     let firstReplayCursor = SynchronizationFixture.sideBufferedCursor
@@ -879,6 +933,9 @@ final class SessionSynchronizationTests: XCTestCase {
     )
 
     XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(effects))
+    XCTAssertFalse(
+      SynchronizationFixture.effectNames(effects).contains("publish_event")
+    )
     XCTAssertEqual(
       transport.machine.phase,
       SynchronizationFixture.firstRecovery(failedStage: .steady)
@@ -903,6 +960,9 @@ final class SessionSynchronizationTests: XCTestCase {
     )
 
     XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(effects))
+    XCTAssertFalse(
+      SynchronizationFixture.effectNames(effects).contains("publish_event")
+    )
     XCTAssertEqual(
       transport.machine.phase,
       SynchronizationFixture.firstRecovery(failedStage: .steady)
@@ -1535,6 +1595,8 @@ private enum SynchronizationFixture {
   static let sideBufferedCursor: UInt64 = 21
   static let secondSideBufferedCursor: UInt64 = 22
   static let liveDuringReplaySideRefreshCursor: UInt64 = 23
+  static let refusedCursor: UInt64 = 24
+  static let reconciliationCursor: UInt64 = 25
   static let recoveredCursor: UInt64 = 30
   static let capacityBelowEncodedFutureEvent: UInt = 32
   static let session = "11111111-1111-4111-8111-111111111111"
@@ -2104,6 +2166,44 @@ private enum SynchronizationFixture {
     )
   }
 
+  static func turnRefusedEvent(cursor: UInt64) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"session_event",
+        "cursor":"\(cursor)",
+        "session_id":"\(session)",
+        "event":{
+          "type":"turn_refused",
+          "turn_id":"\(turn)",
+          "model_call_id":"\(modelCall)",
+          "terminal_frontier_id":"\(frontier)"
+        }
+      }
+      """
+    )
+  }
+
+  static func turnReconciliationRequiredEvent(
+    cursor: UInt64
+  ) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"session_event",
+        "cursor":"\(cursor)",
+        "session_id":"\(session)",
+        "event":{
+          "type":"turn_reconciliation_required",
+          "turn_id":"\(turn)",
+          "model_call_id":"\(modelCall)",
+          "terminal_frontier_id":"\(frontier)"
+        }
+      }
+      """
+    )
+  }
+
   static func unknownModelCallStateEvent(
     cursor: UInt64
   ) throws -> SignalboxProcessServerMessage {
@@ -2221,8 +2321,7 @@ private enum SynchronizationFixture {
       {
         "type":"error",
         "code":"not_found",
-        "message":"fixture session missing",
-        "detail":null
+        "message":"fixture session missing"
       }
       """
     )
