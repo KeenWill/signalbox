@@ -1319,7 +1319,10 @@ async fn await_turn_terminal(
                         return Ok(terminal);
                     }
                 }
-                ServerMessage::ProviderTextDelta { .. } => {}
+                ServerMessage::ProviderTextDelta {
+                    session_id: delta_session,
+                    ..
+                } if delta_session == session_id => {}
                 ServerMessage::Error {
                     code: ErrorCode::ResyncRequired,
                     ..
@@ -2255,6 +2258,86 @@ mod tests {
         let terminal = await_turn_terminal(&mut client, session_id, turn_id).await?;
 
         assert_eq!(terminal, TurnTerminal::Completed);
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_wait_rejects_streamed_text_for_another_session() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let other_session_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let server = tokio::spawn(async move {
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::FollowSession { session_id }
+            );
+            let frame = |message| {
+                ServerFrame::try_new_for_version(
+                    ProtocolVersion::Twelve,
+                    request.request_id(),
+                    message,
+                )
+                .map_err(io::Error::other)
+            };
+            let mut response =
+                encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    session_id,
+                    cursor: CanonicalU64::new(0),
+                })?)
+                .map_err(io::Error::other)?;
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::TranscriptTurn {
+                    turn_id,
+                    acceptance_position: CanonicalU64::new(1),
+                    state: TurnState::Queued {
+                        accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+                        content: InputContent::new(String::from("stream the reply")),
+                    },
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                    session_id,
+                    cursor: CanonicalU64::new(0),
+                    turn_count: CanonicalU64::new(1),
+                    entry_count: CanonicalU64::new(0),
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ProviderTextDelta {
+                    session_id: other_session_id,
+                    turn_id,
+                    model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+                    part_index: CanonicalU64::new(0),
+                    content: ContentFragment::try_new(String::from("cross-wired text"))
+                        .map_err(io::Error::other)?,
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            writer.write_all(&response).await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let result = await_turn_terminal(&mut client, session_id, turn_id).await;
+
+        assert!(matches!(
+            result,
+            Err(ClientError::Protocol(
+                "follow returned an unexpected response"
+            ))
+        ));
         server.await??;
         Ok(())
     }
