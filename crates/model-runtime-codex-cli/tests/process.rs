@@ -2492,9 +2492,16 @@ exit 7
 /// can be timed to arrive after the leader has already exited.
 #[cfg(unix)]
 fn exited_then_cancellable_failure_cli(directory: &Path) -> std::path::PathBuf {
+    // The descendant polls until the leader has actually exited before writing
+    // the readiness marker, so the cancellation deterministically arrives after
+    // the exit even under heavy parallel test load rather than after a fixed
+    // sleep that could race the exit.
     let script = r#"#!/bin/sh
+leader=$$
 printf 'authentication failed\n' >&2
-( sleep 1; printf 'ready\n' > fake-codex-cancel-exit-ready; sleep 60 ) 0<&- 2>&- &
+( while kill -0 "$leader" 2>/dev/null; do sleep 0.05; done
+  printf 'ready\n' > fake-codex-cancel-exit-ready
+  sleep 60 ) 0<&- 2>&- &
 printf 'process_group=%s\ndescendant=%s\n' "$$" "$!" > fake-codex-cancel-exit-group
 exec 2>&-
 exit 7
