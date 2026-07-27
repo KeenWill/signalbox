@@ -33,6 +33,7 @@ ALTER TABLE runner_session_placement_record
                 AND workspace_repository_key IS NULL
                 AND workspace_working_directory IS NULL
                 AND credential_grant_runner_id IS NULL
+                AND credential_grant_lineage_origin_ordinal IS NULL
                 AND credential_grant_revision IS NULL
             )
             OR (
@@ -49,10 +50,12 @@ ALTER TABLE runner_session_placement_record
                         AND (
                             (
                                 credential_grant_runner_id IS NULL
+                                AND credential_grant_lineage_origin_ordinal IS NULL
                                 AND credential_grant_revision IS NULL
                             )
                             OR (
                                 credential_grant_runner_id IS NOT NULL
+                                AND credential_grant_lineage_origin_ordinal IS NOT NULL
                                 AND credential_grant_revision IS NOT NULL
                             )
                         )
@@ -60,6 +63,7 @@ ALTER TABLE runner_session_placement_record
                     OR (
                         pinned_credential_profile_name IS NOT NULL
                         AND credential_grant_runner_id = pinned_runner_id
+                        AND credential_grant_lineage_origin_ordinal IS NOT NULL
                         AND credential_grant_revision IS NOT NULL
                     )
                 )
@@ -68,16 +72,20 @@ ALTER TABLE runner_session_placement_record
     ADD CONSTRAINT runner_session_placement_grant_pointer_shape
         CHECK (
             (credential_grant_runner_id IS NULL) =
+                (credential_grant_lineage_origin_ordinal IS NULL)
+            AND (credential_grant_lineage_origin_ordinal IS NULL) =
                 (credential_grant_revision IS NULL)
         ),
     ADD CONSTRAINT runner_session_placement_grant_fk
         FOREIGN KEY (
             session_id,
+            credential_grant_lineage_origin_ordinal,
             credential_grant_runner_id,
             credential_grant_revision
         )
         REFERENCES runner_credential_grant (
             session_id,
+            lineage_origin_event_ordinal,
             runner_id,
             grant_revision
         )
@@ -90,6 +98,7 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $function$
 DECLARE
+    prior_grant_origin numeric;
     prior_grant_runner uuid;
     prior_grant_revision numeric;
 BEGIN
@@ -102,10 +111,14 @@ BEGIN
               FROM runner_credential_grant AS grant_record
               JOIN runner_credential_grant_audit AS audit
                 ON audit.session_id = grant_record.session_id
+               AND audit.lineage_origin_event_ordinal =
+                    grant_record.lineage_origin_event_ordinal
                AND audit.runner_id = grant_record.runner_id
                AND audit.grant_revision = grant_record.grant_revision
                AND audit.event_kind = 'revoked'
              WHERE grant_record.session_id = NEW.session_id
+               AND grant_record.lineage_origin_event_ordinal =
+                    NEW.credential_grant_lineage_origin_ordinal
                AND grant_record.runner_id = NEW.credential_grant_runner_id
                AND grant_record.grant_revision = NEW.credential_grant_revision
         ) THEN
@@ -113,12 +126,15 @@ BEGIN
                 USING ERRCODE = '23514';
         END IF;
         IF NEW.event_kind = 'runner_replaced' THEN
-            SELECT credential_grant_runner_id, credential_grant_revision
-              INTO prior_grant_runner, prior_grant_revision
+            SELECT credential_grant_lineage_origin_ordinal,
+                   credential_grant_runner_id, credential_grant_revision
+              INTO prior_grant_origin, prior_grant_runner, prior_grant_revision
               FROM runner_session_placement_record
              WHERE session_id = NEW.session_id
                AND event_ordinal = NEW.event_ordinal - 1;
             IF NOT FOUND
+               OR NEW.credential_grant_lineage_origin_ordinal IS DISTINCT FROM
+                    prior_grant_origin
                OR NEW.credential_grant_runner_id IS DISTINCT FROM
                     prior_grant_runner
                OR NEW.credential_grant_revision IS DISTINCT FROM
@@ -134,12 +150,15 @@ BEGIN
     END IF;
 
     IF NEW.event_kind = 'runner_lost' THEN
-        SELECT credential_grant_runner_id, credential_grant_revision
-          INTO prior_grant_runner, prior_grant_revision
+        SELECT credential_grant_lineage_origin_ordinal,
+               credential_grant_runner_id, credential_grant_revision
+          INTO prior_grant_origin, prior_grant_runner, prior_grant_revision
           FROM runner_session_placement_record
          WHERE session_id = NEW.session_id
            AND event_ordinal = NEW.event_ordinal - 1;
-        IF NEW.credential_grant_runner_id IS DISTINCT FROM prior_grant_runner
+        IF NEW.credential_grant_lineage_origin_ordinal IS DISTINCT FROM
+                prior_grant_origin
+           OR NEW.credential_grant_runner_id IS DISTINCT FROM prior_grant_runner
            OR NEW.credential_grant_revision IS DISTINCT FROM
                 prior_grant_revision
         THEN
@@ -161,6 +180,7 @@ EXECUTE FUNCTION require_runner_profileless_grant_tombstone();
 -- Recheck grant completeness against the lineage pointer added above.
 CREATE OR REPLACE FUNCTION assert_runner_grant_complete(
     checked_session uuid,
+    checked_origin numeric,
     checked_runner uuid,
     checked_revision numeric
 )
@@ -176,6 +196,7 @@ BEGIN
     SELECT * INTO grant_row
       FROM runner_credential_grant
      WHERE session_id = checked_session
+       AND lineage_origin_event_ordinal = checked_origin
        AND runner_id = checked_runner
        AND grant_revision = checked_revision;
     IF NOT FOUND THEN
@@ -184,6 +205,7 @@ BEGIN
     SELECT count(*) INTO actual_tools
       FROM runner_credential_grant_tool
      WHERE session_id = checked_session
+       AND lineage_origin_event_ordinal = checked_origin
        AND runner_id = checked_runner
        AND grant_revision = checked_revision;
     SELECT count(*) INTO invalid_tools
@@ -198,6 +220,7 @@ BEGIN
        AND available.registration_revision = grant_row.registration_revision
        AND available.tool_name = granted.tool_name
      WHERE granted.session_id = checked_session
+       AND granted.lineage_origin_event_ordinal = checked_origin
        AND granted.runner_id = checked_runner
        AND granted.grant_revision = checked_revision
        AND (
@@ -214,6 +237,7 @@ BEGIN
     SELECT count(*) INTO initial_audit
       FROM runner_credential_grant_audit
      WHERE session_id = checked_session
+       AND lineage_origin_event_ordinal = checked_origin
        AND runner_id = checked_runner
        AND grant_revision = checked_revision
        AND audit_ordinal = 1;
@@ -228,6 +252,8 @@ BEGIN
                  WHERE prior_placement.session_id = grant_row.session_id
                    AND prior_placement.event_ordinal =
                         grant_row.placement_event_ordinal - 1
+                   AND prior_placement.credential_grant_lineage_origin_ordinal =
+                        grant_row.lineage_origin_event_ordinal
                    AND prior_placement.credential_grant_runner_id =
                         grant_row.prior_runner_id
                    AND prior_placement.credential_grant_revision =
@@ -255,6 +281,8 @@ BEGIN
                             SELECT 1
                               FROM runner_credential_grant_tool AS granted
                              WHERE granted.session_id = grant_row.session_id
+                               AND granted.lineage_origin_event_ordinal =
+                                    grant_row.lineage_origin_event_ordinal
                                AND granted.runner_id = grant_row.runner_id
                                AND granted.grant_revision =
                                     grant_row.grant_revision
@@ -269,6 +297,8 @@ BEGIN
                AND placement.event_ordinal = grant_row.placement_event_ordinal
                AND placement.state_kind = $kind$pinned$kind$
                AND placement.credential_grant_runner_id = grant_row.runner_id
+               AND placement.credential_grant_lineage_origin_ordinal =
+                    grant_row.lineage_origin_event_ordinal
                AND placement.credential_grant_revision =
                     grant_row.grant_revision
                AND (
@@ -287,6 +317,8 @@ BEGIN
                             SELECT 1
                               FROM runner_credential_grant_audit AS revoked
                              WHERE revoked.session_id = grant_row.session_id
+                               AND revoked.lineage_origin_event_ordinal =
+                                    grant_row.lineage_origin_event_ordinal
                                AND revoked.runner_id = grant_row.runner_id
                                AND revoked.grant_revision =
                                     grant_row.grant_revision

@@ -912,6 +912,7 @@ CREATE TABLE runner_session_placement_record (
     pinned_tool_count numeric(20, 0) NOT NULL,
     workspace_repository_key runner_exact_text,
     workspace_working_directory runner_exact_text,
+    credential_grant_lineage_origin_ordinal numeric(20, 0),
     credential_grant_revision numeric(20, 0),
 
     CONSTRAINT runner_session_placement_record_pk
@@ -923,6 +924,11 @@ CREATE TABLE runner_session_placement_record (
             event_ordinal BETWEEN 1 AND 18446744073709551615
             AND placement_revision BETWEEN 1 AND 18446744073709551615
             AND pinned_tool_count BETWEEN 0 AND 18446744073709551615
+            AND (
+                credential_grant_lineage_origin_ordinal IS NULL
+                OR credential_grant_lineage_origin_ordinal
+                    BETWEEN 1 AND 18446744073709551615
+            )
             AND (
                 credential_grant_revision IS NULL
                 OR credential_grant_revision
@@ -1002,6 +1008,7 @@ CREATE TABLE runner_session_placement_record (
                 AND pinned_tool_count = 0
                 AND workspace_repository_key IS NULL
                 AND workspace_working_directory IS NULL
+                AND credential_grant_lineage_origin_ordinal IS NULL
                 AND credential_grant_revision IS NULL
             )
             OR (
@@ -1015,10 +1022,12 @@ CREATE TABLE runner_session_placement_record (
                 AND (
                     (
                         pinned_credential_profile_name IS NULL
+                        AND credential_grant_lineage_origin_ordinal IS NULL
                         AND credential_grant_revision IS NULL
                     )
                     OR (
                         pinned_credential_profile_name IS NOT NULL
+                        AND credential_grant_lineage_origin_ordinal IS NOT NULL
                         AND credential_grant_revision IS NOT NULL
                     )
                 )
@@ -1204,6 +1213,8 @@ BEGIN
                 NEW.pinned_tool_count,
                 NEW.workspace_repository_key,
                 NEW.workspace_working_directory,
+                NEW.credential_grant_runner_id,
+                NEW.credential_grant_lineage_origin_ordinal,
                 NEW.credential_grant_revision,
                 NEW.selector_kind,
                 NEW.selector_runner_id,
@@ -1222,6 +1233,8 @@ BEGIN
                 prior.pinned_tool_count,
                 prior.workspace_repository_key,
                 prior.workspace_working_directory,
+                prior.credential_grant_runner_id,
+                prior.credential_grant_lineage_origin_ordinal,
                 prior.credential_grant_revision,
                 prior.selector_kind,
                 prior.selector_runner_id,
@@ -1241,9 +1254,22 @@ BEGIN
            OR NEW.state_kind <> 'pinned'
            OR NEW.placement_revision <> prior.placement_revision + 1
            OR (
-                NEW.credential_grant_revision IS NOT NULL
-                AND NEW.credential_grant_revision IS DISTINCT FROM
-                    COALESCE(prior.credential_grant_revision + 1, 1)
+                prior.credential_grant_revision IS NULL
+                AND NEW.credential_grant_revision IS NOT NULL
+                AND (
+                    NEW.credential_grant_revision <> 1
+                    OR NEW.credential_grant_lineage_origin_ordinal <>
+                        NEW.event_ordinal
+                )
+           )
+           OR (
+                prior.credential_grant_revision IS NOT NULL
+                AND (
+                    NEW.credential_grant_revision IS DISTINCT FROM
+                        prior.credential_grant_revision + 1
+                    OR NEW.credential_grant_lineage_origin_ordinal IS DISTINCT FROM
+                        prior.credential_grant_lineage_origin_ordinal
+                )
            )
         THEN
             RAISE EXCEPTION 'runner replacement is not a checked successor'
@@ -1253,6 +1279,8 @@ BEGIN
         SELECT event_kind INTO prior_grant_state
           FROM runner_current_credential_grant_audit
          WHERE session_id = prior.session_id
+           AND lineage_origin_event_ordinal =
+                prior.credential_grant_lineage_origin_ordinal
            AND runner_id = prior.credential_grant_runner_id
            AND grant_revision = prior.credential_grant_revision
          FOR SHARE;
@@ -1265,6 +1293,8 @@ BEGIN
            OR NEW.registration_enrollment_id <>
                 prior.registration_enrollment_id
            OR NEW.registration_revision <> prior.registration_revision
+           OR NEW.credential_grant_lineage_origin_ordinal IS DISTINCT FROM
+                prior.credential_grant_lineage_origin_ordinal
            OR NEW.credential_grant_revision IS DISTINCT FROM
                 prior.credential_grant_revision + 1
            OR prior_grant_state IS NULL
@@ -1391,6 +1421,8 @@ BEGIN
                               FROM runner_credential_grant AS grant_record
                              WHERE grant_record.session_id =
                                 placement.session_id
+                               AND grant_record.lineage_origin_event_ordinal =
+                                placement.credential_grant_lineage_origin_ordinal
                                AND grant_record.runner_id =
                                 placement.pinned_runner_id
                                AND grant_record.grant_revision =
@@ -1475,6 +1507,7 @@ EXECUTE FUNCTION require_runner_placement_complete();
 
 CREATE TABLE runner_credential_grant (
     session_id uuid NOT NULL,
+    lineage_origin_event_ordinal numeric(20, 0) NOT NULL,
     runner_id uuid NOT NULL,
     grant_revision numeric(20, 0) NOT NULL,
     credential_profile_name runner_catalog_name NOT NULL,
@@ -1486,21 +1519,29 @@ CREATE TABLE runner_credential_grant (
     tool_count numeric(20, 0) NOT NULL,
 
     CONSTRAINT runner_credential_grant_pk
-        PRIMARY KEY (session_id, runner_id, grant_revision),
+        PRIMARY KEY (
+            session_id,
+            lineage_origin_event_ordinal,
+            runner_id,
+            grant_revision
+        ),
     CONSTRAINT runner_credential_grant_profile_key
         UNIQUE (
             session_id,
+            lineage_origin_event_ordinal,
             runner_id,
             grant_revision,
             credential_profile_name
         ),
     CONSTRAINT runner_credential_grant_revision_shape
         CHECK (
-            grant_revision BETWEEN 1 AND 18446744073709551615
+            lineage_origin_event_ordinal BETWEEN 1 AND 18446744073709551615
+            AND grant_revision BETWEEN 1 AND 18446744073709551615
             AND tool_count BETWEEN 0 AND 18446744073709551615
             AND (
                 (
                     grant_revision = 1
+                    AND lineage_origin_event_ordinal = placement_event_ordinal
                     AND prior_runner_id IS NULL
                     AND prior_grant_revision IS NULL
                 )
@@ -1537,11 +1578,13 @@ CREATE TABLE runner_credential_grant (
     CONSTRAINT runner_credential_grant_prior_fk
         FOREIGN KEY (
             session_id,
+            lineage_origin_event_ordinal,
             prior_runner_id,
             prior_grant_revision
         )
         REFERENCES runner_credential_grant (
             session_id,
+            lineage_origin_event_ordinal,
             runner_id,
             grant_revision
         )
@@ -1552,6 +1595,7 @@ CREATE TABLE runner_credential_grant (
 
 CREATE TABLE runner_credential_grant_tool (
     session_id uuid NOT NULL,
+    lineage_origin_event_ordinal numeric(20, 0) NOT NULL,
     runner_id uuid NOT NULL,
     grant_revision numeric(20, 0) NOT NULL,
     credential_profile_name runner_catalog_name NOT NULL,
@@ -1561,6 +1605,7 @@ CREATE TABLE runner_credential_grant_tool (
     CONSTRAINT runner_credential_grant_tool_pk
         PRIMARY KEY (
             session_id,
+            lineage_origin_event_ordinal,
             runner_id,
             grant_revision,
             tool_name
@@ -1568,6 +1613,7 @@ CREATE TABLE runner_credential_grant_tool (
     CONSTRAINT runner_credential_grant_tool_lease_key
         UNIQUE (
             session_id,
+            lineage_origin_event_ordinal,
             runner_id,
             grant_revision,
             credential_profile_name,
@@ -1579,12 +1625,14 @@ CREATE TABLE runner_credential_grant_tool (
     CONSTRAINT runner_credential_grant_tool_grant_fk
         FOREIGN KEY (
             session_id,
+            lineage_origin_event_ordinal,
             runner_id,
             grant_revision,
             credential_profile_name
         )
         REFERENCES runner_credential_grant (
             session_id,
+            lineage_origin_event_ordinal,
             runner_id,
             grant_revision,
             credential_profile_name
@@ -1596,6 +1644,7 @@ CREATE TABLE runner_credential_grant_tool (
 
 CREATE TABLE runner_credential_grant_audit (
     session_id uuid NOT NULL,
+    lineage_origin_event_ordinal numeric(20, 0) NOT NULL,
     runner_id uuid NOT NULL,
     grant_revision numeric(20, 0) NOT NULL,
     audit_ordinal numeric(20, 0) NOT NULL,
@@ -1605,6 +1654,7 @@ CREATE TABLE runner_credential_grant_audit (
     CONSTRAINT runner_credential_grant_audit_pk
         PRIMARY KEY (
             session_id,
+            lineage_origin_event_ordinal,
             runner_id,
             grant_revision,
             audit_ordinal
@@ -1612,6 +1662,7 @@ CREATE TABLE runner_credential_grant_audit (
     CONSTRAINT runner_credential_grant_audit_head_key
         UNIQUE (
             session_id,
+            lineage_origin_event_ordinal,
             runner_id,
             grant_revision,
             audit_ordinal,
@@ -1640,12 +1691,14 @@ CREATE TABLE runner_credential_grant_audit (
     CONSTRAINT runner_credential_grant_audit_grant_fk
         FOREIGN KEY (
             session_id,
+            lineage_origin_event_ordinal,
             runner_id,
             grant_revision,
             credential_profile_name
         )
         REFERENCES runner_credential_grant (
             session_id,
+            lineage_origin_event_ordinal,
             runner_id,
             grant_revision,
             credential_profile_name
@@ -1657,16 +1710,23 @@ CREATE TABLE runner_credential_grant_audit (
 
 CREATE TABLE runner_current_credential_grant_audit (
     session_id uuid NOT NULL,
+    lineage_origin_event_ordinal numeric(20, 0) NOT NULL,
     runner_id uuid NOT NULL,
     grant_revision numeric(20, 0) NOT NULL,
     audit_ordinal numeric(20, 0) NOT NULL,
     event_kind text NOT NULL,
 
     CONSTRAINT runner_current_credential_grant_audit_pk
-        PRIMARY KEY (session_id, runner_id, grant_revision),
+        PRIMARY KEY (
+            session_id,
+            lineage_origin_event_ordinal,
+            runner_id,
+            grant_revision
+        ),
     CONSTRAINT runner_current_credential_grant_audit_fk
         FOREIGN KEY (
             session_id,
+            lineage_origin_event_ordinal,
             runner_id,
             grant_revision,
             audit_ordinal,
@@ -1674,6 +1734,7 @@ CREATE TABLE runner_current_credential_grant_audit (
         )
         REFERENCES runner_credential_grant_audit (
             session_id,
+            lineage_origin_event_ordinal,
             runner_id,
             grant_revision,
             audit_ordinal,
@@ -1720,9 +1781,19 @@ BEGIN
        OR (
             TG_OP = 'UPDATE'
             AND (
-                ROW(NEW.session_id, NEW.runner_id, NEW.grant_revision)
+                ROW(
+                    NEW.session_id,
+                    NEW.lineage_origin_event_ordinal,
+                    NEW.runner_id,
+                    NEW.grant_revision
+                )
                     IS DISTINCT FROM
-                    ROW(OLD.session_id, OLD.runner_id, OLD.grant_revision)
+                    ROW(
+                    OLD.session_id,
+                    OLD.lineage_origin_event_ordinal,
+                    OLD.runner_id,
+                    OLD.grant_revision
+                )
                 OR OLD.audit_ordinal <> 1
                 OR OLD.event_kind NOT IN ('issued', 'replaced')
                 OR NEW.audit_ordinal <> 2
@@ -1754,9 +1825,11 @@ AS $$
 BEGIN
     IF NEW.audit_ordinal = 1 THEN
         INSERT INTO runner_current_credential_grant_audit
-            (session_id, runner_id, grant_revision, audit_ordinal, event_kind)
+            (session_id, lineage_origin_event_ordinal, runner_id,
+             grant_revision, audit_ordinal, event_kind)
         VALUES (
             NEW.session_id,
+            NEW.lineage_origin_event_ordinal,
             NEW.runner_id,
             NEW.grant_revision,
             NEW.audit_ordinal,
@@ -1767,6 +1840,8 @@ BEGIN
            SET audit_ordinal = NEW.audit_ordinal,
                event_kind = NEW.event_kind
          WHERE session_id = NEW.session_id
+           AND lineage_origin_event_ordinal =
+                NEW.lineage_origin_event_ordinal
            AND runner_id = NEW.runner_id
            AND grant_revision = NEW.grant_revision
            AND audit_ordinal = NEW.audit_ordinal - 1;
@@ -1786,6 +1861,7 @@ EXECUTE FUNCTION advance_runner_current_grant_audit();
 
 CREATE FUNCTION assert_runner_grant_complete(
     checked_session uuid,
+    checked_origin numeric,
     checked_runner uuid,
     checked_revision numeric
 )
@@ -1801,6 +1877,7 @@ BEGIN
     SELECT * INTO grant_row
       FROM runner_credential_grant
      WHERE session_id = checked_session
+       AND lineage_origin_event_ordinal = checked_origin
        AND runner_id = checked_runner
        AND grant_revision = checked_revision;
     IF NOT FOUND THEN
@@ -1809,6 +1886,7 @@ BEGIN
     SELECT count(*) INTO actual_tools
       FROM runner_credential_grant_tool
      WHERE session_id = checked_session
+       AND lineage_origin_event_ordinal = checked_origin
        AND runner_id = checked_runner
        AND grant_revision = checked_revision;
     SELECT count(*) INTO invalid_tools
@@ -1828,6 +1906,7 @@ BEGIN
             grant_row.registration_revision
        AND available.tool_name = granted.tool_name
      WHERE granted.session_id = checked_session
+       AND granted.lineage_origin_event_ordinal = checked_origin
        AND granted.runner_id = checked_runner
        AND granted.grant_revision = checked_revision
        AND (
@@ -1844,6 +1923,7 @@ BEGIN
     SELECT count(*) INTO initial_audit
       FROM runner_credential_grant_audit
      WHERE session_id = checked_session
+       AND lineage_origin_event_ordinal = checked_origin
        AND runner_id = checked_runner
        AND grant_revision = checked_revision
        AND audit_ordinal = 1;
@@ -1859,6 +1939,8 @@ BEGIN
                         grant_row.session_id
                    AND prior_placement.event_ordinal =
                         grant_row.placement_event_ordinal - 1
+                   AND prior_placement.credential_grant_lineage_origin_ordinal =
+                        grant_row.lineage_origin_event_ordinal
                    AND prior_placement.pinned_runner_id =
                         grant_row.prior_runner_id
                    AND prior_placement.credential_grant_revision =
@@ -1887,6 +1969,8 @@ BEGIN
                               FROM runner_credential_grant_tool AS granted
                              WHERE granted.session_id =
                                     grant_row.session_id
+                               AND granted.lineage_origin_event_ordinal =
+                                    grant_row.lineage_origin_event_ordinal
                                AND granted.runner_id =
                                     grant_row.runner_id
                                AND granted.grant_revision =
@@ -1910,6 +1994,8 @@ BEGIN
                     grant_row.registration_enrollment_id
                AND placement.registration_revision =
                     grant_row.registration_revision
+               AND placement.credential_grant_lineage_origin_ordinal =
+                    grant_row.lineage_origin_event_ordinal
                AND placement.credential_grant_revision =
                     grant_row.grant_revision
        )
@@ -1927,6 +2013,10 @@ AS $$
 BEGIN
     PERFORM assert_runner_grant_complete(
         COALESCE(NEW.session_id, OLD.session_id),
+        COALESCE(
+            NEW.lineage_origin_event_ordinal,
+            OLD.lineage_origin_event_ordinal
+        ),
         COALESCE(NEW.runner_id, OLD.runner_id),
         COALESCE(NEW.grant_revision, OLD.grant_revision)
     );
@@ -1986,6 +2076,7 @@ CREATE TABLE runner_lease_generation (
     registration_enrollment_id uuid NOT NULL,
     registration_revision numeric(20, 0) NOT NULL,
     credential_profile_name runner_catalog_name,
+    credential_grant_lineage_origin_ordinal numeric(20, 0),
     credential_grant_revision numeric(20, 0),
     credential_approval_kind text,
     predecessor_generation numeric(20, 0),
@@ -2017,11 +2108,13 @@ CREATE TABLE runner_lease_generation (
         CHECK (
             (
                 credential_profile_name IS NULL
+                AND credential_grant_lineage_origin_ordinal IS NULL
                 AND credential_grant_revision IS NULL
                 AND credential_approval_kind IS NULL
             )
             OR (
                 credential_profile_name IS NOT NULL
+                AND credential_grant_lineage_origin_ordinal IS NOT NULL
                 AND credential_grant_revision IS NOT NULL
                 AND credential_approval_kind
                     IN ('automatic', 'session_policy')
@@ -2061,6 +2154,7 @@ CREATE TABLE runner_lease_generation (
     CONSTRAINT runner_lease_grant_tool_fk
         FOREIGN KEY (
             session_id,
+            credential_grant_lineage_origin_ordinal,
             runner_id,
             credential_grant_revision,
             credential_profile_name,
@@ -2069,6 +2163,7 @@ CREATE TABLE runner_lease_generation (
         )
         REFERENCES runner_credential_grant_tool (
             session_id,
+            lineage_origin_event_ordinal,
             runner_id,
             grant_revision,
             credential_profile_name,
@@ -2090,7 +2185,14 @@ CREATE TABLE runner_lease_event (
     CONSTRAINT runner_lease_event_state_shape
         CHECK (
             (event_ordinal = 1 AND state_kind = 'offered')
-            OR (event_ordinal = 2 AND state_kind IN ('claimed', 'lost_unclaimed'))
+            OR (
+                event_ordinal = 2
+                AND state_kind IN (
+                    'claimed',
+                    'lost_unclaimed',
+                    'lost_execution_possible'
+                )
+            )
             OR (event_ordinal = 3 AND state_kind IN ('completed', 'lost_claimed'))
         ),
     CONSTRAINT runner_lease_event_generation_fk
@@ -2119,6 +2221,191 @@ CREATE TABLE runner_current_lease_event (
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED
 );
+
+CREATE TABLE runner_lease_no_execution_proof (
+    lease_id uuid NOT NULL,
+    generation numeric(20, 0) NOT NULL,
+    attempt_id uuid NOT NULL,
+    session_id uuid NOT NULL,
+    runner_id uuid NOT NULL,
+    tool_name text NOT NULL,
+    turn_id uuid NOT NULL,
+    issuing_turn_attempt_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    dispatch_generation numeric(20, 0) NOT NULL,
+
+    CONSTRAINT runner_lease_no_execution_proof_pk
+        PRIMARY KEY (lease_id, generation),
+    CONSTRAINT runner_lease_no_execution_proof_generation_fk
+        FOREIGN KEY (
+            lease_id,
+            generation,
+            attempt_id,
+            session_id,
+            runner_id,
+            tool_name
+        )
+        REFERENCES runner_lease_generation (
+            lease_id,
+            generation,
+            attempt_id,
+            session_id,
+            runner_id,
+            tool_name
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT,
+    CONSTRAINT runner_lease_no_execution_proof_attempt_fk
+        FOREIGN KEY (
+            attempt_id,
+            request_id,
+            issuing_turn_attempt_id,
+            dispatch_generation
+        )
+        REFERENCES tool_attempt (
+            attempt_id,
+            request_id,
+            issuing_turn_attempt_id,
+            dispatch_generation
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT,
+    CONSTRAINT runner_lease_no_execution_proof_turn_fk
+        FOREIGN KEY (attempt_id, turn_id, session_id)
+        REFERENCES tool_attempt (attempt_id, turn_id, session_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE runner_claimed_retry_attempt_authority (
+    source_lease_id uuid NOT NULL,
+    source_generation numeric(20, 0) NOT NULL,
+    replacement_attempt_id uuid NOT NULL,
+    replacement_session_id uuid NOT NULL,
+    replacement_turn_id uuid NOT NULL,
+    replacement_issuing_turn_attempt_id uuid NOT NULL,
+    replacement_request_id uuid NOT NULL,
+    replacement_dispatch_generation numeric(20, 0) NOT NULL,
+
+    CONSTRAINT runner_claimed_retry_attempt_authority_pk
+        PRIMARY KEY (source_lease_id, source_generation),
+    CONSTRAINT runner_claimed_retry_attempt_authority_replacement_key
+        UNIQUE (replacement_attempt_id),
+    CONSTRAINT runner_claimed_retry_attempt_authority_source_fk
+        FOREIGN KEY (source_lease_id, source_generation)
+        REFERENCES runner_lease_generation (lease_id, generation)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT,
+    CONSTRAINT runner_claimed_retry_attempt_authority_request_fk
+        FOREIGN KEY (
+            replacement_request_id,
+            replacement_turn_id,
+            replacement_session_id
+        )
+        REFERENCES tool_request (request_id, turn_id, session_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+);
+
+CREATE FUNCTION guard_runner_claimed_retry_attempt_authority()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    source_attempt uuid;
+    source_session uuid;
+    source_effect text;
+    source_state text;
+    source_request uuid;
+    source_turn uuid;
+    source_issuing_attempt uuid;
+    source_dispatch_generation numeric;
+BEGIN
+    SELECT generation.attempt_id, generation.session_id,
+           generation.effect_class, event.state_kind,
+           attempt.request_id, attempt.turn_id,
+           attempt.issuing_turn_attempt_id,
+           attempt.dispatch_generation
+      INTO source_attempt, source_session, source_effect, source_state,
+           source_request, source_turn, source_issuing_attempt,
+           source_dispatch_generation
+      FROM runner_lease_generation AS generation
+      JOIN runner_current_lease_event AS current_event
+        ON current_event.lease_id = generation.lease_id
+       AND current_event.generation = generation.generation
+      JOIN runner_lease_event AS event
+        ON event.lease_id = current_event.lease_id
+       AND event.generation = current_event.generation
+       AND event.event_ordinal = current_event.event_ordinal
+      JOIN tool_attempt AS attempt
+        ON attempt.attempt_id = generation.attempt_id
+     WHERE generation.lease_id = NEW.source_lease_id
+       AND generation.generation = NEW.source_generation
+     FOR UPDATE OF current_event;
+    IF NOT FOUND
+       OR source_state NOT IN ('lost_execution_possible', 'lost_claimed')
+       OR source_effect = 'side_effecting'
+       OR NEW.replacement_attempt_id = source_attempt
+       OR ROW(
+            NEW.replacement_session_id,
+            NEW.replacement_turn_id,
+            NEW.replacement_issuing_turn_attempt_id,
+            NEW.replacement_request_id,
+            NEW.replacement_dispatch_generation
+       ) IS DISTINCT FROM ROW(
+            source_session,
+            source_turn,
+            source_issuing_attempt,
+            source_request,
+            source_dispatch_generation
+       )
+    THEN
+        RAISE EXCEPTION 'claimed retry attempt lacks durable loss authority'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER runner_claimed_retry_attempt_authority_is_guarded
+BEFORE INSERT ON runner_claimed_retry_attempt_authority
+FOR EACH ROW
+EXECUTE FUNCTION guard_runner_claimed_retry_attempt_authority();
+
+CREATE FUNCTION require_runner_retry_attempt_authority()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM tool_attempt AS prior
+         WHERE prior.request_id = NEW.request_id
+    )
+       AND NOT EXISTS (
+            SELECT 1
+              FROM runner_claimed_retry_attempt_authority AS authority
+             WHERE authority.replacement_attempt_id = NEW.attempt_id
+               AND authority.replacement_session_id = NEW.session_id
+               AND authority.replacement_turn_id = NEW.turn_id
+               AND authority.replacement_issuing_turn_attempt_id =
+                    NEW.issuing_turn_attempt_id
+               AND authority.replacement_request_id = NEW.request_id
+               AND authority.replacement_dispatch_generation =
+                    NEW.dispatch_generation
+       )
+    THEN
+        RAISE EXCEPTION 'extra tool attempt lacks durable runner retry authority'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER tool_attempt_runner_retry_is_authorized
+BEFORE INSERT ON tool_attempt
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_retry_attempt_authority();
 
 CREATE FUNCTION guard_runner_current_lease_event()
 RETURNS trigger
@@ -2247,6 +2534,69 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_runner_lease_generation_complete();
 
+CREATE FUNCTION assert_runner_no_execution_proof_complete(
+    checked_lease uuid,
+    checked_generation numeric
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    current_state text;
+    proof_exists boolean;
+BEGIN
+    SELECT event.state_kind INTO current_state
+      FROM runner_current_lease_event AS current_event
+      JOIN runner_lease_event AS event
+        ON event.lease_id = current_event.lease_id
+       AND event.generation = current_event.generation
+       AND event.event_ordinal = current_event.event_ordinal
+     WHERE current_event.lease_id = checked_lease
+       AND current_event.generation = checked_generation;
+    SELECT EXISTS (
+        SELECT 1
+          FROM runner_lease_no_execution_proof
+         WHERE lease_id = checked_lease
+           AND generation = checked_generation
+    ) INTO proof_exists;
+    IF proof_exists IS DISTINCT FROM (current_state = 'lost_unclaimed') THEN
+        RAISE EXCEPTION 'runner lost-unclaimed lease lacks exact no-execution proof'
+            USING ERRCODE = '23514';
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION require_runner_no_execution_proof_complete()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM assert_runner_no_execution_proof_complete(
+        COALESCE(NEW.lease_id, OLD.lease_id),
+        COALESCE(NEW.generation, OLD.generation)
+    );
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER runner_no_execution_proof_requires_loss
+AFTER INSERT OR UPDATE OR DELETE ON runner_lease_no_execution_proof
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_no_execution_proof_complete();
+
+CREATE CONSTRAINT TRIGGER runner_loss_rechecks_no_execution_proof
+AFTER INSERT OR UPDATE OR DELETE ON runner_lease_event
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_no_execution_proof_complete();
+
+CREATE CONSTRAINT TRIGGER runner_loss_head_rechecks_no_execution_proof
+AFTER INSERT OR UPDATE OR DELETE ON runner_current_lease_event
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_no_execution_proof_complete();
+
 CREATE FUNCTION require_runner_tool_request_lease_binding_complete()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -2320,7 +2670,7 @@ SELECT attempt.*
            AND event.event_ordinal = current_event.event_ordinal
          WHERE generation.attempt_id = attempt.attempt_id
            AND generation.effect_class IN ('pure', 'idempotent')
-           AND event.state_kind = 'lost_claimed'
+           AND event.state_kind IN ('lost_execution_possible', 'lost_claimed')
  );
 
 CREATE FUNCTION require_runner_initial_pin_has_lease()
@@ -2358,6 +2708,26 @@ AFTER INSERT ON runner_session_placement_record
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_runner_initial_pin_has_lease();
+
+CREATE TRIGGER runner_lease_no_execution_proof_is_append_only
+BEFORE UPDATE OR DELETE ON runner_lease_no_execution_proof
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER runner_lease_no_execution_proof_rejects_truncate
+BEFORE TRUNCATE ON runner_lease_no_execution_proof
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER runner_claimed_retry_attempt_authority_is_append_only
+BEFORE UPDATE OR DELETE ON runner_claimed_retry_attempt_authority
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER runner_claimed_retry_attempt_authority_rejects_truncate
+BEFORE TRUNCATE ON runner_claimed_retry_attempt_authority
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
 
 CREATE TRIGGER runner_lease_generation_is_append_only
 BEFORE UPDATE OR DELETE ON runner_lease_generation
@@ -2458,6 +2828,8 @@ BEGIN
         SELECT event_kind INTO grant_state
           FROM runner_current_credential_grant_audit
          WHERE session_id = NEW.session_id
+           AND lineage_origin_event_ordinal =
+                NEW.credential_grant_lineage_origin_ordinal
            AND runner_id = NEW.runner_id
            AND grant_revision = NEW.credential_grant_revision
          FOR SHARE;
@@ -2492,8 +2864,12 @@ BEGIN
             NEW.credential_profile_name
        OR (
             NEW.credential_profile_name IS NOT NULL
-            AND placement.credential_grant_revision IS DISTINCT FROM
-                NEW.credential_grant_revision
+            AND (
+                placement.credential_grant_lineage_origin_ordinal IS DISTINCT FROM
+                    NEW.credential_grant_lineage_origin_ordinal
+                OR placement.credential_grant_revision IS DISTINCT FROM
+                    NEW.credential_grant_revision
+            )
        )
        OR (
             NEW.credential_profile_name IS NULL
@@ -2589,7 +2965,7 @@ BEGIN
          WHERE previous.lease_id = NEW.lease_id
            AND previous.generation < NEW.generation
            AND previous.attempt_id = NEW.attempt_id
-           AND event.state_kind IN ('lost_claimed', 'completed')
+           AND event.state_kind IN ('lost_execution_possible', 'lost_claimed', 'completed')
     ) THEN
         RAISE EXCEPTION 'claimed physical attempt cannot be reused'
             USING ERRCODE = '23514';
@@ -2627,13 +3003,14 @@ BEGIN
          WHERE attempt.attempt_id = prior.attempt_id;
         IF NOT FOUND
            OR prior_state IS NULL
-           OR prior_state NOT IN ('lost_unclaimed', 'lost_claimed')
+           OR prior_state NOT IN ('lost_unclaimed', 'lost_execution_possible', 'lost_claimed')
            OR ROW(
                 prior.session_id,
                 prior.runner_id,
                 prior.tool_name,
                 prior.effect_class,
                 prior.credential_profile_name,
+                prior.credential_grant_lineage_origin_ordinal,
                 prior.credential_grant_revision,
                 prior.credential_approval_kind
            ) IS DISTINCT FROM ROW(
@@ -2642,6 +3019,7 @@ BEGIN
                 NEW.tool_name,
                 NEW.effect_class,
                 NEW.credential_profile_name,
+                NEW.credential_grant_lineage_origin_ordinal,
                 NEW.credential_grant_revision,
                 NEW.credential_approval_kind
            )
@@ -2650,11 +3028,18 @@ BEGIN
                 AND prior.attempt_id <> NEW.attempt_id
            )
            OR (
-                prior_state = 'lost_claimed'
+                prior_state IN ('lost_execution_possible', 'lost_claimed')
                 AND (
                     prior.effect_class = 'side_effecting'
                     OR prior.attempt_id = NEW.attempt_id
                     OR prior_request IS DISTINCT FROM attempted_request
+                    OR NOT EXISTS (
+                        SELECT 1
+                          FROM runner_claimed_retry_attempt_authority AS authority
+                         WHERE authority.source_lease_id = prior.lease_id
+                           AND authority.source_generation = prior.generation
+                           AND authority.replacement_attempt_id = NEW.attempt_id
+                    )
                 )
            )
         THEN
@@ -2715,7 +3100,7 @@ AS $$
 DECLARE
     lease runner_lease_generation%ROWTYPE;
 BEGIN
-    IF NEW.state_kind <> 'lost_claimed' THEN
+    IF NEW.state_kind NOT IN ('lost_execution_possible', 'lost_claimed') THEN
         RETURN NULL;
     END IF;
     SELECT * INTO lease

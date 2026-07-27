@@ -16,18 +16,20 @@ use signalbox_domain::{
     CredentialDispatchAuthorization, CredentialProfileGrant,
     CredentialProfileGrantReconstitutionInput, CredentialProfileGrantState, CredentialProfileName,
     CredentialProfilePolicy, CredentialToolApproval, PinnedRunnerPlacement, ProvisionedWorkspace,
-    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCredentialGrantLineage, RunnerDomainError,
-    RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentReconstitutionInput,
-    RunnerEnrollmentState, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation,
-    RunnerLeaseId, RunnerLeaseReconstitutionInput, RunnerLeaseState, RunnerSelector,
-    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
-    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
-    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
-    SessionRunnerPlacementState, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId, ToolDispatchGeneration,
-    ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
-    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
-    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
+    RunnerAuthenticationId, RunnerCapabilityClass, RunnerClaimedAttemptReplacement,
+    RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
+    RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerId,
+    RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseLoss,
+    RunnerLeaseNoExecutionProof, RunnerLeaseNoExecutionProofReconstitutionInput,
+    RunnerLeaseReconstitutionInput, RunnerLeaseState, RunnerSelector, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId,
+    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptId, ToolDispatchGeneration, ToolName, ToolPermissionDefault, ToolRequestId,
+    TurnAttemptId, TurnId, ValidatedRunnerRegistration,
+    ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceCapability,
+    WorkspaceRepositoryKey, WorkspaceRequirement,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -383,12 +385,14 @@ impl RunnerProtocolStore {
             .checked_add(1)
             .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
         let event_kind = classify_placement_event(prior.as_ref(), placement)?;
+        let grant_origin = placement_grant_origin(prior.as_ref(), event_ordinal, placement)?;
         insert_placement_record(
             &mut transaction,
             event_ordinal,
             event_kind,
             placement,
             registration,
+            grant_origin,
         )
         .await?;
         if let (Some(grant), Some(registration)) = (grant, registration) {
@@ -399,6 +403,7 @@ impl RunnerProtocolStore {
                 placement,
                 grant,
                 registration,
+                grant_origin.ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?,
             )
             .await?;
         }
@@ -441,12 +446,14 @@ impl RunnerProtocolStore {
             .checked_add(1)
             .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
         let event_kind = classify_placement_event(prior.as_ref(), &pin.placement)?;
+        let grant_origin = placement_grant_origin(prior.as_ref(), event_ordinal, &pin.placement)?;
         insert_placement_record(
             &mut transaction,
             event_ordinal,
             event_kind,
             &pin.placement,
             Some(registration),
+            grant_origin,
         )
         .await?;
         if let Some(grant) = pin.grant.as_ref() {
@@ -457,6 +464,7 @@ impl RunnerProtocolStore {
                 &pin.placement,
                 grant,
                 registration,
+                grant_origin.ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?,
             )
             .await?;
         }
@@ -575,6 +583,8 @@ impl RunnerProtocolStore {
             transaction.rollback().await?;
             return Ok(None);
         };
+        let locked_origin = locked_placement
+            .try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?;
         let locked_runner =
             locked_placement.try_get::<Option<Uuid>, _>("credential_grant_runner_id")?;
         let locked_revision =
@@ -588,8 +598,12 @@ impl RunnerProtocolStore {
             transaction.rollback().await?;
             return Ok(None);
         }
+        let Some(locked_origin) = locked_origin else {
+            return Err(RunnerProtocolCorruption::MissingCanonicalGrant.into());
+        };
         let locked: Option<String> = sqlx::query_scalar(RUNNER_GRANT)
             .bind(session.into_uuid())
+            .bind(locked_origin)
             .bind(runner.into_uuid())
             .bind(Decimal::from(revision.get()))
             .fetch_optional(&mut *transaction)
@@ -606,12 +620,14 @@ impl RunnerProtocolStore {
                  SELECT 1
                    FROM runner_credential_grant_audit
                   WHERE session_id = $1
-                    AND runner_id = $2
-                    AND grant_revision = $3
+                    AND lineage_origin_event_ordinal = $2
+                    AND runner_id = $3
+                    AND grant_revision = $4
                     AND event_kind = 'revoked'
              )",
         )
         .bind(session.into_uuid())
+        .bind(locked_origin)
         .bind(runner.into_uuid())
         .bind(Decimal::from(revision.get()))
         .fetch_one(&mut *transaction)
@@ -622,11 +638,13 @@ impl RunnerProtocolStore {
         }
         sqlx::query(
             "INSERT INTO runner_credential_grant_audit
-                (session_id, runner_id, grant_revision, audit_ordinal,
+                (session_id, lineage_origin_event_ordinal,
+                 runner_id, grant_revision, audit_ordinal,
                  event_kind, credential_profile_name)
-             VALUES ($1, $2, $3, 2, 'revoked', $4)",
+             VALUES ($1, $2, $3, $4, 2, 'revoked', $5)",
         )
         .bind(session.into_uuid())
+        .bind(locked_origin)
         .bind(runner.into_uuid())
         .bind(Decimal::from(revision.get()))
         .bind(revoked.profile().as_str())
@@ -636,8 +654,76 @@ impl RunnerProtocolStore {
         Ok(Some(revoked))
     }
 
-    /// Appends an offered lease generation or a later state event.
+    /// Appends an offered lease generation or a later non-unclaimed state event.
     pub async fn store_lease(&self, lease: &RunnerLease) -> Result<(), RunnerProtocolStoreError> {
+        if lease.state() == RunnerLeaseState::LostUnclaimed {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        self.store_lease_with_proof(lease, None).await
+    }
+
+    /// Atomically stores a sealed lease loss and its independent no-execution proof.
+    pub async fn store_lease_loss(
+        &self,
+        loss: &RunnerLeaseLoss,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        self.store_lease_with_proof(loss.lost(), loss.no_execution_proof())
+            .await
+    }
+
+    /// Durably consumes one retryable claimed loss for an exact replacement attempt.
+    pub async fn store_claimed_retry_attempt_authority(
+        &self,
+        loss: &RunnerLeaseLoss,
+        replacement: &RunnerClaimedAttemptReplacement,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        let source = loss.lost().correlation();
+        if loss.retry().is_none()
+            || !matches!(
+                loss.lost().state(),
+                RunnerLeaseState::LostExecutionPossible | RunnerLeaseState::LostClaimed
+            )
+            || replacement.source() != &source
+        {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ));
+        }
+        let replacement = replacement.replacement();
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO runner_claimed_retry_attempt_authority
+                (source_lease_id, source_generation,
+                 replacement_attempt_id, replacement_session_id,
+                 replacement_turn_id, replacement_issuing_turn_attempt_id,
+                 replacement_request_id, replacement_dispatch_generation)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(source.lease.into_uuid())
+        .bind(Decimal::from(source.generation.get()))
+        .bind(replacement.attempt().into_uuid())
+        .bind(replacement.session().into_uuid())
+        .bind(replacement.turn().into_uuid())
+        .bind(replacement.issuing_attempt().into_uuid())
+        .bind(replacement.request().into_uuid())
+        .bind(Decimal::from(replacement.generation().as_u64()))
+        .execute(&mut *transaction)
+        .await?;
+        commit_mutation(transaction).await
+    }
+
+    async fn store_lease_with_proof(
+        &self,
+        lease: &RunnerLease,
+        no_execution: Option<&RunnerLeaseNoExecutionProof>,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        if (lease.state() == RunnerLeaseState::LostUnclaimed) != no_execution.is_some() {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
         let mut transaction = self.pool.begin().await?;
         let correlation = lease.correlation();
         let current_event = sqlx::query(RUNNER_LEASE_HEAD)
@@ -686,6 +772,34 @@ impl RunnerProtocolStore {
         .bind(Decimal::from(event_ordinal))
         .execute(&mut *transaction)
         .await?;
+        if let Some(no_execution) = no_execution {
+            let proof = no_execution.correlation();
+            if proof != &correlation {
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::CorrelationMismatch,
+                ));
+            }
+            sqlx::query(
+                "INSERT INTO runner_lease_no_execution_proof
+                    (lease_id, generation, attempt_id, session_id,
+                     runner_id, tool_name, turn_id,
+                     issuing_turn_attempt_id, request_id,
+                     dispatch_generation)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            )
+            .bind(proof.lease.into_uuid())
+            .bind(Decimal::from(proof.generation.get()))
+            .bind(proof.dispatch.attempt().into_uuid())
+            .bind(proof.dispatch.session().into_uuid())
+            .bind(proof.runner.into_uuid())
+            .bind(proof.tool.as_str())
+            .bind(proof.dispatch.turn().into_uuid())
+            .bind(proof.dispatch.issuing_attempt().into_uuid())
+            .bind(proof.dispatch.request().into_uuid())
+            .bind(Decimal::from(proof.dispatch.generation().as_u64()))
+            .execute(&mut *transaction)
+            .await?;
+        }
         commit_mutation(transaction).await
     }
 
@@ -732,6 +846,8 @@ impl RunnerProtocolStore {
                     lease_generation.placement_event_ordinal
                LEFT JOIN runner_credential_grant_tool AS grant_tool
                  ON grant_tool.session_id = lease_generation.session_id
+                AND grant_tool.lineage_origin_event_ordinal =
+                    lease_generation.credential_grant_lineage_origin_ordinal
                 AND grant_tool.runner_id = lease_generation.runner_id
                 AND grant_tool.grant_revision =
                     lease_generation.credential_grant_revision
@@ -759,6 +875,59 @@ impl RunnerProtocolStore {
         let lease = decode_lease(&row, registration.registration())?;
         transaction.commit().await?;
         Ok(Some(lease))
+    }
+
+    /// Loads one durable loss generation and rebuilds its sealed retry authority.
+    pub async fn load_lease_loss(
+        &self,
+        lease: RunnerLeaseId,
+        generation: RunnerGeneration,
+    ) -> Result<Option<RunnerLeaseLoss>, RunnerProtocolStoreError> {
+        let Some(loaded) = self.load_lease(lease, generation).await? else {
+            return Ok(None);
+        };
+        let row = sqlx::query(
+            "SELECT *
+               FROM runner_lease_no_execution_proof
+              WHERE lease_id = $1 AND generation = $2",
+        )
+        .bind(lease.into_uuid())
+        .bind(Decimal::from(generation.get()))
+        .fetch_optional(&self.pool)
+        .await?;
+        let no_execution = row
+            .map(|row| {
+                let dispatch = ToolAttemptDispatchCorrelation::reconstitute(
+                    ToolAttemptDispatchCorrelationReconstitutionInput {
+                        session: session_id(row.get("session_id")),
+                        turn: TurnId::from_uuid(row.get("turn_id")),
+                        issuing_attempt: TurnAttemptId::from_uuid(
+                            row.get("issuing_turn_attempt_id"),
+                        ),
+                        request: ToolRequestId::from_uuid(row.get("request_id")),
+                        attempt: tool_attempt_id(row.get("attempt_id")),
+                        generation: decode_dispatch_generation(row.get("dispatch_generation"))?,
+                    },
+                );
+                RunnerLeaseNoExecutionProof::reconstitute(
+                    RunnerLeaseNoExecutionProofReconstitutionInput {
+                        correlation: RunnerLeaseCorrelation {
+                            lease: runner_lease_id(row.get("lease_id")),
+                            runner: runner_id(row.get("runner_id")),
+                            tool: tool_name(row.get("tool_name"))?,
+                            dispatch,
+                            generation: decode_generation(row.get("generation"))?,
+                        },
+                        recorded_correlation: loaded.correlation(),
+                    },
+                )
+                .map_err(RunnerProtocolStoreError::Domain)
+            })
+            .transpose()?;
+        loaded
+            .into_reconstituted_loss(no_execution.as_ref())
+            .map(Some)
+            .map_err(RunnerProtocolStoreError::Domain)
     }
 }
 
@@ -1134,12 +1303,52 @@ fn classify_placement_event(
     }
 }
 
+fn placement_grant_origin(
+    prior: Option<&PgRow>,
+    event_ordinal: u64,
+    placement: &SessionRunnerPlacement,
+) -> Result<Option<Decimal>, RunnerProtocolStoreError> {
+    let lineage = match placement.state() {
+        SessionRunnerPlacementState::Unpinned => None,
+        SessionRunnerPlacementState::Pinned(pinned)
+        | SessionRunnerPlacementState::RunnerLost(pinned) => pinned.grant_lineage,
+    };
+    let Some(lineage) = lineage else {
+        return Ok(None);
+    };
+    if let Some(prior) = prior {
+        let prior_origin =
+            prior.try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?;
+        let prior_runner = prior.try_get::<Option<Uuid>, _>("credential_grant_runner_id")?;
+        let prior_revision = prior.try_get::<Option<Decimal>, _>("credential_grant_revision")?;
+        match (prior_origin, prior_runner, prior_revision) {
+            (Some(origin), Some(runner), Some(revision)) => {
+                let revision = decode_generation(revision)?;
+                let same_grant =
+                    revision == lineage.revision && runner_id(runner) == lineage.runner;
+                let successor = revision.checked_next() == Some(lineage.revision);
+                if same_grant || successor {
+                    return Ok(Some(origin));
+                }
+            }
+            (None, None, None) => {}
+            _ => return Err(RunnerProtocolCorruption::CrossWiredReference.into()),
+        }
+    }
+    if lineage.revision == RunnerGeneration::one() {
+        Ok(Some(Decimal::from(event_ordinal)))
+    } else {
+        Err(RunnerProtocolCorruption::MissingCanonicalGrant.into())
+    }
+}
+
 async fn insert_placement_record(
     transaction: &mut Transaction<'_, Postgres>,
     event_ordinal: u64,
     event_kind: &str,
     placement: &SessionRunnerPlacement,
     registration: Option<&StoredValidatedRunnerRegistration>,
+    grant_origin: Option<Decimal>,
 ) -> Result<(), RunnerProtocolStoreError> {
     let request = placement.request();
     let (selector_kind, selector_runner, selector_class) = encode_selector(&request.selector);
@@ -1165,10 +1374,11 @@ async fn insert_placement_record(
              registration_enrollment_id, registration_revision,
              pinned_tool_count, workspace_repository_key,
              workspace_working_directory, credential_grant_runner_id,
-             credential_grant_revision)
+             credential_grant_lineage_origin_ordinal, credential_grant_revision)
          VALUES (
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-             $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+             $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
+             $22, $23, $24
          )",
     )
     .bind(placement.session().into_uuid())
@@ -1202,6 +1412,7 @@ async fn insert_placement_record(
             .grant_lineage
             .map(|lineage| lineage.runner.into_uuid()),
     )
+    .bind(grant_origin)
     .bind(
         state
             .grant_lineage
@@ -1232,6 +1443,7 @@ async fn insert_grant_if_new(
     placement: &SessionRunnerPlacement,
     grant: &CredentialProfileGrant,
     registration: &StoredValidatedRunnerRegistration,
+    grant_origin: Decimal,
 ) -> Result<(), RunnerProtocolStoreError> {
     let historical_registration;
     let tombstone = matches!(
@@ -1253,10 +1465,12 @@ async fn insert_grant_if_new(
             "SELECT registration_enrollment_id, registration_revision
                FROM runner_credential_grant
               WHERE session_id = $1
-                AND runner_id = $2
-                AND grant_revision = $3",
+                AND lineage_origin_event_ordinal = $2
+                AND runner_id = $3
+                AND grant_revision = $4",
         )
         .bind(grant.session().into_uuid())
+        .bind(grant_origin)
         .bind(grant.runner().into_uuid())
         .bind(Decimal::from(prior_revision))
         .fetch_optional(&mut **transaction)
@@ -1282,11 +1496,13 @@ async fn insert_grant_if_new(
              SELECT 1
                FROM runner_credential_grant
               WHERE session_id = $1
-                AND runner_id = $2
-                AND grant_revision = $3
+                AND lineage_origin_event_ordinal = $2
+                AND runner_id = $3
+                AND grant_revision = $4
          )",
     )
     .bind(grant.session().into_uuid())
+    .bind(grant_origin)
     .bind(grant.runner().into_uuid())
     .bind(Decimal::from(grant.revision().get()))
     .fetch_one(&mut **transaction)
@@ -1298,6 +1514,8 @@ async fn insert_grant_if_new(
                         SELECT 1
                           FROM runner_credential_grant_audit AS audit
                          WHERE audit.session_id = grant_record.session_id
+                           AND audit.lineage_origin_event_ordinal =
+                                grant_record.lineage_origin_event_ordinal
                            AND audit.runner_id = grant_record.runner_id
                            AND audit.grant_revision =
                                 grant_record.grant_revision
@@ -1305,10 +1523,12 @@ async fn insert_grant_if_new(
                     ) AS revoked
                FROM runner_credential_grant AS grant_record
               WHERE grant_record.session_id = $1
-                AND grant_record.runner_id = $2
-                AND grant_record.grant_revision = $3",
+                AND grant_record.lineage_origin_event_ordinal = $2
+                AND grant_record.runner_id = $3
+                AND grant_record.grant_revision = $4",
         )
         .bind(grant.session().into_uuid())
+        .bind(grant_origin)
         .bind(grant.runner().into_uuid())
         .bind(Decimal::from(grant.revision().get()))
         .fetch_one(&mut **transaction)
@@ -1317,11 +1537,13 @@ async fn insert_grant_if_new(
             "SELECT tool_name, approval_kind
                FROM runner_credential_grant_tool
               WHERE session_id = $1
-                AND runner_id = $2
-                AND grant_revision = $3
+                AND lineage_origin_event_ordinal = $2
+                AND runner_id = $3
+                AND grant_revision = $4
               ORDER BY tool_name",
         )
         .bind(grant.session().into_uuid())
+        .bind(grant_origin)
         .bind(grant.runner().into_uuid())
         .bind(Decimal::from(grant.revision().get()))
         .fetch_all(&mut **transaction)
@@ -1367,10 +1589,13 @@ async fn insert_grant_if_new(
             let runner = prior_placement
                 .try_get::<Option<Uuid>, _>("credential_grant_runner_id")?
                 .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+            let origin = prior_placement
+                .try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?
+                .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
             let revision = prior_placement
                 .try_get::<Option<Decimal>, _>("credential_grant_revision")?
                 .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
-            if revision != expected_revision {
+            if origin != grant_origin || revision != expected_revision {
                 return Err(RunnerProtocolCorruption::CrossWiredReference.into());
             }
             Some(runner)
@@ -1380,13 +1605,15 @@ async fn insert_grant_if_new(
     };
     sqlx::query(
         "INSERT INTO runner_credential_grant
-            (session_id, runner_id, grant_revision,
-             credential_profile_name, registration_enrollment_id,
-             registration_revision, placement_event_ordinal,
-             prior_runner_id, prior_grant_revision, tool_count)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            (session_id, lineage_origin_event_ordinal,
+             runner_id, grant_revision, credential_profile_name,
+             registration_enrollment_id, registration_revision,
+             placement_event_ordinal, prior_runner_id,
+             prior_grant_revision, tool_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(grant.session().into_uuid())
+    .bind(grant_origin)
     .bind(grant.runner().into_uuid())
     .bind(Decimal::from(grant.revision().get()))
     .bind(grant.profile().as_str())
@@ -1401,11 +1628,13 @@ async fn insert_grant_if_new(
     for (tool, approval) in tools {
         sqlx::query(
             "INSERT INTO runner_credential_grant_tool
-                (session_id, runner_id, grant_revision,
-                 credential_profile_name, tool_name, approval_kind)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+                (session_id, lineage_origin_event_ordinal,
+                 runner_id, grant_revision, credential_profile_name,
+                 tool_name, approval_kind)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(grant.session().into_uuid())
+        .bind(grant_origin)
         .bind(grant.runner().into_uuid())
         .bind(Decimal::from(grant.revision().get()))
         .bind(grant.profile().as_str())
@@ -1416,11 +1645,13 @@ async fn insert_grant_if_new(
     }
     sqlx::query(
         "INSERT INTO runner_credential_grant_audit
-            (session_id, runner_id, grant_revision, audit_ordinal,
+            (session_id, lineage_origin_event_ordinal,
+             runner_id, grant_revision, audit_ordinal,
              event_kind, credential_profile_name)
-         VALUES ($1, $2, $3, 1, $4, $5)",
+         VALUES ($1, $2, $3, $4, 1, $5, $6)",
     )
     .bind(grant.session().into_uuid())
+    .bind(grant_origin)
     .bind(grant.runner().into_uuid())
     .bind(Decimal::from(grant.revision().get()))
     .bind(if grant.revision() == RunnerGeneration::one() {
@@ -1434,11 +1665,13 @@ async fn insert_grant_if_new(
     if grant.state() == CredentialProfileGrantState::Revoked {
         sqlx::query(
             "INSERT INTO runner_credential_grant_audit
-                (session_id, runner_id, grant_revision, audit_ordinal,
+                (session_id, lineage_origin_event_ordinal,
+                 runner_id, grant_revision, audit_ordinal,
                  event_kind, credential_profile_name)
-             VALUES ($1, $2, $3, 2, 'revoked', $4)",
+             VALUES ($1, $2, $3, $4, 2, 'revoked', $5)",
         )
         .bind(grant.session().into_uuid())
+        .bind(grant_origin)
         .bind(grant.runner().into_uuid())
         .bind(Decimal::from(grant.revision().get()))
         .bind(grant.profile().as_str())
@@ -1567,11 +1800,13 @@ async fn decode_placement(
 fn decode_grant_lineage(
     placement: &PgRow,
 ) -> Result<Option<RunnerCredentialGrantLineage>, RunnerProtocolStoreError> {
+    let origin =
+        placement.try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?;
     let revision = placement.try_get::<Option<Decimal>, _>("credential_grant_revision")?;
     let runner = placement.try_get::<Option<Uuid>, _>("credential_grant_runner_id")?;
-    match (runner, revision) {
-        (None, None) => Ok(None),
-        (Some(runner), Some(revision)) => Ok(Some(RunnerCredentialGrantLineage {
+    match (origin, runner, revision) {
+        (None, None, None) => Ok(None),
+        (Some(_), Some(runner), Some(revision)) => Ok(Some(RunnerCredentialGrantLineage {
             runner: runner_id(runner),
             revision: decode_generation(revision)?,
         })),
@@ -1583,12 +1818,14 @@ async fn load_grant_for_placement(
     connection: &mut PgConnection,
     placement: &PgRow,
 ) -> Result<Option<CredentialProfileGrant>, RunnerProtocolStoreError> {
+    let origin =
+        placement.try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?;
     let revision = placement.try_get::<Option<Decimal>, _>("credential_grant_revision")?;
     let runner = placement.try_get::<Option<Uuid>, _>("credential_grant_runner_id")?;
-    if revision.is_none() && runner.is_none() {
+    if origin.is_none() && revision.is_none() && runner.is_none() {
         return Ok(None);
     }
-    let (Some(revision), Some(runner)) = (revision, runner) else {
+    let (Some(origin), Some(revision), Some(runner)) = (origin, revision, runner) else {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     };
     let session = session_id(placement.get("session_id"));
@@ -1599,6 +1836,8 @@ async fn load_grant_for_placement(
                     SELECT 1
                       FROM runner_credential_grant_audit AS audit
                      WHERE audit.session_id = grant_record.session_id
+                       AND audit.lineage_origin_event_ordinal =
+                            grant_record.lineage_origin_event_ordinal
                        AND audit.runner_id = grant_record.runner_id
                        AND audit.grant_revision =
                             grant_record.grant_revision
@@ -1606,10 +1845,12 @@ async fn load_grant_for_placement(
                 ) AS revoked
            FROM runner_credential_grant AS grant_record
           WHERE grant_record.session_id = $1
-            AND grant_record.runner_id = $2
-            AND grant_record.grant_revision = $3",
+            AND grant_record.lineage_origin_event_ordinal = $2
+            AND grant_record.runner_id = $3
+            AND grant_record.grant_revision = $4",
     )
     .bind(session.into_uuid())
+    .bind(origin)
     .bind(runner)
     .bind(Decimal::from(revision.get()))
     .fetch_optional(&mut *connection)
@@ -1634,10 +1875,14 @@ async fn load_grant_for_placement(
     let tool_rows = sqlx::query(
         "SELECT tool_name, approval_kind
            FROM runner_credential_grant_tool
-          WHERE session_id = $1 AND runner_id = $2 AND grant_revision = $3
+          WHERE session_id = $1
+            AND lineage_origin_event_ordinal = $2
+            AND runner_id = $3
+            AND grant_revision = $4
           ORDER BY tool_name",
     )
     .bind(session.into_uuid())
+    .bind(origin)
     .bind(runner)
     .bind(Decimal::from(revision.get()))
     .fetch_all(&mut *connection)
@@ -1719,9 +1964,18 @@ async fn insert_lease_generation(
         return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
     }
     let authorization = lease.credential_authorization();
+    let authorization_origin = match authorization {
+        Some(_) => Some(
+            placement
+                .try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?
+                .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?,
+        ),
+        None => None,
+    };
     if let Some(authorization) = authorization {
         let profile: Option<String> = sqlx::query_scalar(RUNNER_LEASE_GRANT_AUTHORITY)
             .bind(authorization.session.into_uuid())
+            .bind(authorization_origin)
             .bind(authorization.runner.into_uuid())
             .bind(Decimal::from(authorization.grant_revision.get()))
             .fetch_optional(&mut **transaction)
@@ -1735,10 +1989,13 @@ async fn insert_lease_generation(
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name, credential_grant_revision,
-             credential_approval_kind, predecessor_generation)
+             credential_profile_name,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision, credential_approval_kind,
+             predecessor_generation)
          VALUES (
-             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+             $15
          )",
     )
     .bind(correlation.lease.into_uuid())
@@ -1760,6 +2017,7 @@ async fn insert_lease_generation(
             .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?,
     )
     .bind(authorization.map(|authorization| authorization.profile.as_str()))
+    .bind(authorization_origin)
     .bind(authorization.map(|authorization| Decimal::from(authorization.grant_revision.get())))
     .bind(authorization.map(|authorization| encode_approval(authorization.approval)))
     .bind(
@@ -1831,10 +2089,11 @@ fn decode_lease(
     }
     let authorization = match (
         row.try_get::<Option<String>, _>("credential_profile_name")?,
+        row.try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?,
         row.try_get::<Option<Decimal>, _>("credential_grant_revision")?,
         row.try_get::<Option<String>, _>("credential_approval_kind")?,
     ) {
-        (None, None, None) => {
+        (None, None, None, None) => {
             if row
                 .try_get::<Option<String>, _>("canonical_grant_tool")?
                 .is_some()
@@ -1846,7 +2105,7 @@ fn decode_lease(
             }
             None
         }
-        (Some(profile), Some(grant_revision), Some(approval)) => {
+        (Some(profile), Some(_), Some(grant_revision), Some(approval)) => {
             let canonical_grant_tool = row
                 .try_get::<Option<String>, _>("canonical_grant_tool")?
                 .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
@@ -1985,18 +2244,21 @@ fn require_stored_lease_identity(
     let correlation = lease.correlation();
     let stored_authorization = match (
         row.try_get::<Option<String>, _>("credential_profile_name")?,
+        row.try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?,
         row.try_get::<Option<Decimal>, _>("credential_grant_revision")?,
         row.try_get::<Option<String>, _>("credential_approval_kind")?,
     ) {
-        (None, None, None) => None,
-        (Some(profile), Some(revision), Some(approval)) => Some(CredentialDispatchAuthorization {
-            session: lease.session(),
-            runner: lease.runner(),
-            grant_revision: decode_generation(revision)?,
-            profile: profile_name(profile)?,
-            tool: lease.tool().clone(),
-            approval: decode_approval(approval)?,
-        }),
+        (None, None, None, None) => None,
+        (Some(profile), Some(_), Some(revision), Some(approval)) => {
+            Some(CredentialDispatchAuthorization {
+                session: lease.session(),
+                runner: lease.runner(),
+                grant_revision: decode_generation(revision)?,
+                profile: profile_name(profile)?,
+                tool: lease.tool().clone(),
+                approval: decode_approval(approval)?,
+            })
+        }
         _ => return Err(RunnerProtocolCorruption::CrossWiredReference.into()),
     };
     if row.get::<Uuid, _>("attempt_id") != correlation.dispatch.attempt().into_uuid()

@@ -2,7 +2,9 @@
 
 This page specifies the implemented runner-protocol domain foundation as
 verified against the implementing stack through PR #260
-(`agent/runner-protocol-domain`). It owns logical runner enrollment,
+(`agent/runner-protocol-domain`); its durable Postgres representation and
+restart-recovery authority were verified through PR #267
+(`agent/runner-persistence`). It owns logical runner enrollment,
 daemon-authoritative catalog validation, runner leases, session placement and
 affinity, credential-profile grants, and workspace requirements. The tool
 registry's common declarations remain owned by [tool loop](tool-loop.md);
@@ -11,10 +13,10 @@ session transcript and frontier mechanics remain owned by
 remain owned by [tool loop](tool-loop.md). Invariant tags cite
 [the invariant catalog](../invariants.md).
 
-The verified surface in this stack is domain-only. There is no runner binary,
-store adapter, transport message, streaming connection, authentication
-handshake, or network code. Those implementation edges are listed under
-[Open edges](#open-edges).
+The verified surface in this stack is the domain and its Postgres persistence
+adapter. There is no runner binary, transport message, streaming connection,
+authentication handshake, or network code. Those implementation edges are listed
+under [Open edges](#open-edges).
 
 ## Identity, enrollment, and registration
 
@@ -187,16 +189,22 @@ three-way effect class.
 
 `LostUnclaimed` requires an opaque durable no-execution proof bound to the exact
 lease correlation; complete loss reconstitution requires the same proof. The
-proof exposes no public raw-parts or reconstitution constructor, so an offered
-lease and its public correlation cannot mint this authority. It does not mean
-merely absence of a claim frame after an offer was sent. A future transport must
-supply the independently authoritative producer, durably commit the exact claim,
-and acknowledge it before the runner may execute. Channel loss after delivery
-but before that acknowledgement cannot be interpreted as proof either way by
-transport alone. Without the proof, losing even an `Offered` lease
-conservatively follows the execution-possible law: pure or idempotent work
-requires a fresh physical attempt, while side-effecting work requires crash
-classification.
+proof exposes no public raw-parts constructor, so an offered lease and its
+public correlation cannot mint this authority. The persistence adapter may
+reconstitute it only by comparing the complete stored proof correlation with the
+independently loaded lease correlation through the checked reconstitution input.
+It does not mean merely absence of a claim frame after an offer was sent. A
+future transport must supply the independently authoritative producer, durably
+commit the exact claim, and acknowledge it before the runner may execute.
+Channel loss after delivery but before that acknowledgement cannot be
+interpreted as proof either way by transport alone. The Postgres representation
+commits the proof atomically with the lost-unclaimed event and requires it
+before a successor generation can consume that retry path. Claimed retry instead
+requires a durable record binding the complete lost lease correlation to the
+exact fresh physical-attempt dispatch. Without the proof, losing even an
+`Offered` lease conservatively follows the execution-possible law: pure or
+idempotent work requires a fresh physical attempt, while side-effecting work
+requires crash classification.
 
 With that proof, loss before claim permits every effect class to be re-leased at
 the checked successor lease-lineage generation. Loss after claim follows the
@@ -383,9 +391,11 @@ lineage forward as a new terminal tombstone; omitting the tombstone is therefore
 structurally rejected, and restoring a previously selected profile cannot
 recreate revision one. Every prior revoked revision remains terminal. Every
 successor binds its predecessor through the immediately prior placement's exact
-runner and grant revision, so equal revision numbers in independent session
-grant lines cannot cross-wire provenance. Revocation is also forward-only and
-gates later lease creation. A lease already offered is already dispatched and
+runner and grant revision. Each independent lineage also carries the immutable
+event ordinal of its revision-one placement through grant, audit, placement, and
+lease references, so repeated equal runner and revision numbers within one
+session cannot cross-wire provenance. Revocation is also forward-only and gates
+later lease creation. A lease already offered is already dispatched and
 completes or crash-classifies normally; revocation neither rewrites nor cancels
 it. A revoked grant revision cannot become active again. Complete reconstitution
 accepts a complete public raw-facts input, checks an independently authoritative
@@ -418,9 +428,9 @@ the later runner workspace stack.
 
 ## Open edges
 
-- Runner transport, authentication exchange, durable registration and lease
-  storage, durable-claim acknowledgement before runner execution, reconnect
-  recovery, compatibility, and result envelopes are recorded in
+- Runner transport, authentication exchange, the authoritative producer and
+  acknowledgement protocol that precede runner execution, reconnect
+  orchestration, compatibility, and result envelopes are recorded in
   [Protocols and persistence](../open-questions.md#protocols-and-persistence)
   and
   [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance).

@@ -209,7 +209,7 @@ fn authorized_with_effect(
         .expect("the batch restores canonical runner authority")
 }
 
-fn claimed_batch(facts: PhysicalAttemptFacts) -> ToolBatch {
+fn claimed_batch_with_effect(facts: PhysicalAttemptFacts, effect: ToolEffectClass) -> ToolBatch {
     let approved = approved_request(facts);
     let attempt = ToolAttemptReconstitutionInput::new(
         ToolAttemptId::from_uuid(uuid(facts.attempt)),
@@ -217,7 +217,7 @@ fn claimed_batch(facts: PhysicalAttemptFacts) -> ToolBatch {
         SessionId::from_uuid(uuid(SESSION)),
         TurnId::from_uuid(uuid(facts.turn)),
         TurnAttemptId::from_uuid(uuid(facts.turn + RELATED_IDENTITY_OFFSET)),
-        ToolEffectClass::EffectFree,
+        effect,
         ToolDispatchGeneration::first(),
         ToolAttemptReconstitutionState::InFlight,
     )
@@ -625,6 +625,12 @@ async fn insert_physical_attempt(
         .execute(pool)
         .await?;
     sqlx::query(
+        "ALTER TABLE tool_attempt
+         ENABLE TRIGGER tool_attempt_runner_retry_is_authorized",
+    )
+    .execute(pool)
+    .await?;
+    let inserted = sqlx::query(
         "INSERT INTO tool_attempt
             (attempt_id, request_id, session_id, turn_id,
              issuing_turn_attempt_id, effect_class, dispatch_generation,
@@ -637,10 +643,11 @@ async fn insert_physical_attempt(
     .bind(uuid(facts.turn))
     .bind(uuid(facts.turn + RELATED_IDENTITY_OFFSET))
     .execute(pool)
-    .await?;
+    .await;
     sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
         .execute(pool)
         .await?;
+    inserted?;
     Ok(())
 }
 
@@ -692,7 +699,7 @@ async fn terminalize_physical_attempt(
 async fn store_fixture_retryable_loss(
     store: &RunnerProtocolStore,
     pool: &PgPool,
-    lease: &RunnerLease,
+    loss: &signalbox_domain::RunnerLeaseLoss,
 ) -> Result<(), Box<dyn Error>> {
     sqlx::query(
         "ALTER TABLE tool_attempt
@@ -700,7 +707,7 @@ async fn store_fixture_retryable_loss(
     )
     .execute(pool)
     .await?;
-    let stored = store.store_lease(lease).await;
+    let stored = store.store_lease_loss(loss).await;
     sqlx::query(
         "ALTER TABLE tool_attempt
          ENABLE TRIGGER tool_attempt_requires_approval",
@@ -709,6 +716,25 @@ async fn store_fixture_retryable_loss(
     .await?;
     stored?;
     Ok(())
+}
+
+async fn authorize_fixture_claimed_retry(
+    store: &RunnerProtocolStore,
+    loss: &signalbox_domain::RunnerLeaseLoss,
+    effect: ToolEffectClass,
+) -> Result<signalbox_domain::RunnerClaimedAttemptReplacement, Box<dyn Error>> {
+    let replacement = loss
+        .retry()
+        .expect("the durable loss carries checked retry authority")
+        .prepare_claimed_attempt(
+            claimed_batch_with_effect(INITIAL_PHYSICAL_ATTEMPT, effect),
+            ToolAttemptId::from_uuid(uuid(RETRY_PHYSICAL_ATTEMPT.attempt)),
+        )
+        .expect("the owning batch produces the exact replacement attempt");
+    store
+        .store_claimed_retry_attempt_authority(loss, &replacement)
+        .await?;
+    Ok(replacement)
 }
 
 async fn clone_registration_without_advancing_head(
@@ -795,6 +821,7 @@ async fn append_runner_lost_without_advancing_head(
              registration_enrollment_id, registration_revision,
              pinned_tool_count, workspace_repository_key,
              workspace_working_directory, credential_grant_runner_id,
+             credential_grant_lineage_origin_ordinal,
              credential_grant_revision)
          SELECT session_id, event_ordinal + 1, placement_revision,
                 'runner_lost', selector_kind, selector_runner_id,
@@ -807,6 +834,7 @@ async fn append_runner_lost_without_advancing_head(
                 registration_enrollment_id, registration_revision,
                 pinned_tool_count, workspace_repository_key,
                 workspace_working_directory, credential_grant_runner_id,
+                credential_grant_lineage_origin_ordinal,
                 credential_grant_revision
            FROM runner_session_placement_record
           WHERE session_id = $1 AND event_ordinal = 2",
@@ -1385,7 +1413,7 @@ async fn s31_inv004_inv043_concurrent_attempt_binding_has_one_lease_lineage()
 async fn s31_inv004_inv043_request_cannot_start_second_lease_lineage() -> Result<(), Box<dyn Error>>
 {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact first lease fence claims");
@@ -1393,28 +1421,12 @@ async fn s31_inv004_inv043_request_cannot_start_second_lease_lineage() -> Result
     let loss = claimed
         .lose()
         .expect("claimed pure work may enter durable retry classification");
-    store_fixture_retryable_loss(&store, &pool, loss.lost()).await?;
-    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
-    let second_lineage = pin
-        .placement
-        .offer_lease(
-            &expected_enrollment,
-            registration.registration(),
-            pin.grant.as_ref(),
-            authorized(RETRY_PHYSICAL_ATTEMPT),
-            RunnerLeaseOfferRequest {
-                lease: RunnerLeaseId::from_uuid(uuid(LEASE + 1)),
-                tool: tool("inspect"),
-            },
-        )
-        .expect("the public fresh-offer path cannot see durable request lineage");
-    let rejected = store
-        .store_lease(&second_lineage)
+    store_fixture_retryable_loss(&store, &pool, &loss).await?;
+    let rejected = insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT)
         .await
-        .expect_err("one logical tool request belongs to one lease lineage");
+        .expect_err("an extra physical attempt requires durable retry authority");
 
-    assert_store_check_violation(rejected);
+    assert_check_violation(rejected);
     drop(pool);
     Ok(())
 }
@@ -1559,9 +1571,15 @@ async fn s31_inv045_concurrent_grant_revocation_blocks_a_later_lease() -> Result
     let mut revocation = pool.begin().await?;
     sqlx::query(
         "INSERT INTO runner_credential_grant_audit
-            (session_id, runner_id, grant_revision, audit_ordinal,
+            (session_id, lineage_origin_event_ordinal,
+             runner_id, grant_revision, audit_ordinal,
              event_kind, credential_profile_name)
-         VALUES ($1, $2, $3, 2, 'revoked', $4)",
+         SELECT $1, lineage_origin_event_ordinal,
+                $2, $3, 2, 'revoked', $4
+           FROM runner_credential_grant
+          WHERE session_id = $1
+            AND runner_id = $2
+            AND grant_revision = $3",
     )
     .bind(grant.session().into_uuid())
     .bind(grant.runner().into_uuid())
@@ -1605,9 +1623,15 @@ async fn s32_inv045_grant_revocation_serializes_profile_replacement() -> Result<
     let mut revocation = pool.begin().await?;
     sqlx::query(
         "INSERT INTO runner_credential_grant_audit
-            (session_id, runner_id, grant_revision, audit_ordinal,
+            (session_id, lineage_origin_event_ordinal,
+             runner_id, grant_revision, audit_ordinal,
              event_kind, credential_profile_name)
-         VALUES ($1, $2, $3, 2, 'revoked', $4)",
+         SELECT $1, lineage_origin_event_ordinal,
+                $2, $3, 2, 'revoked', $4
+           FROM runner_credential_grant
+          WHERE session_id = $1
+            AND runner_id = $2
+            AND grant_revision = $3",
     )
     .bind(original_grant.session().into_uuid())
     .bind(original_grant.runner().into_uuid())
@@ -1806,7 +1830,9 @@ async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), 
              pinned_credential_profile_name, registration_enrollment_id,
              registration_revision, pinned_tool_count,
              workspace_repository_key, workspace_working_directory,
-             credential_grant_runner_id, credential_grant_revision)
+             credential_grant_runner_id,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision)
          SELECT session_id, event_ordinal + 1, placement_revision, 'pinned',
                 selector_kind, selector_runner_id,
                 selector_capability_class, directory_selection_kind,
@@ -1822,7 +1848,7 @@ async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), 
                        AND registration_revision = $5
                        AND tool_name = $6
                 ),
-                NULL, NULL, NULL, NULL
+                NULL, NULL, NULL, NULL, NULL
            FROM runner_session_placement_record
           WHERE session_id = $1 AND event_ordinal = 1",
     )
@@ -1856,13 +1882,15 @@ async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), 
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name, credential_grant_revision,
-             credential_approval_kind, predecessor_generation)
+             credential_profile_name,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision, credential_approval_kind,
+             predecessor_generation)
          VALUES (
              $1, 1, $2, $3, $4,
              $5, 'pure', 2,
              $6, $7,
-             NULL, NULL, NULL, NULL
+             NULL, NULL, NULL, NULL, NULL
          )",
     )
     .bind(correlation.lease.into_uuid())
@@ -1921,6 +1949,69 @@ async fn s32_inv035_credential_relations_admit_names_and_audit_only() -> Result<
 
     assert_eq!(forbidden_columns, 0);
     assert_eq!(credential_tables, 5);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv045_grant_lineage_origin_is_part_of_every_durable_identity()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let grant_primary_key: Vec<String> = sqlx::query_scalar(
+        "SELECT array_agg(attribute.attname::text ORDER BY key.ordinality)
+           FROM pg_constraint AS constraint_record
+           JOIN pg_class AS relation
+             ON relation.oid = constraint_record.conrelid
+          CROSS JOIN LATERAL
+               unnest(constraint_record.conkey)
+               WITH ORDINALITY AS key(attnum, ordinality)
+           JOIN pg_attribute AS attribute
+             ON attribute.attrelid = relation.oid
+            AND attribute.attnum = key.attnum
+          WHERE constraint_record.contype = 'p'
+            AND relation.relname = 'runner_credential_grant'
+          GROUP BY constraint_record.oid",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let underbound_references: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM pg_constraint AS constraint_record
+           JOIN pg_class AS referenced_relation
+             ON referenced_relation.oid = constraint_record.confrelid
+          WHERE constraint_record.contype = 'f'
+            AND referenced_relation.relname IN (
+                'runner_credential_grant',
+                'runner_credential_grant_tool',
+                'runner_credential_grant_audit'
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM unnest(constraint_record.confkey)
+                       AS referenced_key(attnum)
+                  JOIN pg_attribute AS referenced_attribute
+                    ON referenced_attribute.attrelid =
+                        constraint_record.confrelid
+                   AND referenced_attribute.attnum =
+                        referenced_key.attnum
+                 WHERE referenced_attribute.attname =
+                    'lineage_origin_event_ordinal'
+            )",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        grant_primary_key,
+        vec![
+            "session_id",
+            "lineage_origin_event_ordinal",
+            "runner_id",
+            "grant_revision",
+        ],
+    );
+    assert_eq!(underbound_references, 0);
     drop(pool);
     Ok(())
 }
@@ -2449,13 +2540,16 @@ async fn s31_inv043_every_generation_requires_offered_event_head() -> Result<(),
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name, credential_grant_revision,
-             credential_approval_kind, predecessor_generation)
+             credential_profile_name,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision, credential_approval_kind,
+             predecessor_generation)
          SELECT $2, 1, $3, session_id, runner_id,
                 tool_name, effect_class, placement_event_ordinal,
                 registration_enrollment_id, registration_revision,
-                credential_profile_name, credential_grant_revision,
-                credential_approval_kind, NULL
+                credential_profile_name,
+                credential_grant_lineage_origin_ordinal,
+                credential_grant_revision, credential_approval_kind, NULL
            FROM runner_lease_generation
           WHERE lease_id = $1 AND generation = 1",
     )
@@ -2554,10 +2648,13 @@ async fn s30_inv042_explicit_automatic_grant_approval_cannot_be_downgraded()
 async fn s32_inv045_grant_audit_rejects_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     stored_pin_fixture(&pool).await?;
-    let truncated = sqlx::query("TRUNCATE runner_credential_grant_audit")
-        .execute(&pool)
-        .await
-        .expect_err("immutable credential grant audit evidence cannot be truncated");
+    let truncated = sqlx::query(
+        "TRUNCATE runner_credential_grant_audit,
+                  runner_current_credential_grant_audit",
+    )
+    .execute(&pool)
+    .await
+    .expect_err("immutable credential grant audit evidence cannot be truncated");
 
     assert_check_violation(truncated);
     drop(pool);
@@ -2680,7 +2777,9 @@ async fn s32_inv044_inv045_relational_placement_binds_selected_grant() -> Result
              pinned_credential_profile_name, registration_enrollment_id,
              registration_revision, pinned_tool_count,
              workspace_repository_key, workspace_working_directory,
-             credential_grant_runner_id, credential_grant_revision)
+             credential_grant_runner_id,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision)
          SELECT session_id, event_ordinal + 1, placement_revision + 1,
                 'profile_replaced',
                 selector_kind, selector_runner_id,
@@ -2692,7 +2791,9 @@ async fn s32_inv044_inv045_relational_placement_binds_selected_grant() -> Result
                 $2, registration_enrollment_id,
                 registration_revision, pinned_tool_count,
                 workspace_repository_key, workspace_working_directory,
-                credential_grant_runner_id, credential_grant_revision + 1
+                credential_grant_runner_id,
+                credential_grant_lineage_origin_ordinal,
+                credential_grant_revision + 1
            FROM runner_session_placement_record
           WHERE session_id = $1 AND event_ordinal = 2",
     )
@@ -3079,7 +3180,7 @@ async fn s31_inv004_inv043_fresh_retry_attempt_is_current_before_successor_lease
     let loss = claimed
         .lose()
         .expect("claimed pure work may enter durable retry classification");
-    store_fixture_retryable_loss(&store, &pool, loss.lost()).await?;
+    store_fixture_retryable_loss(&store, &pool, &loss).await?;
     let retired_facts: (String, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT state_kind, terminal_disposition_kind, error_kind
            FROM tool_attempt
@@ -3096,6 +3197,8 @@ async fn s31_inv004_inv043_fresh_retry_attempt_is_current_before_successor_lease
     .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.request))
     .fetch_all(&pool)
     .await?;
+    let _replacement =
+        authorize_fixture_claimed_retry(&store, &loss, ToolEffectClass::EffectFree).await?;
     insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
     let fresh_attempts: Vec<Uuid> = sqlx::query_scalar(
         "SELECT attempt_id
@@ -3162,7 +3265,7 @@ async fn s31_inv004_inv043_idempotent_claimed_loss_retires_physical_attempt()
     let loss = claimed
         .lose()
         .expect("claimed idempotent work admits a checked retry");
-    store_fixture_retryable_loss(&store, &pool, loss.lost()).await?;
+    store_fixture_retryable_loss(&store, &pool, &loss).await?;
     let retired_facts: (String, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT state_kind, terminal_disposition_kind, error_kind
            FROM tool_attempt
@@ -3171,6 +3274,8 @@ async fn s31_inv004_inv043_idempotent_claimed_loss_retires_physical_attempt()
     .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
     .fetch_one(&pool)
     .await?;
+    let _replacement =
+        authorize_fixture_claimed_retry(&store, &loss, ToolEffectClass::ExternalEffect).await?;
     insert_external_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
     let fresh_attempt: Uuid = sqlx::query_scalar(
         "SELECT attempt_id
@@ -3230,23 +3335,21 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
         .expect("the exact lease fence claims");
     store.store_lease(&claimed).await?;
     let loss = claimed.lose().expect("the claimed pure lease may be lost");
-    store_fixture_retryable_loss(&store, &pool, loss.lost()).await?;
+    store_fixture_retryable_loss(&store, &pool, &loss).await?;
     let lost = store
-        .load_lease(
+        .load_lease_loss(
             RunnerLeaseId::from_uuid(uuid(LEASE)),
             RunnerGeneration::one(),
         )
         .await?
-        .expect("the first generation is durable before the loss event");
+        .expect("the durable loss reconstitutes checked retry authority");
+    assert_eq!(
+        lost.lost().state(),
+        signalbox_domain::RunnerLeaseState::LostClaimed
+    );
+    let prepared_replacement =
+        authorize_fixture_claimed_retry(&store, &lost, ToolEffectClass::EffectFree).await?;
     insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
-    let prepared_replacement = loss
-        .retry()
-        .expect("the claimed loss retains checked retry authority")
-        .prepare_claimed_attempt(
-            claimed_batch(INITIAL_PHYSICAL_ATTEMPT),
-            ToolAttemptId::from_uuid(uuid(RETRY_PHYSICAL_ATTEMPT.attempt)),
-        )
-        .expect("the owning batch retires and replaces the claimed attempt");
     let (_batch, _retired, retry_authorization) = prepared_replacement.into_parts();
     let retry = pin
         .placement
@@ -3254,7 +3357,7 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
             &expected_enrollment,
             registration.registration(),
             pin.grant.as_ref(),
-            loss,
+            lost,
             retry_authorization,
         )
         .expect("claimed pure work requires a fresh physical attempt");
@@ -3273,12 +3376,57 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
     .fetch_all(&pool)
     .await?;
 
-    assert_eq!(
-        lost.state(),
-        signalbox_domain::RunnerLeaseState::LostClaimed
-    );
     assert_eq!(reconstituted, retry);
     assert_eq!(batch_attempts, vec![retry.attempt().into_uuid()]);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_unclaimed_retry_authority_survives_reconstitution() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let offered = duplicate_lease(&pin.lease, registration.registration());
+    let correlation = offered.correlation();
+    let proof = signalbox_domain::RunnerLeaseNoExecutionProof::reconstitute(
+        signalbox_domain::RunnerLeaseNoExecutionProofReconstitutionInput {
+            correlation: correlation.clone(),
+            recorded_correlation: correlation,
+        },
+    )
+    .expect("the independent durable fence facts produce no-execution proof");
+    let loss = offered
+        .lose_unclaimed(&proof)
+        .expect("the exact proof seals the unclaimed loss");
+    store.store_lease_loss(&loss).await?;
+    let restored = store
+        .load_lease_loss(
+            RunnerLeaseId::from_uuid(uuid(LEASE)),
+            RunnerGeneration::one(),
+        )
+        .await?
+        .expect("the durable proof restores unclaimed retry authority");
+
+    assert_eq!(
+        restored.lost().state(),
+        signalbox_domain::RunnerLeaseState::LostUnclaimed
+    );
+    assert_eq!(
+        restored
+            .no_execution_proof()
+            .expect("the restored unclaimed loss retains its proof")
+            .correlation(),
+        &restored.lost().correlation()
+    );
+    assert_eq!(
+        restored
+            .retry()
+            .expect("the restored unclaimed loss is retryable")
+            .generation(),
+        RunnerGeneration::try_from_u64(2).expect("two is positive")
+    );
     drop(pool);
     Ok(())
 }
@@ -3296,13 +3444,16 @@ async fn s31_inv043_first_generation_requires_null_predecessor() -> Result<(), B
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name, credential_grant_revision,
-             credential_approval_kind, predecessor_generation)
+             credential_profile_name,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision, credential_approval_kind,
+             predecessor_generation)
          SELECT $2, 1, attempt_id, session_id, runner_id,
                 tool_name, effect_class, placement_event_ordinal,
                 registration_enrollment_id, registration_revision,
-                credential_profile_name, credential_grant_revision,
-                credential_approval_kind, 0
+                credential_profile_name,
+                credential_grant_lineage_origin_ordinal,
+                credential_grant_revision, credential_approval_kind, 0
            FROM runner_lease_generation
           WHERE lease_id = $1 AND generation = 1",
     )
@@ -3367,20 +3518,23 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
         .expect("the exact lease fence claims");
     store.store_lease(&claimed).await?;
     let loss = claimed.lose().expect("the claimed pure lease may be lost");
-    store_fixture_retryable_loss(&store, &pool, loss.lost()).await?;
+    store_fixture_retryable_loss(&store, &pool, &loss).await?;
 
     let error = sqlx::query(
         "INSERT INTO runner_lease_generation
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name, credential_grant_revision,
-             credential_approval_kind, predecessor_generation)
+             credential_profile_name,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision, credential_approval_kind,
+             predecessor_generation)
          SELECT lease_id, generation + 1, attempt_id, session_id, runner_id,
                 tool_name, effect_class, placement_event_ordinal,
                 registration_enrollment_id, registration_revision,
-                credential_profile_name, credential_grant_revision,
-                credential_approval_kind, generation
+                credential_profile_name,
+                credential_grant_lineage_origin_ordinal,
+                credential_grant_revision, credential_approval_kind, generation
            FROM runner_lease_generation
           WHERE lease_id = $1 AND generation = 1",
     )
@@ -3390,6 +3544,8 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
     .expect_err("claimed retry cannot reuse its physical attempt identity");
 
     assert_check_violation(error);
+    let _replacement =
+        authorize_fixture_claimed_retry(&store, &loss, ToolEffectClass::EffectFree).await?;
     insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
     sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
         .execute(&pool)
@@ -3410,13 +3566,16 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name, credential_grant_revision,
-             credential_approval_kind, predecessor_generation)
+             credential_profile_name,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision, credential_approval_kind,
+             predecessor_generation)
          SELECT $2, 1, $3, session_id, runner_id,
                 tool_name, 'idempotent', placement_event_ordinal,
                 registration_enrollment_id, registration_revision,
-                credential_profile_name, credential_grant_revision,
-                credential_approval_kind, NULL
+                credential_profile_name,
+                credential_grant_lineage_origin_ordinal,
+                credential_grant_revision, credential_approval_kind, NULL
            FROM runner_lease_generation
           WHERE lease_id = $1 AND generation = 1",
     )
@@ -3448,13 +3607,16 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name, credential_grant_revision,
-             credential_approval_kind, predecessor_generation)
+             credential_profile_name,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision, credential_approval_kind,
+             predecessor_generation)
          SELECT $2, 1, $3, session_id, runner_id,
                 tool_name, effect_class, placement_event_ordinal,
                 registration_enrollment_id, registration_revision,
-                credential_profile_name, credential_grant_revision,
-                credential_approval_kind, NULL
+                credential_profile_name,
+                credential_grant_lineage_origin_ordinal,
+                credential_grant_revision, credential_approval_kind, NULL
            FROM runner_lease_generation
           WHERE lease_id = $1 AND generation = 1",
     )
@@ -3492,13 +3654,16 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name, credential_grant_revision,
-             credential_approval_kind, predecessor_generation)
+             credential_profile_name,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision, credential_approval_kind,
+             predecessor_generation)
          SELECT lease_id, 2, $2, session_id, runner_id,
                 tool_name, effect_class, placement_event_ordinal,
                 registration_enrollment_id, registration_revision,
-                credential_profile_name, credential_grant_revision,
-                credential_approval_kind, 1
+                credential_profile_name,
+                credential_grant_lineage_origin_ordinal,
+                credential_grant_revision, credential_approval_kind, 1
            FROM runner_lease_generation
           WHERE lease_id = $1 AND generation = 1",
     )
@@ -3582,13 +3747,16 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name, credential_grant_revision,
-             credential_approval_kind, predecessor_generation)
+             credential_profile_name,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision, credential_approval_kind,
+             predecessor_generation)
          SELECT lease_id, 3, $2, session_id, runner_id,
                 tool_name, effect_class, placement_event_ordinal,
                 registration_enrollment_id, registration_revision,
-                credential_profile_name, credential_grant_revision,
-                credential_approval_kind, 2
+                credential_profile_name,
+                credential_grant_lineage_origin_ordinal,
+                credential_grant_revision, credential_approval_kind, 2
            FROM runner_lease_generation
           WHERE lease_id = $1 AND generation = 2",
     )

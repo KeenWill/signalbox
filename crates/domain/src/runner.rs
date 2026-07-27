@@ -954,6 +954,24 @@ impl RunnerLeaseNoExecutionProof {
     pub const fn correlation(&self) -> &RunnerLeaseCorrelation {
         &self.correlation
     }
+
+    pub fn reconstitute(
+        input: RunnerLeaseNoExecutionProofReconstitutionInput,
+    ) -> Result<Self, RunnerDomainError> {
+        if input.correlation != input.recorded_correlation {
+            return Err(RunnerDomainError::CorruptStoredFacts);
+        }
+        Ok(Self {
+            correlation: input.correlation,
+        })
+    }
+}
+
+/// Complete independently stored facts for one no-execution proof.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerLeaseNoExecutionProofReconstitutionInput {
+    pub correlation: RunnerLeaseCorrelation,
+    pub recorded_correlation: RunnerLeaseCorrelation,
 }
 
 /// One fenced runner lease.
@@ -1062,7 +1080,7 @@ impl RunnerLease {
             RunnerLeaseState::Claimed => RunnerLeaseState::LostClaimed,
             _ => return Err(RunnerDomainError::InvalidState),
         };
-        self.into_loss_consequence()
+        self.into_loss_consequence(None)
     }
 
     pub fn lose_unclaimed(
@@ -1076,13 +1094,18 @@ impl RunnerLease {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
         self.state = RunnerLeaseState::LostUnclaimed;
-        self.into_loss_consequence()
+        self.into_loss_consequence(Some(proof.clone()))
     }
 
-    fn into_loss_consequence(self) -> Result<RunnerLeaseLoss, RunnerDomainError> {
-        let claimed = match self.state {
-            RunnerLeaseState::LostUnclaimed => false,
-            RunnerLeaseState::LostExecutionPossible | RunnerLeaseState::LostClaimed => true,
+    fn into_loss_consequence(
+        self,
+        no_execution: Option<RunnerLeaseNoExecutionProof>,
+    ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
+        let claimed = match (self.state, no_execution.is_some()) {
+            (RunnerLeaseState::LostUnclaimed, true) => false,
+            (RunnerLeaseState::LostExecutionPossible | RunnerLeaseState::LostClaimed, false) => {
+                true
+            }
             _ => return Err(RunnerDomainError::InvalidState),
         };
         if claimed && self.effect == RunnerToolEffectClass::SideEffecting {
@@ -1105,6 +1128,7 @@ impl RunnerLease {
                     claimed_attempt,
                     preparation: RunnerRetryPreparationGuard::new(),
                 }),
+                no_execution,
             },
         })
     }
@@ -1154,16 +1178,22 @@ impl RunnerLease {
         registration: &ValidatedRunnerRegistration,
         no_execution: Option<&RunnerLeaseNoExecutionProof>,
     ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
-        let lease = Self::reconstitute(input, registration)?;
+        Self::reconstitute(input, registration)?.into_reconstituted_loss(no_execution)
+    }
+
+    pub fn into_reconstituted_loss(
+        self,
+        no_execution: Option<&RunnerLeaseNoExecutionProof>,
+    ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
         let proof_matches =
-            no_execution.is_some_and(|proof| proof.correlation == lease.correlation());
-        match (lease.state, proof_matches, no_execution.is_some()) {
+            no_execution.is_some_and(|proof| proof.correlation == self.correlation());
+        match (self.state, proof_matches, no_execution.is_some()) {
             (RunnerLeaseState::LostUnclaimed, true, true)
             | (
                 RunnerLeaseState::LostExecutionPossible | RunnerLeaseState::LostClaimed,
                 false,
                 false,
-            ) => lease.into_loss_consequence(),
+            ) => self.into_loss_consequence(no_execution.cloned()),
             _ => Err(RunnerDomainError::InvalidState),
         }
     }
@@ -1216,6 +1246,7 @@ enum RunnerLeaseLossKind {
     RetryPermitted {
         lost: RunnerLease,
         retry: Box<RunnerLeaseRetryAuthority>,
+        no_execution: Option<RunnerLeaseNoExecutionProof>,
     },
     CrashClassificationRequired {
         lost: RunnerLease,
@@ -1246,9 +1277,16 @@ impl RunnerLeaseLoss {
         }
     }
 
+    pub const fn no_execution_proof(&self) -> Option<&RunnerLeaseNoExecutionProof> {
+        match &self.kind {
+            RunnerLeaseLossKind::RetryPermitted { no_execution, .. } => no_execution.as_ref(),
+            RunnerLeaseLossKind::CrashClassificationRequired { .. } => None,
+        }
+    }
+
     fn into_retry_parts(self) -> Option<(RunnerLease, RunnerLeaseRetryAuthority)> {
         match self.kind {
-            RunnerLeaseLossKind::RetryPermitted { lost, retry } => Some((lost, *retry)),
+            RunnerLeaseLossKind::RetryPermitted { lost, retry, .. } => Some((lost, *retry)),
             RunnerLeaseLossKind::CrashClassificationRequired { .. } => None,
         }
     }
@@ -1277,6 +1315,7 @@ pub struct RunnerClaimedAttemptReplacement {
     batch: ToolBatch,
     retired: EndedToolAttempt,
     authorization: RunnerToolAttemptAuthorization,
+    source: RunnerLeaseCorrelation,
 }
 
 impl RunnerClaimedAttemptReplacement {
@@ -1286,6 +1325,14 @@ impl RunnerClaimedAttemptReplacement {
 
     pub const fn retired(&self) -> &EndedToolAttempt {
         &self.retired
+    }
+
+    pub const fn source(&self) -> &RunnerLeaseCorrelation {
+        &self.source
+    }
+
+    pub const fn replacement(&self) -> ToolAttemptDispatchCorrelation {
+        self.authorization.authorized.correlation()
     }
 
     pub fn into_parts(self) -> (ToolBatch, EndedToolAttempt, RunnerToolAttemptAuthorization) {
@@ -1409,6 +1456,7 @@ impl RunnerLeaseRetryAuthority {
             batch: replacement.batch,
             retired: replacement.retired,
             authorization,
+            source: self.source.correlation.clone(),
         })
     }
 }

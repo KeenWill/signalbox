@@ -5462,6 +5462,12 @@ pub enum RunnerLeaseState {
 pub struct RunnerLeaseNoExecutionProof { /* private durable correlation */ }
 impl RunnerLeaseNoExecutionProof {
     pub const fn correlation(&self) -> &RunnerLeaseCorrelation;
+    pub fn reconstitute(
+        input: RunnerLeaseNoExecutionProofReconstitutionInput,
+    ) -> Result<Self, RunnerDomainError>;
+}
+pub struct RunnerLeaseNoExecutionProofReconstitutionInput {
+    /* public raw proof correlation and independent recorded correlation */
 }
 pub struct RunnerLease { /* private */ }
 impl RunnerLease {
@@ -5489,13 +5495,17 @@ impl RunnerLease {
         registration: &ValidatedRunnerRegistration,
         no_execution: Option<&RunnerLeaseNoExecutionProof>,
     ) -> Result<RunnerLeaseLoss, RunnerDomainError>;
+    pub fn into_reconstituted_loss(
+        self,
+        no_execution: Option<&RunnerLeaseNoExecutionProof>,
+    ) -> Result<RunnerLeaseLoss, RunnerDomainError>;
 }
 pub struct RunnerLeaseReconstitutionInput {
     /* public raw lease projection and independent fence */
 }
 pub struct RunnerLeaseLoss { /* private, produced only by checked RunnerLease transitions */ }
 impl RunnerLeaseLoss {
-    // accessors: lost(), retry(), crash_attempt()
+    // accessors: lost(), retry(), crash_attempt(), no_execution_proof()
 }
 pub struct RunnerLeaseRetryAuthority { /* private */ }
 impl RunnerLeaseRetryAuthority {
@@ -5518,7 +5528,7 @@ impl RunnerUnclaimedAttemptReauthorization {
 
 pub struct RunnerClaimedAttemptReplacement { /* private */ }
 impl RunnerClaimedAttemptReplacement {
-    // accessors: batch(), retired()
+    // accessors: batch(), retired(), source(), replacement()
     pub fn into_parts(
         self,
     ) -> (
@@ -6456,8 +6466,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: replace_session_defaults                   | 13                   |
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
-| domain: runner                                     | 52                   |
-| **signalbox-domain total**                         | **508 (+1 free fn)** |
+| domain: runner                                     | 53                   |
+| **signalbox-domain total**                         | **509 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

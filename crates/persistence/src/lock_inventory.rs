@@ -66,8 +66,9 @@ pub(crate) const RUNNER_ENROLLMENT: &str = "SELECT enrollment_id
 pub(crate) const RUNNER_GRANT: &str = "SELECT credential_profile_name
                FROM runner_credential_grant
               WHERE session_id = $1
-                AND runner_id = $2
-                AND grant_revision = $3
+                AND lineage_origin_event_ordinal = $2
+                AND runner_id = $3
+                AND grant_revision = $4
               FOR UPDATE";
 
 pub(crate) const RUNNER_LEASE_ENROLLMENT_AUTHORITY: &str = "SELECT state_kind
@@ -79,11 +80,14 @@ pub(crate) const RUNNER_LEASE_GRANT_AUTHORITY: &str = "SELECT grant_record.crede
                FROM runner_current_credential_grant_audit AS current_audit
                JOIN runner_credential_grant AS grant_record
                  ON grant_record.session_id = current_audit.session_id
+                AND grant_record.lineage_origin_event_ordinal =
+                    current_audit.lineage_origin_event_ordinal
                 AND grant_record.runner_id = current_audit.runner_id
                 AND grant_record.grant_revision = current_audit.grant_revision
               WHERE current_audit.session_id = $1
-                AND current_audit.runner_id = $2
-                AND current_audit.grant_revision = $3
+                AND current_audit.lineage_origin_event_ordinal = $2
+                AND current_audit.runner_id = $3
+                AND current_audit.grant_revision = $4
               FOR SHARE OF current_audit";
 
 pub(crate) const RUNNER_REGISTRATION_HEAD: &str = "SELECT registration_revision
@@ -96,6 +100,7 @@ pub(crate) const RUNNER_PLACEMENT_HEAD: &str =
                     record.state_kind, record.pinned_runner_id,
                     record.pinned_credential_profile_name,
                     record.credential_grant_runner_id,
+                    record.credential_grant_lineage_origin_ordinal,
                     record.credential_grant_revision
                FROM runner_current_session_placement AS current_placement
                JOIN runner_session_placement_record AS record
@@ -111,6 +116,7 @@ pub(crate) const RUNNER_LEASE_HEAD: &str = "SELECT current_event.event_ordinal, 
                     lease_generation.tool_name,
                     lease_generation.effect_class,
                     lease_generation.credential_profile_name,
+                    lease_generation.credential_grant_lineage_origin_ordinal,
                     lease_generation.credential_grant_revision,
                     lease_generation.credential_approval_kind,
                     attempt.session_id AS canonical_dispatch_session,
