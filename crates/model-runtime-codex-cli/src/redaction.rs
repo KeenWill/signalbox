@@ -287,28 +287,24 @@ pub(crate) fn redact_json(raw: &str) -> String {
         return redact_text(raw);
     };
     let changed = redact_value(&mut value);
-    if !changed {
-        // A duplicate object member is invisible in the parsed tree — only
-        // its last occurrence survives parsing — so a shadowed credential
-        // value cannot be judged clean by the tree alone. Raw bytes are
-        // returned only when they are themselves credential-shape clean.
-        if redact_text(raw) == raw {
-            return raw.to_string();
-        }
-        // Re-serializing drops a shadowed duplicate member while keeping
-        // arbitrary-precision numeric lexemes. If the re-serialized form is
-        // itself credential-shape clean the duplicate was the only shape;
-        // otherwise a credential survives structurally — for example a
-        // token-shaped object key the field-name traversal cannot reach — so
-        // the whole object is conservatively suppressed to a valid sentinel.
-        let reserialized =
-            serde_json::to_string(&value).unwrap_or_else(|_| REDACTED_JSON_OBJECT.to_string());
-        if redact_text(&reserialized) == reserialized {
-            return reserialized;
-        }
-        return REDACTED_JSON_OBJECT.to_string();
+    // Credential-clean raw bytes are returned verbatim. Cleanliness is judged
+    // on the raw text, not the parsed tree, because a shadowed duplicate
+    // member is invisible after parsing.
+    if !changed && redact_text(raw) == raw {
+        return raw.to_string();
     }
-    serde_json::to_string(&value).unwrap_or_else(|_| REDACTED_JSON_OBJECT.to_string())
+    // Every serialized result is rescanned: structural field-name redaction
+    // reaches neither a shadowed duplicate value nor a token-shaped object
+    // key, so a residual credential shape after serialization — whether or
+    // not the tree changed — conservatively suppresses the whole object to a
+    // valid redacted sentinel. Re-serialization also drops a shadowed
+    // duplicate while keeping arbitrary-precision numeric lexemes.
+    let serialized =
+        serde_json::to_string(&value).unwrap_or_else(|_| REDACTED_JSON_OBJECT.to_string());
+    if redact_text(&serialized) == serialized {
+        return serialized;
+    }
+    REDACTED_JSON_OBJECT.to_string()
 }
 
 fn redact_value(value: &mut Value) -> bool {
@@ -1520,6 +1516,19 @@ mod tests {
         let output = redact_json(fixture);
 
         assert!(!output.contains("sk-opaque-token-key"));
+        assert_eq!(output, REDACTED_JSON_OBJECT);
+        assert!(serde_json::from_str::<serde_json::Value>(&output).is_ok());
+    }
+
+    /// INV-035: a token-shaped object key alongside an ordinarily redacted
+    /// value — which sets `changed` — is still suppressed, since every
+    /// serialized result is rescanned.
+    #[test]
+    fn inv_035_redacts_token_key_beside_a_changed_value() {
+        let fixture = r#"{"password":"opaque","sk-sensitive-mixed-key":"safe"}"#;
+        let output = redact_json(fixture);
+
+        assert!(!output.contains("sk-sensitive-mixed-key"));
         assert_eq!(output, REDACTED_JSON_OBJECT);
         assert!(serde_json::from_str::<serde_json::Value>(&output).is_ok());
     }

@@ -549,6 +549,15 @@ async fn execute_process<C: Clone + Send + Sync>(
                     && stdout.buffer().is_empty()
                     && already_fired(cancellation)
                 {
+                    // Work-first: an already-exited leader's status is
+                    // definitive and outranks a simultaneous cancellation.
+                    if let Some((status, detail)) =
+                        reap_exited_leader(&mut child, &mut stderr_task).await
+                    {
+                        reaped_status = Some(status);
+                        deadline_stderr = Some(detail);
+                        break;
+                    }
                     interrupt_then_kill(
                         &mut child,
                         remaining_interrupt_grace(prepared.interrupt_grace, deadline),
@@ -585,20 +594,13 @@ async fn execute_process<C: Clone + Send + Sync>(
                 // discard. Probe without reaping and, if it exited, hand the
                 // status to the exit-classification path below instead of
                 // reporting cancellation.
-                if !terminal_observed && leader_exited_without_reaping(child.id()) {
-                    kill_process_group(child.id());
-                    if let Ok(Some(status)) = child.try_wait() {
-                        child.disarm();
-                        let detail = if stderr_task.is_finished() {
-                            stderr_result((&mut stderr_task).await)
-                        } else {
-                            abort_stderr_task(&mut stderr_task).await;
-                            "Codex stderr was unavailable after cancellation".to_string()
-                        };
-                        reaped_status = Some(Ok(status));
-                        deadline_stderr = Some(detail);
-                        break;
-                    }
+                if !terminal_observed
+                    && let Some((status, detail)) =
+                        reap_exited_leader(&mut child, &mut stderr_task).await
+                {
+                    reaped_status = Some(status);
+                    deadline_stderr = Some(detail);
+                    break;
                 }
                 interrupt_then_kill(
                     &mut child,
@@ -868,6 +870,31 @@ fn spawn_environment_value(name: &str, value: std::ffi::OsString) -> std::ffi::O
         Ok(path) => path.into_os_string(),
         Err(_) => value,
     }
+}
+
+/// Reaps a leader that has already exited on its own, returning its status and
+/// stderr detail so a cancellation racing that exit hands the definitive
+/// provider-error evidence to the exit-classification path instead of
+/// reporting cancellation loss. `None` when the leader is still running.
+async fn reap_exited_leader(
+    child: &mut SupervisedChild,
+    stderr_task: &mut tokio::task::JoinHandle<std::io::Result<String>>,
+) -> Option<(std::io::Result<std::process::ExitStatus>, String)> {
+    if !leader_exited_without_reaping(child.id()) {
+        return None;
+    }
+    kill_process_group(child.id());
+    let Ok(Some(status)) = child.try_wait() else {
+        return None;
+    };
+    child.disarm();
+    let detail = if stderr_task.is_finished() {
+        stderr_result((&mut *stderr_task).await)
+    } else {
+        abort_stderr_task(stderr_task).await;
+        "Codex stderr was unavailable after cancellation".to_string()
+    };
+    Some((Ok(status), detail))
 }
 
 fn incomplete_upload_cause(error: &std::io::Error) -> LossCause {
