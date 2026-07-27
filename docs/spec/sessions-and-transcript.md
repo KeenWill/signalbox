@@ -8,7 +8,7 @@ content, and actor attribution. It was verified against the implementing stack
 through PR #265 (`agent/tool-batch-tier0`); the defaults-epoch and
 model-identity boundary were additionally verified through PR #272
 (`agent/mid-session-model`); the imported-frontier process surface was verified
-against this stack (`agent/continue-imported-conversation`). The
+through PR #294 (`agent/continue-imported-conversation`). The
 imported-conversation record and converter are owned by
 [conversation-import](conversation-import.md). Where a law is cited as
 `INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
