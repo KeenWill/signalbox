@@ -4661,6 +4661,127 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 }
 ```
 
+## application: review_workflow
+
+```rust
+pub struct ReviewWorkflowCommand { /* private */ }
+impl ReviewWorkflowCommand {
+    pub const fn new(
+        command_id: DurableCommandId,
+        semantic_digest: [u8; 32],
+        operation: ReviewWorkflowOperation,
+    ) -> Self;
+    // accessors: command_id(), semantic_digest(), operation()
+}
+
+pub enum ReviewWorkflowOperation {
+    CreateTarget(ReviewTarget),
+    StartRun { run: ReviewRun, pass: ReviewPass },
+    ActivatePass { run: ReviewRun, pass: ReviewPass },
+    RecordFindings {
+        pass: ReviewPassEvidence,
+        findings: Vec<ReviewFinding>,
+    },
+    RecordFindingEvent {
+        pass: ReviewPassEvidence,
+        event: ReviewFindingEvent,
+    },
+    ReserveExternalLink(ReviewExternalLink),
+    AttachExternalLink {
+        link: ReviewExternalLinkId,
+        attachment: ReviewExternalLinkAttachment,
+    },
+}
+
+impl ReviewWorkflowOperation {
+    pub const fn kind(&self) -> ReviewWorkflowOperationKind;
+}
+
+pub enum ReviewWorkflowOperationKind {
+    CreateTarget,
+    StartRun,
+    ActivatePass,
+    RecordFindings,
+    RecordFindingEvent,
+    ReserveExternalLink,
+    AttachExternalLink,
+}
+
+pub enum ReviewWorkflowCommandResult {
+    TargetCreated { target: ReviewTargetId },
+    RunStarted { run: ReviewRunId, pass: ReviewPassId },
+    PassActivated { run: ReviewRunId, pass: ReviewPassId },
+    FindingsRecorded {
+        run: ReviewRunId,
+        pass: ReviewPassId,
+        finding_count: usize,
+    },
+    FindingEventRecorded {
+        finding: ReviewFindingId,
+        status: ReviewFindingStatus,
+    },
+    ExternalLinkReserved { link: ReviewExternalLinkId },
+    ExternalLinkAttached {
+        link: ReviewExternalLinkId,
+        external_object: ReviewKey,
+    },
+}
+
+pub enum ReviewWorkflowCommandOutcome {
+    Recorded(ReviewWorkflowCommandResult),
+    ConflictingReuse { command_id: DurableCommandId },
+}
+
+pub trait ReviewWorkflowTransaction {
+    type Error;
+
+    fn handle(
+        &mut self,
+        command: ReviewWorkflowCommand,
+    ) -> impl Future<Output = Result<ReviewWorkflowCommandOutcome, Self::Error>> + Send;
+}
+
+pub struct ReviewWorkflowCommandService<Transaction> { /* private */ }
+impl<Transaction> ReviewWorkflowCommandService<Transaction> {
+    pub const fn new(transaction: Transaction) -> Self;
+}
+impl<Transaction: ReviewWorkflowTransaction> ReviewWorkflowCommandService<Transaction> {
+    pub async fn execute(
+        &mut self,
+        command: ReviewWorkflowCommand,
+    ) -> Result<ReviewWorkflowCommandOutcome, Transaction::Error>;
+}
+
+pub trait ReviewWorkflowReader {
+    type Error;
+
+    fn load_target(
+        &self,
+        target: ReviewTargetId,
+    ) -> impl Future<Output = Result<Option<ReviewTarget>, Self::Error>> + Send;
+    fn load_run(
+        &self,
+        run: ReviewRunId,
+    ) -> impl Future<Output = Result<Option<ReviewRun>, Self::Error>> + Send;
+    fn load_run_with_pass(
+        &self,
+        run: ReviewRunId,
+    ) -> impl Future<Output = Result<Option<(ReviewRun, Option<ReviewPass>)>, Self::Error>> + Send;
+    fn load_pass(
+        &self,
+        pass: ReviewPassId,
+    ) -> impl Future<Output = Result<Option<ReviewPass>, Self::Error>> + Send;
+    fn load_finding(
+        &self,
+        finding: ReviewFindingId,
+    ) -> impl Future<Output = Result<Option<ReviewFinding>, Self::Error>> + Send;
+    fn list_findings(
+        &self,
+        run: ReviewRunId,
+    ) -> impl Future<Output = Result<Vec<ReviewFinding>, Self::Error>> + Send;
+}
+```
+
 ## application: session_metadata
 
 ```rust
@@ -6492,6 +6613,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop                             | 23 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 4 (incl. 1 trait)    |
+| application: review_workflow                       | 8 (incl. 2 traits)   |
 | application: session_metadata                      | 12 (incl. 4 traits)  |
 | application: scheduler                             | 12 (incl. 4 traits)  |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)   |
@@ -6499,4 +6621,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **136**              |
+| **signalbox-application total**                    | **144**              |

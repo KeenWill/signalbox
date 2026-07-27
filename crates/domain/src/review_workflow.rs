@@ -2126,7 +2126,9 @@ impl ReviewPass {
                 failure: ReviewPassTransitionFailure::InvalidTransition,
             });
         }
-        if validate_pass_result(self.reference, self.kind, &next).is_some() {
+        if read_only_success_result_is_absent(self.kind, &next)
+            || validate_pass_result(self.reference, self.kind, &next).is_some()
+        {
             return Err(ReviewPassTransitionError {
                 attempt: Box::new(ReviewPassTransitionAttempt {
                     current: Box::new(self.clone()),
@@ -2258,9 +2260,8 @@ fn validate_pass_reconstitution(
     ) {
         return Some(failure);
     }
-    (input.kind == ReviewPassKind::ReadOnlyReview
-        && matches!(input.state, ReviewPassState::Succeeded { result: None, .. }))
-    .then_some(ReviewPassReconstitutionFailure::IncompatibleResult)
+    read_only_success_result_is_absent(input.kind, &input.state)
+        .then_some(ReviewPassReconstitutionFailure::IncompatibleResult)
 }
 
 fn validate_pass_turn_evidence(
@@ -2340,6 +2341,10 @@ fn pass_state_matches_turn_outcome(
             ReviewPassTurnOutcome::Cancelled
         )
     )
+}
+fn read_only_success_result_is_absent(kind: ReviewPassKind, state: &ReviewPassState) -> bool {
+    kind == ReviewPassKind::ReadOnlyReview
+        && matches!(state, ReviewPassState::Succeeded { result: None, .. })
 }
 
 fn validate_pass_result(
@@ -5059,7 +5064,10 @@ mod tests {
             ReviewPassState::Succeeded {
                 turn: turn_id(6),
                 output_frontier: frontier_id(8),
-                result: None,
+                result: Some(ReviewPassResult::ProducedFindings(
+                    ReviewProducedFindings::try_new(Vec::new())
+                        .expect("empty fixture inventory is canonical"),
+                )),
             },
             Some(ReviewPassTurnEvidence::new(
                 turn_id(6),
@@ -5070,6 +5078,29 @@ mod tests {
             )),
         )
         .expect("completed canonical turn supports success")
+    }
+
+    fn succeeded_judgment_pass() -> ReviewPass {
+        ReviewPass {
+            reference: pass_ref(3),
+            kind: ReviewPassKind::Judge,
+            session: session_id(4),
+            accepted_input: accepted_input_id(5),
+            origin_turn: turn_id(6),
+            state: ReviewPassState::Succeeded {
+                turn: turn_id(6),
+                output_frontier: frontier_id(8),
+                result: None,
+            },
+        }
+    }
+
+    fn accepted_finding_result() -> ReviewPassResult {
+        ReviewPassResult::FindingEvent(ReviewFindingEventResult::new(
+            finding_ref(10),
+            ReviewEventOrdinal::one(),
+            ReviewFindingEventResultKind::Accepted,
+        ))
     }
 
     /// Labeled target fixture whose values are arbitrary except where repeated
@@ -9165,11 +9196,8 @@ mod tests {
     /// INV-040: a terminal pass may bind its exact result once.
     #[test]
     fn inv040_terminal_pass_binds_absent_result() {
-        let result = ReviewPassResult::ProducedFindings(
-            ReviewProducedFindings::try_new(vec![finding_ref(10)])
-                .expect("fixture result is canonical"),
-        );
-        let bound = succeeded_review_pass()
+        let result = accepted_finding_result();
+        let bound = succeeded_judgment_pass()
             .bind_result(result.clone())
             .expect("compatible exact result binds");
 
@@ -9179,11 +9207,8 @@ mod tests {
     /// INV-040: replaying the equal bound pass result is idempotent.
     #[test]
     fn inv040_terminal_pass_accepts_equal_result_replay() {
-        let result = ReviewPassResult::ProducedFindings(
-            ReviewProducedFindings::try_new(vec![finding_ref(10)])
-                .expect("fixture result is canonical"),
-        );
-        let bound = succeeded_review_pass()
+        let result = accepted_finding_result();
+        let bound = succeeded_judgment_pass()
             .bind_result(result.clone())
             .expect("compatible exact result binds");
 
@@ -9199,16 +9224,16 @@ mod tests {
     /// INV-040: a distinct result cannot replace an already bound result.
     #[test]
     fn inv040_terminal_pass_rejects_distinct_result_rebind() {
-        let original = ReviewPassResult::ProducedFindings(
-            ReviewProducedFindings::try_new(vec![finding_ref(10)])
-                .expect("fixture result is canonical"),
-        );
-        let bound = succeeded_review_pass()
-            .bind_result(original)
+        let bound = succeeded_judgment_pass()
+            .bind_result(accepted_finding_result())
             .expect("compatible exact result binds");
-        let replacement = ReviewPassResult::ProducedFindings(
-            ReviewProducedFindings::try_new(Vec::new()).expect("empty result is canonical"),
-        );
+        let replacement = ReviewPassResult::FindingEvent(ReviewFindingEventResult::new(
+            finding_ref(10),
+            ReviewEventOrdinal::one(),
+            ReviewFindingEventResultKind::Rejected {
+                reason: text("another disposition"),
+            },
+        ));
         let error = bound
             .bind_result(replacement)
             .expect_err("a bound result is immutable");
@@ -9291,9 +9316,9 @@ mod tests {
         assert_eq!(error.current(), &current);
     }
 
-    /// INV-040: a terminal transition cannot bypass typed-result validation.
+    /// INV-040: read-only success admission includes its exact finding inventory.
     #[test]
-    fn inv040_pass_transition_rejects_incompatible_inline_result() {
+    fn inv040_read_only_success_transition_requires_produced_findings() {
         let mut run = ReviewRun::new(
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
@@ -9327,13 +9352,7 @@ mod tests {
                 ReviewPassState::Succeeded {
                     turn: turn_id(6),
                     output_frontier: frontier_id(8),
-                    result: Some(ReviewPassResult::ExternalLinkObservation(
-                        ReviewExternalLinkObservationResult::new(
-                            link_id(30),
-                            ReviewEventOrdinal::one(),
-                            ReviewExternalObjectState::Current,
-                        ),
-                    )),
+                    result: None,
                 },
                 Some(ReviewPassTurnEvidence::new(
                     turn_id(6),
@@ -9343,7 +9362,7 @@ mod tests {
                     Some(frontier_id(8)),
                 )),
             )
-            .expect_err("read-only review cannot inline an observation result");
+            .expect_err("read-only success must atomically bind its inventory");
 
         assert_eq!(
             error.failure(),

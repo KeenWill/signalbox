@@ -1,9 +1,11 @@
 # Review workflows
 
-This page specifies the implemented review-workflow bounded context as verified
-against the implementing stack rooted at PR #221 (`agent/review-workflow-spec`).
-It owns review targets, workflow runs, session-backed passes, findings, external
-links, and their relational store. Session execution remains owned by
+This page specifies the implemented review-workflow bounded context. Its domain
+and store foundation was verified through PR #221
+(`agent/review-workflow-spec`); this stack additionally verifies the executable
+process surface described below. It owns review targets, workflow runs,
+session-backed passes, findings, external links, and their relational store.
+Session execution remains owned by
 [sessions and transcript](sessions-and-transcript.md), turn evidence by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
 execution by [tool loop](tool-loop.md), and relational mechanics shared with the
@@ -104,7 +106,9 @@ exact origin turn. One accepted input is owned by at most one review pass. A
 pass may enter `Running` or a post-start terminal state only in the same
 relational transaction that projects its run through the corresponding state. A
 queued pass may be cancelled before start. Executable orchestration is not
-implemented; see [Open edges](#open-edges).
+inferred or scheduled automatically. The implemented caller-driven process
+surface admits a pass only after its accepted input and canonical origin turn
+exist, then binds activation to that exact turn.
 
 Pass state is:
 
@@ -347,13 +351,66 @@ record, unknown discriminator, incomplete history, or failed domain check is
 reported as corruption rather than normalized into a plausible aggregate
 (INV-040, INV-041).
 
-The first store surface creates and loads complete aggregates, idempotently
-reserves external links, attaches external identifiers, and appends external
-observations. Executable orchestration is not implemented.
+The store creates and loads complete aggregates, idempotently reserves external
+links, attaches external identifiers, appends external observations, lists a
+run's findings in identity order, and implements crash-recoverable durable
+command receipts for the caller-driven process surface.
+
+## Process and terminal surface
+
+Process protocol version eleven exposes closed requests to create a target,
+start a run and its session-backed pass, activate that pass, record its complete
+finding inventory or one finding disposition, reserve and attach external links,
+and read targets, runs with their pass, individual findings, or an
+identity-ordered run finding list. Exact wire shapes and compatibility are owned
+by [the process protocol](process-protocol.md#client-requests).
+
+Starting a run requires an existing target plus an accepted input whose
+canonical session and origin turn agree with the requested pass. Fresh run and
+pass admission commits both valid roots in one transaction. An exact retry may
+also complete a compatible run-only intermediate committed by the earlier
+multi-transaction implementation; every such intermediate remains loadable.
+Activation requires that origin turn to be the session's canonical active turn
+and atomically projects the run and pass to running. Completion requests
+authenticate the named turn's canonical terminal outcome and output frontier
+before entering the aggregate transaction.
+
+Read-only success is admission-atomic. The public command that records findings
+transitions the run and pass to succeeded, binds `ProducedFindings`, and inserts
+the complete canonical inventory in one transaction. It cannot commit succeeded
+read-only state with an absent result. The empty inventory follows that same
+path. Finding dispositions and external-link attachments likewise bind their
+exact pass result in the transaction that appends or attaches the effect. Thus
+every committed intermediate point remains a domain-reconstitutable aggregate; a
+process crash cannot expose a state that the store's own loaders classify as
+corruption.
+
+Every version-eleven review mutation carries an owner-global command identity.
+The daemon binds that identity to the digest and closed kind of the validated
+semantic request and records an append-only typed receipt. Aggregate effects may
+commit before the receipt; an equal retry recognizes the exact complete effect,
+records a missing receipt, and returns the stable result. Once recorded, the
+receipt is inspected before mutable aggregate-state validation and carries every
+fact needed to return the original response, so a later aggregate state cannot
+turn an equal retry into a rejection. Distinct reuse fails closed. The
+representation choice and rejected alternatives are recorded in the
+[durable review-command decision](../decisions.md#2026-07-26--recover-review-commands-from-their-exact-aggregate-effects).
+
+The terminal client exposes target creation, run admission and activation,
+single-finding read-only completion, finding listing, and target, run, and
+finding reads. A run read reconstructs the run and its optional recorded pass
+from one repeatable-read snapshot, so the response cannot combine lifecycle
+projections from different commits. Mutation commands print their generated
+command identity before socket I/O so an ambiguous attempt can be retried
+exactly. Process-derived text uses the terminal-safe rendering contract owned by
+the process protocol.
 
 ## Open edges
 
-- [Review-workflow orchestration](../open-questions.md#destination-features-target-model).
+- Automatic scheduling, provider/model/workspace adapter seams, prompts,
+  automatic publication and repair, conflict escalation, and merge-based stack
+  propagation remain under
+  [review-workflow orchestration](../open-questions.md#destination-features-target-model).
 - [Artifacts](../open-questions.md#general-purpose-artifacts) remain a separate
   future aggregate; review workflow rows contain references and evidence, not
   copied general-purpose artifacts.
