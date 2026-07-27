@@ -20,8 +20,10 @@ The check is deterministic and offline. It verifies:
    not leave the reference's own block. ``docs/spec/README.md`` states this
    format; this check enforces it and verifies that each historical token
    names the exact source branch of a PR merge commit reachable from ``HEAD``.
-   Tokens for one in-flight PR may instead match the checked-out branch locally or the
-   pull-request number and head branch in the GitHub Actions event.
+   Tokens for one in-flight PR may instead match the checked-out branch locally
+   or the pull-request number and head branch in the GitHub Actions event. An
+   event build also accepts unmerged verification identities inherited from the
+   event's exact base commit.
 
 External links and semantic freshness beyond reachability are outside this
 check. Run from any directory; exits nonzero with one stable line per
@@ -265,6 +267,14 @@ RUST_TEST_ATTRIBUTE = re.compile(
     r"test(?=[ \t\r\n(\]])[^\]]*\]",
     re.IGNORECASE,
 )
+RUST_ATTRIBUTE = re.compile(r"#\[(?P<meta>[^\]]*)\]", re.DOTALL)
+RUST_CFG_ATTR_META = re.compile(
+    r"^cfg_attr[ \t\r\n]*\((?P<body>.*)\)[ \t\r\n]*$", re.DOTALL
+)
+RUST_TEST_META = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_]*::)*test(?=[ \t\r\n(]|$)", re.IGNORECASE
+)
+RUST_RAW_STRING_OPEN = re.compile(r'(?:br|rb|r)(?P<hashes>#{0,255})"')
 PULL_REQUEST_MERGE = re.compile(
     r"^Merge pull request #(?P<number>[1-9][0-9]*) from "
     r"[^/\s]+/(?P<branch>[^\r\n]+)$",
@@ -310,6 +320,117 @@ def mask_range(buffer: list[str], start: int, end: int) -> None:
     for index in range(start, end):
         if buffer[index] not in "\r\n":
             buffer[index] = " "
+
+
+def mask_rust_non_code(text: str) -> str:
+    """Mask Rust comments and literals while preserving offsets and newlines."""
+    buffer = list(text)
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index + 2)
+            end = len(text) if end == -1 else end
+            mask_range(buffer, index, end)
+            index = end
+            continue
+        if text.startswith("/*", index):
+            end = index + 2
+            depth = 1
+            while end < len(text) and depth:
+                if text.startswith("/*", end):
+                    depth += 1
+                    end += 2
+                elif text.startswith("*/", end):
+                    depth -= 1
+                    end += 2
+                else:
+                    end += 1
+            mask_range(buffer, index, end)
+            index = end
+            continue
+
+        token_boundary = index == 0 or not (
+            text[index - 1].isalnum() or text[index - 1] == "_"
+        )
+        raw = RUST_RAW_STRING_OPEN.match(text, index) if token_boundary else None
+        if raw is not None:
+            closer = '"' + raw.group("hashes")
+            end = text.find(closer, raw.end())
+            end = len(text) if end == -1 else end + len(closer)
+            mask_range(buffer, index, end)
+            index = end
+            continue
+
+        quote_start = index
+        if token_boundary and text.startswith(("b\"", "c\""), index):
+            quote_start += 1
+        if text[quote_start : quote_start + 1] == '"':
+            end = quote_start + 1
+            while end < len(text):
+                if text[end] == "\\":
+                    end = min(end + 2, len(text))
+                elif text[end] == '"':
+                    end += 1
+                    break
+                else:
+                    end += 1
+            mask_range(buffer, index, end)
+            index = end
+            continue
+
+        char_start = index + 1 if text.startswith("b'", index) else index
+        if token_boundary and text[char_start : char_start + 1] == "'":
+            end = char_start + 1
+            escaped = False
+            while end < len(text) and text[end] not in "\r\n":
+                if escaped:
+                    escaped = False
+                elif text[end] == "\\":
+                    escaped = True
+                elif text[end] == "'":
+                    end += 1
+                    mask_range(buffer, index, end)
+                    index = end
+                    break
+                end += 1
+            else:
+                index += 1
+            continue
+
+        index += 1
+    return "".join(buffer)
+
+
+def split_rust_meta_items(body: str) -> list[str]:
+    """Split one attribute argument list at top-level commas."""
+    items: list[str] = []
+    start = 0
+    depth = 0
+    for index, character in enumerate(body):
+        if character in "([{":
+            depth += 1
+        elif character in ")]}" and depth:
+            depth -= 1
+        elif character == "," and depth == 0:
+            items.append(body[start:index])
+            start = index + 1
+    items.append(body[start:])
+    return items
+
+
+def rust_cfg_attr_has_test(prefix: str) -> bool:
+    """Return whether a cfg_attr applies a test attribute when enabled."""
+    for attribute in RUST_ATTRIBUTE.finditer(prefix):
+        cfg_attr = RUST_CFG_ATTR_META.fullmatch(attribute.group("meta").strip())
+        if cfg_attr is None:
+            continue
+        items = split_rust_meta_items(cfg_attr.group("body"))
+        if any(
+            RUST_TEST_META.match(item.strip()) is not None
+            for item in items[1:]
+        ):
+            return True
+    return False
 
 
 def strip_block_quote_containers(line: str) -> str:
@@ -1016,7 +1137,7 @@ def extract_reference_links(
                 MarkdownLink(
                     label=label,
                     destination=definition.destination,
-                    offset=definition.offset,
+                    offset=index,
                 )
             )
         index = end
@@ -1356,13 +1477,20 @@ def named_tests(
 def rust_test_invariant_tags(text: str) -> list[tuple[str, int]]:
     """Return distinct INV tags and declaration lines from Rust tests."""
     found: dict[str, int] = {}
-    for declaration in RUST_TEST_DECLARATION.finditer(text):
-        raw_prefix = declaration.group("prefix")
+    code = mask_rust_non_code(text)
+    for declaration in RUST_TEST_DECLARATION.finditer(code):
+        raw_prefix = text[
+            declaration.start("prefix") : declaration.end("prefix")
+        ]
         prefix_buffer = list(raw_prefix)
         for comment in RUST_NON_DOC_COMMENT.finditer(raw_prefix):
             mask_range(prefix_buffer, comment.start(), comment.end())
         metadata_prefix = "".join(prefix_buffer)
-        if RUST_TEST_ATTRIBUTE.search(metadata_prefix) is None:
+        code_prefix = declaration.group("prefix")
+        if (
+            RUST_TEST_ATTRIBUTE.search(code_prefix) is None
+            and not rust_cfg_attr_has_test(code_prefix)
+        ):
             continue
         doc_comments = "\n".join(
             comment.group(0)
@@ -1790,26 +1918,71 @@ def current_checkout_branch(root: Path) -> str | None:
     return branch or None
 
 
-def github_pull_request_event() -> tuple[tuple[int, str] | None, str | None]:
-    """Read the current GitHub pull-request identity from its local event."""
+def github_pull_request_event(
+) -> tuple[tuple[int, str] | None, str | None, str | None]:
+    """Read the current PR identity and exact base commit from its event."""
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     if event_path is None:
-        return None, None
+        return None, None, None
     try:
         payload = json.loads(Path(event_path).read_text(encoding="utf-8"))
         number = payload["number"]
         branch = payload["pull_request"]["head"]["ref"]
+        base_sha = payload["pull_request"].get("base", {}).get("sha")
         if type(number) is not int or not isinstance(branch, str) or not branch:
             raise ValueError("pull-request number or head branch has the wrong type")
+        if base_sha is not None and (
+            not isinstance(base_sha, str)
+            or re.fullmatch(r"[0-9a-fA-F]{40}", base_sha) is None
+        ):
+            raise ValueError("pull-request base SHA has the wrong type or shape")
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
-        return None, str(error)
-    return (number, branch), None
+        return None, None, str(error)
+    return (number, branch), base_sha, None
+
+
+def verification_reference_identities(text: str) -> set[tuple[int, str]]:
+    """Return positive verification identities from one specification page."""
+    text = mask_block_content(text)
+    code_ranges = inline_code_ranges(text)
+    identities: set[tuple[int, str]] = set()
+    for reference in VERIFICATION_LEAD.finditer(text):
+        candidate_start = reference.start("pr")
+        if offset_in_ranges(reference.start(), code_ranges) or offset_in_ranges(
+            candidate_start, code_ranges
+        ):
+            continue
+        if verification_is_negated(text, reference.start()):
+            continue
+        token = PR_TOKEN.match(text, candidate_start)
+        if token is not None:
+            identities.add((int(token.group(1)), token.group(2)))
+    return identities
+
+
+def inherited_verification_identities(
+    root: Path, source: Path, base_sha: str | None
+) -> set[tuple[int, str]]:
+    """Read identities already present in this page at the event base commit."""
+    if base_sha is None:
+        return set()
+    source_label = repository_path(root, source)
+    result = subprocess.run(
+        ["git", "show", f"{base_sha}:{source_label}"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return set()
+    return verification_reference_identities(result.stdout)
 
 
 def check_spec_verification_references(root: Path) -> list[Violation]:
     violations: list[Violation] = []
     reachable_branches, history_error = reachable_pull_request_branches(root)
-    event_pull_request, event_error = github_pull_request_event()
+    event_pull_request, event_base_sha, event_error = github_pull_request_event()
     github_event_present = "GITHUB_EVENT_PATH" in os.environ
     checkout_branch = current_checkout_branch(root)
     in_flight_identity: tuple[int, str] | None = None
@@ -1820,6 +1993,9 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
         text = mask_block_content(source.read_text(encoding="utf-8"))
         source_label = repository_path(root, source)
         code_ranges = inline_code_ranges(text)
+        inherited_identities = inherited_verification_identities(
+            root, source, event_base_sha
+        )
         valid_reference = False
 
         for reference in VERIFICATION_LEAD.finditer(text):
@@ -1844,11 +2020,12 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                 local_match = (
                     not github_event_present and branch == checkout_branch
                 )
+                inherited_match = (number, branch) in inherited_identities
                 in_flight_match = (
                     number not in reachable_branches
                     and (event_match or local_match)
                 )
-                if historical_match:
+                if historical_match or inherited_match:
                     continue
                 if in_flight_match:
                     candidate_identity = (number, branch)

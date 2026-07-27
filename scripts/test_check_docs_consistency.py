@@ -51,6 +51,27 @@ def run_git(root: Path, *arguments: str) -> None:
     )
 
 
+def git_output(root: Path, *arguments: str) -> str:
+    """Return output from one deterministic local-only Git fixture command."""
+    disabled_hooks = root / ".disabled-git-hooks"
+    disabled_hooks.mkdir(exist_ok=True)
+    result = subprocess.run(
+        [
+            "git",
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            f"core.hooksPath={disabled_hooks}",
+            *arguments,
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
 def initialize_git_history(root: Path) -> str:
     """Create one reachable GitHub-style PR merge for the baseline fixture."""
     merged_branch = "agent/example"
@@ -354,6 +375,77 @@ class DocsConsistencyTests(unittest.TestCase):
             ["invariant-registration"],
         )
         self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_cfg_attr_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[cfg_attr(test, test)]\n"
+            "fn s01_inv_001_cfg_attr_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_cfg_predicate_test_token_does_not_mark_function_as_test(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[cfg_attr(any(unix, test), allow(dead_code))]\n"
+            "fn s01_inv_001_production_context() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_test_declaration_inside_comment_is_ignored(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "/*\n"
+            "#[test]\n"
+            "fn s01_inv_001_commented_example() {}\n"
+            "*/\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_test_declarations_inside_string_literals_are_ignored(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "const RAW_EXAMPLE: &str = r###\"\n"
+            "#[test]\n"
+            "fn s01_inv_001_raw_string_example() {}\n"
+            "\"###;\n"
+            "const STRING_EXAMPLE: &str = \"#[test]\\nfn "
+            "s01_inv_001_string_example() {}\";\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_reference_style_citation_keeps_occurrence_order(self) -> None:
+        (self.root / "src/tagged.rs").write_text(
+            "#[test]\nfn s01_inv_001_tagged_test() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/named.rs").write_text(
+            "#[test]\nfn named_test() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | INV-001-tagged tests in "
+            "[`src/tagged.rs`][tagged]. Named tests in "
+            "[`src/named.rs`][named]. |\n\n"
+            "[named]: ../src/named.rs\n"
+            "[tagged]: ../src/tagged.rs\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
 
     def test_tagged_claim_applies_only_to_following_link_group(self) -> None:
         (self.root / "src/named.rs").write_text(
@@ -1561,6 +1653,33 @@ class DocsConsistencyTests(unittest.TestCase):
             "## Provider bridge and `current_time`\n\n"
             "## Repeat\n\n"
             "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(failures, [])
+
+    def test_github_event_accepts_verification_inherited_from_exact_base(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-base")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/stack-base`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+        run_git(self.root, "add", "docs/spec/example.md")
+        run_git(self.root, "commit", "-q", "-m", "stack base fixture")
+        base_sha = git_output(self.root, "rev-parse", "HEAD")
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-child")
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 100, "pull_request": {'
+            '"head": {"ref": "agent/stack-child"}, '
+            f'"base": {{"sha": "{base_sha}"}}}}}}',
             encoding="utf-8",
         )
 
