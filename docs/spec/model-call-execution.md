@@ -22,7 +22,9 @@ were verified through PR #258 (`agent/signalboxd-rename`); the
 model-call cause codes were verified through PR #280
 (`agent/provider-identity-normalization`). The complete frontier-payload
 projection and identity-before-terminal-evidence precedence were verified
-through PR #288 (`agent/audit-fix-docs-coherence`). Invariant tags cite
+through PR #288 (`agent/audit-fix-docs-coherence`). Provider-reported token
+evidence retention and exact commit-ambiguity comparison were verified through
+PR #301 (`agent/token-usage`). Invariant tags cite
 [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle

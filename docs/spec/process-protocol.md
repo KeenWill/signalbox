@@ -30,8 +30,9 @@ stack therefore takes version ten, verified through PR #294
 (`agent/continue-imported-conversation`). The review-workflow surface adds
 protocol version eleven. Versions twelve and thirteen are reserved by concurrent
 streaming and steering work. Provider-reported model-call token evidence
-therefore takes version fourteen. The implementation here speaks versions one
-through eight, ten, eleven, and fourteen while nine, twelve, and thirteen remain
+therefore takes version fourteen, verified through PR #301
+(`agent/token-usage`). The implementation here speaks versions one through
+eight, ten, eleven, and fourteen while nine, twelve, and thirteen remain
 unsupported, and its terminal client selects version fourteen. Its `search` verb
 over version four's metadata list was verified through PR #283
 (`agent/session-search-cli`; terminal client surface only). This page's

@@ -10,15 +10,17 @@ proof was verified through PR #265 (`agent/tool-batch-tier0`); the
 (`agent/signalboxd-rename`); the model-identity frontier shape was verified
 through PR #272 (`agent/mid-session-model`). The current classifier names,
 ambiguity reconstitution facts, and command-adapter boundaries were verified
-through PR #288 (`agent/audit-fix-docs-coherence`). This page covers the
-Postgres representation in `crates/persistence` (source and migrations),
-migration discipline, durable command storage and replay equality, the
-fail-closed reconstitution boundary, the lock protocol, pending-steering durable
-state, the corruption taxonomy, commit-ambiguity handling, and the transactional
-outbox. Session aggregate semantics live in
-[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
-lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
-identity kinds and command construction in
+through PR #288 (`agent/audit-fix-docs-coherence`). The terminal model-call
+token evidence columns and transcript reader were verified through PR #301
+(`agent/token-usage`). This page covers the Postgres representation in
+`crates/persistence` (source and migrations), migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
 [docs/invariants.md](../invariants.md); this page cites rows by tag.
