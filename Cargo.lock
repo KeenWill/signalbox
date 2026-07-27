@@ -2752,16 +2752,62 @@ dependencies = [
 ]
 
 [[package]]
-name = "signalboxd"
+name = "signalbox-tool-contract"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "signalbox-application",
+ "signalbox-domain",
+]
+
+[[package]]
+name = "signalbox-tools-basic"
 version = "0.0.0"
 dependencies = [
  "expect-test",
  "futures-util",
  "jiff",
  "reqwest",
- "rustix",
  "rustls",
  "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-persistence",
+ "signalbox-tool-contract",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "signalbox-tools-code-host"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "futures-util",
+ "reqwest",
+ "rustls",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-model-runtime",
+ "signalbox-tool-contract",
+ "signalbox-tools-basic",
+ "tokio",
+]
+
+[[package]]
+name = "signalboxd"
+version = "0.0.0"
+dependencies = [
+ "rustix",
  "serde",
  "serde_json",
  "signalbox-application",
@@ -2773,6 +2819,8 @@ dependencies = [
  "signalbox-model-runtime-anthropic",
  "signalbox-persistence",
  "signalbox-process-protocol",
+ "signalbox-tools-basic",
+ "signalbox-tools-code-host",
  "sqlx",
  "tempfile",
  "testcontainers-modules",

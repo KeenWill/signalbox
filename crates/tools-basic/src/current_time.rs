@@ -16,9 +16,11 @@ use signalbox_domain::{
     NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
 };
 
-use crate::tool_contract::{ToolContract, ToolContractCompileError, compile_contract_definition};
+use signalbox_tool_contract::{
+    ToolContract, ToolContractCompileError, compile_contract_definition,
+};
 
-pub(crate) const CURRENT_TIME_NAME: &str = "current_time";
+pub const CURRENT_TIME_NAME: &str = "current_time";
 const INVALID_ARGUMENTS_DETAIL: &str = "expected an object with one optional IANA timezone string";
 const CLOCK_OUT_OF_RANGE_DETAIL: &str = "current time is outside the supported range";
 const OFFSET_NOT_RFC3339_DETAIL: &str =
@@ -220,7 +222,7 @@ where
 /// Typed `current_time` argument shape; decoder and rendered schema share it.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CurrentTimeArguments {
+pub struct CurrentTimeArguments {
     /// Optional IANA time-zone name; defaults to UTC.
     #[serde(default, deserialize_with = "present_time_zone_only")]
     #[schemars(with = "IanaTimeZone")]
