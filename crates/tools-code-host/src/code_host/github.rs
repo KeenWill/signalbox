@@ -10,7 +10,7 @@ use reqwest::{
 };
 use signalbox_model_runtime::CredentialValue;
 
-use crate::web_fetch::{
+use signalbox_tools_basic::{
     PublicDestinationClientError, has_more_response_bytes, public_destination_client,
 };
 

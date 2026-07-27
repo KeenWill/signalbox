@@ -14,7 +14,7 @@ use signalbox_domain::{ToolEffectClass, ToolName, ToolPermissionDefault};
 
 /// One daemon tool's model-facing contract: registry name, description, and
 /// the typed argument shape its schema is derived from.
-pub(crate) trait ToolContract {
+pub trait ToolContract {
     /// Typed argument shape decoded by serde and rendered by schemars.
     type Arguments: DeserializeOwned + JsonSchema;
 
@@ -27,7 +27,7 @@ pub(crate) trait ToolContract {
 
 /// A static contract could not compile into a registry definition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ToolContractCompileError {
+pub enum ToolContractCompileError {
     /// The contract name was rejected by the registry name rules.
     Name,
     /// The rendered schema was rejected by the registry schema rules.
@@ -45,7 +45,7 @@ pub(crate) enum ToolContractCompileError {
 /// doc comments stay: they render as the per-property descriptions. Argument
 /// newtypes implement [`JsonSchema::inline_schema`], so the rendered object
 /// references no external definitions.
-pub(crate) fn rendered_contract_schema<Contract: ToolContract + ?Sized>() -> serde_json::Value {
+pub fn rendered_contract_schema<Contract: ToolContract + ?Sized>() -> serde_json::Value {
     let mut value = schemars::SchemaGenerator::default()
         .into_root_schema_for::<Contract::Arguments>()
         .to_value();
@@ -62,7 +62,7 @@ pub(crate) fn rendered_contract_schema<Contract: ToolContract + ?Sized>() -> ser
 /// Permission default and effect class stay declaration-site facts: they are
 /// execution policy, not argument shape, and each tool states them beside its
 /// executor wiring.
-pub(crate) fn compile_contract_definition<Contract: ToolContract + ?Sized>(
+pub fn compile_contract_definition<Contract: ToolContract + ?Sized>(
     permission_default: ToolPermissionDefault,
     effect_class: ToolEffectClass,
 ) -> Result<ToolDefinition, ToolContractCompileError> {

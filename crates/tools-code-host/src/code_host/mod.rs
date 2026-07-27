@@ -19,13 +19,13 @@ use std::{error::Error, fmt, future::Future};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     OperatorFailureClass, ToolArgumentValidator, ToolDefinition, ToolExecutionInvocation,
-    ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
+    ToolExecutor, ToolExecutorEvidence,
 };
 use signalbox_domain::{
-    NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolName,
-    ToolPermissionDefault,
+    NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialReference, CredentialValue};
+use signalbox_tool_contract::{ToolContractCompileError, compile_contract_definition};
 
 pub use arguments::{
     CodeHostChangeRequestNumber, CodeHostCommentBody, CodeHostFilePath, CodeHostOpaqueId,
@@ -45,9 +45,9 @@ pub use github::{GitHubCodeHostConstructionError, GitHubCodeHostTransport};
 pub use result::{
     ChangeRequestCommentResult, ChangeRequestSummaryFields, ChangeRequestSummaryResult,
     ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult, CiJobLogResult,
-    CodeHostResult, CodeHostResultCompleteness, FilePatchResult, RerunFailedJobsResult,
-    ReviewThread, ReviewThreadComment, ReviewThreadFields, ReviewThreadResolution,
-    ReviewThreadsResult, ThreadReplyResult, ThreadResolveResult,
+    CodeHostResult, CodeHostResultCompleteness, CodeHostUrl, FilePatchResult,
+    RerunFailedJobsResult, ReviewThread, ReviewThreadComment, ReviewThreadFields,
+    ReviewThreadResolution, ReviewThreadsResult, ThreadReplyResult, ThreadResolveResult,
 };
 
 /// Non-secret name of the daemon-held code-host credential.
@@ -147,33 +147,46 @@ impl CodeHostToolKind {
         }
     }
 
-    const fn description(self) -> &'static str {
+    fn definition(self) -> Result<ToolDefinition, ToolContractCompileError> {
+        let permission = self.permission();
         match self {
-            Self::Summary => change_request_summary::DESCRIPTION,
-            Self::ChangedFiles => change_request_changed_files::DESCRIPTION,
-            Self::FilePatch => change_request_file_patch::DESCRIPTION,
-            Self::ChecksStatus => change_request_checks_status::DESCRIPTION,
-            Self::Comment => change_request_comment::DESCRIPTION,
-            Self::ReviewThreads => change_request_review_threads::DESCRIPTION,
-            Self::ThreadReply => change_request_thread_reply::DESCRIPTION,
-            Self::ThreadResolve => change_request_thread_resolve::DESCRIPTION,
-            Self::CiJobLog => change_request_ci_job_log::DESCRIPTION,
-            Self::RerunFailedJobs => change_request_rerun_failed_jobs::DESCRIPTION,
-        }
-    }
-
-    const fn schema(self) -> &'static str {
-        match self {
-            Self::Summary => change_request_summary::SCHEMA,
-            Self::ChangedFiles => change_request_changed_files::SCHEMA,
-            Self::FilePatch => change_request_file_patch::SCHEMA,
-            Self::ChecksStatus => change_request_checks_status::SCHEMA,
-            Self::Comment => change_request_comment::SCHEMA,
-            Self::ReviewThreads => change_request_review_threads::SCHEMA,
-            Self::ThreadReply => change_request_thread_reply::SCHEMA,
-            Self::ThreadResolve => change_request_thread_resolve::SCHEMA,
-            Self::CiJobLog => change_request_ci_job_log::SCHEMA,
-            Self::RerunFailedJobs => change_request_rerun_failed_jobs::SCHEMA,
+            Self::Summary => compile_contract_definition::<change_request_summary::Contract>(
+                permission,
+                ToolEffectClass::ExternalEffect,
+            ),
+            Self::ChangedFiles => compile_contract_definition::<
+                change_request_changed_files::Contract,
+            >(permission, ToolEffectClass::ExternalEffect),
+            Self::FilePatch => compile_contract_definition::<change_request_file_patch::Contract>(
+                permission,
+                ToolEffectClass::ExternalEffect,
+            ),
+            Self::ChecksStatus => compile_contract_definition::<
+                change_request_checks_status::Contract,
+            >(permission, ToolEffectClass::ExternalEffect),
+            Self::Comment => compile_contract_definition::<change_request_comment::Contract>(
+                permission,
+                ToolEffectClass::ExternalEffect,
+            ),
+            Self::ReviewThreads => compile_contract_definition::<
+                change_request_review_threads::Contract,
+            >(permission, ToolEffectClass::ExternalEffect),
+            Self::ThreadReply => {
+                compile_contract_definition::<change_request_thread_reply::Contract>(
+                    permission,
+                    ToolEffectClass::ExternalEffect,
+                )
+            }
+            Self::ThreadResolve => compile_contract_definition::<
+                change_request_thread_resolve::Contract,
+            >(permission, ToolEffectClass::ExternalEffect),
+            Self::CiJobLog => compile_contract_definition::<change_request_ci_job_log::Contract>(
+                permission,
+                ToolEffectClass::ExternalEffect,
+            ),
+            Self::RerunFailedJobs => compile_contract_definition::<
+                change_request_rerun_failed_jobs::Contract,
+            >(permission, ToolEffectClass::ExternalEffect),
         }
     }
 
@@ -354,17 +367,10 @@ impl<Credentials, Transport> CodeHostTools<Credentials, Transport> {
                 .map_err(|_| CodeHostToolsConstructionError::ErrorDetail)?;
         let mut compiled = Vec::with_capacity(CodeHostToolKind::ALL.len());
         for kind in CodeHostToolKind::ALL {
-            let name = ToolName::try_new(String::from(kind.name()))
-                .map_err(|_| CodeHostToolsConstructionError::Name)?;
-            let schema = ToolInputSchema::try_new(String::from(kind.schema()))
-                .map_err(|_| CodeHostToolsConstructionError::Schema)?;
-            let definition = ToolDefinition::new(
-                name,
-                String::from(kind.description()),
-                schema,
-                kind.permission(),
-                ToolEffectClass::ExternalEffect,
-            );
+            let definition = kind.definition().map_err(|error| match error {
+                ToolContractCompileError::Name => CodeHostToolsConstructionError::Name,
+                ToolContractCompileError::Schema => CodeHostToolsConstructionError::Schema,
+            })?;
             compiled.push(CompiledTool::new(
                 definition,
                 CodeHostArgumentValidator {
@@ -613,7 +619,9 @@ impl CredentialScrubber {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::Expect;
     use signalbox_application::ToolCatalog;
+    use signalbox_domain::ToolName;
 
     use super::*;
 
@@ -640,6 +648,19 @@ mod tests {
             .expect("fixture declaration exists");
         assert_eq!(definition.permission_default(), permission);
         assert_eq!(definition.effect_class(), ToolEffectClass::ExternalEffect);
+    }
+
+    #[track_caller]
+    fn assert_schema(name: &str, expected: Expect) {
+        let catalog = catalog();
+        let definition = catalog
+            .definition(&ToolName::try_new(name.to_owned()).expect("fixture name is admitted"))
+            .expect("fixture declaration exists");
+        let schema: serde_json::Value = serde_json::from_str(definition.input_schema().as_str())
+            .expect("registry schema is valid JSON");
+
+        expected.assert_eq(&format!("{schema:#}"));
+        assert_eq!(definition.input_schema().as_str(), schema.to_string());
     }
 
     #[track_caller]
@@ -704,6 +725,347 @@ mod tests {
             change_request_rerun_failed_jobs::NAME,
             ToolPermissionDefault::Confirm,
         );
+    }
+
+    /// Complete model-facing schema for `change_request_summary`.
+    #[test]
+    fn change_request_summary_schema_is_the_exact_wire_artifact() {
+        assert_schema(
+            change_request_summary::NAME,
+            expect_test::expect![[r#"
+            {
+              "additionalProperties": false,
+              "properties": {
+                "number": {
+                  "description": "Change-request number.",
+                  "maximum": 2147483647,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "repository": {
+                  "description": "Exact owner/repository spelling.",
+                  "maxLength": 256,
+                  "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "repository",
+                "number"
+              ],
+              "type": "object"
+            }"#]],
+        );
+    }
+
+    /// Complete model-facing schema for `change_request_changed_files`.
+    #[test]
+    fn change_request_changed_files_schema_is_the_exact_wire_artifact() {
+        assert_schema(
+            change_request_changed_files::NAME,
+            expect_test::expect![[r#"
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "number": {
+                      "description": "Change-request number.",
+                      "maximum": 2147483647,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "repository": {
+                      "description": "Exact owner/repository spelling.",
+                      "maxLength": 256,
+                      "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "repository",
+                    "number"
+                  ],
+                  "type": "object"
+                }"#]],
+        );
+    }
+
+    /// Complete model-facing schema for `change_request_file_patch`.
+    #[test]
+    fn change_request_file_patch_schema_is_the_exact_wire_artifact() {
+        assert_schema(
+            change_request_file_patch::NAME,
+            expect_test::expect![[r#"
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "number": {
+                      "description": "Change-request number.",
+                      "maximum": 2147483647,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "path": {
+                      "description": "Exact repository-relative changed path.",
+                      "maxLength": 4096,
+                      "minLength": 1,
+                      "pattern": "^[^/\\u0000][^\\u0000]*$",
+                      "type": "string"
+                    },
+                    "repository": {
+                      "description": "Exact owner/repository spelling.",
+                      "maxLength": 256,
+                      "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "repository",
+                    "number",
+                    "path"
+                  ],
+                  "type": "object"
+                }"#]],
+        );
+    }
+
+    /// Complete model-facing schema for `change_request_checks_status`.
+    #[test]
+    fn change_request_checks_status_schema_is_the_exact_wire_artifact() {
+        assert_schema(
+            change_request_checks_status::NAME,
+            expect_test::expect![[r#"
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "repository": {
+                      "description": "Exact owner/repository spelling.",
+                      "maxLength": 256,
+                      "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+                      "type": "string"
+                    },
+                    "revision": {
+                      "description": "Exact lowercase 40-hex head revision.",
+                      "maxLength": 40,
+                      "minLength": 40,
+                      "pattern": "^[0-9a-f]{40}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "repository",
+                    "revision"
+                  ],
+                  "type": "object"
+                }"#]],
+        );
+    }
+
+    /// Complete model-facing schema for `change_request_comment`.
+    #[test]
+    fn change_request_comment_schema_is_the_exact_wire_artifact() {
+        assert_schema(
+            change_request_comment::NAME,
+            expect_test::expect![[r#"
+            {
+              "additionalProperties": false,
+              "properties": {
+                "body": {
+                  "description": "Exact nonempty comment body.",
+                  "maxLength": 65536,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]+$",
+                  "type": "string"
+                },
+                "number": {
+                  "description": "Change-request number.",
+                  "maximum": 2147483647,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "repository": {
+                  "description": "Exact owner/repository spelling.",
+                  "maxLength": 256,
+                  "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "repository",
+                "number",
+                "body"
+              ],
+              "type": "object"
+            }"#]],
+        );
+    }
+
+    /// Complete model-facing schema for `change_request_review_threads`.
+    #[test]
+    fn change_request_review_threads_schema_is_the_exact_wire_artifact() {
+        assert_schema(
+            change_request_review_threads::NAME,
+            expect_test::expect![[r#"
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "number": {
+                      "description": "Change-request number.",
+                      "maximum": 2147483647,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "repository": {
+                      "description": "Exact owner/repository spelling.",
+                      "maxLength": 256,
+                      "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "repository",
+                    "number"
+                  ],
+                  "type": "object"
+                }"#]],
+        );
+    }
+
+    /// Complete model-facing schema for `change_request_thread_reply`.
+    #[test]
+    fn change_request_thread_reply_schema_is_the_exact_wire_artifact() {
+        assert_schema(
+            change_request_thread_reply::NAME,
+            expect_test::expect![[r#"
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "body": {
+                      "description": "Exact nonempty reply body.",
+                      "maxLength": 65536,
+                      "minLength": 1,
+                      "pattern": "^[^\\u0000]+$",
+                      "type": "string"
+                    },
+                    "thread_id": {
+                      "description": "Opaque review-thread node identity.",
+                      "maxLength": 512,
+                      "minLength": 1,
+                      "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "thread_id",
+                    "body"
+                  ],
+                  "type": "object"
+                }"#]],
+        );
+    }
+
+    /// Complete model-facing schema for `change_request_thread_resolve`.
+    #[test]
+    fn change_request_thread_resolve_schema_is_the_exact_wire_artifact() {
+        assert_schema(
+            change_request_thread_resolve::NAME,
+            expect_test::expect![[r#"
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "thread_id": {
+                      "description": "Opaque review-thread node identity.",
+                      "maxLength": 512,
+                      "minLength": 1,
+                      "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "thread_id"
+                  ],
+                  "type": "object"
+                }"#]],
+        );
+    }
+
+    /// Complete model-facing schema for `change_request_ci_job_log`.
+    #[test]
+    fn change_request_ci_job_log_schema_is_the_exact_wire_artifact() {
+        assert_schema(
+            change_request_ci_job_log::NAME,
+            expect_test::expect![[r#"
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "job_id": {
+                      "description": "GitHub Actions job identity.",
+                      "maximum": 18446744073709551615,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "repository": {
+                      "description": "Exact owner/repository spelling.",
+                      "maxLength": 256,
+                      "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "repository",
+                    "job_id"
+                  ],
+                  "type": "object"
+                }"#]],
+        );
+    }
+
+    /// Complete model-facing schema for `change_request_rerun_failed_jobs`.
+    #[test]
+    fn change_request_rerun_failed_jobs_schema_is_the_exact_wire_artifact() {
+        assert_schema(
+            change_request_rerun_failed_jobs::NAME,
+            expect_test::expect![[r#"
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "repository": {
+                      "description": "Exact owner/repository spelling.",
+                      "maxLength": 256,
+                      "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+                      "type": "string"
+                    },
+                    "run_id": {
+                      "description": "GitHub Actions workflow-run identity.",
+                      "maximum": 18446744073709551615,
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "repository",
+                    "run_id"
+                  ],
+                  "type": "object"
+                }"#]],
+        );
+    }
+
+    /// The result URL newtype advertises the absolute HTTPS shape and sound
+    /// code-point bound corresponding to its checked byte cap.
+    #[test]
+    fn code_host_url_schema_states_its_checked_shape() {
+        let schema = <CodeHostUrl as schemars::JsonSchema>::json_schema(
+            &mut schemars::SchemaGenerator::default(),
+        );
+
+        expect_test::expect![[r#"
+            {
+              "format": "uri",
+              "maxLength": 8192,
+              "pattern": "^https://[^/@\\u0000-\\u0020\\u007F-\\u009F]+(?:[/?#]|$)",
+              "type": "string"
+            }"#]]
+        .assert_eq(&format!("{:#}", schema.to_value()));
     }
 
     /// Summary arguments decode into a checked repository and positive number.
