@@ -3249,7 +3249,10 @@ fn reconstitute_inner(
                     // consumer is correlated through its assistant entries
                     // (validated by the assistant-content law) and its exact
                     // frontier window (validated below), not through the
-                    // current phase or the turn's terminal call.
+                    // current phase or the turn's terminal call. Only a tool
+                    // proposal keeps a completed call's turn going, so a
+                    // text-only completed consumer stays bound to the
+                    // terminal correlation below.
                     let completed_history_consumer = !matches!(
                         &record.state,
                         AcceptedInputTurnSchedulingRecordState::Queued
@@ -3257,7 +3260,20 @@ fn reconstitute_inner(
                         == crate::ModelCallReconstitutionState::Terminal(
                             ModelCallDisposition::Completed,
                         )
-                        && assistant_by_call.contains_key(&model_call.id());
+                        && assistant_by_call
+                            .get(&model_call.id())
+                            .is_some_and(|entries| {
+                                entries.iter().any(|entry| {
+                                    matches!(
+                                        semantic_entries
+                                            .get(entry)
+                                            .map(SemanticTranscriptEntry::payload),
+                                        Some(
+                                            SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                                        )
+                                    )
+                                })
+                            });
                     let lifecycle_matches = completed_history_consumer
                         || match &record.state {
                     AcceptedInputTurnSchedulingRecordState::Queued => false,
@@ -9452,6 +9468,45 @@ mod tests {
             )];
         assert_eq!(
             assert_input_rejects_unchanged(crash_lost_attempt.input()),
+            AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                accepted_input: consumed.accepted_input(),
+            }
+        );
+    }
+
+    /// S02 / S08 / INV-016 / INV-036: only a tool proposal keeps a completed
+    /// consumer's turn going, so a text-only completed consumer inside an
+    /// active turn cannot claim the historical-consumer correlation.
+    #[test]
+    fn s02_s08_inv016_inv036_text_only_completed_consumer_fails_closed() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let consumed = accepted_origin(2);
+        let mut text_only_consumer =
+            ConsumedSteeringReconstitutionFacts::matching(&session, active, consumed);
+        text_only_consumer.model_calls[0] = ModelCallReconstitutionInput::new(
+            ConsumedSteeringReconstitutionFacts::matching_continuation_call(),
+            active.turn(),
+            matching_active_attempt(),
+            FrozenModelSelection::Direct(direct(1)),
+            ResolvedProviderTarget::naming(provider_model_identity(51)),
+            frontier(41).id(),
+            ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
+        );
+        text_only_consumer
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                semantic_entry(36).id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::AssistantText {
+                    producing_call: ConsumedSteeringReconstitutionFacts::matching_continuation_call(
+                    ),
+                    value: AssistantText::try_new(String::from("text-only response"))
+                        .expect("fixture assistant text is valid"),
+                },
+            ));
+        assert_eq!(
+            assert_input_rejects_unchanged(text_only_consumer.input()),
             AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
                 accepted_input: consumed.accepted_input(),
             }
