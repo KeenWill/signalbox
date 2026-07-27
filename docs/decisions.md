@@ -10,6 +10,152 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Fail bounded native snapshot work into typed recovery
+
+**Context.** The native synchronization machine retains authoritative snapshots
+and followed events while it validates or merges transcript work. The wire
+protocol bounds individual frames but does not bound the aggregate records or
+UTF-8 content retained across that client-side work.
+
+**Decision.** Require callers to supply separate record/UTF-8 capacities for one
+snapshot and event/UTF-8 capacities for events buffered behind snapshot work.
+Reject an over-capacity snapshot before publication, and abandon an
+over-capacity event buffer or side-refresh trigger through the same typed,
+bounded recovery lifecycle as other transient synchronization failures.
+
+**Rejected alternatives.** A frame limit alone does not bound aggregate
+retention. Unbounded arrays allow a valid stream to exhaust client memory.
+Publishing a partial snapshot or dropping selected buffered events would make
+the client present state that is neither authoritative nor cursor-complete.
+
+**Affects.** Native synchronization policy inputs, snapshot accumulation,
+followed-event buffering, side-refresh admission, diagnostics, and recovery
+tests.
+
+## 2026-07-26 — Retry only transient native synchronization failures
+
+**Context.** A followed session can fail because its snapshot is stale, its
+transport or deadline failed, the daemon requires resynchronization, or the
+daemon returned a definitive request/protocol error. The protocol fixes the
+error vocabulary but does not choose a native-client reconnect lifecycle.
+
+**Decision.** Route transport, deadline, stale-snapshot, malformed-projection,
+`resync_required`, `unavailable`, and `internal` failures through the one typed,
+bounded reconnect schedule. Treat `malformed_frame`, `unsupported_version`,
+`invalid_request`, `not_found`, `conflicting_reuse`, `rejected`, and
+`commit_ambiguous` as terminal for that synchronization. Every path preserves
+its diagnostic and closes active transports before retry or termination.
+
+**Rejected alternatives.** Retrying every server error can repeat requests that
+the daemon has definitively rejected. Retrying nothing makes ordinary transport
+loss and explicit resynchronization terminal. Separate implicit retry loops
+would bypass the typed cap and deadline policy.
+
+**Affects.** Native session synchronization error classification, recovery
+effects, and scripted reducer tests.
+
+## 2026-07-26 — Bound retained native metadata-list text at 32 MiB
+
+**Context.** Each metadata page and summary has a row and UTF-8 bound, and the
+number of pages is capped, but the native client retained every admitted title
+and tag until pagination completed. The product of those independent limits was
+larger than the client should retain for one list operation.
+
+**Decision.** Give metadata-list accumulation its own typed policy parameter and
+set the native default to 32 MiB of title and tag UTF-8. Reject the operation
+before appending a page that would exceed the cap or overflow its byte count.
+
+**Rejected alternatives.** Relying on page count alone leaves a much larger
+implicit memory budget. Truncating metadata silently changes authoritative
+values. Charging fixed-size identifiers does not materially improve the bound
+and obscures what this capacity controls.
+
+**Affects.** Native process-service metadata pagination and its integration
+tests.
+
+## 2026-07-26 — Select bounded native-client operational policies
+
+**Context.** The native synchronization and application layers require concrete
+deadlines, reconnect schedules, memory capacities, metadata pagination limits,
+and ambiguous-mutation retry timing. The process protocol fixes none of these
+client-operational values, and the synchronization policy deliberately keeps
+deadlines separate from heartbeat concerns.
+
+**Decision.** The app allows 5 seconds for connect and hello, 20 seconds for
+initial or side history, and 5 seconds for replay. Reconnect waits are 250 ms, 1
+second, 3 seconds, and 8 seconds, then stop. A snapshot admits at most 50,000
+records and 32 MiB of retained UTF-8; an event buffer admits 2,000 events and 8
+MiB. One-shot application exchanges allow 20 seconds for connection opening and
+for each response frame. Metadata uses 100-row pages with a 100-page cap. An
+exact `commit_ambiguous` mutation retries after 250 ms, 750 ms, and 2 seconds,
+then stops. Each list is the complete cap; there is no implicit retry.
+
+**Rejected alternatives.** Unbounded retries and memory permit indefinite work
+or heap growth. One shared timeout conflates stages with different costs.
+Heartbeat-derived deadlines add a concern absent from the Unix-socket protocol.
+Using the wire frame limit as an aggregate history limit does not bound a
+multi-frame snapshot. Timing only response reads leaves socket opening
+unbounded.
+
+**Affects.** Native application composition, one-shot request exchange, metadata
+paging, mutation retry, and synchronization runtime behavior.
+
+## 2026-07-26 — Bound retained native diagnostic messages at 4 KiB
+
+**Context.** The native synchronization machine retains the latest 128
+diagnostics across fallback and reconnect. Count bounds fixed record overhead,
+but a diagnostic derived from an unknown wire kind or decoding path could retain
+nearly one full 8 MiB frame in its message, so tolerated malformed or future
+input could still make the bounded history retain roughly a gigabyte.
+
+**Decision.** Continue emitting each complete diagnostic to the current caller,
+but retain at most 4,096 UTF-8 bytes of its message in machine history,
+truncating only at a Unicode-scalar boundary. Together with the existing
+128-record cap, retained diagnostic-message text is bounded at 512 KiB. The cap
+applies to every diagnostic source so later wire-derived paths cannot reopen the
+heap-growth path.
+
+**Rejected alternatives.** A count-only limit leaves frame-sized strings
+unbounded in aggregate. Sanitizing only unknown kind names misses decoding paths
+and future diagnostic sources. Bounding emitted diagnostics would discard useful
+immediate evidence even though the caller need not retain it.
+
+**Affects.** Native synchronization diagnostic retention and its scripted tests;
+diagnostic effects remain complete.
+
+## 2026-07-26 — Address imported continuation by position
+
+**Context.** The application and PostgreSQL layers already create a session from
+a sealed `ImportedTranscriptFrontier`, but the process protocol could not invoke
+that command. Import receipts expose the immutable conversation identity, while
+entry position is the stable human-addressable boundary already carried by every
+frontier; the sealed frontier constructor deliberately remains a domain-owned
+mapping.
+
+**Decision.** Protocol version ten adds `create_session_from_imported_frontier`,
+carrying command and conversation identities, a positive inclusive imported
+position, explicit `resume` or `fork` intent, and the initial model selection.
+Eight was taken while seven was reserved by then-open PR #281; #281 merged
+before this branch began. PR #291 subsequently merged version eight. Nine
+remains taken by then-open PR #286. The daemon checks a claimed command for
+replay or conflict first; for an unseen command it loads the immutable
+conversation, resolves the position to its canonical sealed frontier, and
+invokes the existing application service. The terminal verb is `continue`, and
+it requires position, relationship, and model selection rather than guessing any
+of them.
+
+**Rejected alternatives.** Sending an imported entry identity or a complete
+frontier would expose identifiers the import receipt does not provide and would
+duplicate the sealed domain mapping. Adding a public frontier constructor would
+weaken that boundary. Implicitly selecting the last entry or defaulting to
+`Resume` would hide session ancestry intent. Rebuilding the command or adding a
+persistence path would duplicate the already-tested application transaction.
+
+**Affects.** Process-protocol versioning and request mapping, the daemon
+adapter, the terminal client and its synthetic end-to-end continuation test, and
+the process-protocol and sessions specifications. The domain spine, persistence
+schema, and migrations are unchanged.
+
 ## 2026-07-26 — Retire the superseded startup steering blocker
 
 **Context.** The 2026-07-22 pending-steering boundary commissioned a temporary
@@ -595,6 +741,73 @@ reverse the recorded wrap direction.
 **Affects.** `ModelSettings` contract comments, the Codex CLI section of
 [runtime-substrate](spec/runtime-substrate.md), and
 `crates/model-runtime-codex-cli`.
+
+## 2026-07-26 — Bound native followed-event buffering in memory
+
+**Context.** The native synchronization machine buffers followed events while it
+validates initial history and while a side snapshot is in flight. Neither the
+process protocol nor session lifetime bounds how many events can arrive or how
+much variable-size content they retain before snapshot work completes.
+
+**Decision.** Every native synchronization policy supplies an event-buffer
+capacity: a maximum event count for fixed overhead and a maximum retained UTF-8
+byte count for content and the re-encoded future-event JSON object, including
+container and scalar nodes. Crossing either bound rejects the connection through
+bounded recovery without advancing the cursor past the unadmitted event. The
+application wiring owns the concrete operational values.
+
+**Rejected alternatives.** An unbounded array permits heap growth under a slow
+or stalled snapshot. Bounding count alone leaves large event content unbounded.
+Dropping oldest events creates an unrecoverable cursor gap, and spilling to disk
+adds lifecycle and failure modes disproportionate to this phase.
+
+**Affects.** The native synchronization policy, replay and side-snapshot event
+buffers, scripted transport tests, and application composition that selects the
+capacity.
+
+## 2026-07-26 — Retain a bounded native synchronization diagnostic history
+
+**Context.** The native synchronization machine reports every diagnostic as an
+effect and also retains recent diagnostics so a fallback does not erase the
+reason it occurred. A long-lived follow can encounter arbitrarily many future
+unknown events, stale completions, and recoveries, so retaining the complete
+history would make tolerated input an unbounded heap-growth path.
+
+**Decision.** Retain the most recent 128 synchronization diagnostics in the
+machine while continuing to emit every diagnostic to the caller. New diagnostics
+evict the oldest retained entries after the bound. Recovery and successful
+reconnection preserve the bounded history.
+
+**Rejected alternatives.** Retaining every diagnostic permits unbounded growth.
+Retaining only the latest diagnostic loses nearby fallback context. Moving all
+history to the application would duplicate a machine-owned diagnostic-state
+requirement without changing the need for an explicit bound.
+
+**Affects.** The native synchronization machine and its scripted transport
+tests.
+
+## 2026-07-26 — Bound native snapshot validation in memory
+
+**Context.** The process protocol deliberately has no aggregate transcript-size
+limit, while the native synchronization machine must validate a complete
+snapshot before publishing it. Retaining every record and its identity indexes
+without a client-side bound lets one snapshot consume unbounded memory. The
+bound is an operational client concern rather than a wire restriction.
+
+**Decision.** Every native synchronization policy supplies an explicit snapshot
+capacity: a maximum record count for fixed per-record overhead and a maximum
+retained UTF-8 byte count for wire strings and unknown JSON payloads. Crossing
+either bound rejects the snapshot through the existing bounded recovery path;
+the machine never publishes the partial snapshot. The application wiring owns
+the concrete operational values.
+
+**Rejected alternatives.** Unbounded retention leaves the client exposed to
+unbounded heap growth. A disk-backed spool and identity index would add storage
+lifecycle and failure modes disproportionate to this phase. Silent truncation
+would publish state the server never described.
+
+**Affects.** The native synchronization policy, snapshot accumulator, scripted
+transport tests, and application composition that selects the capacity.
 
 ## 2026-07-25 — Use a bounded GitHub adapter for the first code-host tools
 

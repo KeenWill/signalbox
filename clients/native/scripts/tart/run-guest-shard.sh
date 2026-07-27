@@ -26,7 +26,7 @@ Shards:
   ios-screenshots    iPhone screenshot capture.
   ipados-screenshots iPadOS landscape screenshot capture.
   screenshots        iPhone, iPadOS, and macOS screenshot capture.
-  real-smoke         Real local/remote server UI smoke test.
+  real-smoke         Disabled remote-transport design gate.
   privacy            Privacy/no-telemetry scan.
   all                Full single-VM validation pass.
 
@@ -265,55 +265,7 @@ run_screenshots_shard() {
 }
 
 run_real_smoke_shard() {
-	require_tool xcodebuild
-
-	local server_url
-	local api_key
-	local result_bundle_path="$SIGNALBOX_NATIVE_DERIVED_DATA_PATH/Logs/Test/SignalboxNative-RealSmoke.xcresult"
-	local device_id
-	local destination
-	local xcodebuild_status
-	server_url="$(load_and_resolve_real_server_url)"
-	# api_key is a shell-local value that is handed to the single xcodebuild
-	# invocation below through a command-scoped assignment; it is never exported.
-	if ! api_key="$(load_and_resolve_real_server_api_key)"; then
-		echo "Missing real server API key. Set SIGNALBOX_NATIVE_REAL_SERVER_API_KEY or provide clients/native/.env with SIGNALBOX_API_KEY." >&2
-		exit 1
-	fi
-	device_id="$(simulator_resolve_iphone_ids "$SIMULATOR_DEFAULT_MIN_IOS_VERSION" | head -n 1)"
-	if [[ -z "$device_id" ]]; then
-		echo "No available iPhone simulator found for iOS $SIMULATOR_DEFAULT_MIN_IOS_VERSION or newer." >&2
-		exit 1
-	fi
-	destination="$(simulator_xcode_destination_for_id "$device_id")"
-
-	echo "==> Real server UI smoke against $server_url"
-	echo "==> Real server UI smoke simulator: $device_id"
-	echo "==> API key loaded for the smoke test; value intentionally not printed."
-	mkdir -p "$(dirname "$result_bundle_path")"
-	rm -rf "$result_bundle_path"
-	set +e
-	SIGNALBOX_NATIVE_REAL_SERVER_URL="$server_url" \
-		SIGNALBOX_NATIVE_REAL_SERVER_API_KEY="$api_key" \
-		xcodebuild \
-		-quiet \
-		-project "$PROJECT_ROOT/SignalboxNative.xcodeproj" \
-		-scheme "SignalboxNative" \
-		-configuration "Debug" \
-		-destination "$destination" \
-		-derivedDataPath "$SIGNALBOX_NATIVE_DERIVED_DATA_PATH" \
-		-resultBundlePath "$result_bundle_path" \
-		"-only-testing:$REAL_SERVER_SMOKE_TEST_IDENTIFIER" \
-		-parallel-testing-enabled NO \
-		CODE_SIGNING_ALLOWED=YES \
-		CODE_SIGN_IDENTITY=- \
-		test
-	xcodebuild_status=$?
-	set -e
-	if ((xcodebuild_status != 0)); then
-		return "$xcodebuild_status"
-	fi
-	assert_xcresult_passed "$result_bundle_path"
+	echo "==> Real server UI smoke disabled: remote/mobile transport is an owner design gate."
 }
 
 run_privacy_shard() {
