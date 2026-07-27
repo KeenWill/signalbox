@@ -10,17 +10,18 @@ use rust_decimal::Decimal;
 use signalbox_domain::{
     ApprovedToolRequest, ContextFrontierId, CredentialProfileGrant,
     CredentialProfileGrantReconstitutionInput, CredentialProfileName, CredentialProfilePolicy,
-    CredentialToolApproval, EndedToolAttempt, ModelCallId, NormalizedToolArguments,
-    ProvisionedWorkspace, ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement,
-    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerDomainError,
-    RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId, RunnerLease,
-    RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
-    RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
-    RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId, SessionRunnerPin,
-    SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, ToolAdmissibleLoci, ToolApprovalResolutionReconstitutionInput,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    CredentialToolApproval, DangerousToolAutoApproval, EndedToolAttempt, ModelCallId,
+    NormalizedToolArguments, ProvisionedWorkspace, ResolvedContextFrontierReconstitutionInput,
+    RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
+    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId,
+    RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
+    RunnerLeaseReconstitutionInput, RunnerSelector, RunnerToolAttemptAuthorization,
+    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
+    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
+    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest, ToolAdmissibleLoci,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
@@ -164,6 +165,68 @@ fn approved_request(facts: PhysicalAttemptFacts) -> ApprovedToolRequest {
         .expect("the fixture registry policy approves");
     ApprovedToolRequest::try_from_resolution(request, approval)
         .expect("the fixture approval matches its request")
+}
+
+fn blanket_approved_request(facts: PhysicalAttemptFacts) -> ApprovedToolRequest {
+    let request = ToolRequestReconstitutionInput::new(
+        ToolRequestId::from_uuid(uuid(facts.request)),
+        SessionId::from_uuid(uuid(SESSION)),
+        TurnId::from_uuid(uuid(facts.turn)),
+        ModelCallId::from_uuid(uuid(facts.turn + (RELATED_IDENTITY_OFFSET * 2))),
+        ToolRequestOrdinal::from_u32(0),
+        tool("inspect"),
+        NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+            .expect("the fixture arguments are canonical"),
+    )
+    .into_request();
+    let approval = ToolApprovalResolutionReconstitutionInput::session_blanket(
+        request.id(),
+        DangerousToolAutoApproval::ApproveAll,
+    )
+    .reconstitute()
+    .expect("the fixture blanket approves");
+    ApprovedToolRequest::try_from_resolution(request, approval)
+        .expect("the fixture approval matches its request")
+}
+
+fn blanket_authorized(facts: PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization {
+    let approved = blanket_approved_request(facts);
+    let attempt_id = ToolAttemptId::from_uuid(uuid(facts.attempt));
+    let attempt = ToolAttemptReconstitutionInput::new(
+        attempt_id,
+        ToolRequestId::from_uuid(uuid(facts.request)),
+        SessionId::from_uuid(uuid(SESSION)),
+        TurnId::from_uuid(uuid(facts.turn)),
+        TurnAttemptId::from_uuid(uuid(facts.turn + RELATED_IDENTITY_OFFSET)),
+        ToolEffectClass::EffectFree,
+        ToolDispatchGeneration::first(),
+        ToolAttemptReconstitutionState::InFlight,
+    )
+    .reconstitute()
+    .expect("the fixture in-flight attempt reconstitutes");
+    let batch = ToolBatchReconstitutionInput::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        TurnId::from_uuid(uuid(facts.turn)),
+        ModelCallId::from_uuid(uuid(facts.turn + (RELATED_IDENTITY_OFFSET * 2))),
+        ResolvedContextFrontierReconstitutionInput::new(
+            SessionId::from_uuid(uuid(SESSION)),
+            ContextFrontierId::from_uuid(uuid(facts.turn + (RELATED_IDENTITY_OFFSET * 3))),
+            Vec::new(),
+        )
+        .reconstitute()
+        .expect("the empty fixture frontier is valid"),
+        vec![approved.request().clone()],
+        vec![approved.approval().clone()],
+        vec![attempt],
+        ToolBatchPhaseReconstitutionInput::Executing {
+            turn_attempt: TurnAttemptId::from_uuid(uuid(facts.turn + RELATED_IDENTITY_OFFSET)),
+        },
+    )
+    .reconstitute()
+    .expect("the fixture batch is complete");
+    batch
+        .resume_runner_attempt(attempt_id)
+        .expect("the batch restores canonical runner authority")
 }
 
 fn authorized_with_effect(
@@ -2003,6 +2066,146 @@ async fn s32_inv045_grant_revocation_serializes_profile_replacement() -> Result<
         .expect_err("profile replacement cannot reactivate a revoked predecessor");
 
     assert_store_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-045: profile replacement stays durable after an
+/// availability-equivalent re-registration. The domain validates the
+/// replacement against the enrollment-owned current revision while the
+/// placement record carries the pinned registration snapshot forward.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv045_profile_replacement_survives_equivalent_reregistration()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
+    let current = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries a credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, current.registration()),
+            current.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the advanced current registration permits profile replacement");
+    let replacement_grant = duplicate_grant(&replacement.grant.grant, current.registration());
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&current),
+            Some(&replacement_grant),
+        )
+        .await?;
+    let recorded: (String, Decimal) = sqlx::query_as(
+        "SELECT event_kind, registration_revision
+           FROM runner_session_placement_record
+          WHERE session_id = $1
+          ORDER BY event_ordinal DESC
+          LIMIT 1",
+    )
+    .bind(uuid(SESSION))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        recorded,
+        (
+            "profile_replaced".to_owned(),
+            Decimal::from(registration.revision().get())
+        )
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-035 / INV-045: a session-policy tool/profile pair admits a lease
+/// only with confirmed approval provenance; policy-auto provenance is
+/// rejected even for a direct lease-row insert.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv035_inv045_session_policy_lease_requires_confirmed_provenance()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(replacement_profile()),
+            workspace: WorkspaceRequirement::None,
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            blanket_authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the session-policy profile pins the placement");
+    sqlx::query("ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source)
+         VALUES ($1, 'approve', 'policy_auto')",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.request))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let unconfirmed = store
+        .store_pin(&pin, &registration)
+        .await
+        .expect_err("policy-auto provenance cannot admit a session-policy lease");
+    sqlx::query("ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_approval_decision
+            SET decision_source = 'session_blanket'
+          WHERE request_id = $1",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.request))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    store.store_pin(&pin, &registration).await?;
+    let admitted: Decimal = sqlx::query_scalar(
+        "SELECT generation
+           FROM runner_lease_generation
+          WHERE lease_id = $1",
+    )
+    .bind(uuid(LEASE))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_store_check_violation(unconfirmed);
+    assert_eq!(admitted, Decimal::from(1u64));
     drop(pool);
     Ok(())
 }

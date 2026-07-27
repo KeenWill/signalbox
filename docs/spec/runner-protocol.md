@@ -365,16 +365,19 @@ domain aggregate accepts every positive placement revision because each is
 reachable through checked successor transitions.
 
 The store retains append-only created, pinned, runner-lost, runner-replaced, and
-profile-replaced records behind one current pointer. Relational transition
-checks require contiguous event history, exact revision succession, unchanged
-affinity facts at runner loss, profile-only changes for profile replacement, and
-each stored tool's runner-required flag to match its declaration's runner-only
-or combined locus. Every appended record advances the current-placement head in
-the same transaction. Reconstitution reads the current record with its exact
-validated registration and tool inventory. The loaded persistence wrapper
-retains that historical registration and its durable revision so a caller can
-reconcile against newer availability and persist `RunnerLost` without
-reconstructing or guessing the pinned evidence.
+profile-replaced records behind one current pointer. A profile-replaced record
+carries the pinned registration snapshot forward even though the replacement was
+validated against the enrollment-owned current revision, so an
+availability-equivalent re-registration cannot make profile replacement
+undurable. Relational transition checks require contiguous event history, exact
+revision succession, unchanged affinity facts at runner loss, profile-only
+changes for profile replacement, and each stored tool's runner-required flag to
+match its declaration's runner-only or combined locus. Every appended record
+advances the current-placement head in the same transaction. Reconstitution
+reads the current record with its exact validated registration and tool
+inventory. The loaded persistence wrapper retains that historical registration
+and its durable revision so a caller can reconcile against newer availability
+and persist `RunnerLost` without reconstructing or guessing the pinned evidence.
 
 This stack proves that replacement must be explicit and produces the typed
 change facts. Application orchestration that appends the corresponding semantic

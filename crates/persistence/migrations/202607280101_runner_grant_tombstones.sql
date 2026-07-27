@@ -302,12 +302,13 @@ BEGIN
                AND placement.credential_grant_revision =
                     grant_row.grant_revision
                AND (
+                    -- The grant names the registration that validated it; a
+                    -- profile-replaced placement retains the pinned snapshot
+                    -- revision, so only the enrollment must agree.
                     (
                         placement.pinned_runner_id = grant_row.runner_id
                         AND placement.registration_enrollment_id =
                             grant_row.registration_enrollment_id
-                        AND placement.registration_revision =
-                            grant_row.registration_revision
                         AND placement.pinned_credential_profile_name =
                             grant_row.credential_profile_name
                     )

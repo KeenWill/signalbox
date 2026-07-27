@@ -2337,7 +2337,7 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
     let ended = tool_repository
         .commit_observation(
             authorized_attempt
-                .correlation()
+                .executor_fence()
                 .bind(ToolAttemptObservation::Completed {
                     result: ToolResultContent::Text(
                         ToolResultText::try_new(String::from("2026-07-23T12:00:00Z"))
@@ -2656,7 +2656,7 @@ async fn s02_s08_inv016_inv036_steering_consumed_at_continuation_reloads_and_sca
     tool_repository
         .commit_observation(
             authorized_attempt
-                .correlation()
+                .executor_fence()
                 .bind(ToolAttemptObservation::Completed {
                     result: ToolResultContent::Text(
                         ToolResultText::try_new(String::from("2026-07-26T12:00:00Z"))
@@ -2860,7 +2860,7 @@ async fn s02_s07_s10_inv006_inv037_interrupted_continuation_call_reloads_and_act
     tool_repository
         .commit_observation(
             authorized_attempt
-                .correlation()
+                .executor_fence()
                 .bind(ToolAttemptObservation::Completed {
                     result: ToolResultContent::Text(
                         ToolResultText::try_new(String::from("2026-07-26T12:00:00Z"))
@@ -3041,7 +3041,7 @@ async fn authorize_continuation_after_completed_round(
     tool_repository
         .commit_observation(
             authorized_attempt
-                .correlation()
+                .executor_fence()
                 .bind(ToolAttemptObservation::Completed {
                     result: ToolResultContent::Text(
                         ToolResultText::try_new(String::from("2026-07-26T12:00:00Z"))

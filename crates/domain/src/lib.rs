@@ -213,7 +213,7 @@ pub use tool::{
 pub use tool_attempt::{
     ApprovedToolRequest, ApprovedToolRequestError, AuthorizedToolAttempt,
     CorrelatedToolAttemptObservation, CurrentToolAttempt, CurrentToolAttemptState,
-    EndedToolAttempt, ReconstitutedToolAttempt, ToolAttemptCrashOutcome,
+    EndedToolAttempt, IssuedExecutorFence, ReconstitutedToolAttempt, ToolAttemptCrashOutcome,
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
     ToolAttemptDisposition, ToolAttemptEnd, ToolAttemptObservation, ToolAttemptReconstitutionError,
     ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolAttemptTransitionError,

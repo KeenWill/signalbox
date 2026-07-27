@@ -420,12 +420,38 @@ impl RunnerProtocolStore {
             .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
         let event_kind = classify_placement_event(prior.as_ref(), placement)?;
         let grant_origin = placement_grant_origin(prior.as_ref(), event_ordinal, placement)?;
+        // A profile replacement changes only profile axes: the placement
+        // record carries the prior pinned registration snapshot forward even
+        // though the domain validated the replacement against the
+        // enrollment-owned current registration, which may have advanced to
+        // an availability-equivalent revision since the pin.
+        let registration_identity = if event_kind == "profile_replaced" {
+            let prior_row = prior
+                .as_ref()
+                .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+            let prior_ordinal: Decimal = prior_row.get("event_ordinal");
+            let snapshot = sqlx::query(
+                "SELECT registration_enrollment_id, registration_revision
+                   FROM runner_session_placement_record
+                  WHERE session_id = $1 AND event_ordinal = $2",
+            )
+            .bind(placement.session().into_uuid())
+            .bind(prior_ordinal)
+            .fetch_one(&mut *transaction)
+            .await?;
+            (
+                snapshot.try_get::<Option<Uuid>, _>("registration_enrollment_id")?,
+                snapshot.try_get::<Option<Decimal>, _>("registration_revision")?,
+            )
+        } else {
+            stored_registration_identity(registration)
+        };
         insert_placement_record(
             &mut transaction,
             event_ordinal,
             event_kind,
             placement,
-            registration,
+            registration_identity,
             grant_origin,
         )
         .await?;
@@ -489,7 +515,7 @@ impl RunnerProtocolStore {
             event_ordinal,
             event_kind,
             &pin.placement,
-            Some(registration),
+            stored_registration_identity(Some(registration)),
             grant_origin,
         )
         .await?;
@@ -1529,12 +1555,25 @@ fn placement_grant_origin(
     }
 }
 
+fn stored_registration_identity(
+    registration: Option<&StoredValidatedRunnerRegistration>,
+) -> (Option<Uuid>, Option<Decimal>) {
+    registration
+        .map(|registration| {
+            (
+                Some(registration.registration.enrollment().into_uuid()),
+                Some(Decimal::from(registration.revision.get())),
+            )
+        })
+        .unwrap_or((None, None))
+}
+
 async fn insert_placement_record(
     transaction: &mut Transaction<'_, Postgres>,
     event_ordinal: u64,
     event_kind: &str,
     placement: &SessionRunnerPlacement,
-    registration: Option<&StoredValidatedRunnerRegistration>,
+    registration_identity: (Option<Uuid>, Option<Decimal>),
     grant_origin: Option<Decimal>,
 ) -> Result<(), RunnerProtocolStoreError> {
     let request = placement.request();
@@ -1542,14 +1581,7 @@ async fn insert_placement_record(
     let (directory_kind, requested_directory) = encode_directory(&request.working_directory);
     let (workspace_kind, requested_repository) = encode_workspace_requirement(&request.workspace);
     let state = encode_placement_state(placement.state());
-    let (registration_enrollment, registration_revision) = registration
-        .map(|registration| {
-            (
-                Some(registration.registration.enrollment().into_uuid()),
-                Some(Decimal::from(registration.revision.get())),
-            )
-        })
-        .unwrap_or((None, None));
+    let (registration_enrollment, registration_revision) = registration_identity;
     sqlx::query(
         "INSERT INTO runner_session_placement_record
             (session_id, event_ordinal, placement_revision, event_kind,

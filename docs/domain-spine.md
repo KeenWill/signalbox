@@ -3206,11 +3206,15 @@ impl ToolAttemptDispatchCorrelation {
     pub const fn reconstitute(
         input: ToolAttemptDispatchCorrelationReconstitutionInput,
     ) -> Self;
+    // accessors: session(), turn(), issuing_attempt(), request(), attempt(), generation()
+}
+pub struct IssuedExecutorFence { /* private */ }
+impl IssuedExecutorFence {
+    pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation;
     pub const fn bind(
         self,
         observation: ToolAttemptObservation,
     ) -> CorrelatedToolAttemptObservation;
-    // accessors: session(), turn(), issuing_attempt(), request(), attempt(), generation()
 }
 pub struct CorrelatedToolAttemptObservation { /* private */ }
 // accessors: correlation(), observation()
@@ -3229,7 +3233,7 @@ impl CurrentToolAttempt {
     // generation(), state()
 }
 pub struct AuthorizedToolAttempt { /* private */ }
-// accessors: attempt(), correlation(), into_parts()
+// accessors: attempt(), correlation(), executor_fence(), into_parts()
 pub struct EndedToolAttempt { /* private */ }
 // accessors: attempt(), request(), session(), turn(), issuing_attempt(), effect_class(),
 // generation(), end()
@@ -6611,7 +6615,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: context_frontier                           | 6                    |
 | domain: semantic_entry                             | 4                    |
 | domain: tool                                       | 38                   |
-| domain: tool_attempt                               | 25                   |
+| domain: tool_attempt                               | 26                   |
 | domain: tool_execution                             | 17                   |
 | domain: provider_evidence                          | 5                    |
 | domain: applied_interrupt                          | 2                    |
@@ -6620,7 +6624,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 53                   |
-| **signalbox-domain total**                         | **511 (+1 free fn)** |
+| **signalbox-domain total**                         | **512 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

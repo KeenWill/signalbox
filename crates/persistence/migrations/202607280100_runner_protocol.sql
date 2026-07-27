@@ -1456,6 +1456,12 @@ BEGIN
                                AND credential_profile_name =
                                 placement.pinned_credential_profile_name
                         )
+                        -- The grant records the registration that validated
+                        -- it, which profile replacement checks against the
+                        -- enrollment-owned current revision, while the
+                        -- placement retains the pinned snapshot revision:
+                        -- the two agree on the enrollment but may name
+                        -- different revisions.
                         OR NOT EXISTS (
                             SELECT 1
                               FROM runner_credential_grant AS grant_record
@@ -1471,8 +1477,6 @@ BEGIN
                                 placement.pinned_credential_profile_name
                                AND grant_record.registration_enrollment_id =
                                 placement.registration_enrollment_id
-                               AND grant_record.registration_revision =
-                                placement.registration_revision
                         )
                     )
                 )
@@ -2030,10 +2034,11 @@ BEGIN
                AND placement.pinned_runner_id = grant_row.runner_id
                AND placement.pinned_credential_profile_name =
                     grant_row.credential_profile_name
+               -- The grant names the registration that validated it; a
+               -- profile-replaced placement retains the pinned snapshot
+               -- revision, so only the enrollment must agree.
                AND placement.registration_enrollment_id =
                     grant_row.registration_enrollment_id
-               AND placement.registration_revision =
-                    grant_row.registration_revision
                AND placement.credential_grant_lineage_origin_ordinal =
                     grant_row.lineage_origin_event_ordinal
                AND placement.credential_grant_revision =
@@ -3040,6 +3045,24 @@ BEGIN
        )
     THEN
         RAISE EXCEPTION 'runner lease offer is not canonically authorized'
+            USING ERRCODE = '23514';
+    END IF;
+    -- A session-policy tool/profile pair requires confirmation: only an
+    -- owner-command decision or the frozen session blanket may approve the
+    -- request this lease dispatches. Policy-auto provenance would bypass the
+    -- confirmation the pair posture records.
+    IF NEW.credential_approval_kind = 'session_policy'
+       AND NOT EXISTS (
+            SELECT 1
+              FROM tool_approval_decision AS approval
+             WHERE approval.request_id = attempted_request
+               AND approval.decision_kind = 'approve'
+               AND approval.decision_source
+                    IN ('owner_command', 'session_blanket')
+       )
+    THEN
+        RAISE EXCEPTION
+            'session-policy lease admission requires confirmed approval provenance'
             USING ERRCODE = '23514';
     END IF;
     IF EXISTS (
