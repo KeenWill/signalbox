@@ -1368,6 +1368,50 @@ pub(crate) async fn load_steering_continuation_round_evidence(
     Ok(Some((attempts, denials)))
 }
 
+/// Loads the round result evidence backing one steering-free continuation
+/// call named by a terminal or recovery gate: the terminal tool attempts and
+/// owner-sourced denial resolutions whose result entries fill the call's
+/// whole frontier after the round boundary, with no trailing suffix.
+///
+/// A `None` result names a call frontier with no continuing tool round in
+/// that window — a call prepared against its turn's starting frontier.
+pub(crate) async fn load_continuation_round_evidence(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    call_frontier: signalbox_domain::ContextFrontierId,
+) -> Result<
+    Option<(
+        Vec<EndedToolAttempt>,
+        Vec<signalbox_domain::ToolApprovalResolution>,
+    )>,
+    ToolLoopRepositoryError,
+> {
+    let Some((boundary_member_count, request_count)) =
+        load_tool_round_result_window(connection, session, turn, call_frontier, Decimal::ZERO)
+            .await?
+    else {
+        return Ok(None);
+    };
+    let attempts = load_window_result_attempts(
+        connection,
+        session,
+        call_frontier,
+        boundary_member_count,
+        request_count,
+    )
+    .await?;
+    let denials = load_window_result_denials(
+        connection,
+        session,
+        call_frontier,
+        boundary_member_count,
+        request_count,
+    )
+    .await?;
+    Ok(Some((attempts, denials)))
+}
+
 async fn load_window_result_denials(
     connection: &mut PgConnection,
     session: SessionId,
