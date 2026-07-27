@@ -45,7 +45,8 @@ const VALUE_CREDENTIAL_MARKERS: &[&str] = &[
 const TOKEN_PREFIXES: &[&str] = &["sk-", "eyJ"];
 
 pub(crate) fn redact_text(text: &str) -> String {
-    let mut sanitized = redact_json_credential_values(text);
+    let text = decode_unicode_escapes(text);
+    let mut sanitized = redact_json_credential_values(&text);
     for marker in LINE_CREDENTIAL_MARKERS {
         sanitized = redact_line_value(&sanitized, marker);
     }
@@ -56,6 +57,68 @@ pub(crate) fn redact_text(text: &str) -> String {
         sanitized = redact_prefixed_token(&sanitized, prefix);
     }
     sanitized
+}
+
+/// Rewrites `\uXXXX` escape sequences (including surrogate pairs) to the
+/// characters they name, so a credential shape spelled with JSON escapes —
+/// for example `sk\u002d…` — is scanned in the same form a JSON consumer
+/// would reconstruct. Quote and backslash escapes are left alone: they carry
+/// the quoted-value semantics the scanners already honor. Escapes can nest
+/// (`\u005cu0073…` decodes into a new escape), so decoding repeats to a
+/// fixed point within a small bound that alone caps the work.
+fn decode_unicode_escapes(text: &str) -> String {
+    let mut current = text.to_string();
+    for _ in 0..4 {
+        if !current.contains("\\u") {
+            break;
+        }
+        let decoded = decode_unicode_escape_pass(&current);
+        if decoded == current {
+            break;
+        }
+        current = decoded;
+    }
+    current
+}
+
+fn decode_unicode_escape_pass(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(position) = remaining.find("\\u") {
+        output.push_str(&remaining[..position]);
+        match unicode_escape_at(&remaining[position..]) {
+            Some((character, consumed)) => {
+                output.push(character);
+                remaining = &remaining[position + consumed..];
+            }
+            None => {
+                output.push_str("\\u");
+                remaining = &remaining[position + 2..];
+            }
+        }
+    }
+    output.push_str(remaining);
+    output
+}
+
+/// Decodes one `\uXXXX` sequence at the start of `rest`, pairing a leading
+/// high surrogate with an immediately following low one; an invalid or lone
+/// sequence decodes to nothing and is left in place.
+fn unicode_escape_at(rest: &str) -> Option<(char, usize)> {
+    let high = u32::from_str_radix(rest.get(2..6)?, 16).ok()?;
+    if (0xD800..0xDC00).contains(&high) {
+        let low_rest = rest.get(6..12)?;
+        if !low_rest.starts_with("\\u") {
+            return None;
+        }
+        let low = u32::from_str_radix(low_rest.get(2..6)?, 16).ok()?;
+        if !(0xDC00..0xE000).contains(&low) {
+            return None;
+        }
+        let combined = 0x1_0000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+        return char::from_u32(combined).map(|character| (character, 12));
+    }
+    char::from_u32(high).map(|character| (character, 6))
 }
 
 fn redact_json_credential_values(text: &str) -> String {
@@ -127,7 +190,16 @@ pub(crate) fn redact_json(raw: &str) -> String {
     };
     let changed = redact_value(&mut value);
     if !changed {
-        return raw.to_string();
+        // A duplicate object member is invisible in the parsed tree — only
+        // its last occurrence survives parsing — so a shadowed credential
+        // value cannot be judged clean by the tree alone. Raw bytes are
+        // returned only when they are themselves credential-shape clean;
+        // otherwise the parsed tree is re-serialized, which drops shadowed
+        // members while arbitrary-precision numbers keep their lexemes.
+        if redact_text(raw) == raw {
+            return raw.to_string();
+        }
+        return serde_json::to_string(&value).unwrap_or_else(|_| REDACTED.to_string());
     }
     serde_json::to_string(&value).unwrap_or_else(|_| REDACTED.to_string())
 }
@@ -1010,6 +1082,39 @@ mod tests {
 
         assert_eq!(output, "authorization: [redacted]\nsafe-after-value");
         assert!(!output.contains(STRUCTURED_OBJECT_SECRET_VALUE));
+    }
+
+    /// INV-035: a duplicate member shadowed in the parsed tree cannot
+    /// smuggle a credential token through the raw-bytes fast path.
+    #[test]
+    fn inv_035_shadowed_duplicate_members_cannot_leak_tokens() {
+        let fixture = format!(r#"{{"value":"{CREDENTIAL_SHAPED_VALUE}","value":"safe"}}"#);
+        let output = redact_json(&fixture);
+
+        assert!(!output.contains(CREDENTIAL_SHAPED_VALUE));
+        assert_eq!(output, r#"{"value":"safe"}"#);
+    }
+
+    /// INV-035: a token shape spelled with JSON unicode escapes is scanned
+    /// in the reconstructed form a JSON consumer would produce.
+    #[test]
+    fn inv_035_redacts_json_escaped_token_shapes() {
+        let fixture = r#"{"detail":"sk\u002dsensitive-escaped-value"}"#;
+        let output = redact_text(fixture);
+
+        assert!(!output.contains("sensitive-escaped-value"));
+        assert!(output.contains("[redacted]"));
+    }
+
+    /// INV-035: a credential member key spelled with JSON unicode escapes is
+    /// recognized in its reconstructed form.
+    #[test]
+    fn inv_035_redacts_json_escaped_credential_members() {
+        let fixture = format!(r#"{{"api\u005fkey":"{QUOTED_CREDENTIAL_VALUE}"}}"#);
+        let output = redact_text(&fixture);
+
+        assert!(!output.contains(QUOTED_CREDENTIAL_VALUE));
+        assert!(output.contains("[redacted]"));
     }
 
     #[test]
