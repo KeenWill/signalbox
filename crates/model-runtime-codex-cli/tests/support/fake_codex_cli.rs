@@ -119,6 +119,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "final_text_marker_before_tool_arguments" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"Authorization:","tool_calls":[{{"id":"call-final-text","name":"{}","arguments":"{}"}}]}}"#,
+                fixtures::TOOL_NAME,
+                json_escape(&format!(
+                    r#"{{"value":" {}"}}"#,
+                    fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+                ))
+            ));
+            completed();
+        }
         "split_stream_authorization_before_tool_id" => {
             reasoning("reason-split-tool-id", "Authorization:");
             envelope(&format!(

@@ -232,6 +232,25 @@ async fn inv_035_split_authorization_value_before_tool_id_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a tool argument continuing a credential marker at the end of the
+/// same-envelope final text is redacted in both the streamed delta and the
+/// terminal proposal, not only when the marker came from earlier reasoning.
+#[tokio::test]
+async fn inv_035_final_text_marker_before_tool_arguments_is_redacted() {
+    let result = execute_scenario(
+        "final_text_marker_before_tool_arguments",
+        DeliveryMode::Streamed,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
 /// INV-035: a credential marker held from streamed reasoning also governs the
 /// agent-message item id, so an id extending the marker never surfaces as
 /// `ProviderMessageId` in terminal evidence.
