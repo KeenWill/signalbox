@@ -170,6 +170,11 @@ struct ProcessSessionsScreen: View {
             )
           }
         }
+        .onChange(of: selectedSessionID) { _, selection in
+          if selection == nil {
+            coordinator.selectedProcessSessionID = nil
+          }
+        }
         .task {
           viewModel.replaceServiceProvider { coordinator.processService }
           await viewModel.refresh()
@@ -469,6 +474,16 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
+  var canSubmit: Bool {
+    guard connectedService != nil else {
+      return false
+    }
+    if case .steady = phase {
+      return true
+    }
+    return false
+  }
+
   func apply(_ update: SignalboxSessionSynchronizationDriverUpdate) {
     apply(update, generation: synchronizationGeneration)
   }
@@ -523,8 +538,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       case .diagnostic(let diagnostic):
         latestDiagnostic = diagnostic.message
       case .retryLimitReached:
+        connectedService = nil
         errorMessage = "Synchronization reached its bounded reconnect limit."
       case .terminalFailure:
+        connectedService = nil
         errorMessage = "Synchronization stopped after a terminal protocol failure."
       }
     } catch {
@@ -889,6 +906,7 @@ struct ProcessSessionDetailScreen: View {
       .disabled(
         viewModel.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
           || viewModel.isSubmitting
+          || !viewModel.canSubmit
       )
       .accessibilityLabel("Send")
       .accessibilityIdentifier("send-message-button")

@@ -254,18 +254,16 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         "The metadata replacement receipt violated the metadata contract."
       )
     }
-    return SignalboxProcessSession(
-      summary: SignalboxProcessSessionMetadataSummary(
-        sessionID: session.id,
-        defaultsVersion: session.defaultsVersion,
-        modelSelection: session.modelSelection,
-        dangerousToolAutoApproval: session.dangerousToolAutoApproval,
-        title: receipt.metadata.title,
-        tags: receipt.metadata.tags,
-        archived: receipt.metadata.archived,
-        lastWriter: receipt.lastWriter
+    guard
+      let refreshed = try await listSessions(includeArchived: true).first(where: {
+        $0.id == session.id
+      })
+    else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The archived session was absent from the refreshed metadata list."
       )
-    )
+    }
+    return refreshed
   }
 
   public func prepareInputSubmission(

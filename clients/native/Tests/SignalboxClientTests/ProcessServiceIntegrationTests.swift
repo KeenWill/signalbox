@@ -631,6 +631,23 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testRetryExhaustionDisablesFurtherSubmission() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = SuspendedSubmissionService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.composerText = ProcessSubmissionFixture.content
+
+    viewModel.apply(.retryLimitReached)
+    await viewModel.send()
+    let callCounts = await service.callCounts
+
+    XCTAssertFalse(viewModel.canSubmit)
+    XCTAssertEqual(callCounts, ProcessSubmissionFixture.noCallCounts)
+  }
+
+  @MainActor
   func testSubmissionReceiptDoesNotRestoreMaterializedPendingInput() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -1435,6 +1452,7 @@ private enum ProcessSubmissionFixture {
   static let whitespaceSensitiveContents = [whitespaceSensitiveContent]
   static let singleRequestCount = 1
   static let singleCallCounts = SubmissionCallCounts(prepare: 1, submit: 1)
+  static let noCallCounts = SubmissionCallCounts(prepare: 0, submit: 0)
   static let acceptancePosition = SignalboxCanonicalUInt64(rawValue: 1)
   static let receiptReconciledPendingIDs = [
     acceptedInputID,
