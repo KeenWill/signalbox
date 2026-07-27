@@ -27,11 +27,14 @@ use signalbox_application::{
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
-    AssistantText, ContextFrontierId, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, ImportedConversationFormat, ImportedConversationId,
-    ImportedSessionRelationship, ImportedTranscriptEntryId, ModelCallId,
-    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionRequest,
-    ModelTargetCatalog, SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionId, TurnId,
+    ActiveTurnPhase, AssistantResponsePart, AssistantText, ContextFrontierId, DirectModelSelection,
+    DurableCommandId, FailedModelCallTurnIdentities, ImportedConversationFormat,
+    ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId,
+    InitialToolApproval, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelCallTerminalOutcome, ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionId, ToolCallProposal, ToolName,
+    ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TurnId,
 };
 use signalbox_persistence::{
     conversation_import::ImportedConversationRepository,
@@ -44,11 +47,11 @@ use signalbox_persistence::{
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationImportFormat,
-    ConversationImportSource, ErrorCode, ImportedContentKind, ImportedSourceSpeaker,
-    ImportedSpeaker, InputContent, MetadataActor, ModelSelection, ProtocolVersion, RejectionDetail,
-    RequestId, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember,
-    SystemPromptText, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
-    encode_client_line,
+    ConversationImportSource, CurrentModelCallState, ErrorCode, ImportedContentKind,
+    ImportedSourceSpeaker, ImportedSpeaker, InputContent, MetadataActor, ModelSelection,
+    ProtocolVersion, RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
+    SessionMetadata, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
+    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
     HubModelConfiguration, LocalProcessListener, ProcessRuntime, ProcessRuntimeError,
@@ -2185,6 +2188,982 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
 
     drop(commands);
     drop(follow);
+    runtime.stop().await
+}
+
+/// Activates the session's queued turn, checkpoints its initial model call,
+/// and authorizes its send, so the call is durably issued with no terminal
+/// observation. Returns the repository and the authorized call for a later
+/// observation binding.
+async fn authorize_issued_model_call(
+    pool: &PgPool,
+    session_id: CanonicalUuid,
+) -> Result<
+    (
+        PostgresModelCallRepository,
+        signalbox_domain::AuthorizedModelCall,
+        ModelCallId,
+    ),
+    Box<dyn Error>,
+> {
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    activate_turn(pool, session).await?;
+    let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+    let calls = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("turn-control-fixture"),
+    );
+    let call = ModelCallId::from_uuid(Uuid::now_v7());
+    let PrepareInitialModelCallOutcome::Checkpointed(_) = calls
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            ContextFrontierId::from_uuid(Uuid::now_v7()),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    TurnId::from_uuid(Uuid::now_v7()),
+                )
+            },
+        )
+        .await?
+    else {
+        return Err(io::Error::other("the fixture call must checkpoint").into());
+    };
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        calls.authorize_send(session, call).await?
+    else {
+        return Err(io::Error::other("the fixture call must authorize send").into());
+    };
+    Ok((calls, *authorized, call))
+}
+
+/// Commits a confirm-classified tool round over the issued fixture call, so
+/// the active turn parks on the approval wait for the first named request.
+async fn park_turn_on_tool_approval(
+    pool: &PgPool,
+    session_id: CanonicalUuid,
+    request_ids: &[CanonicalUuid],
+) -> Result<(), Box<dyn Error>> {
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let (calls, authorized, _) = authorize_issued_model_call(pool, session_id).await?;
+    let response = ToolUsingAssistantResponse::try_from_parts(
+        request_ids
+            .iter()
+            .map(|_| {
+                AssistantResponsePart::ToolCall(ToolCallProposal::new(
+                    ToolName::try_new(String::from("confirmed"))
+                        .expect("the fixture tool name is valid"),
+                    NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                        .expect("the fixture arguments are bounded"),
+                ))
+            })
+            .collect(),
+    )
+    .expect("the fixture proposals form a tool-using response");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    let identities = request_ids
+        .iter()
+        .map(|request_id| {
+            ToolResponsePartIdentity::tool_call(
+                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                ToolRequestId::from_uuid(request_id.into_uuid()),
+                InitialToolApproval::Confirm,
+            )
+        })
+        .collect();
+    let outcome = calls
+        .apply_terminal_observation(
+            session,
+            observation,
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                identities,
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                None,
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    let first_request = request_ids
+        .first()
+        .map(|request_id| ToolRequestId::from_uuid(request_id.into_uuid()));
+    assert!(
+        matches!(
+            outcome,
+            ModelCallTerminalOutcome::ToolRound(ref round)
+                if matches!(
+                    round.next_phase(),
+                    ActiveTurnPhase::AwaitingApproval { request: waiting }
+                        if Some(*waiting) == first_request
+                )
+        ),
+        "the confirm-classified round must park on its first request"
+    );
+    Ok(())
+}
+
+/// Reads one complete transcript snapshot and returns every message between
+/// its validated start and end frames.
+async fn read_transcript_messages(
+    connection: &mut Connection,
+    request_id: u64,
+    session_id: CanonicalUuid,
+) -> Result<Vec<ServerMessage>, Box<dyn Error>> {
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            request_id,
+            ClientRequest::ReadTranscript { session_id },
+        )
+        .await?;
+    let start = response_within(connection).await?;
+    assert!(matches!(
+        start.message(),
+        ServerMessage::TranscriptSnapshotStart {
+            session_id: snapshot_session,
+            ..
+        } if *snapshot_session == session_id
+    ));
+    let mut messages = Vec::new();
+    loop {
+        let frame = response_within(connection).await?;
+        if let ServerMessage::TranscriptSnapshotEnd {
+            session_id: end_session,
+            ..
+        } = frame.message()
+        {
+            assert_eq!(*end_session, session_id);
+            return Ok(messages);
+        }
+        messages.push(frame.message().clone());
+    }
+}
+
+#[track_caller]
+fn turn_state_of(messages: &[ServerMessage], selected_turn: CanonicalUuid) -> TurnState {
+    messages
+        .iter()
+        .find_map(|message| match message {
+            ServerMessage::TranscriptTurn { turn_id, state, .. } if *turn_id == selected_turn => {
+                Some(state.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the snapshot must project turn {selected_turn}"))
+}
+
+#[track_caller]
+fn cancellation_marker_count(messages: &[ServerMessage], cancelled_turn: CanonicalUuid) -> usize {
+    messages
+        .iter()
+        .filter(|message| {
+            matches!(
+                message,
+                ServerMessage::TranscriptEntry {
+                    entry: TranscriptEntry::TurnCancelled { turn_id },
+                    ..
+                } if *turn_id == cancelled_turn
+            )
+        })
+        .count()
+}
+
+#[track_caller]
+fn tool_use_entry_names(messages: &[ServerMessage], request: CanonicalUuid) -> Vec<String> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            ServerMessage::TranscriptEntry {
+                entry:
+                    TranscriptEntry::AssistantToolUse {
+                        tool_request_id,
+                        tool_name,
+                        ..
+                    },
+                ..
+            } if *tool_request_id == request => Some(tool_name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[track_caller]
+fn tool_denied_entry_count(messages: &[ServerMessage], request: CanonicalUuid) -> usize {
+    messages
+        .iter()
+        .filter(|message| {
+            matches!(
+                message,
+                ServerMessage::TranscriptEntry {
+                    entry: TranscriptEntry::ToolDenied {
+                        tool_request_id,
+                        ..
+                    },
+                    ..
+                } if *tool_request_id == request
+            )
+        })
+        .count()
+}
+
+#[track_caller]
+fn rejected_detail(message: &ServerMessage) -> RejectionDetail {
+    match message {
+        ServerMessage::Error {
+            code: ErrorCode::Rejected,
+            detail,
+            ..
+        } => detail
+            .value()
+            .expect("a rejected error carries its typed detail"),
+        message => panic!("fixture expected a rejected error, got {message:?}"),
+    }
+}
+
+#[track_caller]
+fn decided_receipt(message: &ServerMessage) -> (CanonicalUuid, ToolDecision) {
+    match message {
+        ServerMessage::ToolRequestDecided {
+            tool_request_id,
+            decision,
+        } => (*tool_request_id, decision.clone()),
+        message => panic!("fixture expected a decision receipt, got {message:?}"),
+    }
+}
+
+/// S07 / INV-029: the stop verb applies the accepted interrupt treatment — a
+/// running turn with no prepared call cancels directly through the existing
+/// lifecycle while the stop's content becomes the queued immediate successor.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successor()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, stopped_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    activate_turn(&runtime.pool, SessionId::from_uuid(session_id.into_uuid())).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            3,
+            ClientRequest::StopTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: stopped_turn_id,
+                content: InputContent::new(String::from("continue after the stop")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    let successor_turn_id = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    assert_ne!(successor_turn_id, stopped_turn_id);
+
+    let messages = read_transcript_messages(&mut connection, 4, session_id).await?;
+    assert!(matches!(
+        turn_state_of(&messages, stopped_turn_id),
+        TurnState::Cancelled {
+            terminal_model_call_id: None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        turn_state_of(&messages, successor_turn_id),
+        TurnState::Queued { content, .. } if content.as_str() == "continue after the stop"
+    ));
+    assert_eq!(cancellation_marker_count(&messages, stopped_turn_id), 1);
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S07 / INV-029: stopping an issued call records the durable cancellation
+/// request and retains the slot for lifecycle closure, and a distinct second
+/// stop is refused with the exact prior stop authority named.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_once()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, stopped_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let (_, _, issued_call) = authorize_issued_model_call(&runtime.pool, session_id).await?;
+    let first_stop_command = command()?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            3,
+            ClientRequest::StopTurn {
+                command_id: first_stop_command,
+                session_id,
+                expected_active_turn_id: stopped_turn_id,
+                content: InputContent::new(String::from("continue after the stop")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    let successor_turn_id = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    assert_ne!(successor_turn_id, stopped_turn_id);
+
+    let messages = read_transcript_messages(&mut connection, 4, session_id).await?;
+    assert!(matches!(
+        turn_state_of(&messages, stopped_turn_id),
+        TurnState::ActiveRunning {
+            current_model_call: Some(call),
+            ..
+        } if call.model_call_id().into_uuid() == issued_call.into_uuid()
+            && call.state() == CurrentModelCallState::CancellationRequested {}
+    ));
+    assert!(matches!(
+        turn_state_of(&messages, successor_turn_id),
+        TurnState::Queued { .. }
+    ));
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            5,
+            ClientRequest::StopTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: stopped_turn_id,
+                content: InputContent::new(String::from("a second distinct stop")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::InterruptAlreadyApplied {
+            session_id,
+            active_turn_id: stopped_turn_id,
+            existing_command_id: CanonicalUuid::from_uuid(first_stop_command.into_uuid()),
+        }
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S07: every stop refusal is a recorded typed rejection — an empty session
+/// records `no_active_turn` and a stale expected turn records
+/// `active_turn_mismatch`.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s07_stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let unstarted_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xC1));
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            2,
+            ClientRequest::StopTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: unstarted_turn_id,
+                content: InputContent::new(String::from("names no active turn")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::NoActiveTurn {
+            session_id,
+            expected_active_turn_id: unstarted_turn_id,
+        }
+    );
+
+    let (_, active_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    activate_turn(&runtime.pool, SessionId::from_uuid(session_id.into_uuid())).await?;
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            4,
+            ClientRequest::StopTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: unstarted_turn_id,
+                content: InputContent::new(String::from("names a stale turn")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::ActiveTurnMismatch {
+            session_id,
+            expected_active_turn_id: unstarted_turn_id,
+            active_turn_id,
+        }
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-012: an equal stop replay returns its recorded successor, never a
+/// second interrupt or a refusal.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv012_stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, stopped_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    activate_turn(&runtime.pool, SessionId::from_uuid(session_id.into_uuid())).await?;
+
+    let decision = ClientRequest::StopTurn {
+        command_id: command()?,
+        session_id,
+        expected_active_turn_id: stopped_turn_id,
+        content: InputContent::new(String::from("continue after the stop")),
+        expected_defaults_version: CanonicalU64::new(1),
+    };
+    connection
+        .request_version(ProtocolVersion::Eight, 3, decision.clone())
+        .await?;
+    let successor_turn_id = accepted_successor_turn(&mut connection, session_id, 2).await?;
+
+    connection
+        .request_version(ProtocolVersion::Eight, 4, decision)
+        .await?;
+    let replayed_turn_id = accepted_successor_turn(&mut connection, session_id, 2).await?;
+
+    assert_eq!(
+        replayed_turn_id, successor_turn_id,
+        "an equal stop retry returns its recorded successor"
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S07 / S10 / INV-029: a stop racing an active tool round never wedges the
+/// session. Against the parked approval wait the stop is refused fail-closed
+/// with the wait intact; after the pending request is denied through its
+/// canonical decision command, the stop cancels the turn with the denial
+/// recorded, and the session accepts ordinary later input whose transcript
+/// replays cleanly.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_and_stop_release()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, parked_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xD1));
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            3,
+            ClientRequest::StopTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: parked_turn_id,
+                content: InputContent::new(String::from("stop during the approval wait")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::InterruptUnavailableWhileAwaitingApproval {
+            session_id,
+            active_turn_id: parked_turn_id,
+        }
+    );
+
+    let parked = read_transcript_messages(&mut connection, 4, session_id).await?;
+    assert!(matches!(
+        turn_state_of(&parked, parked_turn_id),
+        TurnState::ActiveAwaitingToolApproval { tool_request_id }
+            if tool_request_id == pending_request_id
+    ));
+    assert_eq!(
+        tool_use_entry_names(&parked, pending_request_id),
+        vec![String::from("confirmed")],
+        "the pending request's identity and tool name are client-visible"
+    );
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            5,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id,
+                tool_request_id: pending_request_id,
+                decision: ToolDecision::Deny {
+                    reason: String::from("stop the tool round"),
+                },
+            },
+        )
+        .await?;
+    assert_eq!(
+        decided_receipt(response_within(&mut connection).await?.message()),
+        (
+            pending_request_id,
+            ToolDecision::Deny {
+                reason: String::from("stop the tool round"),
+            }
+        )
+    );
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            6,
+            ClientRequest::StopTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: parked_turn_id,
+                content: InputContent::new(String::from("continue after the denied round")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    let successor_turn_id = accepted_successor_turn(&mut connection, session_id, 2).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            7,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(String::from("ordinary later work")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    let later_turn_id = accepted_successor_turn(&mut connection, session_id, 3).await?;
+
+    let released = read_transcript_messages(&mut connection, 8, session_id).await?;
+    assert!(matches!(
+        turn_state_of(&released, parked_turn_id),
+        TurnState::Cancelled { .. }
+    ));
+    assert_eq!(tool_denied_entry_count(&released, pending_request_id), 1);
+    assert_eq!(cancellation_marker_count(&released, parked_turn_id), 1);
+    assert!(matches!(
+        turn_state_of(&released, successor_turn_id),
+        TurnState::Queued { .. }
+    ));
+    assert!(matches!(
+        turn_state_of(&released, later_turn_id),
+        TurnState::Queued { .. }
+    ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S10: a decision naming a later request while an earlier one is undecided
+/// records the exact proposal-order rejection.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s10_decide_tool_request_refuses_a_later_request_first() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let first_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    let second_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE2));
+    park_turn_on_tool_approval(
+        &runtime.pool,
+        session_id,
+        &[first_request_id, second_request_id],
+    )
+    .await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            3,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id,
+                tool_request_id: second_request_id,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::ToolRequestNotEarliestUndecided {
+            tool_request_id: second_request_id,
+            earliest_tool_request_id: first_request_id,
+        }
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S10: an unknown logical request records the exact absent-request rejection.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s10_decide_tool_request_reports_an_unknown_request() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
+
+    let unknown_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE3));
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            3,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id,
+                tool_request_id: unknown_request_id,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::ToolRequestNotFound {
+            tool_request_id: unknown_request_id,
+        }
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S10: the session-correlation precondition refuses a decision whose named
+/// session does not own the named request, before any durable command is
+/// recorded.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s10_decide_tool_request_refuses_a_misrouted_session_without_recording()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
+
+    let mut foreign = Connection::connect(runtime.socket()).await?;
+    let foreign_session_id = create_alias_session(&mut foreign).await?;
+    let misrouted_command = command()?;
+    foreign
+        .request_version(
+            ProtocolVersion::Eight,
+            2,
+            ClientRequest::DecideToolRequest {
+                command_id: misrouted_command,
+                session_id: foreign_session_id,
+                tool_request_id: pending_request_id,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut foreign).await?.message()),
+        RejectionDetail::ToolRequestNotInSession {
+            session_id: foreign_session_id,
+            tool_request_id: pending_request_id,
+        }
+    );
+    let misrouted_claim_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+            .bind(misrouted_command.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(
+        misrouted_claim_count, 0,
+        "the session-correlation refusal must record no durable command"
+    );
+
+    drop(foreign);
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S10: a denial reason outside the domain contract is refused as an invalid
+/// request before any durable command is recorded.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s10_decide_tool_request_refuses_an_unsafe_denial_reason_before_recording()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
+
+    let unsafe_reason_command = command()?;
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            3,
+            ClientRequest::DecideToolRequest {
+                command_id: unsafe_reason_command,
+                session_id,
+                tool_request_id: pending_request_id,
+                decision: ToolDecision::Deny {
+                    reason: String::from(" padded "),
+                },
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+    let unsafe_claim_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+            .bind(unsafe_reason_command.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(unsafe_claim_count, 0);
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-012: one durable decision identity has one recorded meaning — an equal
+/// replay returns the exact recorded receipt, a different payload under the
+/// same identity is conflicting reuse, and reusing an identity claimed by
+/// another command kind is conflicting reuse too. The steps share one recorded
+/// command, so they are asserted against the same durable state in one
+/// execution.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv012_decide_tool_request_replays_equally_and_refuses_conflicting_reuse()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
+
+    let denial_command = command()?;
+    let denial = ClientRequest::DecideToolRequest {
+        command_id: denial_command,
+        session_id,
+        tool_request_id: pending_request_id,
+        decision: ToolDecision::Deny {
+            reason: String::from("writes outside the workspace"),
+        },
+    };
+    connection
+        .request_version(ProtocolVersion::Eight, 3, denial.clone())
+        .await?;
+    assert_eq!(
+        decided_receipt(response_within(&mut connection).await?.message()),
+        (
+            pending_request_id,
+            ToolDecision::Deny {
+                reason: String::from("writes outside the workspace"),
+            }
+        )
+    );
+
+    connection
+        .request_version(ProtocolVersion::Eight, 4, denial)
+        .await?;
+    assert_eq!(
+        decided_receipt(response_within(&mut connection).await?.message()),
+        (
+            pending_request_id,
+            ToolDecision::Deny {
+                reason: String::from("writes outside the workspace"),
+            }
+        ),
+        "an equal decision replay returns its exact recorded receipt"
+    );
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            5,
+            ClientRequest::DecideToolRequest {
+                command_id: denial_command,
+                session_id,
+                tool_request_id: pending_request_id,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::Error {
+            code: ErrorCode::ConflictingReuse,
+            ..
+        }
+    ));
+
+    let submit_command = command()?;
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            6,
+            ClientRequest::SubmitInput {
+                command_id: submit_command,
+                session_id,
+                content: InputContent::new(String::from("claims a submit identity")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::ActiveTurnPresent { .. }
+    ));
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            7,
+            ClientRequest::DecideToolRequest {
+                command_id: submit_command,
+                session_id,
+                tool_request_id: pending_request_id,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert!(
+        matches!(
+            response_within(&mut connection).await?.message(),
+            ServerMessage::Error {
+                code: ErrorCode::ConflictingReuse,
+                ..
+            }
+        ),
+        "an identity claimed by another command kind is conflicting reuse"
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S10: the final approval opens the executing phase.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s10_decide_tool_request_final_approval_opens_the_executing_phase()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, decided_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            3,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id,
+                tool_request_id: pending_request_id,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert_eq!(
+        decided_receipt(response_within(&mut connection).await?.message()),
+        (pending_request_id, ToolDecision::Approve {})
+    );
+
+    let decided = read_transcript_messages(&mut connection, 4, session_id).await?;
+    assert!(
+        matches!(
+            turn_state_of(&decided, decided_turn_id),
+            TurnState::ActiveRunning { .. }
+        ),
+        "the final approval opens the executing phase"
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S10: a request that already has a terminal resolution records the exact
+/// already-resolved rejection for a later distinct decision.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s10_decide_tool_request_refuses_an_already_resolved_request() -> Result<(), Box<dyn Error>>
+{
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            3,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id,
+                tool_request_id: pending_request_id,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert_eq!(
+        decided_receipt(response_within(&mut connection).await?.message()),
+        (pending_request_id, ToolDecision::Approve {})
+    );
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            4,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id,
+                tool_request_id: pending_request_id,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::ToolRequestAlreadyResolved {
+            tool_request_id: pending_request_id,
+        }
+    );
+
+    drop(connection);
     runtime.stop().await
 }
 

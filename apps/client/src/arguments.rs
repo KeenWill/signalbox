@@ -60,6 +60,23 @@ pub(crate) enum Command {
         command_id: Option<CommandId>,
         defaults_version: Option<CanonicalU64>,
     },
+    Stop {
+        session_id: CanonicalUuid,
+        turn_id: Option<CanonicalUuid>,
+        command_id: Option<CommandId>,
+        defaults_version: Option<CanonicalU64>,
+    },
+    Approve {
+        session_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+        command_id: Option<CommandId>,
+    },
+    Deny {
+        session_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+        reason: String,
+        command_id: Option<CommandId>,
+    },
 }
 
 #[derive(Debug)]
@@ -118,6 +135,12 @@ enum CliCommand {
     /// Reconcile a turn parked on an ambiguous model call and continue with
     /// standard-input content.
     Reconcile(ReconcileArguments),
+    /// Stop the active turn and continue with standard-input content.
+    Stop(StopArguments),
+    /// Approve one pending tool request.
+    Approve(DecideArguments),
+    /// Deny one pending tool request with an explicit reason.
+    Deny(DenyArguments),
 }
 
 #[derive(Debug, ClapArgs)]
@@ -267,6 +290,66 @@ struct ReconcileArguments {
         value_parser = canonical_u64
     )]
     defaults_version: Option<CanonicalU64>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct StopArguments {
+    /// Session whose active turn should stop.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Exact expected active turn paired with recovery values.
+    #[arg(
+        long,
+        value_name = "UUID",
+        requires_all = ["command_id", "defaults_version"],
+        value_parser = canonical_uuid
+    )]
+    turn: Option<CanonicalUuid>,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(
+        long,
+        value_name = "UUID",
+        requires_all = ["defaults_version", "turn"],
+        value_parser = command_id
+    )]
+    command_id: Option<CommandId>,
+    /// Exact defaults version paired with a recovery command identity.
+    #[arg(
+        long,
+        value_name = "DECIMAL",
+        requires_all = ["command_id", "turn"],
+        value_parser = canonical_u64
+    )]
+    defaults_version: Option<CanonicalU64>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct DecideArguments {
+    /// Session the pending tool request belongs to.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Pending tool request printed by the transcript.
+    #[arg(value_name = "TOOL_REQUEST", value_parser = canonical_uuid)]
+    tool_request_id: CanonicalUuid,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct DenyArguments {
+    /// Session the pending tool request belongs to.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Pending tool request printed by the transcript.
+    #[arg(value_name = "TOOL_REQUEST", value_parser = canonical_uuid)]
+    tool_request_id: CanonicalUuid,
+    /// Exact denial explanation rendered to the model.
+    #[arg(long, value_name = "TEXT")]
+    reason: String,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -441,6 +524,23 @@ pub(crate) fn parse(
             command_id: arguments.command_id,
             defaults_version: arguments.defaults_version,
         },
+        CliCommand::Stop(arguments) => Command::Stop {
+            session_id: arguments.session_id,
+            turn_id: arguments.turn,
+            command_id: arguments.command_id,
+            defaults_version: arguments.defaults_version,
+        },
+        CliCommand::Approve(arguments) => Command::Approve {
+            session_id: arguments.session_id,
+            tool_request_id: arguments.tool_request_id,
+            command_id: arguments.command_id,
+        },
+        CliCommand::Deny(arguments) => Command::Deny {
+            session_id: arguments.session_id,
+            tool_request_id: arguments.tool_request_id,
+            reason: arguments.reason,
+            command_id: arguments.command_id,
+        },
     };
     Ok(ParseOutcome::Run(Arguments {
         socket: parsed.socket,
@@ -583,6 +683,112 @@ mod tests {
                 },
                 ..
             }))
+        ));
+    }
+
+    /// S07: stop recovery accepts only the complete printed observation —
+    /// command identity, defaults version, and the exact expected turn.
+    #[test]
+    fn s07_stop_recovery_flags_are_one_complete_observation() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let turn = "00000000-0000-0000-0000-000000000002";
+
+        assert!(parse(["stop", session, "--command-id", session].map(Into::into)).is_err());
+        assert!(
+            parse(
+                [
+                    "stop",
+                    session,
+                    "--command-id",
+                    session,
+                    "--defaults-version",
+                    "1",
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            parse(["stop", session].map(Into::into)),
+            Ok(ParseOutcome::Run(Arguments {
+                command: Command::Stop {
+                    turn_id: None,
+                    command_id: None,
+                    defaults_version: None,
+                    ..
+                },
+                ..
+            }))
+        ));
+        assert!(matches!(
+            parse(
+                [
+                    "stop",
+                    session,
+                    "--turn",
+                    turn,
+                    "--command-id",
+                    session,
+                    "--defaults-version",
+                    "1",
+                ]
+                .map(Into::into)
+            ),
+            Ok(ParseOutcome::Run(Arguments {
+                command: Command::Stop {
+                    turn_id: Some(recovered_turn),
+                    command_id: Some(_),
+                    defaults_version: Some(_),
+                    ..
+                },
+                ..
+            })) if recovered_turn.to_string() == turn
+        ));
+    }
+
+    /// S10: both decision verbs bind the session and the exact pending
+    /// request, and deny requires its explicit reason.
+    #[test]
+    fn s10_decision_verbs_bind_session_request_and_deny_reason() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let tool_request = "00000000-0000-0000-0000-000000000002";
+
+        assert!(parse(["approve", session].map(Into::into)).is_err());
+        assert!(matches!(
+            parse(["approve", session, tool_request].map(Into::into)),
+            Ok(ParseOutcome::Run(Arguments {
+                command: Command::Approve {
+                    session_id,
+                    tool_request_id,
+                    command_id: None,
+                },
+                ..
+            })) if session_id.to_string() == session
+                && tool_request_id.to_string() == tool_request
+        ));
+        assert!(parse(["deny", session, tool_request].map(Into::into)).is_err());
+        assert!(matches!(
+            parse(
+                [
+                    "deny",
+                    session,
+                    tool_request,
+                    "--reason",
+                    "writes outside the workspace",
+                ]
+                .map(Into::into)
+            ),
+            Ok(ParseOutcome::Run(Arguments {
+                command: Command::Deny {
+                    session_id,
+                    tool_request_id,
+                    reason,
+                    command_id: None,
+                },
+                ..
+            })) if session_id.to_string() == session
+                && tool_request_id.to_string() == tool_request
+                && reason == "writes outside the workspace"
         ));
     }
 
