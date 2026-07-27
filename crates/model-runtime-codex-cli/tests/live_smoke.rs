@@ -567,12 +567,20 @@ fn executable_resolution_finds_a_bare_command_on_the_search_path() {
 #[cfg(unix)]
 #[test]
 fn executable_resolution_skips_an_other_only_execute_bit() {
+    verify_other_only_execute_bit_is_skipped();
+}
+
+/// Body of the other-only-execute-bit case. The effective-uid gate lives here
+/// rather than in the `#[test]` function so that body stays straight-line: an
+/// effective root uid may execute a regular file for any execute bit, so the
+/// owner-vs-other distinction the case relies on does not hold and the check
+/// returns early, keeping the workspace validation portable in root
+/// containers.
+#[cfg(unix)]
+fn verify_other_only_execute_bit_is_skipped() {
     use std::os::unix::fs::PermissionsExt;
 
     if rustix::process::geteuid().is_root() {
-        // Root may execute a regular file when any execute bit is set, so the
-        // owner-vs-other distinction this case relies on does not hold; the
-        // portable workspace validation can run as root in containers.
         return;
     }
     let shadowing = tempfile::tempdir().expect("resolution fixture directory is created");
