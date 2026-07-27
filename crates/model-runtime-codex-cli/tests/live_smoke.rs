@@ -162,9 +162,9 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
 /// so a short bounded retry clears the race without masking a real failure.
 async fn spawn_probe(
     command: &mut tokio::process::Command,
-    executable: &str,
+    executable: &std::path::Path,
 ) -> tokio::process::Child {
-    spawn_with_retry(executable, || command.spawn()).await
+    spawn_with_retry(executable.display(), || command.spawn()).await
 }
 
 const MAX_SPAWN_ATTEMPTS: usize = 50;
@@ -173,7 +173,10 @@ const SPAWN_RETRY_DELAY: Duration = Duration::from_millis(20);
 /// Drives the bounded `ETXTBSY` retry over an injectable spawn, so the
 /// retry-to-success, exhaustion, and non-retryable branches are all testable
 /// without provoking a real text-file-busy race.
-async fn spawn_with_retry<F>(executable: &str, mut spawn: F) -> tokio::process::Child
+async fn spawn_with_retry<F>(
+    executable: impl std::fmt::Display,
+    mut spawn: F,
+) -> tokio::process::Child
 where
     F: FnMut() -> std::io::Result<tokio::process::Child>,
 {
@@ -198,7 +201,7 @@ fn spawn_error_is_retryable(error: &std::io::Error) -> bool {
 /// Fails closed: an unreadable, unparsable, or mismatched version is a smoke
 /// failure, never a skip. A skip here would quietly retire the only check that
 /// binds this evidence to a specific executable.
-async fn assert_pinned_version(executable: &str) {
+async fn assert_pinned_version(executable: &std::path::Path) {
     // A hung or slow probe must not hold the sole gated-smoke concurrency slot
     // until the job timeout; it fails the version gate promptly instead.
     const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -225,35 +228,55 @@ async fn assert_pinned_version(executable: &str) {
     let output = tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output())
         .await
         .unwrap_or_else(|_| {
-            panic!("`{executable} --version` did not exit within {PROBE_TIMEOUT:?}")
+            panic!(
+                "`{} --version` did not exit within {PROBE_TIMEOUT:?}",
+                executable.display()
+            )
         })
-        .unwrap_or_else(|error| panic!("`{executable} --version` could not be awaited: {error}"));
+        .unwrap_or_else(|error| {
+            panic!(
+                "`{} --version` could not be awaited: {error}",
+                executable.display()
+            )
+        });
     assert!(
         output.status.success(),
-        "`{executable} --version` exited with {}",
+        "`{} --version` exited with {}",
+        executable.display(),
         output.status
     );
 
-    let reported = String::from_utf8(output.stdout)
-        .unwrap_or_else(|_| panic!("`{executable} --version` printed non-UTF-8 output"));
+    let reported = String::from_utf8(output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "`{} --version` printed non-UTF-8 output",
+            executable.display()
+        )
+    });
     let version = reported
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().next_back())
-        .unwrap_or_else(|| panic!("`{executable} --version` printed no version token"));
+        .unwrap_or_else(|| {
+            panic!(
+                "`{} --version` printed no version token",
+                executable.display()
+            )
+        });
 
     assert_eq!(
-        version, SUPPORTED_CODEX_CLI_VERSION,
-        "the executable at `{executable}` reports {version}, but this smoke can \
+        version,
+        SUPPORTED_CODEX_CLI_VERSION,
+        "the executable at `{}` reports {version}, but this smoke can \
          only produce compatibility evidence for the pinned \
          {SUPPORTED_CODEX_CLI_VERSION}; install the version pinned in \
-         tooling/codex-cli/package.json"
+         tooling/codex-cli/package.json",
+        executable.display()
     );
 }
 
 /// Writes an executable version-probe script and returns its path.
 #[cfg(unix)]
-fn version_probe_fixture(directory: &std::path::Path, script: &str) -> String {
+fn version_probe_fixture(directory: &std::path::Path, script: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
     let path = directory.join("codex-version-probe");
@@ -263,9 +286,7 @@ fn version_probe_fixture(directory: &std::path::Path, script: &str) -> String {
         .permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&path, permissions).expect("the version-probe script is runnable");
-    path.to_str()
-        .expect("the version-probe path is UTF-8")
-        .to_string()
+    path
 }
 
 #[test]
@@ -282,22 +303,25 @@ fn spawn_error_enoent_is_not_retryable() {
     ));
 }
 
+/// Builds a spawn returning `ETXTBSY` for its first `failures` calls, then a
+/// trivially-succeeding child, keeping the branching out of the test body.
+fn busy_then_success(failures: usize) -> impl FnMut() -> std::io::Result<tokio::process::Child> {
+    let mut remaining = failures;
+    move || match remaining {
+        0 => tokio::process::Command::new("true").spawn(),
+        _ => {
+            remaining -= 1;
+            Err(std::io::Error::from_raw_os_error(26))
+        }
+    }
+}
+
 /// The retry loop keeps trying through transient `ETXTBSY` and returns the
 /// child once a later attempt succeeds.
 #[tokio::test]
 async fn spawn_with_retry_succeeds_after_transient_busy() {
-    let mut attempts = 0_usize;
-    let child = spawn_with_retry("fixture", || {
-        attempts += 1;
-        if attempts < 3 {
-            Err(std::io::Error::from_raw_os_error(26))
-        } else {
-            tokio::process::Command::new("true").spawn()
-        }
-    })
-    .await;
+    let child = spawn_with_retry("fixture", busy_then_success(2)).await;
 
-    assert_eq!(attempts, 3);
     let status = child
         .wait_with_output()
         .await
@@ -532,7 +556,7 @@ fn smoke_variable_selection_falls_back_for_a_whitespace_variable() {
 /// local default is resolved through `PATH` exactly once, here. CI is
 /// unaffected: the workflow always passes the absolute path of the binary
 /// installed from the pin manifest.
-fn absolute_executable(executable: &str) -> String {
+fn absolute_executable(executable: &str) -> std::path::PathBuf {
     resolved_executable(
         executable,
         &std::env::current_dir().expect("the smoke process has a working directory"),
@@ -547,14 +571,17 @@ fn resolved_executable(
     executable: &str,
     current_directory: &std::path::Path,
     search: &std::ffi::OsStr,
-) -> String {
+) -> std::path::PathBuf {
     let path = std::path::Path::new(executable);
     if path.is_absolute() {
-        return executable.to_string();
+        return path.to_path_buf();
     }
     if path.components().count() > 1 {
-        return current_directory.join(path).to_string_lossy().into_owned();
+        return current_directory.join(path);
     }
+    // The resolved candidate is kept as a `PathBuf`, never lossily converted to
+    // a `String`, so a match in a non-UTF-8 `PATH` directory still names the
+    // real executable.
     std::env::split_paths(search)
         .map(|directory| {
             // A relative or empty PATH element denotes a directory under the
@@ -573,8 +600,6 @@ fn resolved_executable(
                  to an absolute executable path"
             )
         })
-        .to_string_lossy()
-        .into_owned()
 }
 
 /// Mirrors shell `PATH` lookup: a regular file the current process cannot
@@ -609,7 +634,7 @@ fn executable_resolution_passes_an_absolute_path_through() {
         std::ffi::OsStr::new(""),
     );
 
-    assert_eq!(resolved, absolute.to_string_lossy());
+    assert_eq!(resolved, absolute);
 }
 
 #[test]
@@ -619,7 +644,7 @@ fn executable_resolution_anchors_a_relative_path_to_the_working_directory() {
 
     let resolved = resolved_executable(relative, directory.path(), std::ffi::OsStr::new(""));
 
-    assert_eq!(resolved, directory.path().join(relative).to_string_lossy());
+    assert_eq!(resolved, directory.path().join(relative));
 }
 
 /// Writes an executable fixture file and returns its path.
@@ -648,7 +673,7 @@ fn executable_resolution_finds_a_bare_command_on_the_search_path() {
 
     let resolved = resolved_executable("codex-on-path", empty.path(), &search);
 
-    assert_eq!(resolved, on_path.to_string_lossy());
+    assert_eq!(resolved, on_path);
 }
 
 /// A file whose only execute bit belongs to "other" is not executable by
@@ -688,7 +713,29 @@ fn verify_other_only_execute_bit_is_skipped() {
 
     let resolved = resolved_executable("codex-other-only", shadowing.path(), &search);
 
-    assert_eq!(resolved, on_path.to_string_lossy());
+    assert_eq!(resolved, on_path);
+}
+
+/// A match in a `PATH` directory whose name is not valid UTF-8 is returned as
+/// the real path, not a lossy conversion that would name a nonexistent file.
+/// Gated to Linux, whose filesystems accept arbitrary filename bytes; macOS
+/// and Windows reject a non-UTF-8 name at creation.
+#[cfg(target_os = "linux")]
+#[test]
+fn executable_resolution_preserves_a_non_utf8_path_directory() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let root = tempfile::tempdir().expect("resolution fixture directory is created");
+    let directory = root
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"codex-\xff-dir"));
+    std::fs::create_dir(&directory).expect("the non-UTF-8 PATH directory is created");
+    let on_path = executable_fixture(&directory, "codex-nonutf8");
+    let search = std::env::join_paths([&directory]).expect("the fixture search path joins");
+
+    let resolved = resolved_executable("codex-nonutf8", root.path(), &search);
+
+    assert_eq!(resolved, on_path);
 }
 
 /// A relative PATH element is anchored to the working directory, so the
@@ -702,7 +749,7 @@ fn executable_resolution_anchors_a_relative_search_entry() {
 
     let resolved = resolved_executable("codex-rel", working.path(), std::ffi::OsStr::new("bin"));
 
-    assert_eq!(resolved, on_path.to_string_lossy());
+    assert_eq!(resolved, on_path);
 }
 
 /// A regular but non-executable file earlier on the search path cannot shadow
@@ -720,7 +767,7 @@ fn executable_resolution_skips_a_non_executable_shadow() {
 
     let resolved = resolved_executable("codex-shadowed", shadowing.path(), &search);
 
-    assert_eq!(resolved, on_path.to_string_lossy());
+    assert_eq!(resolved, on_path);
 }
 
 #[test]
