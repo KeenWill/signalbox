@@ -282,9 +282,9 @@ enum MockSignalboxFixtures {
     ]
     """
 
-    static let markdownBasicsEvents = messageEventsJSON(
-        userText: "Show headings, emphasis, ordered lists, unordered lists, and task states.",
-        assistantText: """
+    static let markdownBasicsUserText =
+        "Show headings, emphasis, ordered lists, unordered lists, and task states."
+    static let markdownBasicsAssistantText = """
         # Incident Handoff
 
         ## Current status
@@ -305,11 +305,13 @@ enum MockSignalboxFixtures {
         - [x] Capture screenshots.
         - [ ] Re-run the local smoke after review.
         """
+    static let markdownBasicsEvents = messageEventsJSON(
+        userText: markdownBasicsUserText,
+        assistantText: markdownBasicsAssistantText
     )
 
-    static let markdownTableEvents = messageEventsJSON(
-        userText: "Render a status table with links and inline code.",
-        assistantText: """
+    static let markdownTableUserText = "Render a status table with links and inline code."
+    static let markdownTableAssistantText = """
         ## Runner fleet summary
 
         | Runner | Environment | Status | Permissions | Runbook |
@@ -320,11 +322,13 @@ enum MockSignalboxFixtures {
 
         The table should stay horizontally scrollable on compact phones without squeezing the timeline.
         """
+    static let markdownTableEvents = messageEventsJSON(
+        userText: markdownTableUserText,
+        assistantText: markdownTableAssistantText
     )
 
-    static let markdownCodeEvents = messageEventsJSON(
-        userText: "Render quoted notes and several fenced code blocks.",
-        assistantText: """
+    static let markdownCodeUserText = "Render quoted notes and several fenced code blocks."
+    static let markdownCodeAssistantText = """
         ## Tool approval notes
 
         > Approval should be obvious, inspectable, and reversible in the timeline.
@@ -351,11 +355,13 @@ enum MockSignalboxFixtures {
 
         Inline code such as `SignalboxToolInvocationID` should align with surrounding prose.
         """
+    static let markdownCodeEvents = messageEventsJSON(
+        userText: markdownCodeUserText,
+        assistantText: markdownCodeAssistantText
     )
 
-    static let markdownEvents = messageEventsJSON(
-        userText: "Summarize the last local smoke run as a mixed markdown report.",
-        assistantText: """
+    static let markdownUserText = "Summarize the last local smoke run as a mixed markdown report."
+    static let markdownAssistantText = """
         # Local smoke result
 
         The **macOS client** connected to `http://127.0.0.1:8000` and used the native server API.
@@ -377,6 +383,9 @@ enum MockSignalboxFixtures {
         native-approval-smoke
         ```
         """
+    static let markdownEvents = messageEventsJSON(
+        userText: markdownUserText,
+        assistantText: markdownAssistantText
     )
 
     private static func messageEventsJSON(userText: String, assistantText: String) -> String {

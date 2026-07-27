@@ -20,6 +20,10 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
     case message(SignalboxMessageEvent)
     case toolInvocation(SignalboxToolInvocationEvent)
     case turnFailed(SignalboxTurnFailedEvent)
+    case processMessage(SignalboxProcessMessageEvent)
+    case processTool(SignalboxProcessToolEvent)
+    case processTurnFailure(SignalboxProcessTurnFailureEvent)
+    case processConservative(SignalboxProcessConservativeEvent)
     case unknown(SignalboxUnknownEvent)
 
     public var kind: String {
@@ -30,6 +34,14 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
             return "tool_invocation"
         case .turnFailed:
             return "turn_failed"
+        case .processMessage:
+            return "process_message"
+        case .processTool:
+            return "process_tool"
+        case .processTurnFailure:
+            return "process_turn_failure"
+        case .processConservative:
+            return "process_conservative"
         case .unknown(let event):
             return event.kind
         }
@@ -79,6 +91,54 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
                     )
                 )
             }
+        case "process_message":
+            do {
+                self = .processMessage(try SignalboxProcessMessageEvent(from: decoder))
+            } catch {
+                self = .unknown(
+                    try SignalboxUnknownEvent(
+                        kind: kind,
+                        decoder: decoder,
+                        decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
+                    )
+                )
+            }
+        case "process_tool":
+            do {
+                self = .processTool(try SignalboxProcessToolEvent(from: decoder))
+            } catch {
+                self = .unknown(
+                    try SignalboxUnknownEvent(
+                        kind: kind,
+                        decoder: decoder,
+                        decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
+                    )
+                )
+            }
+        case "process_turn_failure":
+            do {
+                self = .processTurnFailure(try SignalboxProcessTurnFailureEvent(from: decoder))
+            } catch {
+                self = .unknown(
+                    try SignalboxUnknownEvent(
+                        kind: kind,
+                        decoder: decoder,
+                        decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
+                    )
+                )
+            }
+        case "process_conservative":
+            do {
+                self = .processConservative(try SignalboxProcessConservativeEvent(from: decoder))
+            } catch {
+                self = .unknown(
+                    try SignalboxUnknownEvent(
+                        kind: kind,
+                        decoder: decoder,
+                        decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
+                    )
+                )
+            }
         default:
             self = .unknown(try SignalboxUnknownEvent(kind: kind, decoder: decoder))
         }
@@ -91,6 +151,14 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
         case .toolInvocation(let event):
             try event.encode(to: encoder)
         case .turnFailed(let event):
+            try event.encode(to: encoder)
+        case .processMessage(let event):
+            try event.encode(to: encoder)
+        case .processTool(let event):
+            try event.encode(to: encoder)
+        case .processTurnFailure(let event):
+            try event.encode(to: encoder)
+        case .processConservative(let event):
             try event.encode(to: encoder)
         case .unknown(let event):
             try event.encode(to: encoder)
