@@ -11,6 +11,7 @@ use std::{
 
 use arguments::{
     Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome, ReviewCommand,
+    SystemPromptArgument,
 };
 use connection::ProcessClient;
 use error::ClientError;
@@ -21,10 +22,11 @@ use rustix::{
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportFormat,
-    ConversationImportSource, ErrorCode, InputContent, MAX_FRAME_BYTES, ModelCallDisposition,
-    ModelCallState, ModelSelection, ReviewPassSnapshot, ReviewRunSnapshot, ServerFrame,
-    ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_server_line,
-    encode_server_line,
+    ConversationImportSource, ErrorCode, InputContent, MAX_FRAME_BYTES,
+    MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState, ModelSelection,
+    ReviewPassSnapshot, ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent,
+    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
+    decode_server_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -167,6 +169,30 @@ async fn execute(
         | Command::Approve { .. }
         | Command::Deny { .. } => None,
     };
+    let system_prompt_text = match &arguments.command {
+        Command::Create {
+            system_prompt_file: Some(path),
+            ..
+        }
+        | Command::Model {
+            system_prompt: SystemPromptArgument::File(path),
+            ..
+        } => Some(read_system_prompt_file(path).await?),
+        Command::Create { .. }
+        | Command::List
+        | Command::Search(_)
+        | Command::Send { .. }
+        | Command::Reconcile { .. }
+        | Command::Stop { .. }
+        | Command::Approve { .. }
+        | Command::Deny { .. }
+        | Command::Model { .. }
+        | Command::Transcript { .. }
+        | Command::Follow { .. }
+        | Command::Continue { .. }
+        | Command::Review(_)
+        | Command::Import { .. } => None,
+    };
     let socket = socket_path(arguments.socket, socket_environment)?;
     let mut client = ProcessClient::new(socket);
     let mut output = Output::new(stdout, stderr, arguments.raw_output);
@@ -175,7 +201,17 @@ async fn execute(
         Command::Create {
             selection,
             command_id,
-        } => create(&mut client, &mut output, selection, command_id).await,
+            system_prompt_file: _,
+        } => {
+            create(
+                &mut client,
+                &mut output,
+                selection,
+                command_id,
+                system_prompt_text,
+            )
+            .await
+        }
         Command::Continue {
             imported_conversation_id,
             through_position,
@@ -218,7 +254,16 @@ async fn execute(
             command_id,
             defaults_version,
             dangerous_tool_auto_approval,
+            system_prompt,
         } => {
+            let system_prompt = match system_prompt {
+                SystemPromptArgument::Keep => ModelSystemPromptChoice::Keep,
+                SystemPromptArgument::Clear => ModelSystemPromptChoice::Clear,
+                SystemPromptArgument::File(_) => ModelSystemPromptChoice::Replace(
+                    system_prompt_text
+                        .ok_or(ClientError::Input("system prompt file was not read"))?,
+                ),
+            };
             replace_session_model(
                 &mut client,
                 &mut output,
@@ -227,6 +272,7 @@ async fn execute(
                 command_id,
                 defaults_version,
                 dangerous_tool_auto_approval,
+                system_prompt,
             )
             .await
         }
@@ -343,6 +389,36 @@ async fn read_import_file(file: tokio::fs::File) -> Result<Vec<u8>, ClientError>
     Ok(source)
 }
 
+async fn read_system_prompt_file(path: &Path) -> Result<SystemPromptText, ClientError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(ClientError::system_prompt_file)?;
+    let read_limit = u64::try_from(MAX_SYSTEM_PROMPT_UTF8_BYTES)
+        .ok()
+        .and_then(|bound| bound.checked_add(1))
+        .ok_or(ClientError::Protocol("system prompt read bound overflow"))?;
+    let mut bounded = file.take(read_limit);
+    let mut bytes = Vec::new();
+    bounded
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(ClientError::system_prompt_file)?;
+    if bytes.is_empty() {
+        return Err(ClientError::Input(
+            "the system prompt file must not be empty",
+        ));
+    }
+    if bytes.len() > MAX_SYSTEM_PROMPT_UTF8_BYTES {
+        return Err(ClientError::Input(
+            "the system prompt exceeds the 1 MiB UTF-8 byte limit",
+        ));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| ClientError::Input("the system prompt must be valid UTF-8"))?;
+    SystemPromptText::try_new(text)
+        .map_err(|_| ClientError::Input("the system prompt must not contain U+0000"))
+}
+
 fn socket_path(
     override_path: Option<PathBuf>,
     socket_environment: Option<OsString>,
@@ -400,6 +476,7 @@ async fn create(
     output: &mut Output<'_>,
     selection: ModelSelection,
     command_id: Option<CommandId>,
+    system_prompt: Option<SystemPromptText>,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
     if generated {
@@ -412,6 +489,7 @@ async fn create(
         .mutation_request(ClientRequest::CreateSession {
             command_id,
             initial_model_selection: selection,
+            system_prompt: SystemPromptMember::present(system_prompt),
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
@@ -467,12 +545,26 @@ async fn continue_imported(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedSessionDefaults {
     version: CanonicalU64,
     dangerous_tool_auto_approval: bool,
+    system_prompt: Option<SystemPromptText>,
 }
 
+/// The model verb's resolved replacement choice for the session system
+/// prompt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ModelSystemPromptChoice {
+    /// Copy the observed epoch's exact prompt forward unchanged.
+    Keep,
+    /// Replace the prompt with exact user-supplied file content.
+    Replace(SystemPromptText),
+    /// Install the replacement epoch without a prompt.
+    Clear,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn replace_session_model(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
@@ -481,6 +573,7 @@ async fn replace_session_model(
     command_id: Option<CommandId>,
     defaults_version: Option<CanonicalU64>,
     dangerous_tool_auto_approval: Option<DangerousToolAutoApprovalArgument>,
+    system_prompt: ModelSystemPromptChoice,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
     if generated {
@@ -490,14 +583,29 @@ async fn replace_session_model(
         )?;
     }
     let observed = match (defaults_version, dangerous_tool_auto_approval) {
-        (Some(version), Some(posture)) => ObservedSessionDefaults {
-            version,
-            dangerous_tool_auto_approval: matches!(
-                posture,
-                DangerousToolAutoApprovalArgument::ApproveAll
-            ),
-        },
-        (None, None) => observe_session_defaults(client, session_id).await?,
+        (Some(version), Some(posture)) => {
+            // Recovery pins version and posture from the printed facts. A
+            // copied-forward prompt is re-read from the immutable epoch the
+            // printed version names, so the retried payload is byte-exact
+            // regardless of later concurrent replacements.
+            let system_prompt = match &system_prompt {
+                ModelSystemPromptChoice::Keep => {
+                    read_session_defaults(client, session_id, Some(version))
+                        .await?
+                        .system_prompt
+                }
+                ModelSystemPromptChoice::Replace(_) | ModelSystemPromptChoice::Clear => None,
+            };
+            ObservedSessionDefaults {
+                version,
+                dangerous_tool_auto_approval: matches!(
+                    posture,
+                    DangerousToolAutoApprovalArgument::ApproveAll
+                ),
+                system_prompt,
+            }
+        }
+        (None, None) => read_session_defaults(client, session_id, None).await?,
         (Some(_), None) | (None, Some(_)) => {
             return Err(ClientError::Input(
                 "model recovery requires the complete printed defaults facts",
@@ -513,6 +621,11 @@ async fn replace_session_model(
             "disabled"
         },
     )?;
+    let replacement_system_prompt = match system_prompt {
+        ModelSystemPromptChoice::Keep => observed.system_prompt.clone(),
+        ModelSystemPromptChoice::Replace(text) => Some(text),
+        ModelSystemPromptChoice::Clear => None,
+    };
 
     let mut connection = client
         .mutation_request(ClientRequest::ReplaceSessionDefaults {
@@ -521,6 +634,7 @@ async fn replace_session_model(
             expected_defaults_version: observed.version,
             model_selection: selection,
             dangerous_tool_auto_approval: observed.dangerous_tool_auto_approval,
+            system_prompt: SystemPromptMember::present(replacement_system_prompt.clone()),
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
@@ -529,9 +643,11 @@ async fn replace_session_model(
             defaults_version: installed_version,
             model_selection,
             dangerous_tool_auto_approval,
+            system_prompt: receipt_system_prompt,
         } if replaced_session == session_id
             && model_selection == selection
             && dangerous_tool_auto_approval == observed.dangerous_tool_auto_approval
+            && receipt_system_prompt.value() == Some(&replacement_system_prompt)
             && observed
                 .version
                 .value()
@@ -556,48 +672,44 @@ async fn replace_session_model(
     }
 }
 
-async fn observe_session_defaults(
+async fn read_session_defaults(
     client: &mut ProcessClient,
-    selected_session: CanonicalUuid,
+    session_id: CanonicalUuid,
+    defaults_version: Option<CanonicalU64>,
 ) -> Result<ObservedSessionDefaults, ClientError> {
-    let mut page = SessionMetadataPageRequest {
-        required_tags: Vec::new(),
-        title_contains: None,
-        include_archived: true,
-        page_size: CanonicalU64::new(MAX_METADATA_PAGE_SIZE),
-        after_session_id: None,
-    };
-    loop {
-        let mut selected = None;
-        let next_after_session_id = read_session_metadata_page(client, &page, |frame| {
-            if let ServerMessage::SessionMetadataSummary {
-                session_id,
-                defaults_version,
-                dangerous_tool_auto_approval,
-                ..
-            } = frame.message()
-                && *session_id == selected_session
-            {
-                selected = Some(ObservedSessionDefaults {
-                    version: *defaults_version,
-                    dangerous_tool_auto_approval: *dangerous_tool_auto_approval,
-                });
-            }
-            Ok(())
+    let mut connection = client
+        .request(ClientRequest::ReadSessionDefaults {
+            session_id,
+            defaults_version,
         })
         .await?;
-        if let Some(selected) = selected {
-            return Ok(selected);
+    match connection.message().await? {
+        ServerMessage::SessionDefaults {
+            session_id: read_session,
+            defaults_version: read_version,
+            model_selection: _,
+            dangerous_tool_auto_approval,
+            system_prompt,
+        } if read_session == session_id
+            && defaults_version.is_none_or(|named| named == read_version) =>
+        {
+            Ok(ObservedSessionDefaults {
+                version: read_version,
+                dangerous_tool_auto_approval,
+                system_prompt,
+            })
         }
-        let Some(next) = next_after_session_id else {
-            return Err(ClientError::Input("the selected session was not listed"));
-        };
-        page.after_session_id = Some(next);
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail)),
+        _ => Err(ClientError::Protocol(
+            "session defaults read returned an unexpected response",
+        )),
     }
 }
 
-/// Reads and validates exactly one bounded metadata page, presenting each
-/// summary frame to `consume` and returning the page's continuation cursor.
 async fn read_session_metadata_page(
     client: &mut ProcessClient,
     page: &SessionMetadataPageRequest,
@@ -2051,9 +2163,10 @@ mod tests {
         MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
         MAX_REVIEW_FINDINGS_PER_RUN, ProcessClient, ReviewCommand, SessionMetadataPageRequest,
         SnapshotSelection, TurnTerminal, collect_import_paths, create, decide,
-        model_call_recovery_transition, open_scanned_import_source, read_input, reconcile_turn,
-        review, run, search, socket_path, stop_turn, submit_input, terminal_event_state,
-        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
+        model_call_recovery_transition, open_scanned_import_source, read_input,
+        read_system_prompt_file, reconcile_turn, review, run, search, socket_path, stop_turn,
+        submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
+        tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -2484,6 +2597,27 @@ mod tests {
         Ok(())
     }
 
+    /// S34: an unreadable `--system-prompt-file` names the prompt file, not
+    /// the unrelated conversation-import source, in both its typed variant and
+    /// its rendered diagnostic.
+    #[tokio::test]
+    async fn s34_missing_system_prompt_file_reports_a_prompt_file_failure()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let absent = root.path().join("prompt.txt");
+
+        let failure = read_system_prompt_file(&absent)
+            .await
+            .expect_err("an absent prompt file must fail");
+
+        assert!(matches!(failure, ClientError::SystemPromptFile(_)));
+        assert_eq!(
+            failure.to_string(),
+            "the system prompt file could not be read"
+        );
+        Ok(())
+    }
+
     /// S28 / INV-038: a regular candidate replaced after enumeration by a
     /// FIFO is rejected without waiting for a writer.
     #[cfg(not(target_vendor = "apple"))]
@@ -2740,6 +2874,7 @@ mod tests {
                 selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
             },
             Some(CommandId::try_from_uuid(Uuid::from_u128(2))?),
+            None,
         )
         .await;
 
