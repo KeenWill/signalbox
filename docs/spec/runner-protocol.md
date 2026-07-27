@@ -59,25 +59,34 @@ posture, or credential value. Registration validates the advertisement against
 both the enrollment's allowed capability classes and the daemon-side catalog. An
 unknown or disallowed claim rejects the complete registration. A valid
 registration retains the exact advertised subset and attaches the
-daemon-authoritative declarations. The persistence adapter stages this checked
+daemon-authoritative declarations. Preparing a registration also takes the
+enrollment-shared exclusive preparation fence: a second preparation while one is
+outstanding fails typed, and the fence releases when the prepared registration
+commits or is abandoned. The persistence adapter stages this checked
 registration, commits its complete durable rows and current head, and only then
-advances the enrollment-owned current registration revision; a failed durable
-write leaves the prior registration current. Complete enrollment reconstitution
-restores the optional last issued revision from independently matching stored
-facts; the next successful registration advances it instead of reusing a prior
-revision. A persistence load supplied with caller-held enrollment authority
-compares that authority's current registration revision with the independently
-loaded canonical enrollment before binding any historical registration to its
-revision fence. Retained copies of every prior registration become stale and
-cannot authorize a later lease, reconciliation, or grant-bearing placement
-transition. Omitting a formerly advertised capability removes its availability
-from the new registration, but never changes its daemon-side policy. A pinned
-session never inherits additions from re-registration. If a new registration
-omits a runner-required capability in that session's pinned snapshot, no later
-lease is authorized; an explicit registration-reconciliation transition marks
-the placement `RunnerLost` without rewriting its snapshot. Omitting a
-combined-locus tool disables runner dispatch for that tool but retains placement
-so daemon fallback remains admissible. Why: re-registration can narrow current
+advances the enrollment-owned current registration revision; the held fence
+means no concurrent registration can advance that revision between staging and
+this post-commit advance, so a successful durable write is never reported as a
+failed registration, while a failed durable write leaves the prior registration
+current. Enrollment persistence admits only a pristine active enrollment that
+has issued no registration; inserting one whose caller-held authority already
+advanced would reload with no issued revision and disagree with canonical
+storage on every later registration. Complete enrollment reconstitution restores
+the optional last issued revision from independently matching stored facts; the
+next successful registration advances it instead of reusing a prior revision. A
+persistence load supplied with caller-held enrollment authority compares that
+authority's current registration revision with the independently loaded
+canonical enrollment before binding any historical registration to its revision
+fence. Retained copies of every prior registration become stale and cannot
+authorize a later lease, reconciliation, or grant-bearing placement transition.
+Omitting a formerly advertised capability removes its availability from the new
+registration, but never changes its daemon-side policy. A pinned session never
+inherits additions from re-registration. If a new registration omits a
+runner-required capability in that session's pinned snapshot, no later lease is
+authorized; an explicit registration-reconciliation transition marks the
+placement `RunnerLost` without rewriting its snapshot. Omitting a combined-locus
+tool disables runner dispatch for that tool but retains placement so daemon
+fallback remains admissible. Why: re-registration can narrow current
 availability without downgrading a confirmation requirement, widening
 authorization, or silently changing established affinity (INV-042, INV-044).
 

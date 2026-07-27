@@ -5485,6 +5485,7 @@ pub enum RunnerDomainError {
     ToolUnavailable,
     GrantRevoked,
     RegistrationChanged,
+    RegistrationInProgress,
     CorruptStoredFacts,
 }
 
@@ -5595,7 +5596,8 @@ impl RunnerEnrollment {
     pub fn reconstitute(
         input: RunnerEnrollmentReconstitutionInput,
     ) -> Result<Self, RunnerDomainError>;
-    // accessors: enrollment(), runner(), authentication(), state()
+    // accessors: enrollment(), runner(), authentication(), state(),
+    // last_issued_registration_revision()
 }
 pub struct RunnerEnrollmentReconstitutionInput {
     /* public complete typed facts, including independently recorded optional last registration revision */

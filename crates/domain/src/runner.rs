@@ -54,6 +54,7 @@ pub enum RunnerDomainError {
     ToolUnavailable,
     GrantRevoked,
     RegistrationChanged,
+    RegistrationInProgress,
     CorruptStoredFacts,
 }
 
@@ -431,6 +432,7 @@ pub struct RunnerEnrollment {
     state: RunnerEnrollmentState,
     registration_revision: Arc<AtomicU64>,
     registration_active: Arc<AtomicBool>,
+    registration_preparation: Arc<AtomicBool>,
 }
 
 impl PartialEq for RunnerEnrollment {
@@ -462,6 +464,7 @@ impl RunnerEnrollment {
             state: RunnerEnrollmentState::Active,
             registration_revision: Arc::new(AtomicU64::new(0)),
             registration_active: Arc::new(AtomicBool::new(true)),
+            registration_preparation: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -483,6 +486,12 @@ impl RunnerEnrollment {
 
     pub fn allowed_classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass> {
         self.allowed_classes.iter()
+    }
+
+    /// The last registration revision this enrollment authority issued, or
+    /// `None` while the enrollment is pristine and has issued none.
+    pub fn last_issued_registration_revision(&self) -> Option<RunnerGeneration> {
+        RunnerGeneration::try_from_u64(self.registration_revision.load(Ordering::Acquire))
     }
 
     pub fn revoke(mut self) -> Result<Self, RunnerDomainError> {
@@ -515,6 +524,14 @@ impl RunnerEnrollment {
         if self.state != RunnerEnrollmentState::Active {
             return Err(RunnerDomainError::EnrollmentRevoked);
         }
+        // At most one outstanding preparation exists per enrollment
+        // authority, so nothing can advance the shared registration revision
+        // between this snapshot and the preparation's commit: an adapter that
+        // commits durable rows first can then always advance the fence.
+        self.registration_preparation
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| RunnerDomainError::RegistrationInProgress)?;
+        let preparation = RegistrationPreparationGuard(Arc::clone(&self.registration_preparation));
         if let Some(class) = advertisement.classes.iter().find(|class| {
             !self.allowed_classes.contains(*class) || !catalog.classes.contains(*class)
         }) {
@@ -578,6 +595,7 @@ impl RunnerEnrollment {
             .ok_or(RunnerDomainError::GenerationExhausted)?;
         Ok(PreparedRunnerRegistration {
             expected_revision: prior_revision,
+            preparation,
             registration: ValidatedRunnerRegistration {
                 enrollment: self.enrollment,
                 runner: self.runner,
@@ -637,14 +655,30 @@ impl RunnerEnrollment {
             registration_active: Arc::new(AtomicBool::new(
                 input.state == RunnerEnrollmentState::Active,
             )),
+            registration_preparation: Arc::new(AtomicBool::new(false)),
         })
     }
 }
 
-/// One validated registration awaiting its authoritative commit point.
+/// Releases the enrollment-shared exclusive preparation fence when the
+/// prepared registration commits or is abandoned without committing.
+#[derive(Debug)]
+struct RegistrationPreparationGuard(Arc<AtomicBool>);
+
+impl Drop for RegistrationPreparationGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// One validated registration awaiting its authoritative commit point. It
+/// holds the enrollment's exclusive preparation fence, so no concurrent
+/// registration can advance the shared revision before this one commits or
+/// is abandoned.
 #[derive(Debug)]
 pub struct PreparedRunnerRegistration {
     expected_revision: u64,
+    preparation: RegistrationPreparationGuard,
     registration: ValidatedRunnerRegistration,
 }
 
@@ -654,19 +688,28 @@ impl PreparedRunnerRegistration {
     }
 
     pub fn commit(self) -> Result<ValidatedRunnerRegistration, RunnerDomainError> {
-        if !self.registration.enrollment_active.load(Ordering::Acquire) {
+        let Self {
+            expected_revision,
+            preparation,
+            registration,
+        } = self;
+        if !registration.enrollment_active.load(Ordering::Acquire) {
             return Err(RunnerDomainError::EnrollmentRevoked);
         }
-        self.registration
+        registration
             .current_revision
             .compare_exchange(
-                self.expected_revision,
-                self.registration.revision.get(),
+                expected_revision,
+                registration.revision.get(),
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
             .map_err(|_| RunnerDomainError::RegistrationChanged)?;
-        Ok(self.registration)
+        // Release the preparation fence only after the shared revision has
+        // advanced, so a successor preparation always snapshots the committed
+        // revision.
+        drop(preparation);
+        Ok(registration)
     }
 }
 
@@ -816,6 +859,7 @@ impl ValidatedRunnerRegistration {
             state: RunnerEnrollmentState::Active,
             registration_revision: Arc::new(AtomicU64::new(0)),
             registration_active: Arc::new(AtomicBool::new(true)),
+            registration_preparation: Arc::new(AtomicBool::new(false)),
         };
         let mut registration = historical_authority
             .prepare_registration(advertisement, catalog)
@@ -2646,6 +2690,7 @@ mod tests {
             state: RunnerEnrollmentState::Active,
             registration_revision: Arc::clone(&registration.current_revision),
             registration_active: Arc::clone(&registration.enrollment_active),
+            registration_preparation: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -3306,6 +3351,53 @@ mod tests {
         assert_eq!(
             enrollment.register(RunnerAdvertisement::new([], [], [], []), &catalog()),
             Err(RunnerDomainError::EnrollmentRevoked)
+        );
+    }
+
+    #[test]
+    fn s30_inv042_outstanding_preparation_excludes_concurrent_registration() {
+        let enrollment = enrollment();
+        let outstanding = enrollment
+            .prepare_registration(advertisement(), &catalog())
+            .expect("the pristine enrollment prepares its first registration");
+
+        assert_eq!(
+            enrollment.register(advertisement(), &catalog()),
+            Err(RunnerDomainError::RegistrationInProgress)
+        );
+        drop(outstanding);
+        let registration = enrollment
+            .register(advertisement(), &catalog())
+            .expect("an abandoned preparation releases the exclusive fence");
+        assert_eq!(registration.revision(), RunnerGeneration::one());
+    }
+
+    #[test]
+    fn s30_inv042_committed_preparation_releases_the_exclusive_fence() {
+        let enrollment = enrollment();
+        let first = enrollment
+            .prepare_registration(advertisement(), &catalog())
+            .expect("the pristine enrollment prepares its first registration")
+            .commit()
+            .expect("the sole outstanding preparation commits");
+
+        let second = enrollment
+            .register(advertisement(), &catalog())
+            .expect("a committed preparation releases the exclusive fence");
+        assert_eq!(Some(second.revision()), first.revision().checked_next());
+    }
+
+    #[test]
+    fn s30_inv042_enrollment_reports_its_last_issued_registration_revision() {
+        let enrollment = enrollment();
+        assert_eq!(enrollment.last_issued_registration_revision(), None);
+
+        let registration = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the pristine enrollment issues its first registration");
+        assert_eq!(
+            enrollment.last_issued_registration_revision(),
+            Some(registration.revision())
         );
     }
 

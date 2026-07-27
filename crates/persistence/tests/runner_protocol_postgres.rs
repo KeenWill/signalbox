@@ -1050,6 +1050,69 @@ fn assert_one_store_succeeds_and_one_conflicts(
     }
 }
 
+/// One genuine constraint rejection for the assertion-helper tests below: the
+/// enrollment guard trigger rejects an insert that does not begin active at
+/// revision one with the same SQLSTATE the concurrency races produce.
+async fn stored_check_violation(pool: &PgPool) -> RunnerProtocolStoreError {
+    RunnerProtocolStoreError::Database(
+        sqlx::query(
+            "INSERT INTO runner_enrollment
+                (enrollment_id, runner_id, authentication_reference_id,
+                 allowed_class_count, revision, state_kind)
+             VALUES ($1, $2, $3, 0, 2, 'revoked')",
+        )
+        .bind(uuid(LATER_ENROLLMENT))
+        .bind(uuid(LATER_RUNNER))
+        .bind(uuid(LATER_AUTHENTICATION))
+        .execute(pool)
+        .await
+        .expect_err("an enrollment inserted as already revoked violates the guard"),
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn one_conflict_assertion_accepts_either_winning_order() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let second_loses = stored_check_violation(&pool).await;
+    let first_loses = stored_check_violation(&pool).await;
+
+    assert_one_store_succeeds_and_one_conflicts(Ok(()), Err(second_loses));
+    assert_one_store_succeeds_and_one_conflicts(Err(first_loses), Ok(()));
+    drop(pool);
+    Ok(())
+}
+
+#[test]
+#[should_panic(expected = "one attempt binding must win exactly once")]
+fn one_conflict_assertion_rejects_two_successes() {
+    assert_one_store_succeeds_and_one_conflicts(Ok(()), Ok(()));
+}
+
+#[test]
+#[should_panic(expected = "one attempt binding must win exactly once")]
+fn one_conflict_assertion_rejects_two_rejections() {
+    assert_one_store_succeeds_and_one_conflicts(
+        Err(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::InvalidState,
+        )),
+        Err(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::InvalidState,
+        )),
+    );
+}
+
+#[test]
+#[should_panic(expected = "PostgreSQL must reject the invalid durable evidence")]
+fn one_conflict_assertion_rejects_a_non_constraint_rejection() {
+    assert_one_store_succeeds_and_one_conflicts(
+        Ok(()),
+        Err(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::InvalidState,
+        )),
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
@@ -1170,6 +1233,71 @@ async fn s30_inv042_failed_registration_write_preserves_prior_authority()
         panic!("the synthetic constraint must reject the durable write")
     };
 
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_insert_enrollment_requires_pristine_registration_authority()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    expected_enrollment
+        .register(advertisement(), &catalog())
+        .expect("the domain-only path issues a registration before insertion");
+
+    let rejected = store
+        .insert_enrollment(&expected_enrollment)
+        .await
+        .expect_err("an enrollment that already issued a registration is not pristine");
+
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    assert!(
+        store
+            .load_enrollment(expected_enrollment.enrollment())
+            .await?
+            .is_none()
+    );
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_outstanding_preparation_fails_registration_before_durable_writes()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let first = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let outstanding = expected_enrollment
+        .prepare_registration(advertisement(), &catalog())
+        .expect("the enrollment prepares a concurrent registration");
+
+    let rejected = store
+        .register(&expected_enrollment, advertisement())
+        .await
+        .expect_err("an outstanding preparation excludes a second registration");
+
+    assert_store_domain_error(rejected, RunnerDomainError::RegistrationInProgress);
+    let current = store
+        .load_current_registration(&expected_enrollment)
+        .await?
+        .expect("the rejected registration left the durable head unchanged");
+    assert_eq!(current, first);
+    drop(outstanding);
+    let advanced = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    assert_eq!(
+        Some(advanced.revision().get()),
+        first.revision().get().checked_add(1)
+    );
     drop(pool);
     Ok(())
 }

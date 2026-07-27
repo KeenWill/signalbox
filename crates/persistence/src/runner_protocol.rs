@@ -148,12 +148,18 @@ impl RunnerProtocolStore {
         }
     }
 
-    /// Inserts one active logical enrollment and its exact allowed classes.
+    /// Inserts one pristine active logical enrollment and its exact allowed
+    /// classes. An enrollment that already issued a registration through the
+    /// domain-only path is rejected: persisting only its enrollment rows
+    /// would reload with no issued revision while the caller-held authority
+    /// disagrees with canonical storage forever after.
     pub async fn insert_enrollment(
         &self,
         enrollment: &RunnerEnrollment,
     ) -> Result<(), RunnerProtocolStoreError> {
-        if enrollment.state() != RunnerEnrollmentState::Active {
+        if enrollment.state() != RunnerEnrollmentState::Active
+            || enrollment.last_issued_registration_revision().is_some()
+        {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
             ));
