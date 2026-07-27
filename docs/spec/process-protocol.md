@@ -255,14 +255,16 @@ selection and dangerous-tool auto-approval posture.
 
 Review mutations use the same owner-global command namespace. Equality is the
 closed operation kind plus SHA-256 of the validated semantic request object;
-frame version and request identity are excluded. The typed append-only receipt
-stores the complete stable success response. A recorded receipt is inspected
-before mutable aggregate-state preconditions, so an equal retry returns that
-response even after the operation changed the aggregate state. Each aggregate
-effect uses its owning store transaction. Fresh run admission creates its run
-and sole pass in one transaction; recovery also recognizes and completes a
-matching run-only intermediate committed by the earlier multi-transaction
-implementation. The
+frame version and request identity are excluded. Before hashing, the daemon
+canonicalizes a complete `record_review_findings` request into finding-identity
+order, so array order does not distinguish the same semantic inventory. The
+typed append-only receipt stores the complete stable success response. A
+recorded receipt is inspected before mutable aggregate-state preconditions, so
+an equal retry returns that response even after the operation changed the
+aggregate state. Each aggregate effect uses its owning store transaction. Fresh
+run admission creates its run and sole pass in one transaction; recovery also
+recognizes and completes a matching run-only intermediate committed by the
+earlier multi-transaction implementation. The
 [atomic run-admission decision](../decisions.md#2026-07-26--admit-review-run-and-pass-roots-atomically)
 owns this refinement. If an effect commits before the receipt and the process
 exits, an equal retry recognizes the exact complete effect, records the missing
@@ -1084,13 +1086,15 @@ ambiguous diagnostic directs the operator to repeat the same verb, identifiers,
 and content with that identity. Review reads validate selected identities and a
 run response's pass presence, pass identity, run ancestry, and target ancestry
 before writing output; finding lists additionally validate their start marker,
-strict identity order, terminal count, and end marker before success. Every
-process-derived review text field follows the same terminal-safe escaping and
-`--raw-output` opt-in below. Target output distinguishes an absent base revision
-from every present value, run output carries its complete frozen policy, and
-finding output carries every immutable content field, location, severity,
-confidence, category, optional-repair presence, ancestry identity, status, and
-event count.
+strict identity order, maximum 32-item inventory, terminal count, and end marker
+before success. `record-finding` rejects a zero or greater-than-32-bit line
+number, a line end before its start, and confidence above 10,000 basis points as
+a usage error before socket I/O. Every process-derived review text field follows
+the same terminal-safe escaping and `--raw-output` opt-in below. Target output
+distinguishes an absent base revision from every present value, run output
+carries its complete frozen policy, and finding output carries every immutable
+content field, location, severity, confidence, category, optional-repair
+presence, ancestry identity, status, and event count.
 
 The client validates each complete snapshot and its terminal counts into an
 owner-private anonymous temporary-file spool before replay or presentation. Turn

@@ -6811,6 +6811,77 @@ async fn inv012_start_run_rolls_back_run_when_pass_admission_fails() -> Result<(
     Ok(())
 }
 
+/// INV-040: atomic admission rejects a pass owned by another run root.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_atomic_run_pass_admission_rejects_cross_wired_roots() -> Result<(), Box<dyn Error>>
+{
+    const STORED_RUN_IDENTITY: u128 = 0x77b;
+    const STORED_PASS_IDENTITY: u128 = 0x77c;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = review_command_admission_fixture(&pool).await;
+    let stored_run_reference = ReviewRunRef::new(
+        fixture.target,
+        ReviewRunId::from_uuid(uuid(STORED_RUN_IDENTITY)),
+    );
+    let stored_pass_reference = ReviewPassRef::new(
+        stored_run_reference,
+        ReviewPassId::from_uuid(uuid(STORED_PASS_IDENTITY)),
+    );
+    let mut stored_run = ReviewRun::new(
+        stored_run_reference,
+        ReviewWorkflowKind::ReadOnlyReview,
+        ReviewPolicy::version_one(),
+    );
+    let stored_pass = ReviewPass::try_new(
+        stored_pass_reference,
+        ReviewPassKind::ReadOnlyReview,
+        &mut stored_run,
+        fixture.session,
+        ReviewPassAcceptedInputEvidence::new(
+            fixture.accepted_input,
+            fixture.session,
+            Some(fixture.origin_turn),
+        ),
+    )
+    .expect("the stored-run pass fixture is domain-valid");
+    fixture.store.insert_run(&stored_run).await?;
+
+    let error = fixture
+        .store
+        .insert_run_and_pass(&fixture.run, &stored_pass)
+        .await
+        .expect_err("cross-wired roots must fail before insertion");
+
+    assert!(matches!(
+        error,
+        ReviewWorkflowStoreError::InvalidInsertion(ReviewWorkflowInsertionError::RunPassMismatch)
+    ));
+    assert_eq!(
+        fixture
+            .store
+            .load_run(fixture.run.reference().run())
+            .await?,
+        None
+    );
+    assert_eq!(
+        fixture
+            .store
+            .load_pass(stored_pass.reference().pass())
+            .await?,
+        None
+    );
+    assert!(
+        fixture
+            .store
+            .load_run(stored_run.reference().run())
+            .await?
+            .is_some()
+    );
+    Ok(())
+}
+
 /// INV-012: run admission recovery ignores later lifecycle advancement.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]

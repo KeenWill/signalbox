@@ -538,6 +538,16 @@ const fn is_review_mutation(request: &ClientRequest) -> bool {
     )
 }
 
+fn canonical_review_request_digest(request: &mut ClientRequest) -> Option<[u8; 32]> {
+    if let ClientRequest::RecordReviewFindings { findings, .. } = request {
+        findings.sort_unstable_by_key(|finding| finding.finding_id.into_uuid());
+    }
+    serde_json::to_vec(request).ok().map(|bytes| {
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        digest
+    })
+}
+
 struct ReviewResponseWriter<'a, Writer> {
     writer: &'a mut Writer,
     command_permit: Option<OwnedSemaphorePermit>,
@@ -598,7 +608,7 @@ async fn handle_request<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
-    request: ClientRequest,
+    mut request: ClientRequest,
     permits: ConnectionRequestPermits,
     services: &ConnectionServices,
     mut shutdown: watch::Receiver<bool>,
@@ -613,10 +623,7 @@ where
     } = permits;
     debug_assert_eq!(review_request, review_command_permit.is_some());
     let review_digest = if review_request {
-        serde_json::to_vec(&request).ok().map(|bytes| {
-            let digest: [u8; 32] = Sha256::digest(bytes).into();
-            digest
-        })
+        canonical_review_request_digest(&mut request)
     } else {
         None
     };
@@ -6249,11 +6256,11 @@ mod tests {
         ToolApprovalDecision, ToolAttemptId, TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, ErrorCode, FrameEncodeError, ImportedContentKind,
-        ImportedSourceSpeaker, ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
-        ProtocolVersion, RejectionDetail, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
-        ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
-        encode_server_line,
+        CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, FrameEncodeError,
+        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent,
+        MAX_CONTENT_FRAGMENT_BYTES, ProtocolVersion, RejectionDetail, ReviewFindingInput,
+        ReviewSeverity, ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision,
+        TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
     };
     use sqlx::postgres::PgPoolOptions;
     use tokio::{
@@ -6272,8 +6279,8 @@ mod tests {
         SelectedSessionRepresentationFacts, SnapshotSpoolError, acquire_import_permit,
         acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
         acquire_review_command_permit, acquire_review_command_permit_while_buffered,
-        acquire_snapshot_reader_permit, admitted_user_content, execute_import,
-        inspect_connection_completion, map_rejection, read_frame_line,
+        acquire_snapshot_reader_permit, admitted_user_content, canonical_review_request_digest,
+        execute_import, inspect_connection_completion, map_rejection, read_frame_line,
         replacement_model_is_admitted, required_protocol_version_for_selected_session,
         run_until_shutdown, snapshot_reader_capacity, wire_model_call_state, wire_tool_decision,
         wire_turn_state, wire_uuid, write_content, write_snapshot_spool_error,
@@ -6323,6 +6330,56 @@ mod tests {
             ServerMessage::Error { code, message, .. } => (*code, message),
             other => panic!("expected server error, observed {other:?}"),
         }
+    }
+
+    fn review_finding_input(identity: u128) -> ReviewFindingInput {
+        ReviewFindingInput {
+            finding_id: CanonicalUuid::from_uuid(Uuid::from_u128(identity)),
+            file_path: String::from("src/lib.rs"),
+            line_start: None,
+            line_end: None,
+            diff_side: None,
+            title: String::from("Canonical finding"),
+            body: String::from("Finding order does not change command meaning."),
+            severity: ReviewSeverity::High,
+            confidence: CanonicalU64::new(9_000),
+            category: String::from("correctness"),
+            recommended_fix: None,
+        }
+    }
+
+    #[test]
+    fn review_findings_digest_uses_canonical_identity_order() -> Result<(), Box<dyn Error>> {
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(1))?;
+        let run_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let pass_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let output_frontier_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+        let first = review_finding_input(6);
+        let second = review_finding_input(7);
+        let mut ordered = ClientRequest::RecordReviewFindings {
+            command_id,
+            run_id,
+            pass_id,
+            turn_id,
+            output_frontier_id,
+            findings: vec![first.clone(), second.clone()],
+        };
+        let mut reversed = ClientRequest::RecordReviewFindings {
+            command_id,
+            run_id,
+            pass_id,
+            turn_id,
+            output_frontier_id,
+            findings: vec![second, first],
+        };
+
+        assert_eq!(
+            canonical_review_request_digest(&mut ordered),
+            canonical_review_request_digest(&mut reversed)
+        );
+        assert_eq!(ordered, reversed);
+        Ok(())
     }
 
     /// INV-033: every stop refusal the interrupt treatment records reaches the

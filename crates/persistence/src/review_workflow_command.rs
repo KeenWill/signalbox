@@ -285,7 +285,10 @@ async fn apply_or_recover(
                         .status()
                 }
             };
-            let committed = store.load_pass(pass.reference().pass()).await?;
+            let committed = store
+                .load_pass(pass.reference().pass())
+                .await
+                .map_err(post_effect_verification_error)?;
             if committed
                 .as_ref()
                 .is_none_or(|current| current.state() != pass.state())

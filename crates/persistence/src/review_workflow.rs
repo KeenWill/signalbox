@@ -329,6 +329,14 @@ impl ReviewWorkflowStore {
                 },
             ));
         }
+        if pass.reference().run() != run.reference()
+            || run.recorded_pass() != Some(pass.reference())
+            || !workflow_matches_pass_kind(run.workflow(), pass.kind())
+        {
+            return Err(ReviewWorkflowStoreError::InvalidInsertion(
+                ReviewWorkflowInsertionError::RunPassMismatch,
+            ));
+        }
         let (run_state_kind, run_state_pass_id) = encode_run_state(run.state());
         let policy = run.policy();
         let pass_state = encode_pass_state(pass.state());
@@ -4289,6 +4297,26 @@ fn encode_pass_kind(kind: ReviewPassKind) -> &'static str {
     }
 }
 
+const fn workflow_matches_pass_kind(workflow: ReviewWorkflowKind, pass: ReviewPassKind) -> bool {
+    matches!(
+        (workflow, pass),
+        (
+            ReviewWorkflowKind::ImportExternalContext,
+            ReviewPassKind::ImportExternalContext
+        ) | (
+            ReviewWorkflowKind::ReadOnlyReview,
+            ReviewPassKind::ReadOnlyReview
+        ) | (ReviewWorkflowKind::JudgeFindings, ReviewPassKind::Judge)
+            | (ReviewWorkflowKind::DedupeFindings, ReviewPassKind::Dedupe)
+            | (ReviewWorkflowKind::PublishReview, ReviewPassKind::Publish)
+            | (ReviewWorkflowKind::FixFindings, ReviewPassKind::Fix)
+            | (
+                ReviewWorkflowKind::PropagateStack,
+                ReviewPassKind::PropagateStack
+            )
+    )
+}
+
 fn decode_pass_kind(kind: &str) -> Result<ReviewPassKind, ReviewWorkflowStoreError> {
     match kind {
         "import_external_context" => Ok(ReviewPassKind::ImportExternalContext),
@@ -4566,6 +4594,8 @@ pub enum ReviewWorkflowInsertionError {
         /// Rejected current state.
         state: Box<ReviewPassState>,
     },
+    /// A paired run and pass do not describe one domain-coherent admission.
+    RunPassMismatch,
     /// A finding insertion already carried lifecycle history.
     FindingNotOpen {
         /// Rejected current status.
@@ -4583,6 +4613,9 @@ impl fmt::Display for ReviewWorkflowInsertionError {
             }
             Self::PassNotQueued { state } => {
                 write!(formatter, "new review pass is not queued: {state:?}")
+            }
+            Self::RunPassMismatch => {
+                formatter.write_str("new review run and pass are not one coherent admission")
             }
             Self::FindingNotOpen { status } => {
                 write!(formatter, "new review finding is not open: {status:?}")
@@ -4746,6 +4779,13 @@ impl ReviewWorkflowReader for ReviewWorkflowStore {
 
     async fn load_run(&self, run: ReviewRunId) -> Result<Option<ReviewRun>, Self::Error> {
         ReviewWorkflowStore::load_run(self, run).await
+    }
+
+    async fn load_run_with_pass(
+        &self,
+        run: ReviewRunId,
+    ) -> Result<Option<(ReviewRun, Option<ReviewPass>)>, Self::Error> {
+        ReviewWorkflowStore::load_run_with_pass(self, run).await
     }
 
     async fn load_pass(&self, pass: ReviewPassId) -> Result<Option<ReviewPass>, Self::Error> {

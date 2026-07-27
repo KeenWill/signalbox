@@ -4732,6 +4732,10 @@ pub trait ReviewWorkflowReader {
         &self,
         run: ReviewRunId,
     ) -> impl Future<Output = Result<Option<ReviewRun>, Self::Error>> + Send;
+    fn load_run_with_pass(
+        &self,
+        run: ReviewRunId,
+    ) -> impl Future<Output = Result<Option<(ReviewRun, Option<ReviewPass>)>, Self::Error>> + Send;
     fn load_pass(
         &self,
         pass: ReviewPassId,

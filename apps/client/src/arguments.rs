@@ -299,9 +299,9 @@ struct RecordReviewFindingArguments {
     finding_id: CanonicalUuid,
     #[arg(long)]
     file_path: String,
-    #[arg(long, requires = "line_end", value_parser = canonical_u64)]
+    #[arg(long, requires = "line_end", value_parser = review_line_number)]
     line_start: Option<CanonicalU64>,
-    #[arg(long, requires = "line_start", value_parser = canonical_u64)]
+    #[arg(long, requires = "line_start", value_parser = review_line_number)]
     line_end: Option<CanonicalU64>,
     #[arg(long, value_enum)]
     diff_side: Option<ReviewDiffSideArgument>,
@@ -311,7 +311,7 @@ struct RecordReviewFindingArguments {
     body: String,
     #[arg(long, value_enum)]
     severity: ReviewSeverityArgument,
-    #[arg(long, value_parser = canonical_u64)]
+    #[arg(long, value_parser = review_confidence)]
     confidence: CanonicalU64,
     #[arg(long)]
     category: String,
@@ -817,35 +817,47 @@ pub(crate) fn parse(
                 pass_id: arguments.pass_id,
                 turn_id: arguments.turn_id,
             },
-            ReviewSubcommand::RecordFinding(arguments) => ReviewCommand::RecordFinding {
-                command_id: arguments.command_id,
-                run_id: arguments.run_id,
-                pass_id: arguments.pass_id,
-                turn_id: arguments.turn_id,
-                output_frontier_id: arguments.output_frontier_id,
-                finding: ReviewFindingInput {
-                    finding_id: arguments.finding_id,
-                    file_path: arguments.file_path,
-                    line_start: arguments.line_start,
-                    line_end: arguments.line_end,
-                    diff_side: arguments.diff_side.map(|side| match side {
-                        ReviewDiffSideArgument::Left => ReviewDiffSide::Left,
-                        ReviewDiffSideArgument::Right => ReviewDiffSide::Right,
-                    }),
-                    title: arguments.title,
-                    body: arguments.body,
-                    severity: match arguments.severity {
-                        ReviewSeverityArgument::Info => ReviewSeverity::Info,
-                        ReviewSeverityArgument::Low => ReviewSeverity::Low,
-                        ReviewSeverityArgument::Medium => ReviewSeverity::Medium,
-                        ReviewSeverityArgument::High => ReviewSeverity::High,
-                        ReviewSeverityArgument::Critical => ReviewSeverity::Critical,
+            ReviewSubcommand::RecordFinding(arguments) => {
+                if arguments
+                    .line_start
+                    .zip(arguments.line_end)
+                    .is_some_and(|(start, end)| end.value() < start.value())
+                {
+                    return Err(UsageError(Cli::command().error(
+                        ErrorKind::ArgumentConflict,
+                        "--line-end must not precede --line-start",
+                    )));
+                }
+                ReviewCommand::RecordFinding {
+                    command_id: arguments.command_id,
+                    run_id: arguments.run_id,
+                    pass_id: arguments.pass_id,
+                    turn_id: arguments.turn_id,
+                    output_frontier_id: arguments.output_frontier_id,
+                    finding: ReviewFindingInput {
+                        finding_id: arguments.finding_id,
+                        file_path: arguments.file_path,
+                        line_start: arguments.line_start,
+                        line_end: arguments.line_end,
+                        diff_side: arguments.diff_side.map(|side| match side {
+                            ReviewDiffSideArgument::Left => ReviewDiffSide::Left,
+                            ReviewDiffSideArgument::Right => ReviewDiffSide::Right,
+                        }),
+                        title: arguments.title,
+                        body: arguments.body,
+                        severity: match arguments.severity {
+                            ReviewSeverityArgument::Info => ReviewSeverity::Info,
+                            ReviewSeverityArgument::Low => ReviewSeverity::Low,
+                            ReviewSeverityArgument::Medium => ReviewSeverity::Medium,
+                            ReviewSeverityArgument::High => ReviewSeverity::High,
+                            ReviewSeverityArgument::Critical => ReviewSeverity::Critical,
+                        },
+                        confidence: arguments.confidence,
+                        category: arguments.category,
+                        recommended_fix: arguments.recommended_fix,
                     },
-                    confidence: arguments.confidence,
-                    category: arguments.category,
-                    recommended_fix: arguments.recommended_fix,
-                },
-            },
+                }
+            }
             ReviewSubcommand::ListFindings(arguments) => ReviewCommand::ListFindings {
                 run_id: arguments.run_id,
             },
@@ -939,6 +951,27 @@ fn positive_canonical_u64(value: &str) -> Result<CanonicalU64, String> {
     Ok(parsed)
 }
 
+fn review_line_number(value: &str) -> Result<CanonicalU64, String> {
+    let parsed = positive_canonical_u64(value)?;
+    if parsed.value() > u64::from(u32::MAX) {
+        return Err("review line number exceeds the unsigned 32-bit range".to_owned());
+    }
+    Ok(parsed)
+}
+
+fn review_confidence(value: &str) -> Result<CanonicalU64, String> {
+    const MAXIMUM_REVIEW_CONFIDENCE_BASIS_POINTS: u64 = 10_000;
+
+    let parsed = canonical_u64(value)?;
+    if parsed.value() > MAXIMUM_REVIEW_CONFIDENCE_BASIS_POINTS {
+        return Err(format!(
+            "review confidence must not exceed \
+             {MAXIMUM_REVIEW_CONFIDENCE_BASIS_POINTS} basis points"
+        ));
+    }
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{ffi::OsString, path::Path};
@@ -954,6 +987,82 @@ mod tests {
         Arguments, Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome,
         SessionMetadataPageRequest, UsageError, parse,
     };
+
+    #[derive(Clone, Copy)]
+    struct ReviewFindingArgumentFixture {
+        line_start: &'static str,
+        line_end: &'static str,
+        confidence: &'static str,
+    }
+
+    fn review_finding_arguments(fixture: ReviewFindingArgumentFixture) -> Vec<OsString> {
+        const RUN_ID: &str = "00000000-0000-0000-0000-000000000001";
+        const PASS_ID: &str = "00000000-0000-0000-0000-000000000002";
+        const TURN_ID: &str = "00000000-0000-0000-0000-000000000003";
+        const FRONTIER_ID: &str = "00000000-0000-0000-0000-000000000004";
+        const FINDING_ID: &str = "00000000-0000-0000-0000-000000000005";
+
+        vec![
+            "review",
+            "record-finding",
+            RUN_ID,
+            PASS_ID,
+            "--turn-id",
+            TURN_ID,
+            "--output-frontier-id",
+            FRONTIER_ID,
+            "--finding-id",
+            FINDING_ID,
+            "--file-path",
+            "src/lib.rs",
+            "--line-start",
+            fixture.line_start,
+            "--line-end",
+            fixture.line_end,
+            "--title",
+            "fixture finding",
+            "--body",
+            "fixture body",
+            "--severity",
+            "high",
+            "--confidence",
+            fixture.confidence,
+            "--category",
+            "correctness",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
+    }
+
+    #[test]
+    fn review_finding_rejects_domain_scalar_bounds_locally() {
+        let zero_line = parse(review_finding_arguments(ReviewFindingArgumentFixture {
+            line_start: "0",
+            line_end: "1",
+            confidence: "9000",
+        }));
+        let oversized_line = parse(review_finding_arguments(ReviewFindingArgumentFixture {
+            line_start: "1",
+            line_end: "4294967296",
+            confidence: "9000",
+        }));
+        let reversed_line = parse(review_finding_arguments(ReviewFindingArgumentFixture {
+            line_start: "9",
+            line_end: "7",
+            confidence: "9000",
+        }));
+        let oversized_confidence = parse(review_finding_arguments(ReviewFindingArgumentFixture {
+            line_start: "1",
+            line_end: "1",
+            confidence: "10001",
+        }));
+
+        assert!(zero_line.is_err());
+        assert!(oversized_line.is_err());
+        assert!(reversed_line.is_err());
+        assert!(oversized_confidence.is_err());
+    }
 
     #[test]
     fn review_target_rejects_zero_change_request_number() {

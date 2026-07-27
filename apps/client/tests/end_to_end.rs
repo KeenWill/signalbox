@@ -1334,11 +1334,13 @@ max_output_tokens = 64
     drop(container);
     Ok(())
 }
-/// The terminal and real daemon drive an external target through one
+/// S29 / INV-040: the terminal and real daemon drive an external target through one
 /// session-backed read-only pass, atomically bind a finding, and read it back.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_drives_review_target_to_finding() -> Result<(), Box<dyn Error>> {
+    const SCRIPTED_REVIEW_ASSISTANT_TEXT: &str = "review analysis complete";
+
     let (container, pool) = postgres().await?;
     let socket_directory = SocketDirectory::create()?;
     let selection_uuid = Uuid::from_u128(0x9201);
@@ -1378,7 +1380,7 @@ max_output_tokens = 64
             reported_model: Some(ProviderReportedModel::new("scripted-review")),
             finish: CompletionFinish::EndTurn,
             content: vec![AssistantPart::Text(String::from(
-                "review analysis complete",
+                SCRIPTED_REVIEW_ASSISTANT_TEXT,
             ))],
             usage: TokenUsage::unreported(),
         },
@@ -1418,15 +1420,7 @@ max_output_tokens = 64
         Some(String::from("inspect the frozen change request")),
     )
     .await?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    let (accepted_input_uuid, turn_uuid): (Uuid, Uuid) = sqlx::query_as(
-        "SELECT origin_accepted_input_id, turn_id
-           FROM turn_lifecycle
-          WHERE session_id = $1",
-    )
-    .bind(session_uuid)
-    .fetch_one(&pool)
-    .await?;
+    let (accepted_input_uuid, turn_uuid) = wait_for_turn_identities(&pool, session_uuid).await?;
     let mut activation = StartEligibleTurnService::new(
         UuidV7StartEligibleTurnIdGenerator,
         StartEligibleTurnRepository::new(pool.clone()),
@@ -1567,7 +1561,7 @@ max_output_tokens = 64
     assert!(send.status.success());
     assert_eq!(
         String::from_utf8(send.stdout)?,
-        "review analysis complete\n"
+        format!("{SCRIPTED_REVIEW_ASSISTANT_TEXT}\n")
     );
     let terminal_frontier: Uuid = sqlx::query_scalar(
         "SELECT terminal_frontier_id
@@ -1747,6 +1741,32 @@ impl ToolExecutor for CompletingFixtureExecutor {
             "completed:{name}"
         ))))
     }
+}
+
+/// Waits until the spawned send client durably admits its turn identities.
+async fn wait_for_turn_identities(
+    pool: &PgPool,
+    session: Uuid,
+) -> Result<(Uuid, Uuid), Box<dyn Error>> {
+    let identities = timeout(Duration::from_secs(20), async {
+        loop {
+            let identities = sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT origin_accepted_input_id, turn_id
+                   FROM turn_lifecycle
+                  WHERE session_id = $1",
+            )
+            .bind(session)
+            .fetch_optional(pool)
+            .await?;
+            if let Some(identities) = identities {
+                return Ok::<(Uuid, Uuid), sqlx::Error>(identities);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| io::Error::other("the review send never admitted its turn"))??;
+    Ok(identities)
 }
 
 /// Runs `transcript` until the session's turn parks on its approval wait, then

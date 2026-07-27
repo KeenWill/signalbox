@@ -42,6 +42,8 @@ const MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 const MIN_METADATA_PAGE_SIZE: u64 = 1;
 /// Largest bounded metadata page the process protocol admits.
 const MAX_METADATA_PAGE_SIZE: u64 = 100;
+/// Largest finding inventory one review run can own.
+const MAX_REVIEW_FINDINGS_PER_RUN: u64 = 32;
 
 /// One complete bounded `list_session_metadata` request.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1927,6 +1929,11 @@ async fn review(
                         count = count.checked_add(1).ok_or(ClientError::Protocol(
                             "review finding list count overflowed",
                         ))?;
+                        if count > MAX_REVIEW_FINDINGS_PER_RUN {
+                            return Err(ClientError::Protocol(
+                                "review finding list exceeded its admitted bound",
+                            ));
+                        }
                         spool.write_all(&encode_server_line(&frame)?)?;
                     }
                     ServerMessage::ReviewFindingsEnd { finding_count }
@@ -2026,12 +2033,12 @@ mod tests {
     };
 
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, ClientRequest, CommandId, InputContent, ModelCallDisposition,
-        ModelCallState, ModelSelection, ReviewFindingInput, ReviewFindingSnapshot,
-        ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot,
-        ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame,
-        ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
-        encode_server_line,
+        CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, FrameEncodeError,
+        InputContent, ModelCallDisposition, ModelCallState, ModelSelection, ReviewFindingInput,
+        ReviewFindingSnapshot, ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle,
+        ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow,
+        ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState,
+        decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -2041,12 +2048,12 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES, ProcessClient,
-        ReviewCommand, SessionMetadataPageRequest, SnapshotSelection, TurnTerminal,
-        collect_import_paths, create, decide, model_call_recovery_transition,
-        open_scanned_import_source, read_input, reconcile_turn, review, run, search, socket_path,
-        stop_turn, submit_input, terminal_event_state, terminal_snapshot_selection,
-        terminal_snapshot_state, tool_recovery_transition,
+        MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
+        MAX_REVIEW_FINDINGS_PER_RUN, ProcessClient, ReviewCommand, SessionMetadataPageRequest,
+        SnapshotSelection, TurnTerminal, collect_import_paths, create, decide,
+        model_call_recovery_transition, open_scanned_import_source, read_input, reconcile_turn,
+        review, run, search, socket_path, stop_turn, submit_input, terminal_event_state,
+        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -2672,6 +2679,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn review_list_rejects_an_over_bound_inventory_before_writing_items()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let run_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::ListReviewFindings { run_id }
+            );
+            let response =
+                over_bound_review_findings_response(&request, run_id).map_err(io::Error::other)?;
+            writer.write_all(&response).await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let error = review(
+            &mut client,
+            &mut output,
+            ReviewCommand::ListFindings { run_id },
+        )
+        .await
+        .expect_err("the over-bound finding inventory must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "the server violated the process protocol: review finding list exceeded its admitted bound"
+        );
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn create_connection_failure_is_definitely_uncommitted() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let mut client = ProcessClient::new(directory.path().join("missing.sock"));
@@ -3000,6 +3053,54 @@ mod tests {
         server.await??;
         Ok(())
     }
+
+    fn over_bound_review_findings_response(
+        request: &ClientFrame,
+        run_id: CanonicalUuid,
+    ) -> Result<Vec<u8>, FrameEncodeError> {
+        const FIRST_FINDING_IDENTITY: u128 = 10;
+
+        let frame = |message| {
+            ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
+        };
+        let mut response =
+            encode_server_line(&frame(ServerMessage::ReviewFindingsStart { run_id })?)?;
+        for offset in 0..=MAX_REVIEW_FINDINGS_PER_RUN {
+            let finding_id = CanonicalUuid::from_uuid(Uuid::from_u128(
+                FIRST_FINDING_IDENTITY + u128::from(offset),
+            ));
+            let finding = ReviewFindingSnapshot {
+                target_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                run_id,
+                producing_pass_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+                finding: ReviewFindingInput {
+                    finding_id,
+                    file_path: String::from("src/review.rs"),
+                    line_start: None,
+                    line_end: None,
+                    diff_side: None,
+                    title: String::from("Bound the list"),
+                    body: String::from("The client must reject an over-bound inventory."),
+                    severity: ReviewSeverity::High,
+                    confidence: CanonicalU64::new(9_000),
+                    category: String::from("availability"),
+                    recommended_fix: None,
+                },
+                status: ReviewFindingStatus::Open,
+                event_count: CanonicalU64::new(0),
+            };
+            response.extend_from_slice(&encode_server_line(&frame(
+                ServerMessage::ReviewFindingItem { finding },
+            )?)?);
+        }
+        response.extend_from_slice(&encode_server_line(&frame(
+            ServerMessage::ReviewFindingsEnd {
+                finding_count: CanonicalU64::new(MAX_REVIEW_FINDINGS_PER_RUN + 1),
+            },
+        )?)?);
+        Ok(response)
+    }
+
     fn review_run_snapshot(pass_id: Option<CanonicalUuid>) -> ReviewRunSnapshot {
         ReviewRunSnapshot {
             target_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),

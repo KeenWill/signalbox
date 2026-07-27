@@ -202,6 +202,11 @@ pub trait ReviewWorkflowReader {
         &self,
         run: ReviewRunId,
     ) -> impl Future<Output = Result<Option<ReviewRun>, Self::Error>> + Send;
+    /// Loads one run and its optional recorded pass from one coherent snapshot.
+    fn load_run_with_pass(
+        &self,
+        run: ReviewRunId,
+    ) -> impl Future<Output = Result<Option<(ReviewRun, Option<ReviewPass>)>, Self::Error>> + Send;
     /// Loads one pass projection.
     fn load_pass(
         &self,
