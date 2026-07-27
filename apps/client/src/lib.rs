@@ -392,7 +392,7 @@ async fn read_import_file(file: tokio::fs::File) -> Result<Vec<u8>, ClientError>
 async fn read_system_prompt_file(path: &Path) -> Result<SystemPromptText, ClientError> {
     let file = tokio::fs::File::open(path)
         .await
-        .map_err(ClientError::source_file)?;
+        .map_err(ClientError::system_prompt_file)?;
     let read_limit = u64::try_from(MAX_SYSTEM_PROMPT_UTF8_BYTES)
         .ok()
         .and_then(|bound| bound.checked_add(1))
@@ -402,7 +402,7 @@ async fn read_system_prompt_file(path: &Path) -> Result<SystemPromptText, Client
     bounded
         .read_to_end(&mut bytes)
         .await
-        .map_err(ClientError::source_file)?;
+        .map_err(ClientError::system_prompt_file)?;
     if bytes.is_empty() {
         return Err(ClientError::Input(
             "the system prompt file must not be empty",
@@ -2163,9 +2163,10 @@ mod tests {
         MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
         MAX_REVIEW_FINDINGS_PER_RUN, ProcessClient, ReviewCommand, SessionMetadataPageRequest,
         SnapshotSelection, TurnTerminal, collect_import_paths, create, decide,
-        model_call_recovery_transition, open_scanned_import_source, read_input, reconcile_turn,
-        review, run, search, socket_path, stop_turn, submit_input, terminal_event_state,
-        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
+        model_call_recovery_transition, open_scanned_import_source, read_input,
+        read_system_prompt_file, reconcile_turn, review, run, search, socket_path, stop_turn,
+        submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
+        tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -2593,6 +2594,27 @@ mod tests {
         let opened = open_scanned_import_source(&scan.root, &relative);
 
         assert!(matches!(opened, Err(ClientError::SourceFile(_))));
+        Ok(())
+    }
+
+    /// S34: an unreadable `--system-prompt-file` names the prompt file, not
+    /// the unrelated conversation-import source, in both its typed variant and
+    /// its rendered diagnostic.
+    #[tokio::test]
+    async fn s34_missing_system_prompt_file_reports_a_prompt_file_failure()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let absent = root.path().join("prompt.txt");
+
+        let failure = read_system_prompt_file(&absent)
+            .await
+            .expect_err("an absent prompt file must fail");
+
+        assert!(matches!(failure, ClientError::SystemPromptFile(_)));
+        assert_eq!(
+            failure.to_string(),
+            "the system prompt file could not be read"
+        );
         Ok(())
     }
 

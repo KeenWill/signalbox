@@ -783,9 +783,8 @@ admits
 `assistant_tool_use { turn_id, model_call_id, tool_request_id, tool_name, arguments }`,
 `tool_execution_result { tool_request_id, tool_attempt_id, content }`,
 `tool_denied { tool_request_id, content }`, and
-`tool_closed { tool_request_id, content }`. Versions six through nine
-additionally admit
-`model_identity_changed { turn_id, defaults_version, selected_model_id }`,
+`tool_closed { tool_request_id, content }`. Versions six and above additionally
+admit `model_identity_changed { turn_id, defaults_version, selected_model_id }`,
 naming the first started turn bound to a changed frozen direct selection. A
 native text member begins with
 `transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
