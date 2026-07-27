@@ -90,6 +90,7 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
     assert!(result.argv.contains("--ignore-rules"));
     assert!(result.argv.contains("--disable\nshell_tool"));
     assert!(result.argv.contains("--disable\nunified_exec"));
+    assert!(result.argv.contains("--disable\nskill_search"));
     assert!(result.argv.contains("--config\nproject_doc_max_bytes=0"));
     assert!(result.argv.contains(RESOLVED_TARGET));
     assert!(result.prompt.contains(scenario));

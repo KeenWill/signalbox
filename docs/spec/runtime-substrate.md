@@ -398,20 +398,21 @@ member scan still requires each schema to declare an object root. Execution
 consumes the capability as exactly one `codex exec --json --ephemeral` spawn on
 Unix, passes the full rendered frontier on stdin, requires absolute configured
 executable and working-root paths, selects the exact resolved model, ignores
-user configuration and rule files, disables the shell and unified-exec features,
-sets the project-instruction byte budget to zero, and uses the read-only CLI
-sandbox. Strict configuration turns an unavailable control into a closed failure
-instead of silently relaxing this invocation boundary. Before spawn it clears
-the parent environment, then copies only its explicit home/Codex-home,
-executable and temporary path, XDG, locale/terminal, certificate, and proxy
-allowlist; unrelated service variables do not reach the CLI. It neither resumes
-nor persists a Codex thread. Why: a fresh ephemeral invocation keeps provider
-session state out of memory, and the caller supplies the complete conversation
-frontier instead of an in-memory resume pointer. The read-only sandbox and
-working root are the adapter's filesystem boundary; Unix process-group
-supervision bounds descendant lifetime, so construction rejects hosts where that
-supervision is unavailable. Stronger host isolation is later composition work,
-not an adapter claim.
+user configuration and rule files, disables the shell, unified-exec, and
+skill-search features — the last so ambient `SKILL.md` discovery cannot add
+instructions the caller never rendered — sets the project-instruction byte
+budget to zero, and uses the read-only CLI sandbox. Strict configuration turns
+an unavailable control into a closed failure instead of silently relaxing this
+invocation boundary. Before spawn it clears the parent environment, then copies
+only its explicit home/Codex-home, executable and temporary path, XDG,
+locale/terminal, certificate, and proxy allowlist; unrelated service variables
+do not reach the CLI. It neither resumes nor persists a Codex thread. Why: a
+fresh ephemeral invocation keeps provider session state out of memory, and the
+caller supplies the complete conversation frontier instead of an in-memory
+resume pointer. The read-only sandbox and working root are the adapter's
+filesystem boundary; Unix process-group supervision bounds descendant lifetime,
+so construction rejects hosts where that supervision is unavailable. Stronger
+host isolation is later composition work, not an adapter claim.
 
 `SendCommenced` immediately precedes spawn. Spawn failure is
 `ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.

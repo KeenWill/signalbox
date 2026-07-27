@@ -412,6 +412,8 @@ async fn execute_process<C: Clone + Send + Sync>(
         .arg("shell_tool")
         .arg("--disable")
         .arg("unified_exec")
+        .arg("--disable")
+        .arg("skill_search")
         .arg("--config")
         .arg("project_doc_max_bytes=0")
         .arg("--sandbox")
