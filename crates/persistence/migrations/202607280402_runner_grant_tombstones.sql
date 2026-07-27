@@ -1,17 +1,9 @@
 -- Preserve credential-grant lineage across profileless runner replacements.
 
+-- The placement table is created earlier in this same stack, so no rows
+-- exist to backfill and the append-only guard stays enabled throughout.
 ALTER TABLE runner_session_placement_record
     ADD COLUMN credential_grant_runner_id uuid;
-
-ALTER TABLE runner_session_placement_record
-    DISABLE TRIGGER runner_session_placement_record_is_append_only;
-
-UPDATE runner_session_placement_record
-   SET credential_grant_runner_id = pinned_runner_id
- WHERE credential_grant_revision IS NOT NULL;
-
-ALTER TABLE runner_session_placement_record
-    ENABLE TRIGGER runner_session_placement_record_is_append_only;
 
 ALTER TABLE runner_session_placement_record
     DROP CONSTRAINT runner_session_placement_state_shape;

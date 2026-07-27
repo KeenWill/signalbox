@@ -509,6 +509,11 @@ impl RunnerProtocolStore {
             .checked_add(1)
             .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
         let event_kind = classify_placement_event(prior.as_ref(), &pin.placement)?;
+        if event_kind != "pinned" {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
         let grant_origin = placement_grant_origin(prior.as_ref(), event_ordinal, &pin.placement)?;
         insert_placement_record(
             &mut transaction,
@@ -597,13 +602,9 @@ impl RunnerProtocolStore {
         } else {
             None
         };
+        let pinned_profile = row.try_get::<Option<String>, _>("pinned_credential_profile_name")?;
         let profileless_tombstone = grant.as_ref().filter(|grant| {
-            grant.state() == CredentialProfileGrantState::Revoked
-                && row
-                    .try_get::<Option<String>, _>("pinned_credential_profile_name")
-                    .ok()
-                    .flatten()
-                    .is_none()
+            grant.state() == CredentialProfileGrantState::Revoked && pinned_profile.is_none()
         });
         let placement = decode_placement(
             transaction.as_mut(),
@@ -991,6 +992,19 @@ impl RunnerProtocolStore {
         generation: RunnerGeneration,
     ) -> Result<Option<RunnerLease>, RunnerProtocolStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let lease = self
+            .load_lease_in(&mut transaction, lease, generation)
+            .await?;
+        transaction.commit().await?;
+        Ok(lease)
+    }
+
+    async fn load_lease_in(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        lease: RunnerLeaseId,
+        generation: RunnerGeneration,
+    ) -> Result<Option<RunnerLease>, RunnerProtocolStoreError> {
         let row = sqlx::query(
             "SELECT lease_generation.*, event.state_kind,
                     request.tool_name AS canonical_attempt_tool,
@@ -1043,7 +1057,6 @@ impl RunnerProtocolStore {
         .fetch_optional(transaction.as_mut())
         .await?;
         let Some(row) = row else {
-            transaction.commit().await?;
             return Ok(None);
         };
         let registration = load_registration_in(
@@ -1056,7 +1069,6 @@ impl RunnerProtocolStore {
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
         let lease = decode_lease(&row, registration.registration())?;
-        transaction.commit().await?;
         Ok(Some(lease))
     }
 
@@ -1066,7 +1078,12 @@ impl RunnerProtocolStore {
         lease: RunnerLeaseId,
         generation: RunnerGeneration,
     ) -> Result<Option<RunnerLeaseLoss>, RunnerProtocolStoreError> {
-        let Some(loaded) = self.load_lease(lease, generation).await? else {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let Some(loaded) = self
+            .load_lease_in(&mut transaction, lease, generation)
+            .await?
+        else {
+            transaction.commit().await?;
             return Ok(None);
         };
         let row = sqlx::query(
@@ -1076,7 +1093,7 @@ impl RunnerProtocolStore {
         )
         .bind(lease.into_uuid())
         .bind(Decimal::from(generation.get()))
-        .fetch_optional(&self.pool)
+        .fetch_optional(transaction.as_mut())
         .await?;
         let no_execution = row
             .map(|row| {
@@ -1124,8 +1141,9 @@ impl RunnerProtocolStore {
         )
         .bind(lease.into_uuid())
         .bind(Decimal::from(generation.get()))
-        .fetch_one(&self.pool)
+        .fetch_one(transaction.as_mut())
         .await?;
+        transaction.commit().await?;
         loaded
             .into_reconstituted_loss(no_execution, retry_prepared)
             .map(Some)
