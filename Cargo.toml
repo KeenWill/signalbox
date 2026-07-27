@@ -14,6 +14,9 @@ members = [
     "crates/model-provider-runtime",
     "crates/persistence",
     "crates/process-protocol",
+    "crates/tool-contract",
+    "crates/tools-basic",
+    "crates/tools-code-host",
 ]
 resolver = "3"
 
