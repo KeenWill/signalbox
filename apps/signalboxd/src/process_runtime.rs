@@ -3580,7 +3580,9 @@ where
 /// A prompt response can approach the frame cap, so the direct
 /// `write_message` path would retain the complete encoded frame while a peer
 /// that stops reading blocks the write. Spooling first keeps per-connection
-/// heap at fixed I/O buffers, mirroring the snapshot paths
+/// heap at fixed I/O buffers, and a pre-transmission spool failure stays
+/// request-local as the ordinary `unavailable` response — never fatal daemon
+/// evidence and never peer I/O — mirroring the snapshot paths
 /// (docs/spec/process-protocol.md).
 async fn write_message_via_spool<Writer>(
     writer: &mut Writer,
@@ -3591,16 +3593,31 @@ async fn write_message_via_spool<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    let standard_file = tempfile::tempfile().map_err(ProcessConnectionError::SpoolIo)?;
+    let spool_result = spool_single_message(version, request_id, message).await;
+    let mut file = match spool_result {
+        Ok(file) => file,
+        Err(error) => {
+            return write_snapshot_spool_error(writer, version, request_id, error).await;
+        }
+    };
+    write_spooled_file(writer, &mut file).await
+}
+
+/// Encodes one message into a rewound temporary-file spool, classifying every
+/// failure before the first transmitted byte as a spool failure.
+async fn spool_single_message(
+    version: ProtocolVersion,
+    request_id: RequestId,
+    message: ServerMessage,
+) -> Result<tokio::fs::File, SnapshotSpoolError> {
+    let standard_file = tempfile::tempfile().map_err(SnapshotSpoolError::Io)?;
     let mut file = tokio::fs::File::from_std(standard_file);
-    write_message(&mut file, version, request_id, message).await?;
-    file.flush()
-        .await
-        .map_err(ProcessConnectionError::SpoolIo)?;
+    write_spool_message(&mut file, version, request_id, message).await?;
+    file.flush().await.map_err(SnapshotSpoolError::Io)?;
     file.seek(SeekFrom::Start(0))
         .await
-        .map_err(ProcessConnectionError::SpoolIo)?;
-    write_spooled_file(writer, &mut file).await
+        .map_err(SnapshotSpoolError::Io)?;
+    Ok(file)
 }
 
 async fn write_spool_message(

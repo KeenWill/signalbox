@@ -17884,26 +17884,27 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     .expect("one prompted fixture target forms a catalog");
     let call_repository =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
-    assert!(matches!(
-        call_repository
-            .prepare_initial_call(
-                session,
-                call,
-                FailedModelCallTurnIdentities::new(
-                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xa4c)),
-                    ContextFrontierId::from_uuid(Uuid::from_u128(0xa4d)),
-                ),
-                ContextFrontierId::from_uuid(Uuid::from_u128(0xa4e)),
-                |_| {
-                    (
-                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xa4f)),
-                        TurnId::from_uuid(Uuid::from_u128(0xa50)),
-                    )
-                },
-            )
-            .await?,
-        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
-    ));
+    let checkpoint = call_repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xa4c)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xa4d)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xa4e)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xa4f)),
+                    TurnId::from_uuid(Uuid::from_u128(0xa50)),
+                )
+            },
+        )
+        .await?;
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed) = checkpoint else {
+        panic!("the prompted initial call must checkpoint");
+    };
+    assert_eq!(checkpointed, call);
 
     // Replace the defaults with a promptless successor before the prepared
     // call resumes: the call still binds the origin's frozen prompted epoch.
