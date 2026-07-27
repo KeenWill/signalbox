@@ -2422,22 +2422,28 @@ pub(crate) async fn load_scheduling_projection(
     let required_model_call_ids = required_model_calls.iter().copied().collect::<Vec<_>>();
     let model_call_rows = sqlx::query(
         "SELECT
-            model_call_id,
-            turn_id,
-            session_id,
-            turn_attempt_id,
-            selection_kind,
-            direct_model_selection_id,
-            frozen_model_alias_id,
-            frozen_alias_selected_direct_id,
-            resolved_provider_model_identity_id,
-            context_frontier_id,
-            state_kind,
-            terminal_disposition_kind
-           FROM model_call
-          WHERE session_id = $1
-            AND model_call_id = ANY($2)
-          ORDER BY model_call_id",
+            call.model_call_id,
+            call.turn_id,
+            call.session_id,
+            call.turn_attempt_id,
+            call.selection_kind,
+            call.direct_model_selection_id,
+            call.frozen_model_alias_id,
+            call.frozen_alias_selected_direct_id,
+            call.resolved_provider_model_identity_id,
+            call.context_frontier_id,
+            call.state_kind,
+            call.terminal_disposition_kind,
+            (attempt.continued_from_attempt_id IS NOT NULL)
+                AS continues_prior_attempt
+           FROM model_call AS call
+           JOIN turn_attempt AS attempt
+             ON attempt.turn_attempt_id = call.turn_attempt_id
+            AND attempt.turn_id = call.turn_id
+            AND attempt.session_id = call.session_id
+          WHERE call.session_id = $1
+            AND call.model_call_id = ANY($2)
+          ORDER BY call.model_call_id",
     )
     .bind(session_id_to_uuid(session_id))
     .bind(&required_model_call_ids)
@@ -2494,7 +2500,12 @@ pub(crate) async fn load_scheduling_projection(
                 .into());
             }
         };
-        if let Some(consumed_count) = consumed_counts_by_call.get(&call_uuid).copied() {
+        // Only a continuation-chain attempt's call can carry a continuation
+        // round window, so first-round consumers skip the evidence lookup.
+        let continues_prior_attempt: bool = required(&row, "continues_prior_attempt")?;
+        if let Some(consumed_count) = consumed_counts_by_call.get(&call_uuid).copied()
+            && continues_prior_attempt
+        {
             consuming_call_facts.push(ConsumingCallFacts {
                 call: call_uuid,
                 turn,

@@ -3490,9 +3490,18 @@ fn reconstitute_inner(
                         else {
                             return false;
                         };
-                        call_snapshot
-                            .ordered_entries_range(base_entry_count, call_snapshot.entry_count())
-                            .eq(consumed_entries.iter().map(|(_, entry, _)| *entry))
+                        // The round's tools were issued by the same
+                        // continuation attempt that owns the consuming call.
+                        round
+                            .round_tool_attempts()
+                            .iter()
+                            .all(|attempt| attempt.issuing_attempt() == model_call.attempt())
+                            && call_snapshot
+                                .ordered_entries_range(
+                                    base_entry_count,
+                                    call_snapshot.entry_count(),
+                                )
+                                .eq(consumed_entries.iter().map(|(_, entry, _)| *entry))
                             && tool_round_continuation_producing_call(
                                 model_call.turn(),
                                 call_snapshot,
@@ -4278,18 +4287,24 @@ fn reconstitute_inner(
                 if !named_call_frontier_accounted {
                     let continuation_call_matches = ordinary_terminal_matches
                         && terminal_execution.as_ref().is_some_and(|execution| {
-                            tool_round_continuation_producing_call(
-                                turn,
-                                &terminal,
-                                terminal.entry_count().saturating_sub(1),
-                                execution.terminal_tool_attempts(),
-                                execution.terminal_tool_denials(),
-                                &model_calls,
-                                &assistant_by_call,
-                                &snapshots,
-                                &semantic_entries,
-                            )
-                            .is_some()
+                            execution
+                                .terminal_tool_attempts()
+                                .iter()
+                                .all(|tool_attempt| {
+                                    tool_attempt.issuing_attempt() == execution.ended_attempt
+                                })
+                                && tool_round_continuation_producing_call(
+                                    turn,
+                                    &terminal,
+                                    terminal.entry_count().saturating_sub(1),
+                                    execution.terminal_tool_attempts(),
+                                    execution.terminal_tool_denials(),
+                                    &model_calls,
+                                    &assistant_by_call,
+                                    &snapshots,
+                                    &semantic_entries,
+                                )
+                                .is_some()
                         });
                     if !continuation_call_matches {
                         return Err(
@@ -4708,6 +4723,12 @@ fn reconstitute_inner(
                 // marker extends by exactly one entry.
                 if !named_call_frontier_accounted {
                     let continuation_call_matches = ordinary_terminal_matches
+                        && terminal_execution
+                            .terminal_tool_attempts()
+                            .iter()
+                            .all(|tool_attempt| {
+                                tool_attempt.issuing_attempt() == terminal_execution.ended_attempt
+                            })
                         && tool_round_continuation_producing_call(
                             turn,
                             &terminal,
@@ -9169,7 +9190,7 @@ mod tests {
     /// the durable shape the continuation transaction commits — a running
     /// continuation attempt owning a prepared steering-consuming call whose
     /// frontier is the round's exact result projection plus the consumed
-    /// suffix — and rejects every looser or evidence-free variant.
+    /// suffix.
     #[test]
     fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_reconstitutes() {
         let session = current_session();
@@ -9179,7 +9200,16 @@ mod tests {
             .input()
             .reconstitute()
             .expect("continuation-consumed steering reconstructs");
+    }
 
+    /// S02 / S08 / INV-016 / INV-036: a running attempt owning a prepared
+    /// steering-consuming call is legal only with the round's result
+    /// evidence.
+    #[test]
+    fn s02_s08_inv016_inv036_continuation_pair_requires_round_evidence() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let consumed = accepted_origin(2);
         let mut missing_evidence = ConsumedSteeringReconstitutionFacts::matching_at_continuation(
             &session, active, consumed,
         );
@@ -9188,10 +9218,17 @@ mod tests {
             assert_input_rejects_unchanged(missing_evidence.input()),
             AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
                 accepted_input: consumed.accepted_input(),
-            },
-            "a running attempt owning a prepared call is legal only with round evidence"
+            }
         );
+    }
 
+    /// S02 / S08 / INV-016 / INV-036: continuation-round evidence must name a
+    /// steering-consuming call.
+    #[test]
+    fn s02_s08_inv016_inv036_round_evidence_requires_a_consuming_call() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let consumed = accepted_origin(2);
         let mut dangling_evidence = ConsumedSteeringReconstitutionFacts::matching_at_continuation(
             &session, active, consumed,
         );
@@ -9210,10 +9247,17 @@ mod tests {
             assert_input_rejects_unchanged(dangling_evidence.input()),
             AcceptedInputSchedulingReconstitutionFailure::SteeringContinuationRoundMismatch {
                 call: ConsumedSteeringReconstitutionFacts::matching_continuation_producing_call(),
-            },
-            "round evidence must name a steering-consuming call"
+            }
         );
+    }
 
+    /// S02 / S08 / INV-016 / INV-036: continuation-round evidence names each
+    /// consuming call at most once.
+    #[test]
+    fn s02_s08_inv016_inv036_round_evidence_names_each_consumer_once() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let consumed = accepted_origin(2);
         let mut duplicate_evidence = ConsumedSteeringReconstitutionFacts::matching_at_continuation(
             &session, active, consumed,
         );
@@ -9225,10 +9269,17 @@ mod tests {
             assert_input_rejects_unchanged(duplicate_evidence.input()),
             AcceptedInputSchedulingReconstitutionFailure::SteeringContinuationRoundMismatch {
                 call: ConsumedSteeringReconstitutionFacts::matching_continuation_call(),
-            },
-            "round evidence names each consuming call at most once"
+            }
         );
+    }
 
+    /// S02 / S08 / INV-016 / INV-036: the consumed steering entries must be
+    /// the exact trailing suffix after the round's result window.
+    #[test]
+    fn s02_s08_inv016_inv036_consumed_steering_is_the_continuation_trailing_suffix() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let consumed = accepted_origin(2);
         let mut interposed_steering = ConsumedSteeringReconstitutionFacts::matching_at_continuation(
             &session, active, consumed,
         );
@@ -9245,10 +9296,17 @@ mod tests {
             assert_input_rejects_unchanged(interposed_steering.input()),
             AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
                 accepted_input: consumed.accepted_input(),
-            },
-            "consumed steering must be the exact trailing suffix after the result window"
+            }
         );
+    }
 
+    /// S02 / S08 / S10 / INV-016 / INV-036: each result entry in the
+    /// continuation window must correlate to its proposal-ordered request.
+    #[test]
+    fn s02_s08_s10_inv016_inv036_continuation_results_correlate_to_proposal_order() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let consumed = accepted_origin(2);
         let mut miscorrelated_result =
             ConsumedSteeringReconstitutionFacts::matching_at_continuation(
                 &session, active, consumed,
@@ -9269,10 +9327,49 @@ mod tests {
             assert_input_rejects_unchanged(miscorrelated_result.input()),
             AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
                 accepted_input: consumed.accepted_input(),
-            },
-            "each result entry must correlate to its proposal-ordered request"
+            }
         );
+    }
 
+    /// S02 / S08 / S10 / INV-016 / INV-036: the round's tools were issued by
+    /// the same continuation attempt that owns the consuming call; evidence
+    /// issued by a foreign attempt fails closed.
+    #[test]
+    fn s02_s08_s10_inv016_inv036_continuation_results_bind_to_the_consuming_attempt() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let consumed = accepted_origin(2);
+        let mut foreign_issuing_attempt =
+            ConsumedSteeringReconstitutionFacts::matching_at_continuation(
+                &session, active, consumed,
+            );
+        foreign_issuing_attempt.steering_continuation_rounds =
+            vec![SteeringContinuationRoundReconstitutionInput::new(
+                ConsumedSteeringReconstitutionFacts::matching_continuation_call(),
+                vec![ended_tool_attempt(
+                    &session,
+                    active,
+                    turn_attempt_id(49),
+                    ConsumedSteeringReconstitutionFacts::matching_continuation_tool_attempt(),
+                    ConsumedSteeringReconstitutionFacts::matching_continuation_request(),
+                )],
+                Vec::new(),
+            )];
+        assert_eq!(
+            assert_input_rejects_unchanged(foreign_issuing_attempt.input()),
+            AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                accepted_input: consumed.accepted_input(),
+            }
+        );
+    }
+
+    /// S02 / S08 / S10 / INV-016 / INV-036: a continuation window forbids
+    /// turn-end closures, which exist only in terminal materialization.
+    #[test]
+    fn s02_s08_s10_inv016_inv036_continuation_window_forbids_turn_end_closures() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let consumed = accepted_origin(2);
         let mut closed_request = ConsumedSteeringReconstitutionFacts::matching_at_continuation(
             &session, active, consumed,
         );
@@ -9293,10 +9390,17 @@ mod tests {
             assert_input_rejects_unchanged(closed_request.input()),
             AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
                 accepted_input: consumed.accepted_input(),
-            },
-            "a continuation window forbids turn-end closures"
+            }
         );
+    }
 
+    /// S02 / S08 / S10 / INV-016 / INV-036: an ambiguous attempt end is a
+    /// turn-level failure and never reaches a continuation window.
+    #[test]
+    fn s02_s08_s10_inv016_inv036_continuation_window_rejects_an_ambiguous_attempt_end() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let consumed = accepted_origin(2);
         let mut ambiguous_attempt = ConsumedSteeringReconstitutionFacts::matching_at_continuation(
             &session, active, consumed,
         );
@@ -9317,10 +9421,17 @@ mod tests {
             assert_input_rejects_unchanged(ambiguous_attempt.input()),
             AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
                 accepted_input: consumed.accepted_input(),
-            },
-            "an ambiguous attempt end is a turn-level failure and never continues"
+            }
         );
+    }
 
+    /// S02 / S08 / S10 / INV-016 / INV-036: a crash-lost attempt end is a
+    /// turn-level failure and never reaches a continuation window.
+    #[test]
+    fn s02_s08_s10_inv016_inv036_continuation_window_rejects_a_crash_lost_attempt_end() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let consumed = accepted_origin(2);
         let mut crash_lost_attempt = ConsumedSteeringReconstitutionFacts::matching_at_continuation(
             &session, active, consumed,
         );
@@ -9343,8 +9454,7 @@ mod tests {
             assert_input_rejects_unchanged(crash_lost_attempt.input()),
             AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
                 accepted_input: consumed.accepted_input(),
-            },
-            "a crash-lost attempt end is a turn-level failure and never continues"
+            }
         );
     }
 
@@ -9437,15 +9547,15 @@ mod tests {
             .expect("a parked tool round retains its consumed steering");
     }
 
-    /// S02 / S10 / S11 / INV-006: a failed terminal turn naming its
-    /// round-two continuation call reconstitutes when that call's whole
-    /// frontier is the completed round's result projection the terminal
-    /// marker extends, and fails closed without the round's result evidence
-    /// or with a turn-end closure standing in for an executed result.
-    #[test]
-    fn s02_s10_s11_inv006_failed_continuation_call_reconstitutes() {
-        let session = current_session();
-        let failed = accepted_origin(1);
+    /// Matching stored facts for one failed terminal turn naming its
+    /// round-two continuation call: the call's whole frontier is the
+    /// completed round's result projection and the terminal frontier extends
+    /// it by exactly the failure marker.
+    fn failed_continuation_call_input(
+        session: &Session,
+        failed: OriginFixture,
+    ) -> AcceptedInputSchedulingReconstitutionInput {
+        let session = session.clone();
         let origin_entry = semantic_entry(30);
         let tool_use_entry = semantic_entry(31);
         let result_entry = semantic_entry(32);
@@ -9508,7 +9618,7 @@ mod tests {
             ),
         ];
         let target = ResolvedProviderTarget::naming(provider_model_identity(80));
-        let input = AcceptedInputSchedulingReconstitutionInput::new(
+        AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
             vec![failed_record],
             semantic_entries,
@@ -9547,14 +9657,28 @@ mod tests {
                     ModelCallReconstitutionState::Terminal(ModelCallDisposition::KnownFailed),
                 ),
             ],
-        );
+        )
+    }
 
-        input
-            .clone()
+    /// S02 / S10 / S11 / INV-006: a failed terminal turn naming its round-two
+    /// continuation call reconstitutes when that call's whole frontier is the
+    /// completed round's result projection the terminal marker extends.
+    #[test]
+    fn s02_s10_s11_inv006_failed_continuation_call_reconstitutes() {
+        let session = current_session();
+        let failed = accepted_origin(1);
+        failed_continuation_call_input(&session, failed)
             .reconstitute()
             .expect("the failed continuation-call terminal shape reconstructs");
+    }
 
-        let mut missing_evidence = input.clone();
+    /// S02 / S10 / S11 / INV-006: a failed terminal turn naming a
+    /// continuation call is accepted only with its round's result evidence.
+    #[test]
+    fn s02_s10_s11_inv006_failed_continuation_call_requires_round_evidence() {
+        let session = current_session();
+        let failed = accepted_origin(1);
+        let mut missing_evidence = failed_continuation_call_input(&session, failed);
         let AcceptedInputTurnSchedulingRecordState::TerminalFailed {
             terminal_execution: Some(execution),
             ..
@@ -9567,15 +9691,23 @@ mod tests {
             assert_input_rejects_unchanged(missing_evidence),
             AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
                 turn: failed.turn(),
-            },
-            "a named continuation call is accepted only with its round's result evidence"
+            }
         );
+    }
 
-        let mut closed_request = input;
+    /// S02 / S10 / S11 / INV-006: a named continuation call's round
+    /// completed, so its window forbids turn-end closures.
+    #[test]
+    fn s02_s10_s11_inv006_failed_continuation_call_window_forbids_turn_end_closures() {
+        let session = current_session();
+        let failed = accepted_origin(1);
+        let mut closed_request = failed_continuation_call_input(&session, failed);
         closed_request.semantic_entries[2] = SemanticTranscriptEntryReconstitutionInput::new(
-            result_entry.id(),
+            semantic_entry(32).id(),
             session.id(),
-            InitialSemanticTranscriptEntryPayload::ToolClosed { request },
+            InitialSemanticTranscriptEntryPayload::ToolClosed {
+                request: tool_request_id(60),
+            },
         );
         let AcceptedInputTurnSchedulingRecordState::TerminalFailed {
             terminal_execution: Some(execution),
@@ -9589,21 +9721,20 @@ mod tests {
             assert_input_rejects_unchanged(closed_request),
             AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
                 turn: failed.turn(),
-            },
-            "a continuation call's round completed, so its window forbids turn-end closures"
+            }
         );
     }
 
-    /// S02 / S07 / S10 / INV-006 / INV-037: a cancelled terminal turn naming
-    /// its unsent round-two continuation call reconstitutes when that call's
-    /// whole frontier is the completed round's result projection the
-    /// cancellation marker extends, and fails closed without the round's
-    /// result evidence.
-    #[test]
-    fn s02_s07_s10_inv006_inv037_cancelled_continuation_call_reconstitutes() {
-        let session = current_session();
-        let cancelled = accepted_origin(1);
-        let successor = accepted_origin(2);
+    /// Matching stored facts for one cancelled terminal turn naming its
+    /// unsent round-two continuation call: the call's whole frontier is the
+    /// completed round's result projection and the terminal frontier extends
+    /// it by exactly the cancellation marker.
+    fn cancelled_continuation_call_input(
+        session: &Session,
+        cancelled: OriginFixture,
+        successor: OriginFixture,
+    ) -> AcceptedInputSchedulingReconstitutionInput {
+        let session = session.clone();
         let origin_entry = semantic_entry(30);
         let tool_use_entry = semantic_entry(31);
         let result_entry = semantic_entry(32);
@@ -9695,7 +9826,7 @@ mod tests {
             ),
         ];
         let target = ResolvedProviderTarget::naming(provider_model_identity(80));
-        let input = AcceptedInputSchedulingReconstitutionInput::new(
+        AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
             vec![cancelled_record, successor_record],
             semantic_entries,
@@ -9739,14 +9870,32 @@ mod tests {
                     ModelCallReconstitutionState::Terminal(ModelCallDisposition::Cancelled),
                 ),
             ],
-        );
+        )
+    }
 
-        input
-            .clone()
+    /// S02 / S07 / S10 / INV-006 / INV-037: a cancelled terminal turn naming
+    /// its unsent round-two continuation call reconstitutes when that call's
+    /// whole frontier is the completed round's result projection the
+    /// cancellation marker extends.
+    #[test]
+    fn s02_s07_s10_inv006_inv037_cancelled_continuation_call_reconstitutes() {
+        let session = current_session();
+        let cancelled = accepted_origin(1);
+        let successor = accepted_origin(2);
+        cancelled_continuation_call_input(&session, cancelled, successor)
             .reconstitute()
             .expect("the cancelled continuation-call terminal shape reconstructs");
+    }
 
-        let mut missing_evidence = input;
+    /// S02 / S07 / S10 / INV-006 / INV-037: a cancelled terminal turn naming
+    /// a continuation call is accepted only with its round's result evidence.
+    #[test]
+    fn s02_s07_s10_inv006_inv037_cancelled_continuation_call_requires_round_evidence() {
+        let session = current_session();
+        let cancelled = accepted_origin(1);
+        let successor = accepted_origin(2);
+        let mut missing_evidence =
+            cancelled_continuation_call_input(&session, cancelled, successor);
         let AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
             terminal_execution, ..
         } = &mut missing_evidence.turns[0].state
@@ -9758,8 +9907,7 @@ mod tests {
             assert_input_rejects_unchanged(missing_evidence),
             AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
                 turn: cancelled.turn(),
-            },
-            "a named cancelled continuation call is accepted only with its round's result evidence"
+            }
         );
     }
 

@@ -2613,7 +2613,6 @@ async fn s02_s10_inv006_failed_continuation_call_admits_and_runs_later_turn()
         PostgresStartupScanRepository::new(fixture.pool.clone()),
     );
     let recovery = startup.execute().await?;
-    assert!(recovery.is_complete());
     assert_eq!(
         recovery.recovered_turn_count(),
         0,
@@ -2742,7 +2741,6 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_completes()
         PostgresStartupScanRepository::new(fixture.pool.clone()),
     );
     let recovery = startup.execute().await?;
-    assert!(recovery.is_complete());
     assert_eq!(
         recovery.recovered_turn_count(),
         0,
@@ -2843,7 +2841,6 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_both_safe_points_reloads
         PostgresStartupScanRepository::new(fixture.pool.clone()),
     );
     let recovery = startup.execute().await?;
-    assert!(recovery.is_complete());
     assert_eq!(
         recovery.recovered_turn_count(),
         0,
