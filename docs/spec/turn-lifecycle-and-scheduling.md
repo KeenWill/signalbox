@@ -473,9 +473,13 @@ are conclusions derived from complete owner facts, never trusted discriminators.
 
 - `AwaitingRecoveryDecision` reconstitutes from complete operation-owner facts:
   an `ambiguous` terminal model call or tool attempt correlated with its ended
-  turn attempt (`ambiguous` from a live loss, `lost` from startup recovery). A
-  `StopRequested` current attempt reconstructs only when its stored interrupt
-  command, predecessor, configured immediate successor, applied result, and
+  turn attempt (`ambiguous` from a live loss, `lost` from startup recovery). An
+  ambiguous continuation call — prepared at the continuation boundary of a
+  completed tool round and lost in flight — is admitted when its whole frontier
+  is that round's batch-correlated result projection, proven by the round's
+  durable result evidence; the wait extends it by no entry. A `StopRequested`
+  current attempt reconstructs only when its stored interrupt command,
+  predecessor, configured immediate successor, applied result, and
   cancellation-requested call form the exact proof. `AwaitingApproval`
   reconstructs only from the complete tool batch proving its earliest undecided
   request and absence of a live attempt; a bare wait subject cannot become a
@@ -518,17 +522,26 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   failed form: its whole frontier is the completed round's batch-correlated
   result projection extended by any steering it consumed, and the terminal
   frontier extends it by the cancellation marker alone.
+- A refused terminal turn names its exact ended attempt and correlated terminal
+  `refused` call, and its terminal frontier is an equal-content boundary over
+  that call's frontier. A refused continuation call — prepared at the
+  continuation boundary of a completed tool round — is admitted when its whole
+  frontier is that round's batch-correlated result projection, proven by the
+  round's durable result evidence; a refusal appends no semantic content, and a
+  round-completed continuation window never contains a turn-end closure.
 - A reconciliation-required terminal turn names its exact ended turn attempt and
   exactly one required terminal `ambiguous` model call or tool attempt. The
   attempt end is either `WithoutStop(Ambiguous|Lost)` with a later
   turn-correlated applied interrupt, or `AfterCancellation(Ambiguous|Lost)`
   carrying that same proof. A model-call reconciliation terminal frontier is an
-  equal-content boundary over the ambiguous call's source frontier. A
-  tool-attempt reconciliation terminal frontier extends the producing call's
-  yielded frontier by exactly one batch-correlated result entry per request in
-  proposal order, with the ambiguous request represented as `ToolClosed`. The
-  checked scheduling input validates those correlations before the turn can
-  serve as a terminal predecessor.
+  equal-content boundary over the ambiguous call's source frontier — for an
+  interrupted continuation call, the completed round's batch-correlated result
+  projection, proven by the round's durable result evidence. A tool-attempt
+  reconciliation terminal frontier extends the producing call's yielded frontier
+  by exactly one batch-correlated result entry per request in proposal order,
+  with the ambiguous request represented as `ToolClosed`. The checked scheduling
+  input validates those correlations before the turn can serve as a terminal
+  predecessor.
 - A consumed steering input reconstitutes only against its exact consuming call,
   whose frontier is the turn's starting frontier — or, for a call prepared at a
   tool-round continuation boundary, the round's batch-correlated result
