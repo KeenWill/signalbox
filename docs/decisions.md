@@ -10,6 +10,73 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Fail bounded native snapshot work into typed recovery
+
+**Context.** The native synchronization machine retains authoritative snapshots
+and followed events while it validates or merges transcript work. The wire
+protocol bounds individual frames but does not bound the aggregate records or
+UTF-8 content retained across that client-side work.
+
+**Decision.** Require callers to supply separate record/UTF-8 capacities for one
+snapshot and event/UTF-8 capacities for events buffered behind snapshot work.
+Reject an over-capacity snapshot before publication, and abandon an
+over-capacity event buffer or side-refresh trigger through the same typed,
+bounded recovery lifecycle as other transient synchronization failures.
+
+**Rejected alternatives.** A frame limit alone does not bound aggregate
+retention. Unbounded arrays allow a valid stream to exhaust client memory.
+Publishing a partial snapshot or dropping selected buffered events would make
+the client present state that is neither authoritative nor cursor-complete.
+
+**Affects.** Native synchronization policy inputs, snapshot accumulation,
+followed-event buffering, side-refresh admission, diagnostics, and recovery
+tests.
+
+## 2026-07-26 — Retry only transient native synchronization failures
+
+**Context.** A followed session can fail because its snapshot is stale, its
+transport or deadline failed, the daemon requires resynchronization, or the
+daemon returned a definitive request/protocol error. The protocol fixes the
+error vocabulary but does not choose a native-client reconnect lifecycle.
+
+**Decision.** Route transport, deadline, stale-snapshot, malformed-projection,
+`resync_required`, `unavailable`, and `internal` failures through the one typed,
+bounded reconnect schedule. Treat `malformed_frame`, `unsupported_version`,
+`invalid_request`, `not_found`, `conflicting_reuse`, `rejected`, and
+`commit_ambiguous` as terminal for that synchronization. Every path preserves
+its diagnostic and closes active transports before retry or termination.
+
+**Rejected alternatives.** Retrying every server error can repeat requests that
+the daemon has definitively rejected. Retrying nothing makes ordinary transport
+loss and explicit resynchronization terminal. Separate implicit retry loops
+would bypass the typed cap and deadline policy.
+
+**Affects.** Native session synchronization error classification, recovery
+effects, and scripted reducer tests.
+
+## 2026-07-26 — Bound retained native diagnostic messages at 4 KiB
+
+**Context.** The native synchronization machine retains the latest 128
+diagnostics across fallback and reconnect. Count bounds fixed record overhead,
+but a diagnostic derived from an unknown wire kind or decoding path could retain
+nearly one full 8 MiB frame in its message, so tolerated malformed or future
+input could still make the bounded history retain roughly a gigabyte.
+
+**Decision.** Continue emitting each complete diagnostic to the current caller,
+but retain at most 4,096 UTF-8 bytes of its message in machine history,
+truncating only at a Unicode-scalar boundary. Together with the existing
+128-record cap, retained diagnostic-message text is bounded at 512 KiB. The cap
+applies to every diagnostic source so later wire-derived paths cannot reopen the
+heap-growth path.
+
+**Rejected alternatives.** A count-only limit leaves frame-sized strings
+unbounded in aggregate. Sanitizing only unknown kind names misses decoding paths
+and future diagnostic sources. Bounding emitted diagnostics would discard useful
+immediate evidence even though the caller need not retain it.
+
+**Affects.** Native synchronization diagnostic retention and its scripted tests;
+diagnostic effects remain complete.
+
 ## 2026-07-26 — Address imported continuation by position
 
 **Context.** The application and PostgreSQL layers already create a session from

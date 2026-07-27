@@ -3,6 +3,7 @@ import Foundation
 public enum SignalboxProcessProtocol {
   public static let currentVersion = SignalboxProcessProtocolVersion.five
   public static let maximumFrameBytes = 8 * 1024 * 1024
+  public static let maximumContentFragmentUTF8Bytes = 1024 * 1024
 }
 
 public enum SignalboxProcessProtocolVersion: UInt64, Codable, CaseIterable, Sendable {
@@ -311,10 +312,54 @@ public struct SignalboxProcessClientFrame: Encodable, Equatable, Sendable {
   }
 }
 
-public struct SignalboxProcessServerFrame: Decodable, Equatable, Sendable {
+public enum SignalboxProcessFrameDecodingError: Error, Equatable {
+  case oversizedFrame
+}
+
+public struct SignalboxProcessServerFrame: Equatable, Sendable {
   public let version: SignalboxProcessProtocolVersion
   public let requestID: SignalboxCanonicalUInt64
   public let message: SignalboxProcessServerMessage
+
+  private init(
+    version: SignalboxProcessProtocolVersion,
+    requestID: SignalboxCanonicalUInt64,
+    message: SignalboxProcessServerMessage
+  ) {
+    self.version = version
+    self.requestID = requestID
+    self.message = message
+  }
+
+  public static func decode(from data: Data) throws -> Self {
+    guard data.count <= SignalboxProcessProtocol.maximumFrameBytes else {
+      throw SignalboxProcessFrameDecodingError.oversizedFrame
+    }
+    var scanner = SignalboxJSONDuplicateMemberScanner(data: data)
+    let duplicateObjectPaths = try scanner.scan()
+    let decoder = SignalboxJSONCoding.decoder()
+    decoder.userInfo[.signalboxDuplicateObjectPaths] = duplicateObjectPaths
+    let wire = try decoder.decode(SignalboxProcessServerWireFrame.self, from: data)
+    return Self(version: wire.version, requestID: wire.requestID, message: wire.message)
+  }
+}
+
+private struct SignalboxProcessServerWireFrame: Decodable {
+  let version: SignalboxProcessProtocolVersion
+  let requestID: SignalboxCanonicalUInt64
+  let message: SignalboxProcessServerMessage
+
+  init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      ["version", "request_id", "message"],
+      decoder: decoder
+    )
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    version = try container.decode(SignalboxProcessProtocolVersion.self, forKey: .version)
+    requestID = try container.decode(SignalboxCanonicalUInt64.self, forKey: .requestID)
+    message = try container.decode(SignalboxProcessServerMessage.self, forKey: .message)
+  }
 
   private enum CodingKeys: String, CodingKey {
     case version
@@ -351,6 +396,27 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   )
 
   public init(from decoder: Decoder) throws {
+    if decoder.containsDuplicateObjectMembers {
+      let payload =
+        try decoder.singleValueContainer().decode([String: SignalboxJSONValue].self)
+      guard case .string(let kind) = payload["type"] else {
+        throw DecodingError.keyNotFound(
+          SignalboxDynamicCodingKey("type"),
+          .init(
+            codingPath: decoder.codingPath,
+            debugDescription: "Tagged object is missing its type."
+          )
+        )
+      }
+      self = .unknown(
+        kind: kind,
+        payload: payload,
+        decodingDiagnostic: SignalboxDecodingDiagnostic(
+          error: decoder.duplicateObjectMembersError()
+        )
+      )
+      return
+    }
     let tagged = try SignalboxTaggedPayload(from: decoder)
     do {
       switch tagged.kind {
@@ -381,18 +447,46 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
         self = .conversationImportAlreadyImported(
           importedConversationID: try decoder.decode("imported_conversation_id"))
       case "transcript_snapshot_start":
+        try tagged.rejectUnadmittedFields(
+          ["type", "session_id", "cursor"],
+          decoder: decoder
+        )
         self = .transcriptSnapshotStart(try SignalboxTranscriptSnapshotBoundary(from: decoder))
       case "transcript_turn":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "acceptance_position", "state"],
+          decoder: decoder
+        )
         self = .transcriptTurn(try SignalboxTranscriptTurn(from: decoder))
       case "transcript_entry":
+        try tagged.rejectUnadmittedFields(
+          ["type", "entry_index", "source_session_id", "entry_id", "entry"],
+          decoder: decoder
+        )
         self = .transcriptEntry(try SignalboxTranscriptEntryMessage(from: decoder))
       case "transcript_text_entry":
+        try tagged.rejectUnadmittedFields(
+          ["type", "entry_index", "source_session_id", "entry_id", "entry"],
+          decoder: decoder
+        )
         self = .transcriptTextEntry(try SignalboxTranscriptTextEntryMessage(from: decoder))
       case "transcript_content":
+        try tagged.rejectUnadmittedFields(
+          ["type", "entry_index", "fragment_index", "final_fragment", "content_fragment"],
+          decoder: decoder
+        )
         self = .transcriptContent(try SignalboxTranscriptContent(from: decoder))
       case "transcript_snapshot_end":
+        try tagged.rejectUnadmittedFields(
+          ["type", "session_id", "cursor", "turn_count", "entry_count"],
+          decoder: decoder
+        )
         self = .transcriptSnapshotEnd(try SignalboxTranscriptSnapshotEnd(from: decoder))
       case "session_event":
+        try tagged.rejectUnadmittedFields(
+          ["type", "cursor", "session_id", "event"],
+          decoder: decoder
+        )
         self = .sessionEvent(try SignalboxFollowedSessionEvent(from: decoder))
       case "error":
         self = .protocolError(try SignalboxProcessError(from: decoder))
@@ -563,57 +657,107 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
     do {
       switch tagged.kind {
       case "queued":
+        try tagged.rejectUnadmittedFields(
+          ["type", "accepted_input_id", "content"],
+          decoder: decoder
+        )
         self = .queued(
           acceptedInputID: try decoder.decode("accepted_input_id"),
           content: try decoder.decode("content"))
       case "active_running":
+        try tagged.rejectUnadmittedFields(
+          ["type", "current_attempt_id", "current_model_call"],
+          decoder: decoder
+        )
+        try tagged.requireFields(["current_model_call"], decoder: decoder)
         self = .activeRunning(
           currentAttemptID: try decoder.decode("current_attempt_id"),
           currentModelCall: try decoder.decodeIfPresent("current_model_call")
         )
       case "active_awaiting_model_call_recovery":
+        try tagged.rejectUnadmittedFields(
+          ["type", "ended_attempt_id", "recovery_model_call_id"],
+          decoder: decoder
+        )
         self = .activeAwaitingModelCallRecovery(
           endedAttemptID: try decoder.decode("ended_attempt_id"),
           recoveryModelCallID: try decoder.decode("recovery_model_call_id")
         )
       case "active_awaiting_tool_approval":
+        try tagged.rejectUnadmittedFields(
+          ["type", "tool_request_id"],
+          decoder: decoder
+        )
         self = .activeAwaitingToolApproval(toolRequestID: try decoder.decode("tool_request_id"))
       case "active_awaiting_tool_recovery":
+        try tagged.rejectUnadmittedFields(
+          ["type", "ended_attempt_id", "recovery_tool_attempt_id"],
+          decoder: decoder
+        )
         self = .activeAwaitingToolRecovery(
           endedAttemptID: try decoder.decode("ended_attempt_id"),
           recoveryToolAttemptID: try decoder.decode("recovery_tool_attempt_id")
         )
       case "failed":
+        try tagged.rejectUnadmittedFields(
+          ["type", "terminal_frontier_id", "terminal_attempt_id", "terminal_model_call"],
+          decoder: decoder
+        )
+        try tagged.requireFields(
+          ["terminal_attempt_id", "terminal_model_call"],
+          decoder: decoder
+        )
         self = .failed(
           terminalFrontierID: try decoder.decode("terminal_frontier_id"),
           terminalAttemptID: try decoder.decodeIfPresent("terminal_attempt_id"),
           terminalModelCall: try decoder.decodeIfPresent("terminal_model_call")
         )
       case "completed":
+        try tagged.rejectUnadmittedFields(
+          ["type", "terminal_frontier_id", "terminal_attempt_id", "terminal_model_call_id"],
+          decoder: decoder
+        )
         self = .completed(
           terminalFrontierID: try decoder.decode("terminal_frontier_id"),
           terminalAttemptID: try decoder.decode("terminal_attempt_id"),
           terminalModelCallID: try decoder.decode("terminal_model_call_id")
         )
       case "refused":
+        try tagged.rejectUnadmittedFields(
+          ["type", "terminal_frontier_id", "terminal_attempt_id", "terminal_model_call_id"],
+          decoder: decoder
+        )
         self = .refused(
           terminalFrontierID: try decoder.decode("terminal_frontier_id"),
           terminalAttemptID: try decoder.decode("terminal_attempt_id"),
           terminalModelCallID: try decoder.decode("terminal_model_call_id")
         )
       case "cancelled":
+        try tagged.rejectUnadmittedFields(
+          ["type", "terminal_frontier_id", "terminal_attempt_id", "terminal_model_call_id"],
+          decoder: decoder
+        )
+        try tagged.requireFields(["terminal_model_call_id"], decoder: decoder)
         self = .cancelled(
           terminalFrontierID: try decoder.decode("terminal_frontier_id"),
           terminalAttemptID: try decoder.decode("terminal_attempt_id"),
           terminalModelCallID: try decoder.decodeIfPresent("terminal_model_call_id")
         )
       case "reconciliation_required":
+        try tagged.rejectUnadmittedFields(
+          ["type", "terminal_frontier_id", "terminal_attempt_id", "terminal_model_call_id"],
+          decoder: decoder
+        )
         self = .reconciliationRequired(
           terminalFrontierID: try decoder.decode("terminal_frontier_id"),
           terminalAttemptID: try decoder.decode("terminal_attempt_id"),
           terminalModelCallID: try decoder.decode("terminal_model_call_id")
         )
       case "tool_reconciliation_required":
+        try tagged.rejectUnadmittedFields(
+          ["type", "terminal_frontier_id", "terminal_attempt_id", "terminal_tool_attempt_id"],
+          decoder: decoder
+        )
         self = .toolReconciliationRequired(
           terminalFrontierID: try decoder.decode("terminal_frontier_id"),
           terminalAttemptID: try decoder.decode("terminal_attempt_id"),
@@ -636,9 +780,13 @@ public struct SignalboxFailedTerminalModelCall: Decodable, Equatable, Sendable {
   public let modelCallID: SignalboxCanonicalUUID
   public let disposition: SignalboxFailedModelCallDisposition
 
-  private enum CodingKeys: String, CodingKey {
-    case modelCallID = "model_call_id"
-    case disposition
+  public init(from decoder: Decoder) throws {
+    try SignalboxUntaggedPayload(from: decoder).rejectUnadmittedFields(
+      ["model_call_id", "disposition"],
+      decoder: decoder
+    )
+    modelCallID = try decoder.decode("model_call_id")
+    disposition = try decoder.decode("disposition")
   }
 }
 
@@ -651,9 +799,13 @@ public struct SignalboxCurrentModelCall: Decodable, Equatable, Sendable {
   public let modelCallID: SignalboxCanonicalUUID
   public let state: SignalboxCurrentModelCallState
 
-  private enum CodingKeys: String, CodingKey {
-    case modelCallID = "model_call_id"
-    case state
+  public init(from decoder: Decoder) throws {
+    try SignalboxUntaggedPayload(from: decoder).rejectUnadmittedFields(
+      ["model_call_id", "state"],
+      decoder: decoder
+    )
+    modelCallID = try decoder.decode("model_call_id")
+    state = try decoder.decode("state")
   }
 }
 
@@ -667,10 +819,13 @@ public enum SignalboxCurrentModelCallState: Decodable, Equatable, Sendable {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     switch tagged.kind {
     case "prepared":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
       self = .prepared
     case "in_flight":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
       self = .inFlight
     case "cancellation_requested":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
       self = .cancellationRequested
     default:
       self = .unknown(kind: tagged.kind, payload: tagged.payload)
@@ -718,6 +873,10 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
     do {
       switch tagged.kind {
       case "assistant_tool_use":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "model_call_id", "tool_request_id", "tool_name", "arguments"],
+          decoder: decoder
+        )
         self = .assistantToolUse(
           turnID: try decoder.decode("turn_id"),
           modelCallID: try decoder.decode("model_call_id"),
@@ -726,26 +885,48 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
           arguments: try decoder.decode("arguments")
         )
       case "tool_execution_result":
+        try tagged.rejectUnadmittedFields(
+          ["type", "tool_request_id", "tool_attempt_id", "content"],
+          decoder: decoder
+        )
         self = .toolExecutionResult(
           toolRequestID: try decoder.decode("tool_request_id"),
           toolAttemptID: try decoder.decode("tool_attempt_id"),
           content: try decoder.decode("content")
         )
       case "tool_denied":
+        try tagged.rejectUnadmittedFields(
+          ["type", "tool_request_id", "content"],
+          decoder: decoder
+        )
         self = .toolDenied(
           toolRequestID: try decoder.decode("tool_request_id"),
           content: try decoder.decode("content"))
       case "tool_closed":
+        try tagged.rejectUnadmittedFields(
+          ["type", "tool_request_id", "content"],
+          decoder: decoder
+        )
         self = .toolClosed(
           toolRequestID: try decoder.decode("tool_request_id"),
           content: try decoder.decode("content"))
       case "turn_completed":
+        try tagged.rejectUnadmittedFields(["type", "turn_id"], decoder: decoder)
         self = .turnCompleted(turnID: try decoder.decode("turn_id"))
       case "turn_failed":
+        try tagged.rejectUnadmittedFields(["type", "turn_id"], decoder: decoder)
         self = .turnFailed(turnID: try decoder.decode("turn_id"))
       case "turn_cancelled":
+        try tagged.rejectUnadmittedFields(["type", "turn_id"], decoder: decoder)
         self = .turnCancelled(turnID: try decoder.decode("turn_id"))
       case "imported":
+        try tagged.rejectUnadmittedFields(
+          [
+            "type", "imported_conversation_id", "imported_entry_id", "source_speaker",
+            "content_kind",
+          ],
+          decoder: decoder
+        )
         self = .imported(
           importedConversationID: try decoder.decode("imported_conversation_id"),
           importedEntryID: try decoder.decode("imported_entry_id"),
@@ -787,10 +968,13 @@ public enum SignalboxImportedSourceSpeaker: Decodable, Equatable, Sendable {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     switch tagged.kind {
     case "not_attested":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
       self = .notAttested
     case "attested_absent":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
       self = .attestedAbsent
     case "attested":
+      try tagged.rejectUnadmittedFields(["type", "speaker"], decoder: decoder)
       self = .attested(speaker: try decoder.decode("speaker"))
     default:
       self = .unknown(kind: tagged.kind, payload: tagged.payload)
@@ -834,13 +1018,25 @@ public enum SignalboxTranscriptTextEntry: Decodable, Equatable, Sendable {
     do {
       switch tagged.kind {
       case "user":
+        try tagged.rejectUnadmittedFields(
+          ["type", "accepted_input_id", "turn_id"],
+          decoder: decoder
+        )
         self = .user(
           acceptedInputID: try decoder.decode("accepted_input_id"),
           turnID: try decoder.decode("turn_id"))
       case "assistant":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "model_call_id"],
+          decoder: decoder
+        )
         self = .assistant(
           turnID: try decoder.decode("turn_id"), modelCallID: try decoder.decode("model_call_id"))
       case "imported":
+        try tagged.rejectUnadmittedFields(
+          ["type", "imported_conversation_id", "imported_entry_id", "source_speaker"],
+          decoder: decoder
+        )
         self = .imported(
           importedConversationID: try decoder.decode("imported_conversation_id"),
           importedEntryID: try decoder.decode("imported_entry_id"),
@@ -924,8 +1120,13 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
     do {
       switch tagged.kind {
       case "session_created":
+        try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
         self = .sessionCreated
       case "input_accepted":
+        try tagged.rejectUnadmittedFields(
+          ["type", "accepted_input_id", "turn_id", "acceptance_position", "content"],
+          decoder: decoder
+        )
         self = .inputAccepted(
           acceptedInputID: try decoder.decode("accepted_input_id"),
           turnID: try decoder.decode("turn_id"),
@@ -933,22 +1134,38 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
           content: try decoder.decode("content")
         )
       case "turn_activated":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "current_attempt_id"],
+          decoder: decoder
+        )
         self = .turnActivated(
           turnID: try decoder.decode("turn_id"),
           currentAttemptID: try decoder.decode("current_attempt_id"))
       case "model_call_transition":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "model_call_id", "state"],
+          decoder: decoder
+        )
         self = .modelCallTransition(
           turnID: try decoder.decode("turn_id"),
           modelCallID: try decoder.decode("model_call_id"),
           state: try decoder.decode("state")
         )
       case "tool_batch_transition":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "model_call_id", "state"],
+          decoder: decoder
+        )
         self = .toolBatchTransition(
           turnID: try decoder.decode("turn_id"),
           modelCallID: try decoder.decode("model_call_id"),
           state: try decoder.decode("state")
         )
       case "turn_completed":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "model_call_id", "completion_entry_id", "terminal_frontier_id"],
+          decoder: decoder
+        )
         self = .turnCompleted(
           turnID: try decoder.decode("turn_id"),
           modelCallID: try decoder.decode("model_call_id"),
@@ -956,30 +1173,50 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
           terminalFrontierID: try decoder.decode("terminal_frontier_id")
         )
       case "turn_failed":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "failure_entry_id", "terminal_frontier_id"],
+          decoder: decoder
+        )
         self = .turnFailed(
           turnID: try decoder.decode("turn_id"),
           failureEntryID: try decoder.decode("failure_entry_id"),
           terminalFrontierID: try decoder.decode("terminal_frontier_id")
         )
       case "turn_refused":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "model_call_id", "terminal_frontier_id"],
+          decoder: decoder
+        )
         self = .turnRefused(
           turnID: try decoder.decode("turn_id"),
           modelCallID: try decoder.decode("model_call_id"),
           terminalFrontierID: try decoder.decode("terminal_frontier_id")
         )
       case "turn_cancelled":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "cancellation_entry_id", "terminal_frontier_id"],
+          decoder: decoder
+        )
         self = .turnCancelled(
           turnID: try decoder.decode("turn_id"),
           cancellationEntryID: try decoder.decode("cancellation_entry_id"),
           terminalFrontierID: try decoder.decode("terminal_frontier_id")
         )
       case "turn_reconciliation_required":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "model_call_id", "terminal_frontier_id"],
+          decoder: decoder
+        )
         self = .turnReconciliationRequired(
           turnID: try decoder.decode("turn_id"),
           modelCallID: try decoder.decode("model_call_id"),
           terminalFrontierID: try decoder.decode("terminal_frontier_id")
         )
       case "turn_tool_reconciliation_required":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "tool_attempt_id", "terminal_frontier_id"],
+          decoder: decoder
+        )
         self = .turnToolReconciliationRequired(
           turnID: try decoder.decode("turn_id"),
           toolAttemptID: try decoder.decode("tool_attempt_id"),
@@ -1009,12 +1246,16 @@ public enum SignalboxModelCallState: Decodable, Equatable, Sendable {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     switch tagged.kind {
     case "prepared":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
       self = .prepared
     case "in_flight":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
       self = .inFlight
     case "cancellation_requested":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
       self = .cancellationRequested
     case "terminal":
+      try tagged.rejectUnadmittedFields(["type", "disposition"], decoder: decoder)
       self = .terminal(disposition: try decoder.decode("disposition"))
     default:
       self = .unknown(kind: tagged.kind, payload: tagged.payload)
@@ -1040,10 +1281,13 @@ public enum SignalboxToolBatchState: Decodable, Equatable, Sendable {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     switch tagged.kind {
     case "proposed":
+      try tagged.rejectUnadmittedFields(["type", "frontier_id"], decoder: decoder)
       self = .proposed(frontierID: try decoder.decode("frontier_id"))
     case "results_projected":
+      try tagged.rejectUnadmittedFields(["type", "frontier_id"], decoder: decoder)
       self = .resultsProjected(frontierID: try decoder.decode("frontier_id"))
     case "recovery_required":
+      try tagged.rejectUnadmittedFields(["type", "tool_attempt_id"], decoder: decoder)
       self = .recoveryRequired(toolAttemptID: try decoder.decode("tool_attempt_id"))
     default:
       self = .unknown(kind: tagged.kind, payload: tagged.payload)
@@ -1068,6 +1312,66 @@ public struct SignalboxProcessError: Decodable, Equatable, Sendable {
   public let code: SignalboxProcessErrorCode
   public let message: String
   public let detail: SignalboxRejectionDetail?
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    try tagged.rejectUnadmittedFields(
+      ["type", "code", "message", "detail"],
+      decoder: decoder
+    )
+    code = try decoder.decode("code")
+    message = try decoder.decode("message")
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    switch code {
+    case .rejected:
+      guard container.contains(.detail) else {
+        throw DecodingError.keyNotFound(
+          CodingKeys.detail,
+          .init(
+            codingPath: decoder.codingPath,
+            debugDescription: "A rejected error requires detail."
+          )
+        )
+      }
+      guard try !container.decodeNil(forKey: .detail) else {
+        throw DecodingError.valueNotFound(
+          SignalboxRejectionDetail.self,
+          .init(
+            codingPath: decoder.codingPath + [CodingKeys.detail],
+            debugDescription: "A rejected error requires non-null detail."
+          )
+        )
+      }
+      let rejectionDetail = try container.decode(
+        SignalboxRejectionDetail.self,
+        forKey: .detail
+      )
+      guard case .unknown(let kind, _) = rejectionDetail else {
+        detail = rejectionDetail
+        return
+      }
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath + [CodingKeys.detail],
+          debugDescription: "Unrecognized rejection detail type: \(kind)."
+        )
+      )
+    default:
+      guard !container.contains(.detail) else {
+        throw DecodingError.dataCorrupted(
+          .init(
+            codingPath: decoder.codingPath + [CodingKeys.detail],
+            debugDescription: "Only rejected errors admit detail."
+          )
+        )
+      }
+      detail = nil
+    }
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case detail
+  }
 }
 
 public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
@@ -1085,21 +1389,38 @@ public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     switch tagged.kind {
     case "session_not_found":
+      try tagged.rejectUnadmittedFields(["type", "session_id"], decoder: decoder)
       self = .sessionNotFound(sessionID: try decoder.decode("session_id"))
     case "active_turn_present":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "active_turn_id"],
+        decoder: decoder
+      )
       self = .activeTurnPresent(
         sessionID: try decoder.decode("session_id"),
         activeTurnID: try decoder.decode("active_turn_id"))
     case "defaults_version_mismatch":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "expected", "current"],
+        decoder: decoder
+      )
       self = .defaultsVersionMismatch(
         sessionID: try decoder.decode("session_id"),
         expected: try decoder.decode("expected"),
         current: try decoder.decode("current")
       )
     case "unknown_model_alias":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "alias_id"],
+        decoder: decoder
+      )
       self = .unknownModelAlias(
         sessionID: try decoder.decode("session_id"), aliasID: try decoder.decode("alias_id"))
     case "acceptance_position_exhausted":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "last"],
+        decoder: decoder
+      )
       self = .acceptancePositionExhausted(
         sessionID: try decoder.decode("session_id"), last: try decoder.decode("last"))
     default:
@@ -1113,6 +1434,7 @@ private struct SignalboxTaggedPayload: Decodable {
   let payload: [String: SignalboxJSONValue]
 
   init(from decoder: Decoder) throws {
+    try decoder.rejectDuplicateObjectMembers()
     payload = try decoder.singleValueContainer().decode([String: SignalboxJSONValue].self)
     guard case .string(let kind) = payload["type"] else {
       throw DecodingError.keyNotFound(
@@ -1122,6 +1444,316 @@ private struct SignalboxTaggedPayload: Decodable {
       )
     }
     self.kind = kind
+  }
+
+  func rejectUnadmittedFields(
+    _ admittedFields: Set<String>,
+    decoder: Decoder
+  ) throws {
+    guard
+      let field = payload.keys.sorted().first(where: { !admittedFields.contains($0) })
+    else {
+      return
+    }
+    throw DecodingError.dataCorrupted(
+      .init(
+        codingPath: decoder.codingPath + [SignalboxDynamicCodingKey(field)],
+        debugDescription: "Tagged object contains an unadmitted field."
+      )
+    )
+  }
+
+  func requireFields(
+    _ requiredFields: Set<String>,
+    decoder: Decoder
+  ) throws {
+    guard
+      let field = requiredFields.sorted().first(where: { payload[$0] == nil })
+    else {
+      return
+    }
+    throw DecodingError.keyNotFound(
+      SignalboxDynamicCodingKey(field),
+      .init(
+        codingPath: decoder.codingPath,
+        debugDescription: "Tagged object is missing a required field."
+      )
+    )
+  }
+}
+
+/// The decoded members of a closed object that carries no `type` discriminator.
+///
+/// A tagged variant names its admitted fields through ``SignalboxTaggedPayload``
+/// once its discriminator selects the shape. A nested record such as
+/// `current_model_call` or `terminal_model_call` has one shape and no
+/// discriminator, so it names its admitted fields directly and rejects every
+/// other member rather than letting a synthesized decoder discard it.
+private struct SignalboxUntaggedPayload: Decodable {
+  let payload: [String: SignalboxJSONValue]
+
+  init(from decoder: Decoder) throws {
+    try decoder.rejectDuplicateObjectMembers()
+    payload = try decoder.singleValueContainer().decode([String: SignalboxJSONValue].self)
+  }
+
+  func rejectUnadmittedFields(
+    _ admittedFields: Set<String>,
+    decoder: Decoder
+  ) throws {
+    guard
+      let field = payload.keys.sorted().first(where: { !admittedFields.contains($0) })
+    else {
+      return
+    }
+    throw DecodingError.dataCorrupted(
+      .init(
+        codingPath: decoder.codingPath + [SignalboxDynamicCodingKey(field)],
+        debugDescription: "Closed object contains an unadmitted field."
+      )
+    )
+  }
+}
+
+extension CodingUserInfoKey {
+  fileprivate static let signalboxDuplicateObjectPaths = CodingUserInfoKey(
+    rawValue: "org.signalbox.process-protocol.duplicate-object-paths"
+  )!
+}
+
+extension Decoder {
+  fileprivate var containsDuplicateObjectMembers: Bool {
+    guard
+      let duplicateObjectPaths =
+        userInfo[.signalboxDuplicateObjectPaths] as? Set<[String]>
+    else {
+      return false
+    }
+    return duplicateObjectPaths.contains(decodedObjectPath)
+  }
+
+  fileprivate func rejectDuplicateObjectMembers() throws {
+    guard containsDuplicateObjectMembers else {
+      return
+    }
+    throw duplicateObjectMembersError()
+  }
+
+  fileprivate func duplicateObjectMembersError() -> DecodingError {
+    .dataCorrupted(
+      .init(
+        codingPath: codingPath,
+        debugDescription: "Object contains a repeated decoded member name."
+      )
+    )
+  }
+
+  private var decodedObjectPath: [String] {
+    codingPath.map { key in
+      key.intValue.map { "[\($0)]" } ?? key.stringValue
+    }
+  }
+}
+
+private struct SignalboxJSONDuplicateMemberScanner {
+  private let bytes: [UInt8]
+  private let stringDecoder = SignalboxJSONCoding.decoder()
+  private var index = 0
+  private var duplicateObjectPaths: Set<[String]> = []
+
+  init(data: Data) {
+    bytes = Array(data)
+  }
+
+  mutating func scan() throws -> Set<[String]> {
+    skipWhitespace()
+    try scanValue(path: [], containerDepth: 0)
+    skipWhitespace()
+    guard index == bytes.count else {
+      throw malformedJSON()
+    }
+    return duplicateObjectPaths
+  }
+
+  private mutating func scanValue(
+    path: [String],
+    containerDepth: Int
+  ) throws {
+    guard let byte = currentByte else {
+      throw malformedJSON()
+    }
+    switch byte {
+    case UInt8(ascii: "{"):
+      guard containerDepth < Self.maximumContainerDepth else {
+        throw excessiveContainerDepth()
+      }
+      try scanObject(path: path, containerDepth: containerDepth + 1)
+    case UInt8(ascii: "["):
+      guard containerDepth < Self.maximumContainerDepth else {
+        throw excessiveContainerDepth()
+      }
+      try scanArray(path: path, containerDepth: containerDepth + 1)
+    case UInt8(ascii: "\""):
+      _ = try skipString()
+    default:
+      try scanPrimitive()
+    }
+  }
+
+  private mutating func scanObject(
+    path: [String],
+    containerDepth: Int
+  ) throws {
+    index += 1
+    skipWhitespace()
+    if consume(UInt8(ascii: "}")) {
+      return
+    }
+    var members: Set<String> = []
+    while true {
+      let member = try scanString()
+      if !members.insert(member).inserted {
+        recordDuplicateObject(at: path)
+      }
+      skipWhitespace()
+      guard consume(UInt8(ascii: ":")) else {
+        throw malformedJSON()
+      }
+      skipWhitespace()
+      try scanValue(path: path + [member], containerDepth: containerDepth)
+      skipWhitespace()
+      if consume(UInt8(ascii: "}")) {
+        return
+      }
+      guard consume(UInt8(ascii: ",")) else {
+        throw malformedJSON()
+      }
+      skipWhitespace()
+    }
+  }
+
+  private mutating func recordDuplicateObject(at path: [String]) {
+    duplicateObjectPaths.insert(path)
+    if path.first == "message" {
+      duplicateObjectPaths.insert(["message"])
+    }
+  }
+
+  private mutating func scanArray(
+    path: [String],
+    containerDepth: Int
+  ) throws {
+    index += 1
+    skipWhitespace()
+    if consume(UInt8(ascii: "]")) {
+      return
+    }
+    var elementIndex = 0
+    while true {
+      try scanValue(
+        path: path + ["[\(elementIndex)]"],
+        containerDepth: containerDepth
+      )
+      elementIndex += 1
+      skipWhitespace()
+      if consume(UInt8(ascii: "]")) {
+        return
+      }
+      guard consume(UInt8(ascii: ",")) else {
+        throw malformedJSON()
+      }
+      skipWhitespace()
+    }
+  }
+
+  private mutating func scanString() throws -> String {
+    let encoded = Data(bytes[try skipString()])
+    return try stringDecoder.decode(String.self, from: encoded)
+  }
+
+  private mutating func skipString() throws -> Range<Int> {
+    guard currentByte == UInt8(ascii: "\"") else {
+      throw malformedJSON()
+    }
+    let start = index
+    index += 1
+    var escaped = false
+    while let byte = currentByte {
+      index += 1
+      if escaped {
+        escaped = false
+      } else if byte == UInt8(ascii: "\\") {
+        escaped = true
+      } else if byte == UInt8(ascii: "\"") {
+        return start..<index
+      }
+    }
+    throw malformedJSON()
+  }
+
+  private mutating func scanPrimitive() throws {
+    let start = index
+    while let byte = currentByte,
+      !Self.primitiveDelimiters.contains(byte)
+    {
+      index += 1
+    }
+    guard index > start else {
+      throw malformedJSON()
+    }
+  }
+
+  private mutating func skipWhitespace() {
+    while let byte = currentByte,
+      Self.whitespace.contains(byte)
+    {
+      index += 1
+    }
+  }
+
+  private mutating func consume(_ byte: UInt8) -> Bool {
+    guard currentByte == byte else {
+      return false
+    }
+    index += 1
+    return true
+  }
+
+  private var currentByte: UInt8? {
+    bytes.indices.contains(index) ? bytes[index] : nil
+  }
+
+  private static let whitespace: Set<UInt8> = [
+    UInt8(ascii: " "),
+    UInt8(ascii: "\t"),
+    UInt8(ascii: "\n"),
+    UInt8(ascii: "\r"),
+  ]
+
+  private static let primitiveDelimiters = whitespace.union([
+    UInt8(ascii: ","),
+    UInt8(ascii: "]"),
+    UInt8(ascii: "}"),
+  ])
+
+  private static let maximumContainerDepth = 127
+
+  private func malformedJSON() -> DecodingError {
+    .dataCorrupted(
+      .init(
+        codingPath: [],
+        debugDescription: "Process frame was not one complete JSON value."
+      )
+    )
+  }
+
+  private func excessiveContainerDepth() -> DecodingError {
+    .dataCorrupted(
+      .init(
+        codingPath: [],
+        debugDescription: "Process frame exceeded 127 simultaneously open JSON containers."
+      )
+    )
   }
 }
 
