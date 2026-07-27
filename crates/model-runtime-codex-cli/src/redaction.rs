@@ -496,7 +496,34 @@ fn credential_value_bounds(
         },
         |quote| quoted_value_end(text, prefix_end, quote),
     );
+    // A PEM block value spans lines and whitespace, so token/line termination
+    // would stop at the first space after `-----BEGIN` and emit the key body.
+    // When the value opens a PEM block, extend through its matching
+    // `-----END …-----` marker (or to the text end if unterminated), so the
+    // whole private key is suppressed.
+    let value_end =
+        pem_block_end(text, prefix_end).map_or(value_end, |pem_end| value_end.max(pem_end));
     (&text[value_start..prefix_end], prefix_end, value_end)
+}
+
+/// If an unquoted value at `value_start` opens a PEM block, returns the byte
+/// offset just past its matching `-----END …-----` marker, or the text end
+/// when the block is unterminated. `None` when the value is not a PEM block.
+fn pem_block_end(text: &str, value_start: usize) -> Option<usize> {
+    const BEGIN: &str = "-----BEGIN";
+    const END: &str = "-----END";
+    const DASHES: &str = "-----";
+    if !text[value_start..].starts_with(BEGIN) {
+        return None;
+    }
+    let end_marker = match find_ascii_case_insensitive(&text[value_start..], END) {
+        Some(offset) => value_start + offset + END.len(),
+        None => return Some(text.len()),
+    };
+    match text[end_marker..].find(DASHES) {
+        Some(offset) => Some(end_marker + offset + DASHES.len()),
+        None => Some(text.len()),
+    }
 }
 
 /// Consumes a `{`- or `[`-opened credential value through its balanced
@@ -980,6 +1007,14 @@ fn spaced_credential_starts_at_zero(text: &str) -> bool {
         })
 }
 
+/// The trailing portion of `text` that could begin a credential extending into
+/// text emitted after it — everything before it is credential-clean. Used to
+/// give same-envelope tool fields the final text's relevant context without
+/// rescanning the whole (possibly multi-megabyte) text per field.
+pub(crate) fn trailing_credential_context(text: &str) -> &str {
+    unsafe_stream_suffix_start(text).map_or("", |start| &text[start..])
+}
+
 fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
     let mut earliest = None;
     for marker in LINE_CREDENTIAL_MARKERS
@@ -1266,7 +1301,7 @@ mod tests {
     use super::{
         MAX_PENDING_STREAM_BYTES, REDACTED, REDACTED_JSON_OBJECT, RedactingSink,
         decode_unicode_escapes, redact_json, redact_text, stream_candidate_starts_at_zero,
-        unsafe_stream_suffix_start,
+        trailing_credential_context, unsafe_stream_suffix_start,
     };
 
     const CREDENTIAL_SHAPED_VALUE: &str = "sk-sensitive-value";
@@ -1643,6 +1678,30 @@ mod tests {
         assert!(!output.contains("sk-sensitive-mixed-key"));
         assert_eq!(output, REDACTED_JSON_OBJECT);
         assert!(serde_json::from_str::<serde_json::Value>(&output).is_ok());
+    }
+
+    /// INV-035: an unquoted PEM private-key assignment consumes the whole
+    /// block through its END marker, not just the first token of the header.
+    #[test]
+    fn inv_035_redacts_unquoted_pem_private_key() {
+        let fixture = "private_key = -----BEGIN PRIVATE KEY-----\nMIIBpem-body-secret\n-----END PRIVATE KEY-----\nsafe-after";
+        let output = redact_text(fixture);
+
+        assert!(!output.contains("MIIBpem-body-secret"));
+        assert!(!output.contains("BEGIN PRIVATE KEY"));
+        assert!(output.contains("[redacted]"));
+        assert!(output.contains("safe-after"));
+    }
+
+    /// The trailing credential context is the unsafe suffix; a clean-ending
+    /// text yields nothing to rescan.
+    #[test]
+    fn trailing_credential_context_is_the_unsafe_suffix() {
+        assert_eq!(trailing_credential_context("the quick brown fox"), "");
+        assert_eq!(
+            trailing_credential_context("some text Authorization:"),
+            "Authorization:"
+        );
     }
 
     /// INV-035: a multiword unquoted secret consumes its whole line, not just
