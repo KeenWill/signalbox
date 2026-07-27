@@ -5495,11 +5495,15 @@ fn map_rejection(
             session_id: wire_uuid(session.into_uuid()),
             active_turn_id: wire_uuid(active_turn.into_uuid()),
         },
-        // No wire request can carry the next-safe-point treatment, so its
-        // stopping-turn refusal has no version-eight projection.
-        SubmitInputRejectedResult::SafePointUnavailableWhileStopping { .. } => {
-            return Err(ProcessConnectionError::EncodeInvariant);
-        }
+        SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
+            session,
+            active_turn,
+            existing_command,
+        } => RejectionDetail::SafePointUnavailableWhileStopping {
+            session_id: wire_uuid(session.into_uuid()),
+            active_turn_id: wire_uuid(active_turn.into_uuid()),
+            existing_command_id: wire_uuid(*existing_command.as_uuid()),
+        },
     })
 }
 
@@ -6717,16 +6721,20 @@ mod tests {
                 active_turn_id: wire_uuid(actual_active_turn.into_uuid()),
             }
         );
-        assert!(matches!(
+        assert_eq!(
             map_rejection(
                 SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
                     session,
                     active_turn: actual_active_turn,
                     existing_command,
                 }
-            ),
-            Err(ProcessConnectionError::EncodeInvariant)
-        ));
+            )?,
+            RejectionDetail::SafePointUnavailableWhileStopping {
+                session_id: wire_uuid(session.into_uuid()),
+                active_turn_id: wire_uuid(actual_active_turn.into_uuid()),
+                existing_command_id: wire_uuid(*existing_command.as_uuid()),
+            }
+        );
         Ok(())
     }
 

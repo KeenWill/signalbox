@@ -539,20 +539,28 @@ fn submitted_input_identity(
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct TranscriptSnapshotEndFacts {
+    session_id: CanonicalUuid,
+    cursor: u64,
+    turn_count: u64,
+    entry_count: u64,
+}
+
 #[track_caller]
-fn transcript_snapshot_end_facts(message: &ServerMessage) -> (CanonicalUuid, u64, u64, u64) {
+fn transcript_snapshot_end_facts(message: &ServerMessage) -> TranscriptSnapshotEndFacts {
     match message {
         ServerMessage::TranscriptSnapshotEnd {
             session_id,
             cursor,
             turn_count,
             entry_count,
-        } => (
-            *session_id,
-            cursor.value(),
-            turn_count.value(),
-            entry_count.value(),
-        ),
+        } => TranscriptSnapshotEndFacts {
+            session_id: *session_id,
+            cursor: cursor.value(),
+            turn_count: turn_count.value(),
+            entry_count: entry_count.value(),
+        },
         message => panic!("fixture expected transcript-snapshot end, got {message:?}"),
     }
 }
@@ -2240,7 +2248,12 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
     let snapshot_end = response_within(&mut follow).await?;
     assert_eq!(
         transcript_snapshot_end_facts(snapshot_end.message()),
-        (session_id, follow_cursor, 1, 0)
+        TranscriptSnapshotEndFacts {
+            session_id,
+            cursor: follow_cursor,
+            turn_count: 1,
+            entry_count: 0,
+        }
     );
 
     let followed = response_within(&mut follow).await?;

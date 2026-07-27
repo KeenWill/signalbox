@@ -655,12 +655,14 @@ admits `session_not_found { session_id }`,
 version-thirteen `start_when_idle` retains that set. Version-thirteen `steer`
 admits `session_not_found`, `acceptance_position_exhausted`,
 `no_active_turn { session_id, expected_active_turn_id }`, and
-`active_turn_mismatch { session_id, expected_active_turn_id, active_turn_id }`.
-Version-thirteen `queue` admits those same four details plus
-`defaults_version_mismatch` and `unknown_model_alias`. A version-four
-`replace_session_metadata` rejection admits exactly
-`session_not_found { session_id }`. A version-six `replace_session_defaults`
-rejection admits `session_not_found { session_id }`,
+`active_turn_mismatch { session_id, expected_active_turn_id, active_turn_id }`,
+plus
+`safe_point_unavailable_while_stopping { session_id, active_turn_id, existing_command_id }`
+when the named turn already carries a stop proof. Version-thirteen `queue`
+admits the first four steering details plus `defaults_version_mismatch` and
+`unknown_model_alias`. A version-four `replace_session_metadata` rejection
+admits exactly `session_not_found { session_id }`. A version-six
+`replace_session_defaults` rejection admits `session_not_found { session_id }`,
 `defaults_version_mismatch { session_id, expected, current }`, and
 `defaults_version_exhausted { session_id, current }`. A version-seven
 `reconcile_turn` rejection admits `session_not_found`,

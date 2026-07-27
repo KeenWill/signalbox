@@ -1885,6 +1885,15 @@ pub enum RejectionDetail {
         /// Authoritative active turn.
         active_turn_id: CanonicalUuid,
     },
+    /// A next-safe-point input targeted a turn that is already stopping.
+    SafePointUnavailableWhileStopping {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Authoritative stopping turn.
+        active_turn_id: CanonicalUuid,
+        /// Command whose applied result already carries the stop proof.
+        existing_command_id: CanonicalUuid,
+    },
     /// No logical tool request had the named identity.
     ToolRequestNotFound {
         /// Absent logical tool request.
@@ -1953,6 +1962,7 @@ impl RejectionDetail {
             Self::ActiveTurnMismatch { .. }
             | Self::NoActiveTurn { .. }
             | Self::TurnNotAwaitingReconciliation { .. } => TURN_RECONCILIATION_PROTOCOL_VERSION,
+            Self::SafePointUnavailableWhileStopping { .. } => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::InterruptAlreadyApplied { .. }
             | Self::InterruptUnavailableWhileAwaitingApproval { .. }
             | Self::ToolRequestNotFound { .. }
@@ -6289,6 +6299,26 @@ mod tests {
         );
         assert_eq!(invalid, Err(FrameValidationError::InputDeliveryShape));
         Ok(())
+    }
+
+    /// INV-033: steering against an already-stopping turn carries the exact
+    /// stop proof through one closed version-thirteen rejection shape.
+    #[test]
+    fn inv033_version_thirteen_stopping_steering_rejection_has_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the active turn is already stopping"),
+                detail: ErrorDetail::rejected(RejectionDetail::SafePointUnavailableWhileStopping {
+                    session_id: uuid(2),
+                    active_turn_id: uuid(3),
+                    existing_command_id: uuid(5),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"the active turn is already stopping","detail":{"type":"safe_point_unavailable_while_stopping","session_id":"00000000-0000-0000-0000-000000000002","active_turn_id":"00000000-0000-0000-0000-000000000003","existing_command_id":"00000000-0000-0000-0000-000000000005"}}"#,
+        )
     }
 
     /// INV-033: pending steering has one version-thirteen typed receipt naming
