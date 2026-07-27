@@ -2591,6 +2591,7 @@ version = "0.0.0"
 dependencies = [
  "clap",
  "expect-test",
+ "rustix",
  "signalbox-application",
  "signalbox-domain",
  "signalbox-model-provider-runtime",
@@ -2797,6 +2798,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "signalbox-application",
  "signalbox-conversation-import-claude-code",
  "signalbox-conversation-import-codex",

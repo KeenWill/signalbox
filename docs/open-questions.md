@@ -64,13 +64,13 @@ identifiers refer to [scenarios.md](scenarios.md).
   converter. A later slice must select each source format's exact mapping and
   converter version, with synthetic fixtures and persistence round-trip
   coverage. The accepted format-versioned converter seam remains fixed. (S28)
-- **Import discovery and operational surfaces beyond one file.** The owner
-  terminal's explicit-format, one-file operation and its distinct inserted or
-  already-imported receipt are implemented in
-  [conversation-import](spec/conversation-import.md#operational-surface).
-  Directory traversal, file watching, bulk-import policy, source-size admission
-  beyond the inherited process-frame bound, raw-record access, and any
-  authorization beyond the owner-private local socket remain undecided. (S28)
+- **Import operational surfaces beyond explicit file and directory scans.** The
+  owner terminal's explicit-format, one-file and recursive directory-scan
+  operations are implemented in
+  [conversation-import](spec/conversation-import.md#operational-surface). File
+  watching, source-size admission beyond the inherited process-frame bound,
+  raw-record access, and any authorization beyond the owner-private local socket
+  remain undecided. (S28)
 
 ## Delegation
 
@@ -417,12 +417,14 @@ and ordering.
   decision. Blocks the planned callback surface.
 - **Review-workflow orchestration.** The
   [review-workflow foundation](spec/review-workflows.md) fixes the target, run,
-  pass, finding, external-link, and store contracts. Exact application commands,
-  durable hold or atomic accepted-input admission and run/pass projection, pass
-  scheduling, code-host/model/workspace adapter seams, workflow-facing protocol,
-  prompts, automatic publication, repair, conflict escalation, and merge-based
-  stack propagation remain to be designed and implemented above that foundation.
-  Blocks only executable review workflows.
+  pass, finding, external-link, and store contracts. The caller-driven
+  application commands, durable retry receipts, run/pass projection, and
+  workflow-facing local process protocol are implemented. Automatic pass
+  scheduling, durable hold or atomic accepted-input creation,
+  code-host/model/workspace adapter seams, prompts, automatic publication,
+  repair, conflict escalation, and merge-based stack propagation remain to be
+  designed and implemented above that surface. Blocks automatic end-to-end
+  review workflows.
 - **Independent session-link relationship.** Links between sessions that
   delegation did not create require their own foundation decision. Blocks
   session linking and visibility authority. (S18, S19)

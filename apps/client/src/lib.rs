@@ -1,21 +1,30 @@
 //! Terminal client for the closed local Signalbox process protocol.
 
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
+    fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    os::unix::ffi::OsStrExt as _,
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
-use arguments::{Command, DangerousToolAutoApprovalArgument, ParseOutcome};
+use arguments::{
+    Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome, ReviewCommand,
+};
 use connection::ProcessClient;
 use error::ClientError;
 use presentation::{Output, SessionMetadataRow, SnapshotSelection};
+use rustix::{
+    fd::OwnedFd,
+    fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fstat, openat, statat},
+};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportFormat,
     ConversationImportSource, ErrorCode, InputContent, MAX_FRAME_BYTES, ModelCallDisposition,
-    ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
-    ToolDecision, TurnState, decode_server_line, encode_server_line,
+    ModelCallState, ModelSelection, ReviewPassSnapshot, ReviewRunSnapshot, ServerFrame,
+    ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_server_line,
+    encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -33,6 +42,8 @@ const MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 const MIN_METADATA_PAGE_SIZE: u64 = 1;
 /// Largest bounded metadata page the process protocol admits.
 const MAX_METADATA_PAGE_SIZE: u64 = 100;
+/// Largest finding inventory one review run can own.
+const MAX_REVIEW_FINDINGS_PER_RUN: u64 = 32;
 
 /// One complete bounded `list_session_metadata` request.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -54,6 +65,34 @@ impl SessionMetadataPageRequest {
             after_session_id: self.after_session_id,
         }
     }
+}
+
+enum PreparedImport {
+    File(Vec<u8>),
+    Scan(PreparedImportScan),
+}
+
+struct PreparedImportScan {
+    root: OwnedFd,
+    paths: Vec<ScannedImportPath>,
+}
+
+struct ScannedImportPath {
+    relative: PathBuf,
+    display: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConversationImportOutcome {
+    Inserted(CanonicalUuid),
+    AlreadyImported(CanonicalUuid),
+}
+
+#[derive(Default)]
+pub(crate) struct ImportScanSummary {
+    pub(crate) imported: usize,
+    pub(crate) already_imported: usize,
+    pub(crate) skipped: usize,
 }
 
 /// Parses and runs one terminal-client invocation.
@@ -105,9 +144,17 @@ async fn execute(
     } else {
         None
     };
-    let import_source = match &arguments.command {
-        Command::Import { path, .. } => Some(read_import_source(path).await?),
+    let prepared_import = match &arguments.command {
+        Command::Import {
+            source: ImportSourceArgument::File(path),
+            ..
+        } => Some(PreparedImport::File(read_import_source(path).await?)),
+        Command::Import {
+            source: ImportSourceArgument::Scan(path),
+            ..
+        } => Some(PreparedImport::Scan(collect_import_paths(path)?)),
         Command::Create { .. }
+        | Command::Continue { .. }
         | Command::List
         | Command::Search(_)
         | Command::Send { .. }
@@ -115,6 +162,7 @@ async fn execute(
         | Command::Transcript { .. }
         | Command::Follow { .. }
         | Command::Reconcile { .. }
+        | Command::Review(_)
         | Command::Stop { .. }
         | Command::Approve { .. }
         | Command::Deny { .. } => None,
@@ -128,6 +176,24 @@ async fn execute(
             selection,
             command_id,
         } => create(&mut client, &mut output, selection, command_id).await,
+        Command::Continue {
+            imported_conversation_id,
+            through_position,
+            relationship,
+            selection,
+            command_id,
+        } => {
+            continue_imported(
+                &mut client,
+                &mut output,
+                imported_conversation_id,
+                through_position,
+                relationship,
+                selection,
+                command_id,
+            )
+            .await
+        }
         Command::List => list(&mut client, &mut output).await,
         Command::Search(page) => search(&mut client, &mut output, page).await,
         Command::Send {
@@ -171,8 +237,15 @@ async fn execute(
         }
         Command::Follow { session_id } => follow(&mut client, &mut output, session_id).await,
         Command::Import { format, .. } => {
-            let source = import_source.ok_or(ClientError::Input("import source was not read"))?;
-            import_conversation(&mut client, &mut output, format, source).await
+            match prepared_import.ok_or(ClientError::Input("import source was not prepared"))? {
+                PreparedImport::File(source) => {
+                    let outcome = import_conversation(&mut client, format, source).await?;
+                    write_single_import_outcome(&mut output, outcome)
+                }
+                PreparedImport::Scan(scan) => {
+                    scan_conversations(&mut client, &mut output, format, scan).await
+                }
+            }
         }
         Command::Reconcile {
             session_id,
@@ -192,6 +265,7 @@ async fn execute(
             )
             .await
         }
+        Command::Review(command) => review(&mut client, &mut output, *command).await,
         Command::Stop {
             session_id,
             turn_id,
@@ -248,6 +322,10 @@ async fn read_import_source(path: &Path) -> Result<Vec<u8>, ClientError> {
     let file = tokio::fs::File::open(path)
         .await
         .map_err(ClientError::source_file)?;
+    read_import_file(file).await
+}
+
+async fn read_import_file(file: tokio::fs::File) -> Result<Vec<u8>, ClientError> {
     let read_limit = MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES
         .checked_add(1)
         .ok_or(ClientError::Protocol("import read bound overflow"))?;
@@ -347,6 +425,45 @@ async fn create(
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("create returned an unexpected response").mutation()),
+    }
+}
+
+async fn continue_imported(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    imported_conversation_id: CanonicalUuid,
+    through_position: CanonicalU64,
+    relationship: signalbox_process_protocol::ImportedSessionRelationship,
+    selection: ModelSelection,
+    command_id: Option<CommandId>,
+) -> Result<(), ClientError> {
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let mut connection = client
+        .mutation_request(ClientRequest::CreateSessionFromImportedFrontier {
+            command_id,
+            imported_conversation_id,
+            through_position,
+            relationship,
+            initial_model_selection: selection,
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::SessionCreated { session_id } => {
+            output.session_created(session_id)?;
+            Ok(())
+        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("continue returned an unexpected response").mutation()),
     }
 }
 
@@ -553,12 +670,127 @@ async fn read_session_metadata_page(
     }
 }
 
+fn collect_import_paths(root: &Path) -> Result<PreparedImportScan, ClientError> {
+    let root_metadata = std::fs::symlink_metadata(root).map_err(ClientError::scan_directory)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(ClientError::Input("--scan requires a directory"));
+    }
+
+    let root_fd = openat(
+        CWD,
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)
+    .map_err(ClientError::scan_directory)?;
+    let root_directory = Dir::read_from(&root_fd)
+        .map_err(std::io::Error::from)
+        .map_err(ClientError::scan_directory)?;
+    let mut pending = vec![(PathBuf::new(), root_directory)];
+    let mut paths = Vec::new();
+    while let Some((relative_directory, directory)) = pending.last_mut() {
+        let Some(entry) = directory.read() else {
+            pending.pop();
+            continue;
+        };
+        let entry = entry
+            .map_err(std::io::Error::from)
+            .map_err(ClientError::scan_directory)?;
+        let name_bytes = entry.file_name().to_bytes();
+        if name_bytes == b"." || name_bytes == b".." {
+            continue;
+        }
+        let name = OsStr::from_bytes(name_bytes);
+        let relative = relative_directory.join(name);
+        let descriptor = directory
+            .fd()
+            .map_err(std::io::Error::from)
+            .map_err(ClientError::scan_directory)?;
+        let status = statat(descriptor, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(std::io::Error::from)
+            .map_err(ClientError::scan_directory)?;
+        match FileType::from_raw_mode(status.st_mode) {
+            FileType::Directory => {
+                let child = openat(
+                    descriptor,
+                    name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(std::io::Error::from)
+                .map_err(ClientError::scan_directory)?;
+                let child = Dir::new(child)
+                    .map_err(std::io::Error::from)
+                    .map_err(ClientError::scan_directory)?;
+                pending.push((relative, child));
+            }
+            FileType::RegularFile if relative.extension() == Some(OsStr::new("jsonl")) => {
+                paths.push(ScannedImportPath {
+                    display: root.join(&relative),
+                    relative,
+                });
+            }
+            FileType::RegularFile
+            | FileType::Symlink
+            | FileType::Fifo
+            | FileType::Socket
+            | FileType::CharacterDevice
+            | FileType::BlockDevice
+            | FileType::Unknown => {}
+        }
+    }
+    paths.sort_by(|left, right| left.display.cmp(&right.display));
+    Ok(PreparedImportScan {
+        root: root_fd,
+        paths,
+    })
+}
+
+fn open_scanned_import_source(
+    root: &OwnedFd,
+    relative: &Path,
+) -> Result<tokio::fs::File, ClientError> {
+    let mut components = relative.components().peekable();
+    let mut current = None;
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(ClientError::Protocol(
+                "scan produced a non-relative candidate path",
+            ));
+        };
+        let parent = current.as_ref().unwrap_or(root);
+        let flags = if components.peek().is_some() {
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+        } else {
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC
+        };
+        current = Some(
+            openat(parent, name, flags, Mode::empty())
+                .map_err(std::io::Error::from)
+                .map_err(ClientError::source_file)?,
+        );
+    }
+    let descriptor = current.ok_or(ClientError::Protocol(
+        "scan produced an empty candidate path",
+    ))?;
+    let status = fstat(&descriptor)
+        .map_err(std::io::Error::from)
+        .map_err(ClientError::source_file)?;
+    if FileType::from_raw_mode(status.st_mode) != FileType::RegularFile {
+        return Err(ClientError::source_file(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "scan candidate is no longer a regular file",
+        )));
+    }
+    Ok(tokio::fs::File::from_std(File::from(descriptor)))
+}
+
 async fn import_conversation(
     client: &mut ProcessClient,
-    output: &mut Output<'_>,
     format: ConversationImportFormat,
     source: Vec<u8>,
-) -> Result<(), ClientError> {
+) -> Result<ConversationImportOutcome, ClientError> {
     let mut connection = client
         .mutation_request(ClientRequest::ImportConversation {
             format,
@@ -568,22 +800,80 @@ async fn import_conversation(
     match connection.message().await.map_err(ClientError::mutation)? {
         ServerMessage::ConversationImportInserted {
             imported_conversation_id,
-        } => {
-            output.conversation_import_inserted(imported_conversation_id)?;
-            Ok(())
-        }
+        } => Ok(ConversationImportOutcome::Inserted(
+            imported_conversation_id,
+        )),
         ServerMessage::ConversationImportAlreadyImported {
             imported_conversation_id,
-        } => {
-            output.conversation_import_already_imported(imported_conversation_id)?;
-            Ok(())
-        }
+        } => Ok(ConversationImportOutcome::AlreadyImported(
+            imported_conversation_id,
+        )),
         ServerMessage::Error {
             code,
             message,
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("import returned an unexpected response").mutation()),
+    }
+}
+
+fn write_single_import_outcome(
+    output: &mut Output<'_>,
+    outcome: ConversationImportOutcome,
+) -> Result<(), ClientError> {
+    match outcome {
+        ConversationImportOutcome::Inserted(imported_conversation_id) => {
+            output.conversation_import_inserted(imported_conversation_id)?;
+        }
+        ConversationImportOutcome::AlreadyImported(imported_conversation_id) => {
+            output.conversation_import_already_imported(imported_conversation_id)?;
+        }
+    }
+    Ok(())
+}
+
+async fn scan_conversations(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    format: ConversationImportFormat,
+    scan: PreparedImportScan,
+) -> Result<(), ClientError> {
+    let mut summary = ImportScanSummary::default();
+    for path in scan.paths {
+        let outcome = match open_scanned_import_source(&scan.root, &path.relative) {
+            Ok(file) => read_import_file(file).await,
+            Err(error) => Err(error),
+        };
+        let outcome = match outcome {
+            Ok(source) => import_conversation(client, format, source).await,
+            Err(error) => Err(error),
+        };
+        match outcome {
+            Ok(ConversationImportOutcome::Inserted(imported_conversation_id)) => {
+                summary.imported += 1;
+                output
+                    .conversation_import_scan_inserted(&path.display, imported_conversation_id)?;
+            }
+            Ok(ConversationImportOutcome::AlreadyImported(imported_conversation_id)) => {
+                summary.already_imported += 1;
+                output.conversation_import_scan_already_imported(
+                    &path.display,
+                    imported_conversation_id,
+                )?;
+            }
+            Err(error) => {
+                summary.skipped += 1;
+                output.conversation_import_scan_skipped(&path.display, &error)?;
+            }
+        }
+    }
+    output.conversation_import_scan_summary(&summary)?;
+    if summary.skipped == 0 {
+        Ok(())
+    } else {
+        Err(ClientError::ScanIncomplete {
+            skipped_files: summary.skipped,
+        })
     }
 }
 
@@ -1369,6 +1659,350 @@ async fn read_session_summaries(
     }
 }
 
+async fn review(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    command: ReviewCommand,
+) -> Result<(), ClientError> {
+    match command {
+        ReviewCommand::CreateTarget {
+            command_id,
+            target_id,
+            provider,
+            repository,
+            subject,
+            head_revision,
+            base_revision,
+            stack_parent_target_id,
+        } => {
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::CreateReviewTarget {
+                    command_id,
+                    target_id,
+                    provider,
+                    repository,
+                    subject,
+                    head_revision,
+                    base_revision,
+                    stack_parent_target_id,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewTargetCreated {
+                    target_id: recorded,
+                } if recorded == target_id => {
+                    output.review_acknowledgement(&format!("target={recorded} created"))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review target creation returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::StartRun {
+            command_id,
+            target_id,
+            run_id,
+            pass_id,
+            workflow,
+            session_id,
+            accepted_input_id,
+        } => {
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::StartReviewRun {
+                    command_id,
+                    target_id,
+                    run_id,
+                    pass_id,
+                    workflow,
+                    session_id,
+                    accepted_input_id,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewRunStarted {
+                    run_id: recorded_run,
+                    pass_id: recorded_pass,
+                } if recorded_run == run_id && recorded_pass == pass_id => {
+                    output.review_acknowledgement(&format!(
+                        "run={recorded_run} pass={recorded_pass} started"
+                    ))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review run creation returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::ActivatePass {
+            command_id,
+            run_id,
+            pass_id,
+            turn_id,
+        } => {
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::ActivateReviewPass {
+                    command_id,
+                    run_id,
+                    pass_id,
+                    turn_id,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewPassActivated {
+                    run_id: recorded_run,
+                    pass_id: recorded_pass,
+                } if recorded_run == run_id && recorded_pass == pass_id => {
+                    output.review_acknowledgement(&format!(
+                        "run={recorded_run} pass={recorded_pass} activated"
+                    ))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review pass activation returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::RecordFinding {
+            command_id,
+            run_id,
+            pass_id,
+            turn_id,
+            output_frontier_id,
+            finding,
+        } => {
+            let command_id = review_command_identity(output, command_id)?;
+            let mut connection = client
+                .mutation_request(ClientRequest::RecordReviewFindings {
+                    command_id,
+                    run_id,
+                    pass_id,
+                    turn_id,
+                    output_frontier_id,
+                    findings: vec![finding],
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::ReviewFindingsRecorded {
+                    run_id: recorded_run,
+                    pass_id: recorded_pass,
+                    finding_count,
+                } if recorded_run == run_id
+                    && recorded_pass == pass_id
+                    && finding_count.value() == 1 =>
+                {
+                    output.review_acknowledgement(&format!(
+                        "run={recorded_run} pass={recorded_pass} findings=1 recorded"
+                    ))?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol(
+                    "review finding admission returned an unexpected response",
+                )
+                .mutation()),
+            }
+        }
+        ReviewCommand::ReadTarget { target_id } => {
+            let mut connection = client
+                .request(ClientRequest::ReadReviewTarget { target_id })
+                .await?;
+            match connection.message().await? {
+                ServerMessage::ReviewTarget { target } if target.target_id == target_id => {
+                    output.review_target(&target)?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail)),
+                _ => Err(ClientError::Protocol(
+                    "review target read returned an unexpected response",
+                )),
+            }
+        }
+        ReviewCommand::ReadRun { run_id } => {
+            let mut connection = client
+                .request(ClientRequest::ReadReviewRun { run_id })
+                .await?;
+            match connection.message().await? {
+                ServerMessage::ReviewRun { run, pass }
+                    if run.run_id == run_id
+                        && review_run_response_is_coherent(&run, pass.as_ref()) =>
+                {
+                    output.review_run(&run, pass.as_ref())?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail)),
+                _ => Err(ClientError::Protocol(
+                    "review run read returned an unexpected response",
+                )),
+            }
+        }
+        ReviewCommand::ReadFinding { finding_id } => {
+            let mut connection = client
+                .request(ClientRequest::ReadReviewFinding { finding_id })
+                .await?;
+            match connection.message().await? {
+                ServerMessage::ReviewFinding { finding }
+                    if finding.finding.finding_id == finding_id =>
+                {
+                    output.review_finding(&finding)?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail)),
+                _ => Err(ClientError::Protocol(
+                    "review finding read returned an unexpected response",
+                )),
+            }
+        }
+        ReviewCommand::ListFindings { run_id } => {
+            let mut connection = client
+                .request(ClientRequest::ListReviewFindings { run_id })
+                .await?;
+            let start = connection.frame().await?;
+            match start.message() {
+                ServerMessage::ReviewFindingsStart { run_id: selected } if *selected == run_id => {}
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => {
+                    return Err(ClientError::remote(*code, message.clone(), *detail));
+                }
+                _ => {
+                    return Err(ClientError::Protocol(
+                        "review finding list did not start correctly",
+                    ));
+                }
+            }
+            let mut spool = tempfile::tempfile()?;
+            let mut count = 0_u64;
+            let mut previous_finding_id: Option<CanonicalUuid> = None;
+            loop {
+                let frame = connection.frame().await?;
+                match frame.message() {
+                    ServerMessage::ReviewFindingItem { finding } if finding.run_id == run_id => {
+                        let finding_id = finding.finding.finding_id;
+                        if previous_finding_id
+                            .is_some_and(|previous| finding_id.into_uuid() <= previous.into_uuid())
+                        {
+                            return Err(ClientError::Protocol(
+                                "review finding list identity order was invalid",
+                            ));
+                        }
+                        previous_finding_id = Some(finding_id);
+                        count = count.checked_add(1).ok_or(ClientError::Protocol(
+                            "review finding list count overflowed",
+                        ))?;
+                        if count > MAX_REVIEW_FINDINGS_PER_RUN {
+                            return Err(ClientError::Protocol(
+                                "review finding list exceeded its admitted bound",
+                            ));
+                        }
+                        spool.write_all(&encode_server_line(&frame)?)?;
+                    }
+                    ServerMessage::ReviewFindingsEnd { finding_count }
+                        if finding_count.value() == count =>
+                    {
+                        break;
+                    }
+                    ServerMessage::Error {
+                        code,
+                        message,
+                        detail,
+                    } => {
+                        return Err(ClientError::remote(*code, message.clone(), *detail));
+                    }
+                    _ => {
+                        return Err(ClientError::Protocol(
+                            "review finding list sequence or count was invalid",
+                        ));
+                    }
+                }
+            }
+            spool.seek(SeekFrom::Start(0))?;
+            let mut reader = BufReader::new(spool);
+            let mut line = Vec::new();
+            while reader.read_until(b'\n', &mut line)? != 0 {
+                match decode_server_line(&line)?.message() {
+                    ServerMessage::ReviewFindingItem { finding } => {
+                        output.review_finding(finding)?;
+                    }
+                    _ => {
+                        return Err(ClientError::Protocol(
+                            "review finding spool contained a non-finding frame",
+                        ));
+                    }
+                }
+                line.clear();
+            }
+            Ok(())
+        }
+    }
+}
+
+fn review_run_response_is_coherent(
+    run: &ReviewRunSnapshot,
+    pass: Option<&ReviewPassSnapshot>,
+) -> bool {
+    match (run.pass_id, pass) {
+        (None, None) => true,
+        (Some(pass_id), Some(pass)) => {
+            pass.pass_id == pass_id && pass.run_id == run.run_id && pass.target_id == run.target_id
+        }
+        (None, Some(_)) | (Some(_), None) => false,
+    }
+}
+
+fn review_command_identity(
+    output: &mut Output<'_>,
+    supplied: Option<CommandId>,
+) -> Result<CommandId, ClientError> {
+    let (command_id, generated) = command_identity(supplied)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    Ok(command_id)
+}
+
 fn command_identity(supplied: Option<CommandId>) -> Result<(CommandId, bool), ClientError> {
     match supplied {
         Some(command_id) => Ok((command_id, false)),
@@ -1390,16 +2024,21 @@ mod tests {
     use std::{
         error::Error,
         ffi::OsString,
+        fs,
         io::{self, Cursor},
+        os::unix::fs::symlink,
         path::PathBuf,
         process::ExitCode,
         time::Duration,
     };
 
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, ClientRequest, CommandId, InputContent, ModelCallDisposition,
-        ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
-        ToolDecision, TurnState, decode_client_line, encode_server_line,
+        CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, FrameEncodeError,
+        InputContent, ModelCallDisposition, ModelCallState, ModelSelection, ReviewFindingInput,
+        ReviewFindingSnapshot, ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle,
+        ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow,
+        ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState,
+        decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -1409,13 +2048,41 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES, ProcessClient,
-        SessionMetadataPageRequest, SnapshotSelection, TurnTerminal, create, decide,
-        model_call_recovery_transition, read_input, reconcile_turn, run, search, socket_path,
-        stop_turn, submit_input, terminal_event_state, terminal_snapshot_selection,
-        terminal_snapshot_state, tool_recovery_transition,
+        MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
+        MAX_REVIEW_FINDINGS_PER_RUN, ProcessClient, ReviewCommand, SessionMetadataPageRequest,
+        SnapshotSelection, TurnTerminal, collect_import_paths, create, decide,
+        model_call_recovery_transition, open_scanned_import_source, read_input, reconcile_turn,
+        review, run, search, socket_path, stop_turn, submit_input, terminal_event_state,
+        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
+
+    #[test]
+    fn coherent_review_run_response_is_accepted() {
+        let pass = review_pass_snapshot();
+        let run = review_run_snapshot(Some(pass.pass_id));
+
+        assert!(super::review_run_response_is_coherent(&run, Some(&pass)));
+    }
+
+    #[test]
+    fn review_run_response_rejects_a_missing_recorded_pass() {
+        let recorded_pass = review_pass_snapshot();
+        let run = review_run_snapshot(Some(recorded_pass.pass_id));
+
+        assert!(!super::review_run_response_is_coherent(&run, None));
+    }
+
+    #[test]
+    fn review_run_response_rejects_cross_wired_pass_ancestry() {
+        const FOREIGN_TARGET_IDENTITY: u128 = 4;
+
+        let mut pass = review_pass_snapshot();
+        let run = review_run_snapshot(Some(pass.pass_id));
+        pass.target_id = CanonicalUuid::from_uuid(Uuid::from_u128(FOREIGN_TARGET_IDENTITY));
+
+        assert!(!super::review_run_response_is_coherent(&run, Some(&pass)));
+    }
 
     #[test]
     fn empty_standard_input_is_rejected() {
@@ -1791,6 +2458,59 @@ mod tests {
         Ok(())
     }
 
+    /// S28 / INV-038: a directory replaced after enumeration cannot redirect
+    /// a queued candidate read through a symbolic link.
+    #[tokio::test]
+    async fn s28_inv038_scan_refuses_directory_symlink_replacement() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        let queued_directory = root.path().join("queued");
+        let retained_directory = root.path().join("retained");
+        fs::create_dir(&queued_directory)?;
+        fs::write(queued_directory.join("conversation.jsonl"), b"inside")?;
+        fs::write(outside.path().join("conversation.jsonl"), b"outside")?;
+        let scan = collect_import_paths(root.path())?;
+        let candidate = scan
+            .paths
+            .first()
+            .ok_or("fixture must select one candidate")?;
+        let relative = candidate.relative.clone();
+        fs::rename(&queued_directory, retained_directory)?;
+        symlink(outside.path(), &queued_directory)?;
+
+        let opened = open_scanned_import_source(&scan.root, &relative);
+
+        assert!(matches!(opened, Err(ClientError::SourceFile(_))));
+        Ok(())
+    }
+
+    /// S28 / INV-038: a regular candidate replaced after enumeration by a
+    /// FIFO is rejected without waiting for a writer.
+    #[tokio::test]
+    async fn s28_inv038_scan_refuses_fifo_replacement_without_blocking()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let candidate_path = root.path().join("conversation.jsonl");
+        fs::write(&candidate_path, b"inside")?;
+        let scan = collect_import_paths(root.path())?;
+        let candidate = scan
+            .paths
+            .first()
+            .ok_or("fixture must select one candidate")?;
+        let relative = candidate.relative.clone();
+        fs::remove_file(&candidate_path)?;
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &candidate_path,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )?;
+
+        let opened = open_scanned_import_source(&scan.root, &relative);
+
+        assert!(matches!(opened, Err(ClientError::SourceFile(_))));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn search_rejects_a_page_that_exceeds_its_requested_bound() -> Result<(), Box<dyn Error>>
     {
@@ -1868,6 +2588,136 @@ mod tests {
                 "session metadata page exceeded its requested bound"
             ))
         ));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_list_rejects_terminal_count_before_writing_items() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let run_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let finding_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::ListReviewFindings { run_id }
+            );
+            let frame = |message| {
+                ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
+                    .map_err(io::Error::other)
+            };
+            let finding = ReviewFindingSnapshot {
+                target_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                run_id,
+                producing_pass_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+                finding: ReviewFindingInput {
+                    finding_id,
+                    file_path: String::from("src/review.rs"),
+                    line_start: Some(CanonicalU64::new(11)),
+                    line_end: Some(CanonicalU64::new(14)),
+                    diff_side: None,
+                    title: String::from("Retain the exact edge"),
+                    body: String::from("The terminal count must authenticate the list."),
+                    severity: ReviewSeverity::High,
+                    confidence: CanonicalU64::new(9_000),
+                    category: String::from("correctness"),
+                    recommended_fix: None,
+                },
+                status: ReviewFindingStatus::Open,
+                event_count: CanonicalU64::new(0),
+            };
+            let mut response = Vec::new();
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ReviewFindingsStart { run_id })?)
+                    .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ReviewFindingItem { finding })?)
+                    .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ReviewFindingsEnd {
+                    finding_count: CanonicalU64::new(2),
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            writer.write_all(&response).await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let error = review(
+            &mut client,
+            &mut output,
+            ReviewCommand::ListFindings { run_id },
+        )
+        .await
+        .expect_err("the mismatched terminal count must reject the list");
+
+        assert_eq!(
+            error.to_string(),
+            "the server violated the process protocol: review finding list sequence or count was invalid"
+        );
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_list_rejects_an_over_bound_inventory_before_writing_items()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let run_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::ListReviewFindings { run_id }
+            );
+            let response =
+                over_bound_review_findings_response(&request, run_id).map_err(io::Error::other)?;
+            writer.write_all(&response).await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let error = review(
+            &mut client,
+            &mut output,
+            ReviewCommand::ListFindings { run_id },
+        )
+        .await
+        .expect_err("the over-bound finding inventory must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "the server violated the process protocol: review finding list exceeded its admitted bound"
+        );
         assert!(stdout.is_empty());
         assert!(stderr.is_empty());
         server.await??;
@@ -2202,5 +3052,80 @@ mod tests {
         assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
         server.await??;
         Ok(())
+    }
+
+    fn over_bound_review_findings_response(
+        request: &ClientFrame,
+        run_id: CanonicalUuid,
+    ) -> Result<Vec<u8>, FrameEncodeError> {
+        const FIRST_FINDING_IDENTITY: u128 = 10;
+
+        let frame = |message| {
+            ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
+        };
+        let mut response =
+            encode_server_line(&frame(ServerMessage::ReviewFindingsStart { run_id })?)?;
+        for offset in 0..=MAX_REVIEW_FINDINGS_PER_RUN {
+            let finding_id = CanonicalUuid::from_uuid(Uuid::from_u128(
+                FIRST_FINDING_IDENTITY + u128::from(offset),
+            ));
+            let finding = ReviewFindingSnapshot {
+                target_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                run_id,
+                producing_pass_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+                finding: ReviewFindingInput {
+                    finding_id,
+                    file_path: String::from("src/review.rs"),
+                    line_start: None,
+                    line_end: None,
+                    diff_side: None,
+                    title: String::from("Bound the list"),
+                    body: String::from("The client must reject an over-bound inventory."),
+                    severity: ReviewSeverity::High,
+                    confidence: CanonicalU64::new(9_000),
+                    category: String::from("availability"),
+                    recommended_fix: None,
+                },
+                status: ReviewFindingStatus::Open,
+                event_count: CanonicalU64::new(0),
+            };
+            response.extend_from_slice(&encode_server_line(&frame(
+                ServerMessage::ReviewFindingItem { finding },
+            )?)?);
+        }
+        response.extend_from_slice(&encode_server_line(&frame(
+            ServerMessage::ReviewFindingsEnd {
+                finding_count: CanonicalU64::new(MAX_REVIEW_FINDINGS_PER_RUN + 1),
+            },
+        )?)?);
+        Ok(response)
+    }
+
+    fn review_run_snapshot(pass_id: Option<CanonicalUuid>) -> ReviewRunSnapshot {
+        ReviewRunSnapshot {
+            target_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            run_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            workflow: ReviewWorkflow::ReadOnlyReview,
+            policy_version: CanonicalU64::new(1),
+            minimum_judge_confidence: CanonicalU64::new(8_000),
+            minimum_publication_confidence: CanonicalU64::new(9_000),
+            state: ReviewRunLifecycle::Queued,
+            pass_id,
+        }
+    }
+
+    fn review_pass_snapshot() -> ReviewPassSnapshot {
+        ReviewPassSnapshot {
+            pass_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+            run_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            target_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            kind: ReviewPassKind::ReadOnlyReview,
+            session_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+            accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(6)),
+            origin_turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(7)),
+            state: ReviewPassLifecycle::Queued,
+            turn_id: None,
+            output_frontier_id: None,
+        }
     }
 }
