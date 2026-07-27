@@ -535,9 +535,7 @@ impl<'a> Output<'a> {
         if let Some((turn, total)) = current_turn {
             self.usage_line(Some(turn), total)?;
         }
-        if session_total.terminal_calls > 0 {
-            self.usage_line(None, session_total)?;
-        }
+        self.usage_line(None, session_total)?;
         Ok(())
     }
 
@@ -1819,6 +1817,7 @@ mod tests {
         expect![[r#"
             imported_user imported_conversation=00000000-0000-0000-0000-000000000003 imported_entry=00000000-0000-0000-0000-000000000004 source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000002
             exact imported text
+            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());
@@ -1850,6 +1849,7 @@ mod tests {
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
             imported_speaker_unattested kind=tool_call imported_conversation=00000000-0000-0000-0000-000000000003 imported_entry=00000000-0000-0000-0000-000000000006 source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000005
+            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());
@@ -2124,6 +2124,7 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=active_running attempt=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 call_state=cancellation_requested
+            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
         "#]]
         .assert_eq(&rendered);
     }
@@ -2141,6 +2142,7 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=failed frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=00000000-0000-0000-0000-000000000004 call_disposition=cancelled
+            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
         "#]]
         .assert_eq(&rendered);
     }
@@ -2155,6 +2157,7 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=cancelled frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=none
+            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
         "#]]
         .assert_eq(&rendered);
     }
@@ -2169,8 +2172,28 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=reconciliation_required frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 operation=model_call operation_id=00000000-0000-0000-0000-000000000004
+            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
         "#]]
         .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn transcript_without_terminal_calls_renders_a_session_usage_total() {
+        let mut snapshot =
+            TranscriptSnapshot::from_messages(1, std::iter::empty::<ServerMessage>())
+                .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect("empty usage snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
     }
 
     #[test]

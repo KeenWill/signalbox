@@ -1132,12 +1132,15 @@ visible even when it has not added a semantic transcript entry.
 
 `transcript` replays the validated usage rows after ordinary turn and frontier
 output. It prints one compact subtotal per turn that has terminal calls and one
-session-total line. Each of the four token fields carries both its subtotal and
-`reported_calls/terminal_calls` coverage. Zero is printed as zero; a field with
-no reported calls is printed as `unreported`, and partial coverage is never
-silently treated as complete. These client totals are presentation arithmetic
-over the exact per-call evidence. The client does not compute currency cost or
-store a derived total.
+session-total line, including `terminal_calls=0` with `0/0` field coverage when
+there are no terminal calls. Each of the four token fields carries both its
+subtotal and `reported_calls/terminal_calls` coverage. Zero is printed as zero;
+a field with no reported calls is printed as `unreported`, and partial coverage
+is never silently treated as complete. Snapshot validation rejects noncontiguous
+indices, unknown turn identities, repeated model-call identities, or usage rows
+outside strict turn-acceptance and per-turn model-call-UUID order. These client
+totals are presentation arithmetic over the exact per-call evidence. The client
+does not compute currency cost or store a derived total.
 
 The unbounded aggregate session-summary sequence is bounded the same way. `list`
 validates ordering and the terminal count while spooling summary frames to an

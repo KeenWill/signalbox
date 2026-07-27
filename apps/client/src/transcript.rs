@@ -191,6 +191,7 @@ pub(crate) async fn read_snapshot(
 
     let mut spool = tempfile::tempfile()?;
     let mut turn_ids = FixedDiskSet::<16>::new()?;
+    let mut model_call_order = DiskModelCallUsageOrder::new()?;
     let mut model_call_ids = FixedDiskSet::<16>::new()?;
     let mut entry_ids = FixedDiskSet::<32>::new()?;
     let mut prior_acceptance_position = None;
@@ -218,6 +219,7 @@ pub(crate) async fn read_snapshot(
                     ));
                 }
                 prior_acceptance_position = Some(position);
+                model_call_order.push_turn(turn_id)?;
                 append_frame(&mut spool, &frame)?;
                 turn_count = turn_count
                     .checked_add(1)
@@ -231,11 +233,11 @@ pub(crate) async fn read_snapshot(
             } if !model_calls_ended && !entries_started => {
                 model_calls_started = true;
                 if model_call_index.value() != model_call_count
-                    || turn_ids.insert(uuid_key(turn_id))?
+                    || !model_call_order.accept(turn_id, model_call_id)?
                     || !model_call_ids.insert(uuid_key(model_call_id))?
                 {
                     return Err(ClientError::Protocol(
-                        "snapshot model-call usage identities or indices were invalid",
+                        "snapshot model-call usage identities, indices, or order were invalid",
                     ));
                 }
                 append_frame(&mut spool, &frame)?;
@@ -444,6 +446,61 @@ fn entry_key(source_session_id: CanonicalUuid, entry_id: CanonicalUuid) -> [u8; 
     key
 }
 
+struct DiskModelCallUsageOrder {
+    file: File,
+    reading: bool,
+    previous: Option<([u8; 16], [u8; 16])>,
+}
+
+impl DiskModelCallUsageOrder {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            file: tempfile::tempfile()?,
+            reading: false,
+            previous: None,
+        })
+    }
+
+    fn push_turn(&mut self, turn: CanonicalUuid) -> io::Result<()> {
+        if self.reading {
+            return Err(io::Error::other(
+                "model-call usage order accepted a late turn",
+            ));
+        }
+        self.file.write_all(&uuid_key(turn))
+    }
+
+    fn accept(&mut self, turn: CanonicalUuid, call: CanonicalUuid) -> io::Result<bool> {
+        let turn = uuid_key(turn);
+        let call = uuid_key(call);
+        let accepted = match self.previous {
+            None => self.advance_to(turn)?,
+            Some((previous_turn, previous_call)) if previous_turn == turn => previous_call < call,
+            Some(_) => self.advance_to(turn)?,
+        };
+        if accepted {
+            self.previous = Some((turn, call));
+        }
+        Ok(accepted)
+    }
+
+    fn advance_to(&mut self, selected: [u8; 16]) -> io::Result<bool> {
+        if !self.reading {
+            self.file.seek(SeekFrom::Start(0))?;
+            self.reading = true;
+        }
+        let mut candidate = [0_u8; 16];
+        loop {
+            match self.file.read_exact(&mut candidate) {
+                Ok(()) if candidate == selected => return Ok(true),
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
 struct FixedDiskSet<const WIDTH: usize> {
     file: File,
     len: u64,
@@ -566,7 +623,55 @@ fn stable_hash(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::FixedDiskSet;
+    use signalbox_process_protocol::CanonicalUuid;
+    use uuid::Uuid;
+
+    use super::{DiskModelCallUsageOrder, FixedDiskSet};
+
+    #[test]
+    fn disk_usage_order_rejects_a_return_to_an_earlier_turn() {
+        let first_turn = wire_uuid(1);
+        let second_turn = wire_uuid(2);
+        let mut order = DiskModelCallUsageOrder::new().expect("anonymous order file must open");
+        order.push_turn(first_turn).expect("first turn must spool");
+        order
+            .push_turn(second_turn)
+            .expect("second turn must spool");
+
+        assert!(
+            order
+                .accept(first_turn, wire_uuid(11))
+                .expect("first usage lookup must succeed")
+        );
+        assert!(
+            order
+                .accept(second_turn, wire_uuid(12))
+                .expect("second usage lookup must succeed")
+        );
+        assert!(
+            !order
+                .accept(first_turn, wire_uuid(13))
+                .expect("backward usage lookup must succeed")
+        );
+    }
+
+    #[test]
+    fn disk_usage_order_rejects_descending_calls_within_one_turn() {
+        let turn = wire_uuid(1);
+        let mut order = DiskModelCallUsageOrder::new().expect("anonymous order file must open");
+        order.push_turn(turn).expect("turn must spool");
+
+        assert!(
+            order
+                .accept(turn, wire_uuid(12))
+                .expect("first usage lookup must succeed")
+        );
+        assert!(
+            !order
+                .accept(turn, wire_uuid(11))
+                .expect("descending usage lookup must succeed")
+        );
+    }
 
     #[test]
     fn disk_identity_set_grows_at_its_load_boundary() {
@@ -597,6 +702,10 @@ mod tests {
 
         assert!(!set.insert([0, 2]).expect("duplicate lookup must succeed"));
         assert_eq!(set.len, 1);
+    }
+
+    fn wire_uuid(value: u128) -> CanonicalUuid {
+        CanonicalUuid::from_uuid(Uuid::from_u128(value))
     }
 
     #[track_caller]
