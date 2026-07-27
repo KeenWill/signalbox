@@ -13,15 +13,15 @@ use signalbox_domain::{
     AcceptedInputTurnSchedulingRecordState, ActiveTurnSchedulingReconstitutionInput, Actor,
     AppliedInterruptCommandResult, AssistantText, CancellationStopDisposition,
     CancelledModelCallTurnIdentities, CancelledTurnExecutionReconstitutionInput,
-    ConsumedSteeringReconstitutionInput, ContextFrontierId, DeliveryRequest, DirectModelSelection,
-    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
-    FrozenModelSelection, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
-    ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-    ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest,
-    NonEmptyUnicodeTextFailure, OriginConfiguration, PerInputConfigurationChoices,
-    PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
-    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
-    SemanticTranscriptEntryId,
+    ConsumedSteeringReconstitutionInput, ContextFrontierId, ContinuationRoundReconstitutionInput,
+    DeliveryRequest, DirectModelSelection, DurableCommandId,
+    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
+    IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
+    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
+    ModelSelectionOverride, ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
+    ProviderModelIdentity, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    ResolvedProviderTarget, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -57,9 +57,9 @@ use crate::{
     outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     tool_loop::{
-        load_active_batch_from_connection, load_recovery_batch_by_attempt,
-        load_steering_continuation_round_evidence, load_terminal_result_attempts,
-        load_terminal_result_denials, persist_ended_attempt,
+        load_active_batch_from_connection, load_continuation_round_evidence,
+        load_recovery_batch_by_attempt, load_steering_continuation_round_evidence,
+        load_terminal_result_attempts, load_terminal_result_denials, persist_ended_attempt,
     },
 };
 
@@ -1276,6 +1276,7 @@ pub(crate) async fn load_scheduling_projection(
     let mut pinned_target_identities = BTreeMap::new();
     let mut required_frontiers = BTreeSet::new();
     let mut required_model_calls = BTreeSet::new();
+    let mut named_continuation_gate_calls = BTreeSet::new();
     for (row, accepting_command) in rows.into_iter().zip(accepting_commands) {
         let queued_turn = turn_id_from_uuid(required(&row, "queued_turn_id")?);
         let queued_accepted =
@@ -1573,6 +1574,7 @@ pub(crate) async fn load_scheduling_projection(
                             .into());
                         }
                         required_model_calls.insert(recovery_call);
+                        named_continuation_gate_calls.insert(recovery_call);
                         match (end_variant.as_deref(), end_disposition.as_deref()) {
                             (Some("without_stop"), Some("ambiguous")) => ActiveTurnSchedulingReconstitutionInput::awaiting_model_call_recovery(
                                 lifecycle_turn,
@@ -2118,6 +2120,7 @@ pub(crate) async fn load_scheduling_projection(
                         match (terminal_model_call, terminal_tool_attempt) {
                             (Some(terminal_call), None) => {
                                 required_model_calls.insert(terminal_call);
+                                named_continuation_gate_calls.insert(terminal_call);
                                 AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
                                     starting_lineage,
                                     starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
@@ -2294,6 +2297,7 @@ pub(crate) async fn load_scheduling_projection(
                                         .into());
                                     }
                                 };
+                                named_continuation_gate_calls.insert(terminal_call);
                                 AcceptedInputTurnSchedulingRecordState::TerminalRefused {
                                     starting_lineage,
                                     starting_frontier: ContextFrontierId::from_uuid(
@@ -2459,11 +2463,19 @@ pub(crate) async fn load_scheduling_projection(
         call_frontier: Uuid,
         consumed_count: u64,
     }
+    /// One gate-named steering-free call whose round evidence must be looked
+    /// up.
+    struct NamedGateCallFacts {
+        call: Uuid,
+        turn: TurnId,
+        call_frontier: Uuid,
+    }
     let mut model_calls = Vec::with_capacity(model_call_rows.len());
     let mut pinned_targets = Vec::with_capacity(model_call_rows.len());
     let mut loaded_pinned_turns = BTreeSet::new();
     let mut loaded_model_calls = BTreeSet::new();
     let mut consuming_call_facts = Vec::new();
+    let mut named_gate_call_facts = Vec::new();
     for row in model_call_rows {
         let call_uuid: Uuid = required(&row, "model_call_id")?;
         if !loaded_model_calls.insert(call_uuid) {
@@ -2516,6 +2528,13 @@ pub(crate) async fn load_scheduling_projection(
                 consumed_count,
             });
         }
+        if named_continuation_gate_calls.contains(&call_uuid) && continues_prior_attempt {
+            named_gate_call_facts.push(NamedGateCallFacts {
+                call: call_uuid,
+                turn,
+                call_frontier: frontier_uuid,
+            });
+        }
         model_calls.push(ModelCallReconstitutionInput::new(
             ModelCallId::from_uuid(call_uuid),
             turn,
@@ -2558,6 +2577,30 @@ pub(crate) async fn load_scheduling_projection(
             continue;
         };
         steering_continuation_rounds.push(SteeringContinuationRoundReconstitutionInput::new(
+            ModelCallId::from_uuid(facts.call),
+            round_tool_attempts,
+            round_tool_denials,
+        ));
+    }
+
+    // A steering-free continuation call named by a terminal or recovery gate
+    // reconstitutes only together with its round's complete result evidence;
+    // a named call prepared against its turn's starting frontier has no
+    // continuing round window and carries none.
+    let mut continuation_rounds = Vec::new();
+    for facts in named_gate_call_facts {
+        let Some((round_tool_attempts, round_tool_denials)) = load_continuation_round_evidence(
+            connection,
+            session_id,
+            facts.turn,
+            ContextFrontierId::from_uuid(facts.call_frontier),
+        )
+        .await
+        .map_err(map_tool_loop_error)?
+        else {
+            continue;
+        };
+        continuation_rounds.push(ContinuationRoundReconstitutionInput::new(
             ModelCallId::from_uuid(facts.call),
             round_tool_attempts,
             round_tool_denials,
@@ -3097,6 +3140,7 @@ pub(crate) async fn load_scheduling_projection(
         .with_model_call_facts(pinned_targets, model_calls)
         .with_consumed_steering_facts(consumed_steering)
         .with_steering_continuation_rounds(steering_continuation_rounds)
+        .with_continuation_rounds(continuation_rounds)
         .reconstitute()
         .map_err(|error| {
             let (_, failure) = error.into_parts();

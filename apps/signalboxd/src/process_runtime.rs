@@ -3894,6 +3894,15 @@ async fn handle_submit_input<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    let Ok(content) = admitted_user_content(content) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let session = SessionId::from_uuid(session_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
     let repository = SubmitInputRepository::new(pool.clone());
@@ -3921,15 +3930,6 @@ where
             }
         }
     }
-    let Ok(content) = admitted_user_content(content) else {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::InvalidRequest),
-        )
-        .await;
-    };
     let expected_version = expected_defaults_version
         .and_then(|version| SessionConfigurationDefaultsVersion::try_from_u64(version.value()));
     let configuration = || {

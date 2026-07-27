@@ -40,8 +40,8 @@ use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, CredentialAccess,
     CredentialAccessError, CredentialReference, CredentialValue, ExchangeFacts, MessagePart,
     ModelOperation, ModelRuntime, NativeErrorFacts, ObservationSink, PreparationOutcome,
-    ProviderErrorEvidence, ProviderErrorKind, ProviderReportedModel, Script, ScriptedModel,
-    ScriptedPrepared, TerminalEvidence, TerminalReport, TokenUsage, ToolCallId,
+    ProviderErrorEvidence, ProviderErrorKind, ProviderReportedModel, RefusalEvidence, Script,
+    ScriptedModel, ScriptedPrepared, TerminalEvidence, TerminalReport, TokenUsage, ToolCallId,
     ToolCallProposal as RuntimeToolCallProposal, ToolName as RuntimeToolName, ToolResultRecord,
 };
 use signalbox_persistence::{
@@ -514,6 +514,16 @@ fn provider_error_script() -> Script {
         reported_model: Some(ProviderReportedModel::new("scripted-tool-loop")),
         kind: ProviderErrorKind::ProviderInternal,
         native: NativeErrorFacts::default(),
+        usage: TokenUsage::unreported(),
+    }))
+}
+
+fn refusal_script() -> Script {
+    Script::delivering(TerminalEvidence::Refused(RefusalEvidence {
+        exchange: ExchangeFacts::default(),
+        message_id: None,
+        reported_model: Some(ProviderReportedModel::new("scripted-tool-loop")),
+        content: Vec::new(),
         usage: TokenUsage::unreported(),
     }))
 }
@@ -2716,8 +2726,103 @@ async fn submit_steering_through_process(
     }
 }
 
+/// S02 / S10 / INV-006: a provider refusal on the continuation model call of
+/// a completed tool round terminalizes the turn as refused naming that call,
+/// and the committed refused shape reloads through the scheduling
+/// projection — the startup scan completes and the next submit activates and
+/// runs instead of the session becoming permanently unloadable.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s02_s10_inv006_refused_continuation_call_admits_and_runs_later_turn()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let tool_catalog = catalog([tool(
+        "effect_free",
+        ToolPermissionDefault::Auto,
+        ToolEffectClass::EffectFree,
+    )]);
+    let executor = RecordingExecutor::completing();
+    let (execution, runtime) = fixture.execution(
+        [tool_use_script(&[("effect_free", "{}")]), refusal_script()],
+        tool_catalog,
+        executor.clone(),
+    );
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    assert_eq!(executor.events(), vec![String::from("effect_free")]);
+    assert_eq!(
+        runtime.received_operations().len(),
+        2,
+        "the refused continuation round follows the completed tool round"
+    );
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct RefusedContinuationShape {
+        turn_disposition: String,
+        terminal_model_call_id: Option<Uuid>,
+        call_disposition: String,
+        model_call_count: i64,
+    }
+    let terminal_shape: RefusedContinuationShape = sqlx::query_as(
+        "SELECT lifecycle.terminal_disposition_kind AS turn_disposition,
+                lifecycle.terminal_model_call_id,
+                continuation.terminal_disposition_kind AS call_disposition,
+                (SELECT count(*) FROM model_call
+                  WHERE session_id = $1 AND turn_id = $2) AS model_call_count
+           FROM turn_lifecycle AS lifecycle
+           JOIN model_call AS continuation
+             ON continuation.session_id = lifecycle.session_id
+            AND continuation.model_call_id = lifecycle.terminal_model_call_id
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(terminal_shape.turn_disposition, "refused");
+    assert!(
+        terminal_shape.terminal_model_call_id.is_some(),
+        "the refused turn names its continuation call"
+    );
+    assert_eq!(terminal_shape.call_disposition, "refused");
+    assert_eq!(
+        terminal_shape.model_call_count, 2,
+        "the refusing call is the second-round continuation call"
+    );
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+        ],
+        "a refusal appends no semantic content after the round's results"
+    );
+
+    let mut startup = StartupScanService::new(
+        UuidV7StartupScanIdGenerator,
+        PostgresStartupScanRepository::new(fixture.pool.clone()),
+    );
+    let recovery = startup.execute().await?;
+    assert_eq!(
+        recovery.recovered_turn_count(),
+        0,
+        "the provider refusal already terminalized the turn"
+    );
+
+    let later_turn = fixture
+        .submit_new_turn(0x3812, "work after refused continuation call")
+        .await?;
+    fixture
+        .activate_and_complete_turn(later_turn, "post-continuation-refusal submit completed")
+        .await?;
+    Ok(())
+}
+
 /// S02 / S08 / S10 / INV-016 / INV-036: a NextSafePoint input accepted through
-/// process protocol version thirteen while a tool round is parked is consumed by the continuation call, the
+/// process protocol version thirteen while a tool round is parked is consumed by the
+/// continuation call, the
 /// steering-bearing continuation completes the turn, and the committed shape
 /// reloads through the scheduling projection — the startup scan completes and
 /// the next submit activates and runs.
