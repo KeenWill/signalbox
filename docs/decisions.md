@@ -540,6 +540,31 @@ in [model-call-execution](spec/model-call-execution.md), the adapter contract in
 model-identifier-normalization half of the model fallback and provenance
 question.
 
+## 2026-07-26 — Carry credential lineage in runner placement
+
+**Context.** Runner replacement can intentionally move from a credential-bearing
+placement to a profileless one. The terminal grant tombstone advances the
+revision, but a later caller could omit that separate value and the pure
+replacement function had no fact from which to distinguish a never-profiled
+placement from a lineage whose tombstone was dropped.
+
+**Decision.** Every pinned placement carries the optional exact last-grant
+identity: runner and positive revision. Initial profile selection records
+revision one; profile and runner replacements advance the identity from the
+checked predecessor, including a revoked tombstone for a profileless successor.
+A replacement must supply the grant named by existing placement evidence, while
+a placement with no lineage may begin at revision one. Reconstitution validates
+the placement evidence and persistence validates the named grant record.
+
+**Rejected alternatives.** Letting callers omit a profileless tombstone can
+recreate a retired session/runner/profile/revision tuple. A revision-only marker
+cannot distinguish cross-runner grant ancestry. A global lookup inside the pure
+domain transition would move storage authority into the domain boundary.
+
+**Affects.** `PinnedRunnerPlacement`, credential-grant replacement and
+reconstitution, INV-044 and INV-045, S32, and the
+[runner-protocol specification](spec/runner-protocol.md).
+
 ## 2026-07-26 — Add sccache as the devenv shared compiler cache
 
 **Context.** Every checkout and worktree cold-builds the full dependency graph,
@@ -593,6 +618,32 @@ reservation and merged filename differ.
 **Affects.** The review-workflow migration filename, the provenance of PR #227,
 and interpretation of the earlier review-workflow decision entries' affected
 slice.
+
+## 2026-07-26 — Select execution locus before authorization
+
+**Context.** A combined-locus tool can use a runner-resident credential profile
+or execute daemon-locally without that profile. Runner re-registration may make
+the first locus unavailable while leaving the second admissible. Reusing the
+runner pair's automatic approval for daemon execution would silently cross both
+the credential and tool-policy boundaries.
+
+**Decision.** The runner domain retains daemon fallback as admissibility only:
+runner lease creation returns `ToolUnavailable` and consumes no reusable
+daemon-execution authority. Later application orchestration must select a locus
+before authorization. If runner availability changes before dispatch, daemon
+fallback discards the runner-pair authorization and resolves the daemon-local
+tool policy without the runner-resident credential profile. Locus is a material
+approval constraint and is never selected by the model or runner.
+
+**Rejected alternatives.** Reusing runner-pair `Automatic` authority can bypass
+a daemon-local `Confirm` default and cannot supply the runner-resident
+credential. Silently disabling daemon fallback contradicts the combined-locus
+declaration. Letting the executor choose after approval makes policy depend on
+ambient availability rather than recorded intent.
+
+**Affects.** `ToolAdmissibleLoci`, combined-locus registration reconciliation,
+approval orchestration, INV-019 and INV-042, S16, and the
+[runner-protocol specification](spec/runner-protocol.md).
 
 ## 2026-07-26 — Make runner lease authority single-use and tool-bound
 

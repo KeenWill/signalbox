@@ -54,7 +54,7 @@ impl <Identity> {
 }
 ```
 
-The sixteen identities defined in `lib.rs`:
+The twenty identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -68,6 +68,10 @@ pub struct ModelCallId(/* private */);
 pub struct ProviderTargetEvidenceId(/* private */);
 pub struct ToolRequestId(/* private */);
 pub struct ToolAttemptId(/* private */);
+pub struct RunnerEnrollmentId(/* private */);
+pub struct RunnerId(/* private */);
+pub struct RunnerAuthenticationId(/* private */);
+pub struct RunnerLeaseId(/* private */);
 pub struct ReviewTargetId(/* private */);
 pub struct ReviewRunId(/* private */);
 pub struct ReviewPassId(/* private */);
@@ -3269,6 +3273,14 @@ impl ToolBatchReconstitutionInput {
         attempts: Vec<ReconstitutedToolAttempt>,
         phase: ToolBatchPhaseReconstitutionInput,
     ) -> Self;
+    pub fn with_retired_attempts(
+        self,
+        retired_attempts: Vec<ToolAttemptId>,
+    ) -> Self;
+    pub fn with_runner_authorized_attempts(
+        self,
+        runner_authorized_attempts: Vec<ToolAttemptId>,
+    ) -> Self;
     pub fn reconstitute(self) -> Result<ToolBatch, ToolBatchReconstitutionError>;
 }
 pub enum ToolBatchReconstitutionFailure {
@@ -3296,6 +3308,10 @@ pub enum ToolBatchPhase {
 
 pub struct ToolBatch { /* private */ }
 impl ToolBatch {
+    pub fn retired_attempts(&self) -> impl Iterator<Item = ToolAttemptId> + '_;
+    pub fn runner_authorized_attempts(
+        &self,
+    ) -> impl Iterator<Item = ToolAttemptId> + '_;
     pub fn awaiting_approval(&self) -> Option<AwaitingToolApproval>;
     pub fn awaiting_recovery(&self) -> Option<AwaitingToolRecovery>;
     pub fn prepare_owner_decision(
@@ -3316,6 +3332,14 @@ impl ToolBatch {
         &self,
         attempt: ToolAttemptId,
     ) -> Result<AuthorizedToolAttempt, ToolBatchExecutionError>;
+    pub fn authorize_runner_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<RunnerToolAttemptAuthorization, ToolBatchExecutionError>;
+    pub fn resume_runner_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<RunnerToolAttemptAuthorization, ToolBatchExecutionError>;
     pub fn prepare_result_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
@@ -5245,6 +5269,388 @@ pub trait ToolExecutionTransaction {
 }
 ```
 
+## domain: runner
+
+```rust
+pub enum RunnerDomainError {
+    Empty,
+    ContainsNull,
+    TooLong,
+    InvalidName,
+    InvalidToolInputSchema,
+    DuplicateCapabilityClass(RunnerCapabilityClass),
+    DuplicateTool(ToolName),
+    DuplicateProfile(CredentialProfileName),
+    DuplicateWorkspaceCapability(WorkspaceCapability),
+    UndeclaredProfileTool(ToolName),
+    UnsupportedDaemonIdempotency(ToolName),
+    EnrollmentRevoked,
+    CapabilityClassNotAllowed(RunnerCapabilityClass),
+    ToolUndeclared(ToolName),
+    ToolLocusNotAllowed(ToolName),
+    CredentialProfileUndeclared(CredentialProfileName),
+    WorkspaceCapabilityNotAllowed(WorkspaceCapability),
+    InvalidState,
+    CorrelationMismatch,
+    GenerationExhausted,
+    AttemptIdentityReuse,
+    SelectorMismatch,
+    CredentialProfileUnavailable,
+    WorkingDirectoryMismatch,
+    WorkspaceCapabilityUnavailable,
+    WorkspaceMismatch,
+    ToolUnavailable,
+    GrantRevoked,
+    RegistrationChanged,
+    CorruptStoredFacts,
+}
+
+pub struct RunnerCapabilityClass(/* private */);
+pub struct CredentialProfileName(/* private */);
+pub struct RunnerWorkingDirectory(/* private */);
+pub struct WorkspaceRepositoryKey(/* private */);
+// each checked string exposes try_new(String) and as_str()
+
+pub enum RunnerSelector {
+    Identity(RunnerId),
+    CapabilityClass(RunnerCapabilityClass),
+}
+
+pub enum ToolAdmissibleLoci {
+    DaemonOnly,
+    RunnerOnly { selector: RunnerSelector },
+    DaemonOrRunner { selector: RunnerSelector },
+}
+// accessors: allows_daemon(), runner_selector()
+
+pub enum RunnerToolEffectClass {
+    Pure,
+    Idempotent,
+    SideEffecting,
+}
+
+pub struct RunnerToolDeclaration { /* private */ }
+impl RunnerToolDeclaration {
+    pub const fn new(
+        name: ToolName,
+        model: RunnerToolModelDefinition,
+        permission: ToolPermissionDefault,
+        effect: RunnerToolEffectClass,
+        loci: ToolAdmissibleLoci,
+    ) -> Self;
+    // accessors: name(), model(), permission(), effect(), loci()
+}
+pub struct RunnerToolModelDefinition { /* private */ }
+impl RunnerToolModelDefinition {
+    pub fn try_new(
+        description: String,
+        input_schema: String,
+    ) -> Result<Self, RunnerDomainError>;
+    // accessors: description(), input_schema()
+}
+
+pub enum CredentialToolApproval {
+    Automatic,
+    SessionPolicy,
+}
+
+pub struct CredentialProfilePolicy { /* private */ }
+impl CredentialProfilePolicy {
+    pub fn try_new(
+        name: CredentialProfileName,
+        approvals: impl IntoIterator<Item = (ToolName, CredentialToolApproval)>,
+    ) -> Result<Self, RunnerDomainError>;
+    // accessors: name(), approval_for()
+}
+pub enum WorkspaceCapability {
+    WorktreePerSession,
+}
+pub struct RunnerCatalog { /* private */ }
+impl RunnerCatalog {
+    pub fn try_new(
+        classes: impl IntoIterator<Item = RunnerCapabilityClass>,
+        tools: impl IntoIterator<Item = RunnerToolDeclaration>,
+        profiles: impl IntoIterator<Item = CredentialProfilePolicy>,
+        workspaces: impl IntoIterator<Item = WorkspaceCapability>,
+    ) -> Result<Self, RunnerDomainError>;
+}
+pub struct RunnerAdvertisement { /* private */ }
+impl RunnerAdvertisement {
+    pub fn new(
+        classes: impl IntoIterator<Item = RunnerCapabilityClass>,
+        tools: impl IntoIterator<Item = ToolName>,
+        profiles: impl IntoIterator<Item = CredentialProfileName>,
+        workspaces: impl IntoIterator<Item = WorkspaceCapability>,
+    ) -> Self;
+}
+
+pub enum RunnerEnrollmentState {
+    Active,
+    Revoked,
+}
+pub struct RunnerEnrollment { /* private */ }
+impl RunnerEnrollment {
+    pub fn new(
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        authentication: RunnerAuthenticationId,
+        allowed_classes: impl IntoIterator<Item = RunnerCapabilityClass>,
+    ) -> Self;
+    pub fn revoke(self) -> Result<Self, RunnerDomainError>;
+    pub fn register(
+        &self,
+        advertisement: RunnerAdvertisement,
+        catalog: &RunnerCatalog,
+    ) -> Result<ValidatedRunnerRegistration, RunnerDomainError>;
+    pub fn reconstitute(
+        input: RunnerEnrollmentReconstitutionInput,
+    ) -> Result<Self, RunnerDomainError>;
+    // accessors: enrollment(), runner(), authentication(), state()
+}
+pub struct RunnerEnrollmentReconstitutionInput {
+    /* public complete typed facts, including independently recorded optional last registration revision */
+}
+pub struct ValidatedRunnerRegistration { /* private */ }
+impl ValidatedRunnerRegistration {
+    // accessors: enrollment(), runner(), authentication(), revision()
+    pub fn satisfies(&self, selector: &RunnerSelector) -> bool;
+    pub fn tool(&self, tool: &ToolName) -> Option<&RunnerToolDeclaration>;
+    pub fn profile(
+        &self,
+        profile: &CredentialProfileName,
+    ) -> Option<&CredentialProfilePolicy>;
+    pub fn supports_workspace(&self, capability: WorkspaceCapability) -> bool;
+    pub fn tool_names(&self) -> impl Iterator<Item = &ToolName>;
+}
+
+pub struct RunnerGeneration(/* private NonZeroU64 */);
+impl RunnerGeneration {
+    pub const fn one() -> Self;
+    pub const fn try_from_u64(value: u64) -> Option<Self>;
+    pub const fn get(self) -> u64;
+    pub const fn checked_next(self) -> Option<Self>;
+}
+pub struct RunnerLeaseCorrelation {
+    /* public exact fence fields */
+}
+pub struct RunnerLeaseOfferRequest {
+    /* public exact initial-offer fields */
+}
+pub struct RunnerToolAttemptAuthorization { /* private */ }
+impl RunnerToolAttemptAuthorization {
+    pub const fn tool(&self) -> &ToolName;
+}
+pub enum RunnerLeaseState {
+    Offered,
+    Claimed,
+    Completed,
+    LostUnclaimed,
+    LostExecutionPossible,
+    LostClaimed,
+}
+pub struct RunnerLeaseNoExecutionProof { /* private durable correlation */ }
+impl RunnerLeaseNoExecutionProof {
+    pub const fn correlation(&self) -> &RunnerLeaseCorrelation;
+}
+pub struct RunnerLease { /* private */ }
+impl RunnerLease {
+    // accessors: correlation(), state(), generation(), attempt(), tool(),
+    //   credential_authorization()
+    pub fn claim(
+        self,
+        correlation: RunnerLeaseCorrelation,
+    ) -> Result<Self, RunnerDomainError>;
+    pub fn complete(
+        self,
+        correlation: RunnerLeaseCorrelation,
+    ) -> Result<Self, RunnerDomainError>;
+    pub fn lose(self) -> Result<RunnerLeaseLoss, RunnerDomainError>;
+    pub fn lose_unclaimed(
+        self,
+        proof: &RunnerLeaseNoExecutionProof,
+    ) -> Result<RunnerLeaseLoss, RunnerDomainError>;
+    pub fn reconstitute(
+        input: RunnerLeaseReconstitutionInput,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<Self, RunnerDomainError>;
+    pub fn reconstitute_loss(
+        input: RunnerLeaseReconstitutionInput,
+        registration: &ValidatedRunnerRegistration,
+        no_execution: Option<&RunnerLeaseNoExecutionProof>,
+    ) -> Result<RunnerLeaseLoss, RunnerDomainError>;
+}
+pub struct RunnerLeaseReconstitutionInput {
+    /* public raw lease projection and independent fence */
+}
+pub struct RunnerLeaseLoss { /* private, produced only by checked RunnerLease transitions */ }
+impl RunnerLeaseLoss {
+    // accessors: lost(), retry(), crash_attempt()
+}
+pub struct RunnerLeaseRetryAuthority { /* private */ }
+impl RunnerLeaseRetryAuthority {
+    // accessors: generation()
+    pub fn prepare_unclaimed_attempt(
+        &self,
+        batch: ToolBatch,
+    ) -> Result<RunnerUnclaimedAttemptReauthorization, RunnerDomainError>;
+    pub fn prepare_claimed_attempt(
+        &self,
+        batch: ToolBatch,
+        attempt: ToolAttemptId,
+    ) -> Result<RunnerClaimedAttemptReplacement, RunnerDomainError>;
+}
+pub struct RunnerUnclaimedAttemptReauthorization { /* private */ }
+impl RunnerUnclaimedAttemptReauthorization {
+    // accessor: batch()
+    pub fn into_parts(self) -> (ToolBatch, RunnerToolAttemptAuthorization);
+}
+
+pub struct RunnerClaimedAttemptReplacement { /* private */ }
+impl RunnerClaimedAttemptReplacement {
+    // accessors: batch(), retired()
+    pub fn into_parts(
+        self,
+    ) -> (
+        ToolBatch,
+        EndedToolAttempt,
+        RunnerToolAttemptAuthorization,
+    );
+}
+
+pub enum WorkingDirectorySelection {
+    RunnerDefault,
+    Exact(RunnerWorkingDirectory),
+}
+pub enum WorkspaceRequirement {
+    None,
+    RepositoryWorktree {
+        repository: WorkspaceRepositoryKey,
+    },
+}
+pub struct ProvisionedWorkspace {
+    /* public typed ownership facts */
+}
+pub struct SessionRunnerPlacementRequest {
+    /* public complete requested axes */
+}
+pub struct RunnerCredentialGrantLineage {
+    /* public exact last-grant runner and revision */
+}
+pub struct PinnedRunnerPlacement {
+    /* public complete pinned facts, including optional grant lineage */
+}
+pub enum SessionRunnerPlacementState {
+    Unpinned,
+    Pinned(PinnedRunnerPlacement),
+    RunnerLost(PinnedRunnerPlacement),
+}
+pub struct SessionRunnerPlacement { /* private */ }
+impl SessionRunnerPlacement {
+    // placement is the only producer of initial and retry lease offers
+    pub const fn new(
+        session: SessionId,
+        request: SessionRunnerPlacementRequest,
+    ) -> Self;
+    pub fn pin_and_offer_lease(
+        self,
+        enrollment: &RunnerEnrollment,
+        registration: &ValidatedRunnerRegistration,
+        directory: RunnerWorkingDirectory,
+        workspace: Option<ProvisionedWorkspace>,
+        authorization: RunnerToolAttemptAuthorization,
+        offer: RunnerLeaseOfferRequest,
+    ) -> Result<SessionRunnerPin, RunnerDomainError>;
+    pub fn offer_lease(
+        &self,
+        enrollment: &RunnerEnrollment,
+        registration: &ValidatedRunnerRegistration,
+        grant: Option<&CredentialProfileGrant>,
+        authorization: RunnerToolAttemptAuthorization,
+        offer: RunnerLeaseOfferRequest,
+    ) -> Result<RunnerLease, RunnerDomainError>;
+    pub fn offer_retry(
+        &self,
+        enrollment: &RunnerEnrollment,
+        registration: &ValidatedRunnerRegistration,
+        grant: Option<&CredentialProfileGrant>,
+        loss: RunnerLeaseLoss,
+        authorization: RunnerToolAttemptAuthorization,
+    ) -> Result<RunnerLease, RunnerDomainError>;
+    pub fn mark_runner_lost(self) -> Result<Self, RunnerDomainError>;
+    pub fn reconcile_registration(
+        self,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<Self, RunnerDomainError>;
+    pub fn replace_lost_runner(
+        self,
+        request: SessionRunnerPlacementRequest,
+        registration: &ValidatedRunnerRegistration,
+        directory: RunnerWorkingDirectory,
+        workspace: Option<ProvisionedWorkspace>,
+        prior_grant: Option<CredentialProfileGrant>,
+    ) -> Result<RunnerPlacementReplacement, RunnerDomainError>;
+    pub fn replace_credential_profile(
+        self,
+        grant: CredentialProfileGrant,
+        registration: &ValidatedRunnerRegistration,
+        profile: CredentialProfileName,
+        tools: impl IntoIterator<Item = ToolName>,
+    ) -> Result<CredentialProfilePlacementReplacement, RunnerDomainError>;
+    pub fn reconstitute(
+        input: SessionRunnerPlacementReconstitutionInput,
+        expected_session: SessionId,
+        registration: Option<&ValidatedRunnerRegistration>,
+        profileless_tombstone: Option<&CredentialProfileGrant>,
+    ) -> Result<Self, RunnerDomainError>;
+    // accessors: state(), revision()
+}
+pub struct SessionRunnerPlacementReconstitutionInput {
+    /* public complete stored placement facts */
+}
+pub struct SessionRunnerPin {
+    /* public placement, optional initial grant, and initial lease */
+}
+pub struct RunnerPlacementReplacement {
+    /* public placement, change, optional replacement grant, and optional complete grant change */
+}
+pub struct RunnerPlacementChange {
+    /* public before-and-after request and pinned facts */
+}
+pub struct CredentialProfilePlacementReplacement {
+    /* public placement, placement change, and grant replacement */
+}
+
+pub enum CredentialProfileGrantState {
+    Active,
+    Revoked,
+}
+pub struct CredentialProfileGrant { /* private */ }
+impl CredentialProfileGrant {
+    // accessors: state(), revision(), lineage(), profile()
+    pub fn revoke(self) -> Result<Self, RunnerDomainError>;
+    pub fn reconstitute(
+        input: CredentialProfileGrantReconstitutionInput,
+        expected_session: SessionId,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<Self, RunnerDomainError>;
+}
+pub struct CredentialProfileGrantReconstitutionInput {
+    /* public complete stored grant facts */
+}
+pub struct RunnerCredentialGrantChange {
+    /* public optional complete before-and-after grant facts */
+}
+pub struct CredentialDispatchAuthorization {
+    /* public exact tool/profile decision facts; produced only inside a lease */
+}
+pub struct CredentialProfileGrantReplacement {
+    /* public grant and change */
+}
+pub struct CredentialProfileChange {
+    /* public before-and-after facts */
+}
+```
+
 ## domain: review_workflow
 
 ```rust
@@ -6010,7 +6416,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types         |
 | -------------------------------------------------- | -------------------- |
-| domain: lib.rs identities                          | 16                   |
+| domain: lib.rs identities                          | 20                   |
 | domain: actor                                      | 1                    |
 | domain: imported_conversation                      | 29                   |
 | domain: session                                    | 21                   |
@@ -6037,7 +6443,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: replace_session_defaults                   | 13                   |
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
-| **signalbox-domain total**                         | **452 (+1 free fn)** |
+| domain: runner                                     | 51                   |
+| **signalbox-domain total**                         | **507 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
