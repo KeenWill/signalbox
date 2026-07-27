@@ -177,16 +177,20 @@ authority already issued. Its in-memory clones share the exact atomic guard for
 each physical attempt. The persistence loader derives the active batch's
 consumed inventory from exact current physical attempts already bound by durable
 runner lease generations, and complete reconstitution restores every consumed
-guard from that inventory. Atomic runner authorization marks that exact attempt
-issued in the batch; a later clone or reconstitution from the updated facts
-cannot mint a second runner lease capability. Current active enrollment, pinned
-placement, its exact validated registration, and any selected active credential
-grant jointly authorize every offer after the first. The initial offer instead
-creates that pinned placement, any selected grant, and generation-one lease in
-one checked transition from `Unpinned`; it does not require those products to
-exist beforehand. The request, attempt, session, and two-way crash class must
-match the selected tool, placement, and declaration-derived effect class (`Pure`
-to `EffectFree`; `Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked
+guard from that inventory. The same loader restores the batch's retired-identity
+inventory from the physical attempts its current-attempt view hides as claimed
+pure or idempotent loss predecessors, so a reloaded batch keeps rejecting
+retired attempt-identity reuse in the domain rather than at the retained row's
+key. Atomic runner authorization marks that exact attempt issued in the batch; a
+later clone or reconstitution from the updated facts cannot mint a second runner
+lease capability. Current active enrollment, pinned placement, its exact
+validated registration, and any selected active credential grant jointly
+authorize every offer after the first. The initial offer instead creates that
+pinned placement, any selected grant, and generation-one lease in one checked
+transition from `Unpinned`; it does not require those products to exist
+beforehand. The request, attempt, session, and two-way crash class must match
+the selected tool, placement, and declaration-derived effect class (`Pure` to
+`EffectFree`; `Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked
 enrollment, lost placement, or a mismatched runner, request, tool, attempt,
 effect, profile, or grant cannot create a lease.
 

@@ -1894,6 +1894,176 @@ async fn s31_inv043_active_batch_reload_restores_consumed_runner_issuance()
     Ok(())
 }
 
+/// S31 / INV-004 / INV-043: active-batch reload restores the durable
+/// retired-identity inventory a claimed runner retry leaves behind, so a
+/// restarted process rejects reuse of the retired physical-attempt identity in
+/// the domain instead of failing on the retained database row's key.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s31_inv004_inv043_batch_reload_restores_retired_attempt_identities()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7440;
+    let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(
+        &pool,
+        seed,
+        &[("current_time", "{}"), ("current_time", "{}")],
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let turn_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0));
+    let [first_request, second_request] = requests.as_slice() else {
+        panic!("the two-proposal fixture returns two requests")
+    };
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0)),
+                *first_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || turn_attempt,
+        )
+        .await?;
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd1)),
+                *second_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || turn_attempt,
+        )
+        .await?;
+    let retired = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            retired,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the first approved request prepares its physical attempt");
+    repository
+        .authorize_attempt(fixture.session, fixture.turn, retired)
+        .await?;
+    let issuing_attempt: Uuid = sqlx::query_scalar(
+        "SELECT issuing_turn_attempt_id
+           FROM tool_attempt
+          WHERE attempt_id = $1",
+    )
+    .bind(retired.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    // The exact durable shape a persisted claimed pure retry leaves behind:
+    // a lost-claimed lease head over the retired terminal predecessor and the
+    // committed replacement attempt that completed after the restart.
+    sqlx::query("ALTER TABLE runner_lease_generation DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_generation
+            (lease_id, generation, attempt_id, session_id, runner_id,
+             tool_name, effect_class, placement_event_ordinal,
+             registration_enrollment_id, registration_revision,
+             predecessor_generation)
+         VALUES ($1, 1, $2, $3, $4, $5, 'pure', 1, $6, 1, NULL)",
+    )
+    .bind(Uuid::from_u128(seed + 0xe2))
+    .bind(retired.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(seed + 0xe3))
+    .bind("current_time")
+    .bind(Uuid::from_u128(seed + 0xe4))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_lease_generation ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE runner_lease_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, 1, 1, 'offered'), ($1, 1, 2, 'claimed'),
+                ($1, 1, 3, 'lost_claimed')",
+    )
+    .bind(Uuid::from_u128(seed + 0xe2))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_lease_event ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE runner_current_lease_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_current_lease_event
+            (lease_id, generation, event_ordinal)
+         VALUES ($1, 1, 3)",
+    )
+    .bind(Uuid::from_u128(seed + 0xe2))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_current_lease_event ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'known_failed',
+                error_kind = 'crash_lost'
+          WHERE attempt_id = $1",
+    )
+    .bind(retired.into_uuid())
+    .execute(&pool)
+    .await?;
+    let replacement = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe5));
+    sqlx::query(
+        "INSERT INTO tool_attempt
+            (attempt_id, request_id, session_id, turn_id,
+             issuing_turn_attempt_id, effect_class, dispatch_generation,
+             state_kind, terminal_disposition_kind, result_content_kind,
+             result_text)
+         VALUES ($1, $2, $3, $4, $5, 'effect_free', 1,
+                 'terminal', 'completed', 'text', 'replacement completed')",
+    )
+    .bind(replacement.into_uuid())
+    .bind(first_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(issuing_attempt)
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let reloaded = repository
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("the active batch reloads with its retired-identity inventory");
+    let reuse = reloaded
+        .prepare_next_attempt(retired, ToolEffectClass::EffectFree)
+        .expect_err("a durably retired identity cannot be reused after restart");
+
+    assert_eq!(
+        reloaded.retired_attempts().collect::<Vec<_>>(),
+        vec![retired]
+    );
+    assert_eq!(
+        reuse.failure(),
+        ToolBatchExecutionFailure::AttemptIdentityReuse
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S02 / S10 / S11 / INV-005 / INV-006 / INV-019 / INV-027 / INV-036: one confirmed
 /// proposal survives a repository restart, records a replay-safe owner
 /// decision, executes through an exact durable fence, and projects one
