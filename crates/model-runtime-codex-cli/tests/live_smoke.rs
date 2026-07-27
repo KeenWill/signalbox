@@ -206,21 +206,42 @@ async fn probe_output_bounded(
     executable: &std::path::Path,
     bound: Duration,
 ) -> std::process::Output {
-    tokio::time::timeout(bound, child.wait_with_output())
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "`{} --version` did not exit within {bound:?}",
-                executable.display()
-            )
-        })
-        .unwrap_or_else(|error| {
+    let group = child.id();
+    match tokio::time::timeout(bound, child.wait_with_output()).await {
+        Ok(result) => result.unwrap_or_else(|error| {
             panic!(
                 "`{} --version` could not be awaited: {error}",
                 executable.display()
             )
-        })
+        }),
+        Err(_) => {
+            // The timed-out future drops the child, whose kill-on-drop kills
+            // and reaps the direct launcher; additionally signal its whole
+            // process group so a native subprocess of a Node launcher cannot
+            // survive the panic.
+            kill_probe_group(group);
+            panic!(
+                "`{} --version` did not exit within {bound:?}",
+                executable.display()
+            );
+        }
+    }
 }
+
+/// SIGKILLs the probe's process group so a launcher's native subprocess is
+/// terminated with it. Harmless when the child is not its own group leader
+/// (the signal target group does not exist).
+#[cfg(unix)]
+fn kill_probe_group(group: Option<u32>) {
+    if let Some(raw) = group
+        && let Some(pid) = rustix::process::Pid::from_raw(raw as i32)
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_probe_group(_group: Option<u32>) {}
 
 /// Fails closed: an unreadable, unparsable, or mismatched version is a smoke
 /// failure, never a skip. A skip here would quietly retire the only check that
@@ -245,9 +266,12 @@ async fn assert_pinned_version(executable: &std::path::Path) {
         // surface provider-controlled diagnostics, and this text does not pass
         // through the adapter's redaction.
         .stderr(Stdio::null())
-        // Dropping the timed-out future drops the child, which kills and reaps
-        // it, so an unbounded probe cannot linger.
+        // Dropping the timed-out future kill-on-drops the direct launcher;
+        // its own process group lets the timeout path signal a native
+        // subprocess too, so an unbounded probe cannot linger.
         .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     let child = spawn_probe(&mut command, executable).await;
     let output = probe_output_bounded(child, executable, PROBE_TIMEOUT).await;
     assert!(
@@ -349,14 +373,15 @@ async fn busy_then_success_fails_the_requested_count_then_spawns() {
 #[tokio::test]
 #[should_panic(expected = "did not exit within")]
 async fn version_probe_times_out_on_a_hanging_child() {
-    let child = tokio::process::Command::new("sleep")
+    let mut command = tokio::process::Command::new("sleep");
+    command
         .arg("60")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true)
-        .spawn()
-        .expect("the hanging child spawns");
+        .process_group(0);
+    let child = command.spawn().expect("the hanging child spawns");
 
     let _ = probe_output_bounded(
         child,
