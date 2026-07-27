@@ -812,15 +812,16 @@ async fn execute_process<C: Clone + Send + Sync>(
     }
 }
 
-/// `CODEX_HOME` names the CLI's login store and the child interprets it
-/// after `current_dir` moves it to the configured working root, so a
-/// relative operator value would silently re-root the credential store
-/// beneath the working directory. Absolutize it against the parent's own
-/// current directory; every other allowlisted value passes through
-/// unchanged, and an unabsolutizable value (for example an empty one) is
-/// passed verbatim for the CLI itself to reject.
+/// `CODEX_HOME` names the CLI's login store — with `HOME` supplying its
+/// `$HOME/.codex` fallback — and the child interprets both after
+/// `current_dir` moves it to the configured working root, so a relative
+/// operator value would silently re-root the credential store beneath the
+/// working directory. Absolutize both against the parent's own current
+/// directory; every other allowlisted value passes through unchanged, and an
+/// unabsolutizable value (for example an empty one) is passed verbatim for
+/// the CLI itself to reject.
 fn spawn_environment_value(name: &str, value: std::ffi::OsString) -> std::ffi::OsString {
-    if name != "CODEX_HOME" {
+    if name != "CODEX_HOME" && name != "HOME" {
         return value;
     }
     match std::path::absolute(std::path::Path::new(&value)) {
@@ -1101,6 +1102,13 @@ mod tests {
     fn codex_home_is_absolutized_for_the_child() {
         let value =
             spawn_environment_value("CODEX_HOME", std::ffi::OsString::from("relative-home"));
+
+        assert!(std::path::Path::new(&value).is_absolute());
+    }
+
+    #[test]
+    fn fallback_home_is_absolutized_for_the_child() {
+        let value = spawn_environment_value("HOME", std::ffi::OsString::from("relative-home"));
 
         assert!(std::path::Path::new(&value).is_absolute());
     }
