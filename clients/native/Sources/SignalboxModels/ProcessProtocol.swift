@@ -1563,6 +1563,7 @@ extension Decoder {
 
 private struct SignalboxJSONDuplicateMemberScanner {
   private let bytes: [UInt8]
+  private let stringDecoder = SignalboxJSONCoding.decoder()
   private var index = 0
   private var duplicateObjectPaths: Set<[String]> = []
 
@@ -1599,7 +1600,7 @@ private struct SignalboxJSONDuplicateMemberScanner {
       }
       try scanArray(path: path, containerDepth: containerDepth + 1)
     case UInt8(ascii: "\""):
-      _ = try scanString()
+      _ = try skipString()
     default:
       try scanPrimitive()
     }
@@ -1672,6 +1673,11 @@ private struct SignalboxJSONDuplicateMemberScanner {
   }
 
   private mutating func scanString() throws -> String {
+    let encoded = Data(bytes[try skipString()])
+    return try stringDecoder.decode(String.self, from: encoded)
+  }
+
+  private mutating func skipString() throws -> Range<Int> {
     guard currentByte == UInt8(ascii: "\"") else {
       throw malformedJSON()
     }
@@ -1685,8 +1691,7 @@ private struct SignalboxJSONDuplicateMemberScanner {
       } else if byte == UInt8(ascii: "\\") {
         escaped = true
       } else if byte == UInt8(ascii: "\"") {
-        let encoded = Data(bytes[start..<index])
-        return try SignalboxJSONCoding.decoder().decode(String.self, from: encoded)
+        return start..<index
       }
     }
     throw malformedJSON()

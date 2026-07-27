@@ -10,6 +10,28 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Fail bounded native snapshot work into typed recovery
+
+**Context.** The native synchronization machine retains authoritative snapshots
+and followed events while it validates or merges transcript work. The wire
+protocol bounds individual frames but does not bound the aggregate records or
+UTF-8 content retained across that client-side work.
+
+**Decision.** Require callers to supply separate record/UTF-8 capacities for one
+snapshot and event/UTF-8 capacities for events buffered behind snapshot work.
+Reject an over-capacity snapshot before publication, and abandon an
+over-capacity event buffer or side-refresh trigger through the same typed,
+bounded recovery lifecycle as other transient synchronization failures.
+
+**Rejected alternatives.** A frame limit alone does not bound aggregate
+retention. Unbounded arrays allow a valid stream to exhaust client memory.
+Publishing a partial snapshot or dropping selected buffered events would make
+the client present state that is neither authoritative nor cursor-complete.
+
+**Affects.** Native synchronization policy inputs, snapshot accumulation,
+followed-event buffering, side-refresh admission, diagnostics, and recovery
+tests.
+
 ## 2026-07-26 — Retry only transient native synchronization failures
 
 **Context.** A followed session can fail because its snapshot is stale, its

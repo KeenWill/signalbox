@@ -111,6 +111,10 @@ public actor SignalboxProcessClient: SignalboxProcessRequesting {
         await connection.close()
         throw SignalboxProcessRequestOpenError.definitelyUnsent(error.localizedDescription)
       }
+      guard !Task.isCancelled else {
+        await connection.close()
+        throw CancellationError()
+      }
       do {
         try await connection.send(encoded)
       } catch is CancellationError {
