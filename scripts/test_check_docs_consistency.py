@@ -1213,6 +1213,121 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_raw_string_module_path_resolves(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            '#[path = r"generic.rs"]\nmod inv_001;\n', encoding="utf-8"
+        )
+        (self.root / "src/uncited_root").mkdir()
+        (self.root / "src/uncited_root/generic.rs").write_text(
+            "#[test]\nfn generic() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited_root/generic.rs", failures[0].message)
+
+    def test_included_file_carries_its_including_module_path(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            'mod inv_001 {\n    include!("generic.rs");\n}\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/generic.rs").write_text(
+            "#[test]\nfn generic() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/generic.rs", failures[0].message)
+
+    def test_cfg_not_test_declaration_leaves_the_harness(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[cfg(not(test))]\n"
+            "#[test]\n"
+            "fn s01_inv_001_never_in_harness() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_spaced_attribute_path_declares_a_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[:: tokio :: test]\n"
+            "async fn s01_inv_001_spaced_path() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_qualifier_split_across_lines_declares_a_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test] const\nfn s01_inv_001_split_qualifier() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_disabled_use_item_declares_no_test_alias(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[cfg(any())]\n"
+            "use tokio::test as shared;\n\n"
+            "#[shared]\n"
+            "fn s01_inv_001_not_a_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_procedural_test_generator_is_rejected(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "#[proc_macro]\n"
+            "pub fn generate(_: TokenStream) -> TokenStream {\n"
+            '    "#[test] fn s01_inv_001_generated() {}".parse().unwrap()\n'
+            "}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "this procedural macro spells a test attribute",
+            failures[0].message,
+        )
+
+    def test_ordinary_procedural_macro_is_allowed(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "#[proc_macro_derive(Thing)]\n"
+            "pub fn derive_thing(_: TokenStream) -> TokenStream {\n"
+            "    quote! { impl Thing for #name {} }.into()\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_tagged_label_claims_only_its_own_link(self) -> None:
         (self.root / "docs/invariants.md").write_text(
             "# Invariants\n\n"
@@ -2619,6 +2734,43 @@ class DocsConsistencyTests(unittest.TestCase):
         run_git(self.root, "commit", "-q", "-m", "stack base fixture")
         base_sha = git_output(self.root, "rev-parse", "HEAD")
         run_git(self.root, "checkout", "-q", "-b", "agent/stack-child")
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 100, "pull_request": {'
+            '"head": {"ref": "agent/stack-child"}, '
+            f'"base": {{"sha": "{base_sha}"}}}}}}',
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(failures, [])
+
+    def test_inherited_verification_follows_a_renamed_page(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-base")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/stack-base`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+        run_git(self.root, "add", "docs/spec/example.md")
+        run_git(self.root, "commit", "-q", "-m", "stack base fixture")
+        base_sha = git_output(self.root, "rev-parse", "HEAD")
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-child")
+        run_git(
+            self.root,
+            "mv",
+            "docs/spec/example.md",
+            "docs/spec/renamed.md",
+        )
+        run_git(self.root, "commit", "-q", "-m", "rename the page")
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n[Docs directory](docs/)\n", encoding="utf-8"
+        )
         event = self.root / "event.json"
         event.write_text(
             '{"number": 100, "pull_request": {'

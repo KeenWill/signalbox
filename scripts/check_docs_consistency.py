@@ -286,17 +286,17 @@ RUST_TEST_DECLARATION = re.compile(
     # alternative ends the prefix without consuming a line break.
     rf"|^[ \t]*{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t]*"
     r")+)"
-    r"[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?"
-    r"(?:(?:const|async|unsafe)[ \t]+)*"
-    r'(?:extern(?:[ \t]+"[^"\n]*")?[ \t]+)?'
-    rf"fn[ \t]+(?P<name>{RUST_IDENTIFIER_PATTERN})",
+    r"[ \t]*(?:pub(?:\([^)]*\))?[ \t\r\n]+)?"
+    r"(?:(?:const|async|unsafe)[ \t\r\n]+)*"
+    r'(?:extern(?:[ \t\r\n]+"[^"\n]*")?[ \t\r\n]+)?'
+    rf"fn[ \t\r\n]+(?P<name>{RUST_IDENTIFIER_PATTERN})",
     re.MULTILINE,
 )
 # Rust resolves an attribute path case-sensitively, so a distinct macro
 # named `Test` is not the built-in attribute.
 RUST_TEST_ATTRIBUTE = re.compile(
-    rf"{RUST_ATTRIBUTE_OPEN}[ \t\r\n]*(?:::)?"
-    r"(?:(?:r#)?[A-Za-z_][A-Za-z0-9_]*::)*"
+    rf"{RUST_ATTRIBUTE_OPEN}[ \t\r\n]*(?:::[ \t\r\n]*)?"
+    r"(?:(?:r#)?[A-Za-z_][A-Za-z0-9_]*[ \t\r\n]*::[ \t\r\n]*)*"
     r"(?:r#)?test(?=[ \t\r\n(\]])[^\]]*\]"
 )
 RUST_ATTRIBUTE = re.compile(
@@ -314,7 +314,8 @@ RUST_CFG_PREDICATE = re.compile(
     re.DOTALL,
 )
 RUST_TEST_META = re.compile(
-    r"^(?:::)?(?:(?:r#)?[A-Za-z_][A-Za-z0-9_]*::)*"
+    r"^(?:::[ \t\r\n]*)?"
+    r"(?:(?:r#)?[A-Za-z_][A-Za-z0-9_]*[ \t\r\n]*::[ \t\r\n]*)*"
     r"(?:r#)?test(?=[ \t\r\n(]|$)"
 )
 RUST_META_NAME = re.compile(
@@ -325,6 +326,7 @@ RUST_META_ITEM = re.compile(
     rf"{RUST_IDENTIFIER_PATTERN}"
 )
 RUST_USE_ITEM = re.compile(
+    rf"(?P<attributes>(?:{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t\r\n]*)*)"
     r"(?P<visibility>\bpub(?:\([^)]*\))?[ \t\r\n]+)?"
     r"\buse\b(?P<body>[^;]*);",
     re.DOTALL,
@@ -348,12 +350,27 @@ RUST_OUT_OF_LINE_MODULE = re.compile(
     rf"mod[ \t\r\n]+(?P<name>{RUST_IDENTIFIER_PATTERN})[ \t\r\n]*;"
 )
 RUST_PATH_META = re.compile(
-    r"^path[ \t\r\n]*=[ \t\r\n]*\"(?P<path>[^\"\n]*)\"$"
+    r"^path[ \t\r\n]*=[ \t\r\n]*"
+    r"(?:\"(?P<plain>[^\"\n]*)\"|r(?P<hashes>\#*)\"(?P<raw>.*?)\"(?P=hashes))$",
+    re.DOTALL,
 )
 RUST_CRATE_ROOT_NAMES = ("mod.rs", "lib.rs", "main.rs")
+RUST_HARNESS_PREDICATE = "test"
 RUST_MACRO_RULES = re.compile(
     rf"\bmacro_rules![ \t\r\n]*(?P<name>{RUST_IDENTIFIER_PATTERN})"
     r"[ \t\r\n]*(?P<opening>[\(\[\{])"
+)
+RUST_INCLUDE_OPEN = re.compile(
+    r"\binclude![ \t\r\n]*(?P<opening>[\(\[\{])"
+)
+RUST_STRING_LITERAL = re.compile(
+    r"[ \t\r\n]*"
+    r"(?:\"(?P<plain>[^\"\n]*)\"|r(?P<hashes>\#*)\"(?P<raw>.*?)\"(?P=hashes))",
+    re.DOTALL,
+)
+RUST_PROC_MACRO_ATTRIBUTE = re.compile(
+    rf"{RUST_ATTRIBUTE_OPEN}[ \t\r\n]*proc_macro(?:_attribute|_derive)?"
+    r"(?=[ \t\r\n(\]])[^\]]*\]"
 )
 RUST_MACRO_INVOCATION = re.compile(
     rf"\b(?P<name>{RUST_IDENTIFIER_PATTERN})![ \t\r\n]*(?P<opening>[\(\[\{{])"
@@ -591,8 +608,16 @@ def split_rust_meta_items(body: str) -> list[str]:
 
 
 def rust_cfg_truth(meta: str) -> bool | None:
-    """Evaluate cfg predicates whose truth is independent of the build."""
-    predicate = RUST_CFG_PREDICATE.fullmatch(meta.strip())
+    """Evaluate cfg predicates whose truth the harness build already fixes.
+
+    The catalog is checked against what `cargo test` registers, so the bare
+    `test` predicate is true here; every other configuration name stays
+    unknown unless a build-independent combinator settles it.
+    """
+    meta = meta.strip()
+    if meta == RUST_HARNESS_PREDICATE:
+        return True
+    predicate = RUST_CFG_PREDICATE.fullmatch(meta)
     if predicate is None:
         return None
     body = predicate.group("body")
@@ -626,6 +651,7 @@ def rust_exported_test_aliases(code: str) -> frozenset[str]:
         alias.group("alias")
         for item in RUST_USE_ITEM.finditer(code)
         if item.group("visibility") is not None
+        and not rust_item_is_disabled(item.group("attributes"))
         for alias in RUST_TEST_ALIAS.finditer(item.group("body"))
     )
 
@@ -652,6 +678,8 @@ def rust_test_attribute_aliases(
     )
     aliases: list[ScopedTestAlias] = []
     for item in RUST_USE_ITEM.finditer(code):
+        if rust_item_is_disabled(item.group("attributes")):
+            continue
         enclosing = [
             (opening, closing)
             for opening, closing in blocks
@@ -763,7 +791,8 @@ def rust_meta_module_path(meta: str) -> str | None:
     meta = meta.strip()
     direct = RUST_PATH_META.fullmatch(meta)
     if direct is not None:
-        return direct.group("path")
+        plain = direct.group("plain")
+        return direct.group("raw") if plain is None else plain
     cfg_attr = RUST_CFG_ATTR_META.fullmatch(meta)
     if cfg_attr is None:
         return None
@@ -2210,6 +2239,30 @@ def rust_module_graph(
                 ((*inline, module.group("name")), child)
             )
             declared.add(child)
+        for include in RUST_INCLUDE_OPEN.finditer(source.code):
+            # Masking blanks the literal, so the destination is read raw
+            # from the offset the masked scan located.
+            literal = RUST_STRING_LITERAL.match(
+                source.text, include.end("opening")
+            )
+            if literal is None:
+                continue
+            plain = literal.group("plain")
+            relative = literal.group("raw") if plain is None else plain
+            enclosing = rust_enclosing_modules(module_spans, include.start())
+            if any(item.disabled for item in enclosing):
+                continue
+            # `include!` splices into the module that includes it, so the
+            # included file carries that module path with no new segment.
+            included = Path(
+                os.path.normpath(source.path.parent / relative)
+            )
+            if not included.is_file() or included == source.path:
+                continue
+            children.setdefault(source.path, []).append(
+                (tuple(item.name for item in enclosing), included)
+            )
+            declared.add(included)
 
     prefixes: dict[Path, list[tuple[str, ...]]] = {}
     roots: dict[Path, set[Path]] = {}
@@ -2302,9 +2355,44 @@ def rust_invariant_test_files(
     return found
 
 
+def rust_proc_macro_test_generators(source: RustSource) -> list[int]:
+    """Return the offsets of procedural macros that spell a test attribute.
+
+    A procedural macro assembles its output in ordinary Rust, so only a test
+    attribute written out in the definition — in a `quote!` body or a string
+    it parses — is visible here. One assembled from separate tokens is not
+    decidable from source and is out of this check's reach.
+    """
+    offsets: list[int] = []
+    for declaration in RUST_TEST_DECLARATION.finditer(source.code):
+        if RUST_PROC_MACRO_ATTRIBUTE.search(declaration.group("prefix")) is None:
+            continue
+        opening = source.code.find("{", declaration.end("name"))
+        closing = source.delimiters.get(opening) if opening >= 0 else None
+        if closing is None:
+            continue
+        # The body is read raw: masking blanks exactly the literals a
+        # generator writes its output into.
+        if RUST_TEST_ATTRIBUTE.search(source.text[opening:closing]) is not None:
+            offsets.append(declaration.start())
+    return offsets
+
+
 def check_rust_test_generation(sources: list[RustSource]) -> list[Violation]:
     """Reject macros whose expanded tests cannot be registered from source."""
     violations: list[Violation] = []
+    for source in sources:
+        for offset in rust_proc_macro_test_generators(source):
+            violations.append(
+                Violation(
+                    source.label,
+                    line_number(source.text, offset),
+                    "invariant-test-generation",
+                    "this procedural macro spells a test attribute in its "
+                    "expansion; write explicit test declarations so invariant "
+                    "registration remains mechanically visible",
+                )
+            )
     definition_counts: dict[str, int] = {}
     for source in sources:
         for macro in RUST_MACRO_RULES.finditer(source.code):
@@ -2868,14 +2956,40 @@ def verification_reference_identities(text: str) -> set[tuple[int, str]]:
     return identities
 
 
+def renamed_from(root: Path, base_sha: str | None) -> dict[str, str]:
+    """Map each renamed path at `HEAD` to the name it had at the base commit."""
+    if base_sha is None:
+        return {}
+    result = git_command(
+        root, "diff", "--name-status", "-M", base_sha, "HEAD"
+    )
+    if result is None or result.returncode != 0:
+        return {}
+    renames: dict[str, str] = {}
+    for record in result.stdout.splitlines():
+        fields = record.split("\t")
+        if len(fields) != 3 or not fields[0].startswith("R"):
+            continue
+        renames[fields[2]] = fields[1]
+    return renames
+
+
 def inherited_verification_identities(
-    root: Path, source: Path, base_sha: str | None
+    root: Path,
+    source: Path,
+    base_sha: str | None,
+    renames: dict[str, str] | None = None,
 ) -> set[tuple[int, str]]:
-    """Read identities already present in this page at the event base commit."""
+    """Read identities already present in this page at the event base commit.
+
+    A page a stacked child renames is read under the name it had at the base,
+    so the base's own verification survives the move.
+    """
     if base_sha is None:
         return set()
     source_label = repository_path(root, source)
-    result = git_command(root, "show", f"{base_sha}:{source_label}")
+    base_label = (renames or {}).get(source_label, source_label)
+    result = git_command(root, "show", f"{base_sha}:{base_label}")
     if result is None or result.returncode != 0:
         return set()
     return verification_reference_identities(result.stdout)
@@ -2887,6 +3001,7 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
     event_pull_request, event_base_sha, event_error = github_pull_request_event()
     github_event_present = "GITHUB_EVENT_PATH" in os.environ
     checkout_branch = current_checkout_branch(root)
+    base_renames = renamed_from(root, event_base_sha)
     in_flight_identity: tuple[int, str] | None = None
     specification_index = (root / SPEC_DIR / "README.md").resolve()
     for source in sorted((root / SPEC_DIR).rglob("*.md")):
@@ -2896,7 +3011,7 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
         source_label = repository_path(root, source)
         code_ranges = inline_code_ranges(text)
         inherited_identities = inherited_verification_identities(
-            root, source, event_base_sha
+            root, source, event_base_sha, base_renames
         )
         valid_reference = False
 

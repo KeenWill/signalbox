@@ -103,27 +103,29 @@ and uncited tagged files, while local Git records exact merge provenance.
 
 **Decision.** A cited `INV-NNN`-tagged enforcement file must contain that tag,
 and every Rust test file tagged in its harness test name — the declaration name
-qualified by every inline and out-of-line module path reaching it — or in an
-attached doc comment must be cited by that row; a `test` attribute a `use` item
-renames counts as a test attribute where that rename is visible, and in a module
-that imports it as `crate::<name>` from a crate root re-exporting it. Every
-historical subsystem-page verification token must match its exact PR and source
-branch in a two-parent merge on the first-parent history of the protected
-integration branch — `refs/remotes/origin/main`, or the local `main` when no
-remote-tracking ref resolves — which only an owner merge extends. Tokens for one
-unmerged PR may instead match the local checkout branch or, in GitHub Actions,
-the pull-request event's exact number and branch. Verification identities
-already present on the event's exact base commit remain valid in a stacked child
-until that base PR merges. This reverses PR #246's mechanical exclusions without
-adding a dependency or network access to the checker; the CI validate job
-therefore supplies full history at checkout. Rust tests remain explicit source
-declarations: macros that emit or forward test attributes are rejected so
-reverse registration never depends on expanding arbitrary macros, and a
-forwarded attribute is read from the invocation argument its matcher binds
-whenever that binding is determinable, from every top-level metadata item of the
-invocation when it is not, and from invocations anywhere in the repository when
-the macro name has exactly one definition, from the defining file alone when it
-does not.
+qualified by every inline, out-of-line, and `include!` module path reaching it —
+or in an attached doc comment must be cited by that row; a `test` attribute a
+`use` item renames counts as a test attribute where that rename is visible, and
+in a module that imports it as `crate::<name>` from a crate root re-exporting
+it. Every historical subsystem-page verification token must match its exact PR
+and source branch in a two-parent merge on the first-parent history of the
+protected integration branch — `refs/remotes/origin/main`, or the local `main`
+when no remote-tracking ref resolves — which only an owner merge extends. Tokens
+for one unmerged PR may instead match the local checkout branch or, in GitHub
+Actions, the pull-request event's exact number and branch. Verification
+identities already present on the event's exact base commit remain valid in a
+stacked child until that base PR merges. This reverses PR #246's mechanical
+exclusions without adding a dependency or network access to the checker; the CI
+validate job therefore supplies full history at checkout. Discovery reads the
+harness build, so `cfg(test)` is true and a page a stacked child renames is read
+at its base name. Rust tests remain explicit source declarations: macros that
+emit or forward test attributes are rejected, and a procedural macro that spells
+one in its expansion with it, so reverse registration never depends on expanding
+arbitrary macros; a forwarded attribute is read from the invocation argument its
+matcher binds whenever that binding is determinable, from every top-level
+metadata item of the invocation when it is not, and from invocations anywhere in
+the repository when the macro name has exactly one definition, from the defining
+file alone when it does not.
 
 **Rejected alternatives.** Reviewer-only checks repeat deterministic work.
 GitHub calls or per-token fetches add mutable network state and do not inspect
