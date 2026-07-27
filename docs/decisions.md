@@ -10,6 +10,35 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Retire the superseded startup steering blocker
+
+**Context.** The 2026-07-22 pending-steering boundary commissioned a temporary
+startup blocker and required its replacement by the later atomic
+reclassification transition. That transition now covers every terminal restart
+branch, including evidence-free turns, but the application outcome, daemon
+failure path, and an unreachable PostgreSQL adapter arm still exposed the
+superseded guard and contradicted the implemented specification.
+
+**Decision.** Remove the pending-steering startup outcome, aggregate blocker
+state, and daemon failure path. Startup reports its recovered-turn count and
+continues after the finite scan. The PostgreSQL adapter retains fail-closed
+handling if loss preparation unexpectedly reports pending steering after the
+same checked projection reported none, but classifies that contradiction through
+the existing corruption path rather than as an operator-visible blocker. This
+records completion of the 2026-07-22 replacement obligation; the specification
+already owns the implemented reclassification semantics.
+
+**Rejected alternatives.** Keeping the dead surface for compatibility would
+preserve a public route that no production adapter can produce and that future
+code could accidentally revive. Documenting the blocker would contradict the
+implemented transition and the living specification. Editing an applied
+migration is unnecessary because the repair removes only superseded Rust
+composition.
+
+**Affects.** Startup-scan application outcomes and reporting, PostgreSQL startup
+recovery mapping, signalboxd startup composition and logging, and the
+application domain-spine declaration.
+
 ## 2026-07-26 — Separate daemon tools into workspace crates
 
 **Context.** The daemon crate owned the Tier 0 and code-host tool

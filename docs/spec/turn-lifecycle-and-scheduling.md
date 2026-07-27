@@ -17,16 +17,16 @@ code-host credential path is verified through PR #270
 (`agent/tool-batch-tier1`); and the owner reconciliation decision that releases
 an ambiguity wait, together with the startup scan's separate report of sessions
 holding their slot for that decision, were verified through PR #281
-(`agent/turn-reconciliation-recovery`); the client stop surface that submits the
-interrupt delivery was verified through PR #291 (`agent/turn-control-verbs`).
-[docs/invariants.md](../invariants.md) remains the law catalog; INV tags below
-reference its rows without restating them. Designed lifecycle behavior that has
-no committed code path appears only under [Open edges](#open-edges). Sibling
-pages named in scope deferrals below (identity-and-commands,
-sessions-and-transcript, persistence-protocol, model-call-execution,
-configuration-and-credentials, runtime-substrate) are companion pages of this
-spec set; each deferral names the owning page rather than restating its
-material.
+(`agent/turn-reconciliation-recovery`). The finite startup scan and removal of
+the superseded steering blocker were verified through PR #291
+(`agent/turn-control-verbs`). [docs/invariants.md](../invariants.md) remains the
+law catalog; INV tags below reference its rows without restating them. Designed
+lifecycle behavior that has no committed code path appears only under
+[Open edges](#open-edges). Sibling pages named in scope deferrals below
+(identity-and-commands, sessions-and-transcript, persistence-protocol,
+model-call-execution, configuration-and-credentials, runtime-substrate) are
+companion pages of this spec set; each deferral names the owning page rather
+than restating its material.
 
 ## Turns, states, and the single active slot
 

@@ -80,11 +80,6 @@ pub enum StartupScanSessionOutcome {
         /// The active turn holding the slot until reconciliation.
         turn: TurnId,
     },
-    /// Pending steering keeps the source turn active until reclassification.
-    DeferredPendingSteering {
-        /// The accepted input that visibly blocks terminalization.
-        accepted_input: AcceptedInputId,
-    },
 }
 
 /// Authoritative inventory and per-session transaction boundary.
@@ -113,7 +108,6 @@ pub trait StartupScanRepository {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StartupScanOutcome {
     recovered_turn_count: usize,
-    pending_steering_sessions: Box<[SessionId]>,
     awaiting_recovery_decision_sessions: Box<[SessionId]>,
 }
 
@@ -121,11 +115,6 @@ impl StartupScanOutcome {
     /// Returns the number of prior-process turns terminalized by this scan.
     pub const fn recovered_turn_count(&self) -> usize {
         self.recovered_turn_count
-    }
-
-    /// Returns every session whose pending steering visibly blocks startup.
-    pub fn pending_steering_sessions(&self) -> &[SessionId] {
-        &self.pending_steering_sessions
     }
 
     /// Returns every session whose active turn holds the slot awaiting an
@@ -138,11 +127,6 @@ impl StartupScanOutcome {
     /// waits with an operator surface are reported.
     pub fn awaiting_recovery_decision_sessions(&self) -> &[SessionId] {
         &self.awaiting_recovery_decision_sessions
-    }
-
-    /// Returns whether startup may proceed to runtime scheduling.
-    pub fn is_complete(&self) -> bool {
-        self.pending_steering_sessions.is_empty()
     }
 }
 
@@ -252,7 +236,6 @@ where
             .await
             .map_err(StartupScanError::inventory)?;
         let mut recovered_turn_count = 0_usize;
-        let mut pending_steering_sessions = Vec::new();
         let mut awaiting_recovery_decision_sessions = Vec::new();
 
         for session in sessions {
@@ -293,10 +276,6 @@ where
                         awaiting_recovery_decision_sessions.push(session);
                         break;
                     }
-                    Ok(StartupScanSessionOutcome::DeferredPendingSteering { .. }) => {
-                        pending_steering_sessions.push(session);
-                        break;
-                    }
                     Err(error)
                         if error.operator_failure_class()
                             == OperatorFailureClass::IdentityCollision =>
@@ -310,7 +289,6 @@ where
 
         Ok(StartupScanOutcome {
             recovered_turn_count,
-            pending_steering_sessions: pending_steering_sessions.into_boxed_slice(),
             awaiting_recovery_decision_sessions: awaiting_recovery_decision_sessions
                 .into_boxed_slice(),
         })
@@ -332,10 +310,6 @@ mod tests {
 
     fn session(value: u128) -> SessionId {
         SessionId::from_uuid(Uuid::from_u128(value))
-    }
-
-    fn accepted_input(value: u128) -> AcceptedInputId {
-        AcceptedInputId::from_uuid(Uuid::from_u128(value))
     }
 
     #[derive(Debug)]
@@ -421,10 +395,10 @@ mod tests {
         }
     }
 
-    /// INV-034: the finite startup inventory is handled once, collision gets
-    /// fresh identities, and pending steering remains a visible blocker.
+    /// INV-034: the finite startup inventory is handled once and an
+    /// identity-collision retry receives fresh identities.
     #[test]
-    fn inv034_retries_collision_and_reports_pending_steering() {
+    fn inv034_retries_collision_and_scans_finite_inventory() {
         let first = session(1);
         let second = session(2);
         let repository = FakeRepository {
@@ -432,9 +406,7 @@ mod tests {
             responses: VecDeque::from([
                 Err(FakeError::Collision),
                 Ok(StartupScanSessionOutcome::NoActiveTurn),
-                Ok(StartupScanSessionOutcome::DeferredPendingSteering {
-                    accepted_input: accepted_input(3),
-                }),
+                Ok(StartupScanSessionOutcome::NoActiveTurn),
             ]),
             observed: Vec::new(),
         };
@@ -446,8 +418,6 @@ mod tests {
         assert_eq!(ids.calls, 6);
         assert_eq!(repository.observed, vec![first, first, second]);
         assert_eq!(outcome.recovered_turn_count(), 0);
-        assert_eq!(outcome.pending_steering_sessions(), &[second]);
-        assert!(!outcome.is_complete());
     }
 
     /// INV-034: a turn parked on an owner reconciliation decision is neither
@@ -472,11 +442,6 @@ mod tests {
 
         assert_eq!(outcome.recovered_turn_count(), 0);
         assert_eq!(outcome.awaiting_recovery_decision_sessions(), &[parked]);
-        assert_eq!(outcome.pending_steering_sessions(), &[] as &[SessionId]);
-        assert!(
-            outcome.is_complete(),
-            "a turn awaiting an owner reconciliation decision must not block startup"
-        );
     }
 
     /// docs/spec/turn-lifecycle-and-scheduling.md: non-collision
