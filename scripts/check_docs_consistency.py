@@ -252,16 +252,6 @@ RUST_TEST_DECLARATION = re.compile(
     r"fn[ \t]+(?P<name>(?:r#)?[A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
 )
-RUST_NON_DOC_COMMENT = re.compile(
-    r"^[ \t]*//(?!/)[^\n]*(?:\n|$)"
-    r"|^[ \t]*/\*(?!\*)(?:[^*]|\*(?!/))*\*/[ \t]*(?:\n|$)",
-    re.MULTILINE,
-)
-RUST_DOC_COMMENT = re.compile(
-    r"^[ \t]*(?:///[^\n]*(?:\n|$)"
-    r"|/\*\*(?:[^*]|\*(?!/))*\*/[ \t]*(?:\n|$))",
-    re.MULTILINE,
-)
 RUST_TEST_ATTRIBUTE = re.compile(
     r"#\[[ \t\r\n]*(?:[A-Za-z_][A-Za-z0-9_]*::)*"
     r"test(?=[ \t\r\n(\]])[^\]]*\]",
@@ -274,7 +264,7 @@ RUST_CFG_ATTR_META = re.compile(
 RUST_TEST_META = re.compile(
     r"^(?:[A-Za-z_][A-Za-z0-9_]*::)*test(?=[ \t\r\n(]|$)", re.IGNORECASE
 )
-RUST_RAW_STRING_OPEN = re.compile(r'(?:br|rb|r)(?P<hashes>#{0,255})"')
+RUST_RAW_STRING_OPEN = re.compile(r'(?:br|rb|cr|r)(?P<hashes>#{0,255})"')
 PULL_REQUEST_MERGE = re.compile(
     r"^Merge pull request #(?P<number>[1-9][0-9]*) from "
     r"[^/\s]+/(?P<branch>[^\r\n]+)$",
@@ -323,7 +313,23 @@ def mask_range(buffer: list[str], start: int, end: int) -> None:
             buffer[index] = " "
 
 
-def mask_rust_non_code(text: str) -> str:
+def rust_block_comment_end(text: str, start: int) -> int:
+    """Return the end of one possibly nested Rust block comment."""
+    end = start + 2
+    depth = 1
+    while end < len(text) and depth:
+        if text.startswith("/*", end):
+            depth += 1
+            end += 2
+        elif text.startswith("*/", end):
+            depth -= 1
+            end += 2
+        else:
+            end += 1
+    return end
+
+
+def mask_rust_non_code(text: str, *, preserve_doc_comments: bool = False) -> str:
     """Mask Rust comments and literals while preserving offsets and newlines."""
     buffer = list(text)
     index = 0
@@ -331,22 +337,14 @@ def mask_rust_non_code(text: str) -> str:
         if text.startswith("//", index):
             end = text.find("\n", index + 2)
             end = len(text) if end == -1 else end
-            mask_range(buffer, index, end)
+            if not preserve_doc_comments or not text.startswith("///", index):
+                mask_range(buffer, index, end)
             index = end
             continue
         if text.startswith("/*", index):
-            end = index + 2
-            depth = 1
-            while end < len(text) and depth:
-                if text.startswith("/*", end):
-                    depth += 1
-                    end += 2
-                elif text.startswith("*/", end):
-                    depth -= 1
-                    end += 2
-                else:
-                    end += 1
-            mask_range(buffer, index, end)
+            end = rust_block_comment_end(text, index)
+            if not preserve_doc_comments or not text.startswith("/**", index):
+                mask_range(buffer, index, end)
             index = end
             continue
 
@@ -402,6 +400,29 @@ def mask_rust_non_code(text: str) -> str:
     return "".join(buffer)
 
 
+def rust_doc_comments(prefix: str) -> list[str]:
+    """Return attached outer Rust doc comments, including nested block docs."""
+    metadata = mask_rust_non_code(prefix, preserve_doc_comments=True)
+    comments: list[str] = []
+    index = 0
+    while index < len(metadata):
+        line_start = metadata.rfind("\n", 0, index) + 1
+        at_line_indent = not metadata[line_start:index].strip()
+        if at_line_indent and metadata.startswith("///", index):
+            end = metadata.find("\n", index + 3)
+            end = len(metadata) if end == -1 else end
+            comments.append(prefix[index:end])
+            index = end
+            continue
+        if at_line_indent and metadata.startswith("/**", index):
+            end = rust_block_comment_end(metadata, index)
+            comments.append(prefix[index:end])
+            index = end
+            continue
+        index += 1
+    return comments
+
+
 def split_rust_meta_items(body: str) -> list[str]:
     """Split one attribute argument list at top-level commas."""
     items: list[str] = []
@@ -419,17 +440,22 @@ def split_rust_meta_items(body: str) -> list[str]:
     return items
 
 
+def rust_meta_applies_test(meta: str) -> bool:
+    """Return whether one direct or recursively conditional meta is `test`."""
+    meta = meta.strip()
+    if RUST_TEST_META.match(meta) is not None:
+        return True
+    cfg_attr = RUST_CFG_ATTR_META.fullmatch(meta)
+    if cfg_attr is None:
+        return False
+    items = split_rust_meta_items(cfg_attr.group("body"))
+    return any(rust_meta_applies_test(item) for item in items[1:])
+
+
 def rust_cfg_attr_has_test(prefix: str) -> bool:
     """Return whether a cfg_attr applies a test attribute when enabled."""
     for attribute in RUST_ATTRIBUTE.finditer(prefix):
-        cfg_attr = RUST_CFG_ATTR_META.fullmatch(attribute.group("meta").strip())
-        if cfg_attr is None:
-            continue
-        items = split_rust_meta_items(cfg_attr.group("body"))
-        if any(
-            RUST_TEST_META.match(item.strip()) is not None
-            for item in items[1:]
-        ):
+        if rust_meta_applies_test(attribute.group("meta")):
             return True
     return False
 
@@ -1484,20 +1510,13 @@ def rust_test_invariant_tags(text: str) -> list[tuple[str, int]]:
         raw_prefix = text[
             declaration.start("prefix") : declaration.end("prefix")
         ]
-        prefix_buffer = list(raw_prefix)
-        for comment in RUST_NON_DOC_COMMENT.finditer(raw_prefix):
-            mask_range(prefix_buffer, comment.start(), comment.end())
-        metadata_prefix = "".join(prefix_buffer)
         code_prefix = declaration.group("prefix")
         if (
             RUST_TEST_ATTRIBUTE.search(code_prefix) is None
             and not rust_cfg_attr_has_test(code_prefix)
         ):
             continue
-        doc_comments = "\n".join(
-            comment.group(0)
-            for comment in RUST_DOC_COMMENT.finditer(metadata_prefix)
-        )
+        doc_comments = "\n".join(rust_doc_comments(raw_prefix))
         material = f"{doc_comments}\n{declaration.group('name')}"
         declaration_line = line_number(text, declaration.start("name"))
         for tag in INVARIANT_TAG.finditer(material):

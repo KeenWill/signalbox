@@ -259,6 +259,22 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("src/uncited.rs", failures[0].message)
 
+    def test_reverse_discovers_tag_in_nested_block_doc_comment(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "/** Outer proof: /* nested explanation */ INV-001. */\n"
+            "#[test]\n"
+            "fn generically_named_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
     def test_unrelated_test_attribute_does_not_register_invariant(self) -> None:
         (self.root / "src/ignored.rs").write_text(
             '#[ignore = "INV-001 is temporarily flaky"]\n'
@@ -391,6 +407,21 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("src/uncited.rs", failures[0].message)
 
+    def test_reverse_discovers_nested_cfg_attr_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[cfg_attr(test, cfg_attr(all(), test))]\n"
+            "fn s01_inv_001_nested_cfg_attr_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
     def test_cfg_predicate_test_token_does_not_mark_function_as_test(self) -> None:
         (self.root / "src/context.rs").write_text(
             "#[cfg_attr(any(unix, test), allow(dead_code))]\n"
@@ -419,6 +450,17 @@ class DocsConsistencyTests(unittest.TestCase):
             "\"###;\n"
             "const STRING_EXAMPLE: &str = \"#[test]\\nfn "
             "s01_inv_001_string_example() {}\";\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_test_declaration_inside_raw_c_string_is_ignored(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "const RAW_C_EXAMPLE: &CStr = cr###\"prefix \\\"\n"
+            "#[test]\n"
+            "fn s01_inv_001_raw_c_string_example() {}\n"
+            "\"###;\n",
             encoding="utf-8",
         )
 
