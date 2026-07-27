@@ -954,7 +954,7 @@ impl RunnerLease {
             RunnerLeaseState::Claimed => RunnerLeaseState::LostClaimed,
             _ => return Err(RunnerDomainError::InvalidState),
         };
-        self.into_loss_consequence()
+        self.into_loss_consequence(false)
     }
 
     pub fn lose_unclaimed(
@@ -968,10 +968,13 @@ impl RunnerLease {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
         self.state = RunnerLeaseState::LostUnclaimed;
-        self.into_loss_consequence()
+        self.into_loss_consequence(false)
     }
 
-    fn into_loss_consequence(self) -> Result<RunnerLeaseLoss, RunnerDomainError> {
+    fn into_loss_consequence(
+        self,
+        retry_prepared: bool,
+    ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
         let claimed = match self.state {
             RunnerLeaseState::LostUnclaimed => false,
             RunnerLeaseState::LostExecutionPossible | RunnerLeaseState::LostClaimed => true,
@@ -995,7 +998,7 @@ impl RunnerLease {
                     source,
                     generation,
                     claimed_attempt,
-                    preparation: RunnerRetryPreparationGuard::new(),
+                    preparation: RunnerRetryPreparationGuard::new(retry_prepared),
                 }),
             },
         })
@@ -1035,6 +1038,7 @@ impl RunnerLease {
             || !credential_matches
             || !declaration_matches
             || lease.state != input.recorded_state
+            || input.retry_prepared != input.recorded_retry_prepared
         {
             return Err(RunnerDomainError::CorruptStoredFacts);
         }
@@ -1046,6 +1050,7 @@ impl RunnerLease {
         registration: &ValidatedRunnerRegistration,
         no_execution: Option<&RunnerLeaseNoExecutionProof>,
     ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
+        let retry_prepared = input.retry_prepared;
         let lease = Self::reconstitute(input, registration)?;
         let proof_matches =
             no_execution.is_some_and(|proof| proof.correlation == lease.correlation());
@@ -1055,7 +1060,7 @@ impl RunnerLease {
                 RunnerLeaseState::LostExecutionPossible | RunnerLeaseState::LostClaimed,
                 false,
                 false,
-            ) => lease.into_loss_consequence(),
+            ) => lease.into_loss_consequence(retry_prepared),
             _ => Err(RunnerDomainError::InvalidState),
         }
     }
@@ -1087,6 +1092,8 @@ pub struct RunnerLeaseReconstitutionInput {
     pub recorded_effect: RunnerToolEffectClass,
     pub recorded_credential_authorization: Option<CredentialDispatchAuthorization>,
     pub recorded_state: RunnerLeaseState,
+    pub retry_prepared: bool,
+    pub recorded_retry_prepared: bool,
 }
 
 /// Typed consequence of lease loss. Construction is sealed to checked `RunnerLease` transitions.
@@ -1190,8 +1197,8 @@ impl RunnerClaimedAttemptReplacement {
 struct RunnerRetryPreparationGuard(AtomicBool);
 
 impl RunnerRetryPreparationGuard {
-    const fn new() -> Self {
-        Self(AtomicBool::new(false))
+    const fn new(prepared: bool) -> Self {
+        Self(AtomicBool::new(prepared))
     }
 
     fn claim(&self) -> bool {
@@ -1733,7 +1740,6 @@ impl SessionRunnerPlacement {
                         tombstone.session == placement.session
                             && tombstone.state == CredentialProfileGrantState::Revoked
                             && tombstone.lineage() == lineage
-                            && lineage.runner == stored.runner
                             && lineage.revision <= placement.revision
                     }
                     (None, None, Some(_))
@@ -2805,6 +2811,8 @@ mod tests {
             recorded_effect: lease.effect,
             recorded_credential_authorization: lease.credential_authorization.clone(),
             recorded_state: lease.state,
+            retry_prepared: false,
+            recorded_retry_prepared: false,
         }
     }
 
@@ -2823,6 +2831,8 @@ mod tests {
             recorded_effect: lease.effect,
             recorded_credential_authorization: lease.credential_authorization.clone(),
             recorded_state: lease.state,
+            retry_prepared: false,
+            recorded_retry_prepared: false,
         }
     }
 
@@ -4515,6 +4525,61 @@ mod tests {
     }
 
     #[test]
+    fn s32_inv044_inv045_cross_runner_profileless_placement_reconstitutes_with_tombstone() {
+        let initial = registration();
+        let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
+        let mut pin = SessionRunnerPlacement::new(
+            session_id(SESSION),
+            placement_request(profile("readonly")),
+        )
+        .pin_and_offer_lease(
+            &enrollment_for_registration(&initial),
+            &initial,
+            directory("/workspace/old"),
+            None,
+            authorized(
+                "inspect",
+                tool_attempt_id(ATTEMPT),
+                RunnerToolEffectClass::Pure,
+            ),
+            lease_offer_request("inspect"),
+        )
+        .expect("the initial registration and lease satisfy placement");
+        let prior_grant = pin
+            .grant
+            .take()
+            .expect("the selected profile creates a prior grant");
+        let lost = pin
+            .placement
+            .mark_runner_lost()
+            .expect("the profiled placement can be marked lost");
+        let profileless = lost
+            .replace_lost_runner(
+                profileless_placement_request(),
+                &replacement,
+                directory("/workspace/new"),
+                None,
+                Some(prior_grant),
+            )
+            .expect("the replacement runner preserves the retired grant lineage");
+        let tombstone = profileless
+            .grant
+            .expect("the checked replacement returns the prior runner tombstone");
+        let expected_state = profileless.placement.state().clone();
+        let input = placement_reconstitution_input(profileless.placement);
+
+        let restored = SessionRunnerPlacement::reconstitute(
+            input,
+            session_id(SESSION),
+            Some(&replacement),
+            Some(&tombstone),
+        )
+        .expect("the prior runner tombstone authenticates the retained lineage");
+
+        assert_eq!(restored.state(), &expected_state);
+    }
+
+    #[test]
     fn s32_inv045_profileless_lineage_rejects_an_omitted_tombstone() {
         let registration = registration();
         let mut pin = pinned("readonly").1;
@@ -4962,6 +5027,30 @@ mod tests {
             expected_generation
         );
         assert_eq!(restored.crash_attempt(), None);
+    }
+
+    #[test]
+    fn s31_inv043_loss_reconstitution_restores_consumed_retry_preparation() {
+        let (registration, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let loss = offered
+            .lose()
+            .expect("an execution-possible pure lease carries retry authority");
+        let mut input = borrowed_lease_reconstitution_input(loss.lost());
+        input.retry_prepared = true;
+        input.recorded_retry_prepared = true;
+        let restored = RunnerLease::reconstitute_loss(input, &registration, None)
+            .expect("the durable consumed preparation state reconstitutes");
+
+        assert_eq!(
+            restored
+                .retry()
+                .expect("the restored loss retains its durable identity")
+                .prepare_claimed_attempt(
+                    claimed_batch("inspect", RunnerToolEffectClass::Pure),
+                    tool_attempt_id(RETRY_ATTEMPT),
+                ),
+            Err(RunnerDomainError::InvalidState)
+        );
     }
 
     #[test]
