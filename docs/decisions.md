@@ -18,7 +18,7 @@ and uncited tagged files, while local Git records exact merge provenance.
 
 **Decision.** A cited `INV-NNN`-tagged enforcement file must contain that tag,
 and every Rust test file tagged in its harness test name — the declaration name
-qualified by the inline and out-of-line module path that reaches it — or in an
+qualified by every inline and out-of-line module path reaching it — or in an
 attached doc comment must be cited by that row; a `test` attribute a `use` item
 renames counts as a test attribute in the file that renames it. Every historical
 subsystem-page verification token must match its exact PR and source branch in a

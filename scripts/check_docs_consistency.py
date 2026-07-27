@@ -19,7 +19,8 @@ The check is deterministic and offline. It verifies:
    in backticks without the span's parentheses closing the reference, and may
    not leave the reference's own block. ``docs/spec/README.md`` states this
    format; this check enforces it and verifies that each historical token
-   names the exact source branch of a PR merge commit reachable from ``HEAD``.
+   names the exact source branch of a PR merge commit on the first-parent
+   history of the protected integration branch.
    Tokens for one in-flight PR may instead match the checked-out branch locally
    or the pull-request number and head branch in the GitHub Actions event. An
    event build also accepts unmerged verification identities inherited from the
@@ -237,12 +238,47 @@ INVARIANT_TAG = re.compile(
     r"(?<![^\W_])INV[-_]?(?P<number>[0-9]{3})(?![^\W_])",
     re.IGNORECASE,
 )
-RUST_IDENTIFIER_PATTERN = r"(?:r#)?(?![0-9])\w+"
+def _unicode_mark_class() -> str:
+    """Return a character class of the marks Rust's XID_Continue admits.
+
+    Python's ``\\w`` covers XID_Start and the letters, digits, and connectors
+    of XID_Continue but omits the combining marks, so decomposed identifiers
+    such as ``cafe`` followed by U+0301 would otherwise end early. The class is
+    derived from the interpreter's own Unicode data rather than transcribed.
+    """
+    marks = [
+        code
+        for code in range(0x300, sys.maxunicode + 1)
+        if unicodedata.category(chr(code)) in ("Mn", "Mc")
+    ]
+    ranges: list[tuple[int, int]] = []
+    for code in marks:
+        if ranges and code == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], code)
+        else:
+            ranges.append((code, code))
+    return "".join(
+        re.escape(chr(first))
+        if first == last
+        else f"{re.escape(chr(first))}-{re.escape(chr(last))}"
+        for first, last in ranges
+    )
+
+
+RUST_IDENTIFIER_MARKS = _unicode_mark_class()
+RUST_IDENTIFIER_PATTERN = (
+    rf"(?:r#)?(?![0-9])[^\W{RUST_IDENTIFIER_MARKS}]"
+    rf"[\w{RUST_IDENTIFIER_MARKS}]*"
+)
+RUST_ATTRIBUTE_OPEN = r"#[ \t\r\n]*\["
+RUST_CHARACTER_LITERAL = re.compile(
+    r"'(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,6}\}|.)|[^\\\r\n])'"
+)
 RUST_TEST_DECLARATION = re.compile(
     r"(?P<prefix>(?:"
     r"^[ \t]*///[^\n]*(?:\n|$)"
     r"|^[ \t]*/\*\*(?:[^*]|\*(?!/))*\*/[ \t]*(?:\n|$)"
-    r"|^[ \t]*#\[[^\]]*\][ \t]*(?:\n|$)"
+    rf"|^[ \t]*{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t]*(?:\n|$)"
     r"|^[ \t]*//(?!/)[^\n]*(?:\n|$)"
     r"|^[ \t]*/\*(?!\*)(?:[^*]|\*(?!/))*\*/[ \t]*(?:\n|$)"
     r"|^[ \t]*(?:\n|$)"
@@ -254,11 +290,13 @@ RUST_TEST_DECLARATION = re.compile(
     re.MULTILINE,
 )
 RUST_TEST_ATTRIBUTE = re.compile(
-    r"#\[[ \t\r\n]*(?:::)?(?:[A-Za-z_][A-Za-z0-9_]*::)*"
+    rf"{RUST_ATTRIBUTE_OPEN}[ \t\r\n]*(?:::)?(?:[A-Za-z_][A-Za-z0-9_]*::)*"
     r"test(?=[ \t\r\n(\]])[^\]]*\]",
     re.IGNORECASE,
 )
-RUST_ATTRIBUTE = re.compile(r"#\[(?P<meta>[^\]]*)\]", re.DOTALL)
+RUST_ATTRIBUTE = re.compile(
+    rf"{RUST_ATTRIBUTE_OPEN}(?P<meta>[^\]]*)\]", re.DOTALL
+)
 RUST_CFG_META = re.compile(
     r"^cfg[ \t\r\n]*\((?P<body>.*)\)[ \t\r\n]*$", re.DOTALL
 )
@@ -292,19 +330,22 @@ RUST_INLINE_MODULE = re.compile(
     rf"\bmod[ \t\r\n]+(?P<name>{RUST_IDENTIFIER_PATTERN})[ \t\r\n]*\{{"
 )
 RUST_OUT_OF_LINE_MODULE = re.compile(
-    rf"(?P<attributes>(?:#\[[^\]]*\][ \t\r\n]*)*)"
+    rf"(?P<attributes>(?:{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t\r\n]*)*)"
     rf"\b(?:pub(?:\([^)]*\))?[ \t\r\n]+)?"
     rf"mod[ \t\r\n]+(?P<name>{RUST_IDENTIFIER_PATTERN})[ \t\r\n]*;"
 )
 RUST_PATH_ATTRIBUTE = re.compile(
-    r"#\[[ \t\r\n]*path[ \t\r\n]*=[ \t\r\n]*\"(?P<path>[^\"\n]*)\"[ \t\r\n]*\]"
+    rf"{RUST_ATTRIBUTE_OPEN}[ \t\r\n]*path[ \t\r\n]*=[ \t\r\n]*"
+    r"\"(?P<path>[^\"\n]*)\"[ \t\r\n]*\]"
 )
 RUST_CRATE_ROOT_NAMES = ("mod.rs", "lib.rs", "main.rs")
 RUST_MACRO_RULES = re.compile(
     rf"\bmacro_rules![ \t\r\n]*(?P<name>{RUST_IDENTIFIER_PATTERN})"
     r"[ \t\r\n]*(?P<opening>[\(\[\{])"
 )
-RUST_FORWARDED_ATTRIBUTE = re.compile(r"#\[[^\]]*\$[^\]]*\]", re.DOTALL)
+RUST_FORWARDED_ATTRIBUTE = re.compile(
+    rf"{RUST_ATTRIBUTE_OPEN}[^\]]*\$[^\]]*\]", re.DOTALL
+)
 RUST_METAVARIABLE = re.compile(rf"\$(?P<name>{RUST_IDENTIFIER_PATTERN})")
 RUST_METAVARIABLE_BINDING = re.compile(
     rf"\$(?P<name>{RUST_IDENTIFIER_PATTERN})[ \t\r\n]*:"
@@ -446,21 +487,15 @@ def mask_rust_non_code(text: str, *, preserve_doc_comments: bool = False) -> str
 
         char_start = index + 1 if text.startswith("b'", index) else index
         if token_boundary and text[char_start : char_start + 1] == "'":
-            end = char_start + 1
-            escaped = False
-            while end < len(text) and text[end] not in "\r\n":
-                if escaped:
-                    escaped = False
-                elif text[end] == "\\":
-                    escaped = True
-                elif text[end] == "'":
-                    end += 1
-                    mask_range(buffer, index, end)
-                    index = end
-                    break
-                end += 1
-            else:
+            # A quote also opens a lifetime or a loop label, which must not
+            # swallow the source up to the next unrelated quote, so only a
+            # closer in character-literal position ends the token.
+            end = RUST_CHARACTER_LITERAL.match(text, char_start)
+            if end is None:
                 index += 1
+                continue
+            mask_range(buffer, index, end.end())
+            index = end.end()
             continue
 
         index += 1
@@ -1873,9 +1908,14 @@ def named_tests(
 
 
 def rust_test_invariant_tags(
-    text: str, module_prefix: tuple[str, ...] = ()
+    text: str, module_prefixes: tuple[tuple[str, ...], ...] = ((),)
 ) -> list[tuple[str, int]]:
-    """Return distinct INV tags and declaration lines from Rust tests."""
+    """Return distinct INV tags and declaration lines from Rust tests.
+
+    Every module path under which the harness registers this file's tests is
+    read, so a file included under more than one active module name carries
+    the tags of each of them.
+    """
     found: dict[str, int] = {}
     code = mask_rust_non_code(text)
     module_spans = rust_inline_module_spans(code)
@@ -1896,18 +1936,19 @@ def rust_test_invariant_tags(
         module_names = rust_enclosing_module_names(
             module_spans, declaration.start()
         )
-        material = "\n".join(
-            [
-                doc_comments,
-                *module_prefix,
-                *module_names,
-                declaration.group("name"),
-            ]
-        )
         declaration_line = line_number(text, declaration.start("name"))
-        for tag in INVARIANT_TAG.finditer(material):
-            invariant = f"INV-{tag.group('number')}"
-            found.setdefault(invariant, declaration_line)
+        for module_prefix in module_prefixes:
+            material = "\n".join(
+                [
+                    doc_comments,
+                    *module_prefix,
+                    *module_names,
+                    declaration.group("name"),
+                ]
+            )
+            for tag in INVARIANT_TAG.finditer(material):
+                invariant = f"INV-{tag.group('number')}"
+                found.setdefault(invariant, declaration_line)
     return sorted(found.items())
 
 
@@ -1940,12 +1981,14 @@ def rust_module_child(
 
 def rust_module_prefixes(
     sources: list[Path], text_cache: dict[Path, str]
-) -> dict[Path, tuple[str, ...]]:
-    """Return the out-of-line module names that prefix each file's test names.
+) -> dict[Path, tuple[tuple[str, ...], ...]]:
+    """Return the out-of-line module paths that prefix each file's test names.
 
-    A file several declarations reach keeps the shortest path to it, breaking
-    ties in sorted source order, so the result never depends on filesystem
-    iteration order. A file no declaration reaches is its own root.
+    A file several active declarations reach keeps every one of those paths,
+    since the harness registers its tests once under each. Paths are visited
+    breadth-first from the files no declaration reaches and each is recorded
+    once, so a cyclic or repeated declaration terminates and the result never
+    depends on filesystem iteration order.
     """
     children: dict[Path, list[tuple[str, Path]]] = {}
     declared: set[Path] = set()
@@ -1958,6 +2001,8 @@ def rust_module_prefixes(
             attributes = text[
                 module.start("attributes") : module.end("attributes")
             ]
+            if rust_item_is_disabled(module.group("attributes")):
+                continue
             child = rust_module_child(
                 source, module.group("name"), attributes
             )
@@ -1968,17 +2013,17 @@ def rust_module_prefixes(
             )
             declared.add(child)
 
-    prefixes: dict[Path, tuple[str, ...]] = {}
+    prefixes: dict[Path, list[tuple[str, ...]]] = {}
     pending = [(source, ()) for source in sources if source not in declared]
     while pending:
         source, prefix = pending.pop(0)
-        if source in prefixes:
+        recorded = prefixes.setdefault(source, [])
+        if prefix in recorded:
             continue
-        prefixes[source] = prefix
+        recorded.append(prefix)
         for name, child in children.get(source, []):
-            if child not in prefixes:
-                pending.append((child, (*prefix, name)))
-    return prefixes
+            pending.append((child, (*prefix, name)))
+    return {source: tuple(paths) for source, paths in prefixes.items()}
 
 
 def rust_invariant_test_files(
@@ -2002,7 +2047,7 @@ def rust_invariant_test_files(
     for source in sources:
         source_label = repository_path(root, source)
         tags = rust_test_invariant_tags(
-            text_cache[source], prefixes.get(source, ())
+            text_cache[source], prefixes.get(source, ((),))
         )
         for invariant, line in tags:
             found[(invariant, source_label)] = line
@@ -2025,10 +2070,21 @@ def check_rust_test_generation(root: Path) -> list[Violation]:
             closing = delimiters.get(opening)
             if closing is None:
                 continue
+            # A matcher may consume a test attribute the expansion never
+            # emits, so only what each rule expands to is read directly; an
+            # unparsed rule list falls back to the whole definition body.
+            rules = rust_macro_rule_spans(
+                code, opening + 1, closing, delimiters
+            )
             body = code[opening + 1 : closing]
+            emitted = (
+                "\n".join(code[start:end] for _, (start, end) in rules)
+                if rules
+                else body
+            )
             if (
-                RUST_TEST_ATTRIBUTE.search(body) is None
-                and not rust_attributes_apply_test(body, aliases)
+                RUST_TEST_ATTRIBUTE.search(emitted) is None
+                and not rust_attributes_apply_test(emitted, aliases)
                 and not rust_macro_invocation_applies_test(
                     code,
                     macro.group("name"),
@@ -2421,22 +2477,35 @@ def verification_is_negated(text: str, offset: int) -> bool:
     return VERIFICATION_NEGATION.search(preceding) is not None
 
 
-def integration_history_ref(root: Path) -> str | None:
-    """Return the protected integration ref this checkout resolves, if any."""
-    for reference in INTEGRATION_REFS:
-        result = subprocess.run(
-            [
-                "git",
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                f"{reference}^{{commit}}",
-            ],
+def git_command(
+    root: Path, *arguments: str
+) -> subprocess.CompletedProcess[str] | None:
+    """Run one read-only Git command, or return ``None`` without a Git binary.
+
+    A checkout without Git reports a deterministic violation rather than
+    aborting, so the checker fails the same way it fails on any other missing
+    provenance.
+    """
+    try:
+        return subprocess.run(
+            ["git", *arguments],
             cwd=root,
             check=False,
             capture_output=True,
             text=True,
         )
+    except OSError:
+        return None
+
+
+def integration_history_ref(root: Path) -> str | None:
+    """Return the protected integration ref this checkout resolves, if any."""
+    for reference in INTEGRATION_REFS:
+        result = git_command(
+            root, "rev-parse", "--verify", "--quiet", f"{reference}^{{commit}}"
+        )
+        if result is None:
+            return None
         if result.returncode == 0 and result.stdout.strip():
             return reference
     return None
@@ -2451,25 +2520,19 @@ def integration_pull_request_branches(
     chain, which no branch under review can extend: a merge a head branch
     contributes is reachable from ``HEAD`` but never appears there.
     """
+    if git_command(root, "rev-parse", "--git-dir") is None:
+        return {}, "`git` is not available in this environment"
     reference = integration_history_ref(root)
     if reference is None:
         return {}, (
             f"no `{INTEGRATION_BRANCH}` integration branch resolves in this "
             "checkout"
         )
-    result = subprocess.run(
-        [
-            "git",
-            "log",
-            "--first-parent",
-            reference,
-            "--format=%H%x1f%P%x1f%s%x1e",
-        ],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
+    result = git_command(
+        root, "log", "--first-parent", reference, "--format=%H%x1f%P%x1f%s%x1e"
     )
+    if result is None:
+        return {}, "`git` is not available in this environment"
     if result.returncode != 0:
         detail = result.stderr.strip() or "git log failed without diagnostics"
         return {}, detail
@@ -2491,14 +2554,8 @@ def integration_pull_request_branches(
 
 def current_checkout_branch(root: Path) -> str | None:
     """Return the symbolic checkout branch, or ``None`` for detached HEAD."""
-    result = subprocess.run(
-        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
+    result = git_command(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if result is None or result.returncode != 0:
         return None
     branch = result.stdout.strip()
     return branch or None
@@ -2560,14 +2617,8 @@ def inherited_verification_identities(
     if base_sha is None:
         return set()
     source_label = repository_path(root, source)
-    result = subprocess.run(
-        ["git", "show", f"{base_sha}:{source_label}"],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
+    result = git_command(root, "show", f"{base_sha}:{source_label}")
+    if result is None or result.returncode != 0:
         return set()
     return verification_reference_identities(result.stdout)
 

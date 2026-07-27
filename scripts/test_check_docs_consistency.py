@@ -822,6 +822,123 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_lifetime_does_not_mask_the_rest_of_its_line(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "mod inv_001 {\n"
+            "    fn helper<'a>() -> char { let c = 'x'; c }\n"
+            "    #[test]\n"
+            "    fn rejects() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_loop_label_does_not_mask_the_rest_of_its_line(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "mod inv_001 {\n"
+            "    fn helper() { 'outer: loop { let c = 'x'; break 'outer; } }\n"
+            "    #[test]\n"
+            "    fn rejects() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_spaced_attribute_declares_a_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "# [ test ]\nfn s01_inv_001_spaced_attribute() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_decomposed_unicode_identifier(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test]\nfn café_inv_001_executes() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_cfg_disabled_out_of_line_module_declares_no_prefix(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            '#[cfg(any())]\n#[path = "generic.rs"]\nmod inv_001;\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/generic.rs").write_text(
+            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_every_active_out_of_line_module_prefix_is_read(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            '#[path = "generic.rs"]\nmod ordinary;\n'
+            '#[path = "generic.rs"]\nmod inv_001;\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/generic.rs").write_text(
+            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/generic.rs", failures[0].message)
+
+    def test_matcher_only_test_attribute_generates_no_test(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! strip_test {\n"
+            "    (#[test] $item:item) => { $item };\n"
+            "}\n"
+            "strip_test!(#[test] fn ignored() {});\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_missing_git_reports_a_verification_violation(self) -> None:
+        empty_path = self.root / ".empty-path"
+        empty_path.mkdir()
+
+        with patch.dict(os.environ, {"PATH": str(empty_path)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn("`git` is not available", failures[0].message)
+
     def test_reference_style_citation_keeps_occurrence_order(self) -> None:
         (self.root / "src/tagged.rs").write_text(
             "#[test]\nfn s01_inv_001_tagged_test() {}\n",
