@@ -480,11 +480,14 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .turnCancelled(let turnID, let cancellationEntryID, _):
       return message.entryID == cancellationEntryID
         || toolEntry(message.entry, belongsTo: turnID, modelCallID: nil)
-    case .turnToolReconciliationRequired(_, let toolAttemptID, _):
-      guard case .toolExecutionResult(_, let entryAttemptID, _) = message.entry else {
+    case .turnToolReconciliationRequired(let turnID, let toolAttemptID, _):
+      guard
+        case .toolExecutionResult(let requestID, let entryAttemptID, _) = message.entry,
+        let context = toolContextsByRequestID[requestID.rawValue]
+      else {
         return false
       }
-      return entryAttemptID == toolAttemptID
+      return entryAttemptID == toolAttemptID && context.turnID == turnID
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .turnRefused,
       .turnReconciliationRequired, .unknown:
       return false
@@ -602,14 +605,15 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryTurnID == turnID
       }
-    case .turnToolReconciliationRequired(_, let toolAttemptID, _):
+    case .turnToolReconciliationRequired(let turnID, let toolAttemptID, _):
       return snapshot.records.contains {
         guard case .entry(let message) = $0,
-          case .toolExecutionResult(_, let entryAttemptID, _) = message.entry
+          case .toolExecutionResult(let requestID, let entryAttemptID, _) = message.entry,
+          let context = toolContextsByRequestID[requestID.rawValue]
         else {
           return false
         }
-        return entryAttemptID == toolAttemptID
+        return entryAttemptID == toolAttemptID && context.turnID == turnID
       }
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .turnRefused,
       .turnReconciliationRequired, .unknown:

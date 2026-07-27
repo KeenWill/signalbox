@@ -181,6 +181,22 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     }
   }
 
+  func testSideProjectionRejectsReconciliationResultFromAnotherTurn() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithCrossTurnReconciliationResult()
+    let trigger = try ProcessProjectionFixture.toolReconciliationTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertThrowsError(
+      try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    ) { error in
+      XCTAssertEqual(
+        error as? SignalboxProcessTranscriptProjectionError,
+        .missingTriggerEvidence
+      )
+    }
+  }
+
   func testAuthoritativeProjectionRestoresWireOrderAfterSideProjection() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCompletedTurnEntries()
     let trigger = try ProcessProjectionFixture.completedTrigger()
@@ -2810,6 +2826,10 @@ private enum ProcessProjectionFixture {
   static let proposedAssistantEntry = "99999999-9999-4999-8999-999999999999"
   static let proposedToolEntry = "aaaaaaaa-1111-4111-8111-111111111111"
   static let proposedToolRequest = "bbbbbbbb-1111-4111-8111-111111111111"
+  static let crossTurn = "cccccccc-3333-4333-8333-333333333333"
+  static let reconciliationAttempt = "dddddddd-3333-4333-8333-333333333333"
+  static let reconciliationResultEntry = "eeeeeeee-3333-4333-8333-333333333333"
+  static let reconciliationOutput = "Fixture cross-turn result."
   static let completedUserEntry = "aaaaaaaa-2222-4222-8222-222222222222"
   static let completedAssistantEntry = "bbbbbbbb-2222-4222-8222-222222222222"
   static let completedAssistantText = "Fixture terminal assistant response."
@@ -2988,6 +3008,61 @@ private enum ProcessProjectionFixture {
             "tool_request_id":"\(proposedToolRequest)",
             "tool_name":"\(proposedToolName)",
             "arguments":"{}"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"2"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithCrossTurnReconciliationResult() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(proposedToolEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(crossTurn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)",
+            "tool_request_id":"\(proposedToolRequest)",
+            "tool_name":"\(proposedToolName)",
+            "arguments":"{}"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationResultEntry)",
+          "entry":{
+            "type":"tool_execution_result",
+            "tool_request_id":"\(proposedToolRequest)",
+            "tool_attempt_id":"\(reconciliationAttempt)",
+            "content":"\(reconciliationOutput)"
           }
         }
         """,
@@ -3289,6 +3364,19 @@ private enum ProcessProjectionFixture {
       }
       """,
       sessionID: MockSignalboxFixtures.approvalSessionID
+    )
+  }
+
+  static func toolReconciliationTrigger() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"turn_tool_reconciliation_required",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "tool_attempt_id":"\(reconciliationAttempt)",
+        "terminal_frontier_id":"\(ProcessDriverFixture.frontier)"
+      }
+      """
     )
   }
 
