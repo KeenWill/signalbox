@@ -180,6 +180,11 @@ BEFORE UPDATE OR DELETE ON runner_enrollment_allowed_class
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE TRIGGER runner_enrollment_allowed_class_rejects_truncate
+BEFORE TRUNCATE ON runner_enrollment_allowed_class
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
+
 CREATE TRIGGER runner_enrollment_audit_allowed_class_is_append_only
 BEFORE UPDATE OR DELETE ON runner_enrollment_audit_allowed_class
 FOR EACH ROW

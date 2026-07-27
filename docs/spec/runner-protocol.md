@@ -43,9 +43,9 @@ lease offer rechecks the active enrollment and its exact enrollment, runner, and
 authentication-reference correlations; a lease already offered is unaffected.
 The Postgres admission trigger locks the current enrollment and placement heads
 before accepting even a direct lease-row insert, so concurrent revocation,
-runner loss, or runner replacement wins before the stale offer can commit.
-Enrollment audit-class evidence rejects row mutation and statement-level
-truncation.
+runner loss, or runner replacement wins before the stale offer can commit. Both
+the current and audit allowed-class inventories reject row mutation and
+statement-level truncation, including cascading truncation.
 
 A registration carries availability claims only:
 
@@ -65,16 +65,19 @@ advances the enrollment-owned current registration revision; a failed durable
 write leaves the prior registration current. Complete enrollment reconstitution
 restores the optional last issued revision from independently matching stored
 facts; the next successful registration advances it instead of reusing a prior
-revision. Retained copies of every prior registration become stale and cannot
-authorize a later lease, reconciliation, or grant-bearing placement transition.
-Omitting a formerly advertised capability removes its availability from the new
-registration, but never changes its daemon-side policy. A pinned session never
-inherits additions from re-registration. If a new registration omits a
-runner-required capability in that session's pinned snapshot, no later lease is
-authorized; an explicit registration-reconciliation transition marks the
-placement `RunnerLost` without rewriting its snapshot. Omitting a combined-locus
-tool disables runner dispatch for that tool but retains placement so daemon
-fallback remains admissible. Why: re-registration can narrow current
+revision. A persistence load supplied with caller-held enrollment authority
+compares that authority's current registration revision with the independently
+loaded canonical enrollment before binding any historical registration to its
+revision fence. Retained copies of every prior registration become stale and
+cannot authorize a later lease, reconciliation, or grant-bearing placement
+transition. Omitting a formerly advertised capability removes its availability
+from the new registration, but never changes its daemon-side policy. A pinned
+session never inherits additions from re-registration. If a new registration
+omits a runner-required capability in that session's pinned snapshot, no later
+lease is authorized; an explicit registration-reconciliation transition marks
+the placement `RunnerLost` without rewriting its snapshot. Omitting a
+combined-locus tool disables runner dispatch for that tool but retains placement
+so daemon fallback remains admissible. Why: re-registration can narrow current
 availability without downgrading a confirmation requirement, widening
 authorization, or silently changing established affinity (INV-042, INV-044).
 

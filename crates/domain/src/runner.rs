@@ -440,6 +440,8 @@ impl PartialEq for RunnerEnrollment {
             && self.authentication == other.authentication
             && self.allowed_classes == other.allowed_classes
             && self.state == other.state
+            && self.registration_revision.load(Ordering::Acquire)
+                == other.registration_revision.load(Ordering::Acquire)
     }
 }
 

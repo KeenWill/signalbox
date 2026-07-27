@@ -1138,6 +1138,38 @@ async fn s30_inv042_historical_registration_load_remains_stale() -> Result<(), B
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s30_inv042_stale_loaded_enrollment_cannot_bind_historical_registration()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let historical = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let stale_enrollment = store
+        .load_enrollment(expected_enrollment.enrollment())
+        .await?
+        .expect("the first registration head is loaded");
+    let current_enrollment = store
+        .load_enrollment(expected_enrollment.enrollment())
+        .await?
+        .expect("the independent current authority is loaded");
+    store
+        .register(&current_enrollment, expanded_advertisement())
+        .await?;
+    let rejected = store
+        .load_registration(&stale_enrollment, historical.revision())
+        .await
+        .expect_err("stale enrollment revision cannot bind historical registration as current");
+
+    assert_store_domain_error(rejected, RunnerDomainError::CorruptStoredFacts);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s30_inv042_orphan_revocation_audit_cannot_commit() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -1505,6 +1537,21 @@ async fn s30_inv042_current_registration_head_rejects_truncate() -> Result<(), B
         .execute(&pool)
         .await
         .expect_err("the registration head cannot be truncated");
+
+    assert_check_violation(truncated);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_enrollment_classes_reject_truncate() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, _) = stored_pin_fixture(&pool).await?;
+    let truncated = sqlx::query("TRUNCATE runner_enrollment_allowed_class CASCADE")
+        .execute(&pool)
+        .await
+        .expect_err("immutable enrollment classes cannot be truncated");
 
     assert_check_violation(truncated);
     drop(pool);
