@@ -5657,7 +5657,8 @@ fn tool_round_terminal_producing_call(
 /// one call can claim that window.
 ///
 /// Continuation happens only once every request is executed or denied, so this
-/// window forbids `ToolClosed` stand-ins.
+/// window forbids `ToolClosed` stand-ins and admits only the attempt ends the
+/// continuation writer projects.
 #[allow(clippy::too_many_arguments)]
 fn tool_round_continuation_producing_call(
     turn: TurnId,
@@ -5700,6 +5701,24 @@ fn tool_round_producing_call_in_window(
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
     semantic_entries: &BTreeMap<SemanticTranscriptEntryRef, SemanticTranscriptEntry>,
 ) -> Option<crate::ModelCallId> {
+    // A continuation window projects only executed results the writer admits:
+    // a completed attempt or an ordinary known failure. An ambiguous or
+    // crash-lost end is a turn-level failure that can never reach a
+    // continuation, while terminal materialization projects the crash-lost
+    // known-failed attempt directly.
+    if !closed_requests_permitted
+        && terminal_tool_attempts
+            .iter()
+            .any(|attempt| match attempt.end() {
+                crate::ToolAttemptEnd::Completed { .. } => false,
+                crate::ToolAttemptEnd::KnownFailed { error } => {
+                    error.kind() == crate::ToolExecutionErrorKind::CrashLost
+                }
+                crate::ToolAttemptEnd::Ambiguous => true,
+            })
+    {
+        return None;
+    }
     let mut denied_requests = BTreeSet::new();
     for resolution in terminal_tool_denials {
         if !matches!(resolution.decision(), ToolApprovalDecision::Deny { .. })
@@ -6146,8 +6165,8 @@ mod tests {
         ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd,
         ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
         ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
-        ToolEffectClass, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
-        ToolResultContent, ToolResultText,
+        ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestOrdinal,
+        ToolRequestReconstitutionInput, ToolResultContent, ToolResultText,
         test_support::{
             accepted_input_id, command_id, context_frontier_id, direct, imported_conversation_id,
             imported_transcript_entry_id, model_call_id, provider_model_identity,
@@ -6892,6 +6911,29 @@ mod tests {
         attempt: crate::ToolAttemptId,
         request: ToolRequestId,
     ) -> crate::EndedToolAttempt {
+        ended_tool_attempt_with_end(
+            session,
+            turn,
+            issuing_attempt,
+            attempt,
+            request,
+            ToolAttemptEnd::Completed {
+                result: ToolResultContent::Text(
+                    ToolResultText::try_new(String::from("ok"))
+                        .expect("fixture tool result is valid"),
+                ),
+            },
+        )
+    }
+
+    fn ended_tool_attempt_with_end(
+        session: &Session,
+        turn: OriginFixture,
+        issuing_attempt: TurnAttemptId,
+        attempt: crate::ToolAttemptId,
+        request: ToolRequestId,
+        end: ToolAttemptEnd,
+    ) -> crate::EndedToolAttempt {
         let reconstituted = ToolAttemptReconstitutionInput::new(
             attempt,
             request,
@@ -6900,12 +6942,7 @@ mod tests {
             issuing_attempt,
             ToolEffectClass::EffectFree,
             ToolDispatchGeneration::first(),
-            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Completed {
-                result: ToolResultContent::Text(
-                    ToolResultText::try_new(String::from("ok"))
-                        .expect("fixture tool result is valid"),
-                ),
-            }),
+            ToolAttemptReconstitutionState::Ended(end),
         )
         .reconstitute()
         .expect("fixture tool attempt is supported");
@@ -9229,6 +9266,56 @@ mod tests {
                 accepted_input: consumed.accepted_input(),
             },
             "a continuation window forbids turn-end closures"
+        );
+
+        let mut ambiguous_attempt = ConsumedSteeringReconstitutionFacts::matching_at_continuation(
+            &session, active, consumed,
+        );
+        ambiguous_attempt.steering_continuation_rounds =
+            vec![SteeringContinuationRoundReconstitutionInput::new(
+                ConsumedSteeringReconstitutionFacts::matching_continuation_call(),
+                vec![ended_tool_attempt_with_end(
+                    &session,
+                    active,
+                    matching_active_attempt(),
+                    ConsumedSteeringReconstitutionFacts::matching_continuation_tool_attempt(),
+                    ConsumedSteeringReconstitutionFacts::matching_continuation_request(),
+                    ToolAttemptEnd::Ambiguous,
+                )],
+                Vec::new(),
+            )];
+        assert_eq!(
+            assert_input_rejects_unchanged(ambiguous_attempt.input()),
+            AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                accepted_input: consumed.accepted_input(),
+            },
+            "an ambiguous attempt end is a turn-level failure and never continues"
+        );
+
+        let mut crash_lost_attempt = ConsumedSteeringReconstitutionFacts::matching_at_continuation(
+            &session, active, consumed,
+        );
+        crash_lost_attempt.steering_continuation_rounds =
+            vec![SteeringContinuationRoundReconstitutionInput::new(
+                ConsumedSteeringReconstitutionFacts::matching_continuation_call(),
+                vec![ended_tool_attempt_with_end(
+                    &session,
+                    active,
+                    matching_active_attempt(),
+                    ConsumedSteeringReconstitutionFacts::matching_continuation_tool_attempt(),
+                    ConsumedSteeringReconstitutionFacts::matching_continuation_request(),
+                    ToolAttemptEnd::KnownFailed {
+                        error: ToolExecutionError::new(ToolExecutionErrorKind::CrashLost, None),
+                    },
+                )],
+                Vec::new(),
+            )];
+        assert_eq!(
+            assert_input_rejects_unchanged(crash_lost_attempt.input()),
+            AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                accepted_input: consumed.accepted_input(),
+            },
+            "a crash-lost attempt end is a turn-level failure and never continues"
         );
     }
 

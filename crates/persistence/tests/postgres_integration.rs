@@ -2387,13 +2387,12 @@ async fn s02_s08_inv016_inv036_steering_consumed_at_continuation_reloads_and_sca
             &mut recovery_ids,
         )
         .await?;
+    let StartupScanSessionOutcome::RecoveredModelCall(recovered) = scan else {
+        panic!("the startup scan classifies the prepared continuation call instead of aborting");
+    };
     assert!(
-        matches!(
-            scan,
-            StartupScanSessionOutcome::RecoveredModelCall(ref outcome)
-                if matches!(**outcome, ModelCallTerminalOutcome::Failed(_))
-        ),
-        "the startup scan classifies the prepared continuation call instead of aborting"
+        matches!(*recovered, ModelCallTerminalOutcome::Failed(_)),
+        "the lost prepared continuation call closes as a known failure"
     );
     let recovered_shape: (String, Option<Uuid>) = sqlx::query_as(
         "SELECT terminal_disposition_kind, terminal_model_call_id
@@ -2598,14 +2597,12 @@ async fn s02_s07_s10_inv006_inv037_interrupted_continuation_call_reloads_and_act
         ),
         StartEligibleTurnRepository::new(pool.clone()),
     );
-    assert!(
-        matches!(
-            scheduling_probe.execute(fixture.session).await?,
-            StartEligibleTurnOutcome::Activated(ref activated)
-                if activated.turn() == successor
-        ),
-        "the interrupt successor activates behind the cancelled continuation call"
-    );
+    let StartEligibleTurnOutcome::Activated(activated) =
+        scheduling_probe.execute(fixture.session).await?
+    else {
+        panic!("the interrupt successor activates behind the cancelled continuation call");
+    };
+    assert_eq!(activated.turn(), successor);
 
     pool.close().await;
     drop(container);
