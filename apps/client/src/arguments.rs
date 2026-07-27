@@ -243,7 +243,7 @@ struct CreateReviewTargetArguments {
     provider: String,
     #[arg(long)]
     repository: String,
-    #[arg(long, value_name = "DECIMAL", value_parser = canonical_u64)]
+    #[arg(long, value_name = "DECIMAL", value_parser = positive_canonical_u64)]
     change_request: CanonicalU64,
     #[arg(long)]
     head_revision: String,
@@ -954,6 +954,32 @@ mod tests {
         Arguments, Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome,
         SessionMetadataPageRequest, UsageError, parse,
     };
+
+    #[test]
+    fn review_target_rejects_zero_change_request_number() {
+        const TARGET_ID: &str = "00000000-0000-0000-0000-000000000001";
+
+        let result = parse(
+            [
+                "review",
+                "create-target",
+                TARGET_ID,
+                "--provider",
+                "example-host",
+                "--repository",
+                "owner/repository",
+                "--change-request",
+                "0",
+                "--head-revision",
+                "head",
+                "--base-revision",
+                "base",
+            ]
+            .map(Into::into),
+        );
+
+        assert!(result.is_err());
+    }
 
     #[test]
     fn send_recovery_flags_are_an_exact_pair() {

@@ -385,13 +385,27 @@ async fn serve_connection(
         } else {
             None
         };
+        let Some((frame_buffer_permit, review_command_permit)) =
+            acquire_review_command_permit_while_buffered(
+                ReviewCommandAdmission::for_request(&request),
+                frame_buffer_permit,
+                Arc::clone(&services.review_command_budget),
+                &mut shutdown,
+            )
+            .await?
+        else {
+            return Ok(());
+        };
         drop(frame_buffer_permit);
         handle_request(
             &mut writer,
             version,
             request_id,
             request,
-            import_permit,
+            ConnectionRequestPermits {
+                import: import_permit,
+                review: review_command_permit,
+            },
             &services,
             shutdown.clone(),
         )
@@ -468,6 +482,40 @@ async fn acquire_review_command_permit(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReviewCommandAdmission {
+    Required,
+    NotRequired,
+}
+
+impl ReviewCommandAdmission {
+    const fn for_request(request: &ClientRequest) -> Self {
+        if is_review_mutation(request) {
+            Self::Required
+        } else {
+            Self::NotRequired
+        }
+    }
+}
+
+async fn acquire_review_command_permit_while_buffered(
+    review_admission: ReviewCommandAdmission,
+    frame_buffer_permit: OwnedSemaphorePermit,
+    budget: Arc<Semaphore>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<Option<(OwnedSemaphorePermit, Option<OwnedSemaphorePermit>)>, ProcessConnectionError> {
+    let review_command_permit = match review_admission {
+        ReviewCommandAdmission::Required => {
+            let Some(permit) = acquire_review_command_permit(budget, shutdown).await? else {
+                return Ok(None);
+            };
+            Some(permit)
+        }
+        ReviewCommandAdmission::NotRequired => None,
+    };
+    Ok(Some((frame_buffer_permit, review_command_permit)))
+}
+
 fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
     let available =
         max_pool_connections.checked_sub(RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS)?;
@@ -541,12 +589,17 @@ where
     }
 }
 
+struct ConnectionRequestPermits {
+    import: Option<OwnedSemaphorePermit>,
+    review: Option<OwnedSemaphorePermit>,
+}
+
 async fn handle_request<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
     request: ClientRequest,
-    import_permit: Option<OwnedSemaphorePermit>,
+    permits: ConnectionRequestPermits,
     services: &ConnectionServices,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
@@ -554,19 +607,11 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let review_request = is_review_mutation(&request);
-    let mut review_command_permit = if review_request {
-        let Some(permit) = acquire_review_command_permit(
-            Arc::clone(&services.review_command_budget),
-            &mut shutdown,
-        )
-        .await?
-        else {
-            return Ok(());
-        };
-        Some(permit)
-    } else {
-        None
-    };
+    let ConnectionRequestPermits {
+        import: import_permit,
+        review: mut review_command_permit,
+    } = permits;
+    debug_assert_eq!(review_request, review_command_permit.is_some());
     let review_digest = if review_request {
         serde_json::to_vec(&request).ok().map(|bytes| {
             let digest: [u8; 32] = Sha256::digest(bytes).into();
@@ -6223,9 +6268,10 @@ mod tests {
         MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS,
         MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES, OperationalImportError, ProcessConnectionError,
         ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
-        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, SelectedSessionRepresentationFacts,
-        SnapshotSpoolError, acquire_import_permit, acquire_inbound_frame_permit,
-        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
+        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, ReviewCommandAdmission,
+        SelectedSessionRepresentationFacts, SnapshotSpoolError, acquire_import_permit,
+        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
+        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
         acquire_snapshot_reader_permit, admitted_user_content, execute_import,
         inspect_connection_completion, map_rejection, read_frame_line,
         replacement_model_is_admitted, required_protocol_version_for_selected_session,
@@ -6726,6 +6772,38 @@ max_output_tokens = 256
                 .await?
                 .is_none()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_review_request_retains_its_inbound_frame_slot() -> Result<(), Box<dyn Error>> {
+        let frame_budget = Arc::new(Semaphore::new(1));
+        let review_budget = Arc::new(Semaphore::new(1));
+        let occupied_review = Arc::clone(&review_budget).acquire_owned().await?;
+        let frame_permit = Arc::clone(&frame_budget).acquire_owned().await?;
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let acquire = acquire_review_command_permit_while_buffered(
+            ReviewCommandAdmission::Required,
+            frame_permit,
+            Arc::clone(&review_budget),
+            &mut shutdown_receiver,
+        );
+        tokio::pin!(acquire);
+
+        assert!(
+            timeout(Duration::from_millis(20), &mut acquire)
+                .await
+                .is_err()
+        );
+        assert_eq!(frame_budget.available_permits(), 0);
+        drop(occupied_review);
+        let (held_frame, review_permit) = timeout(Duration::from_secs(1), &mut acquire)
+            .await??
+            .ok_or_else(|| io::Error::other("the admitted request must retain both permits"))?;
+        assert!(review_permit.is_some());
+        assert_eq!(frame_budget.available_permits(), 0);
+        drop(held_frame);
+        assert_eq!(frame_budget.available_permits(), 1);
         Ok(())
     }
 

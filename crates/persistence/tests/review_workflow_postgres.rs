@@ -795,6 +795,64 @@ async fn insert_review_pass_fixture(pool: &PgPool) -> PersistedReviewPassFixture
     }
 }
 
+struct ReviewCommandAdmissionFixture {
+    store: ReviewWorkflowStore,
+    target: ReviewTargetId,
+    run: ReviewRun,
+    pass: ReviewPass,
+    session: SessionId,
+    accepted_input: AcceptedInputId,
+    origin_turn: TurnId,
+}
+
+async fn review_command_admission_fixture(pool: &PgPool) -> ReviewCommandAdmissionFixture {
+    let store = ReviewWorkflowStore::new(pool.clone());
+    let session = SessionId::from_uuid(uuid(0x771));
+    let accepted_input = AcceptedInputId::from_uuid(uuid(0x772));
+    let origin_turn = TurnId::from_uuid(uuid(0x773));
+    insert_active_turn(pool, session, accepted_input, origin_turn).await;
+    let target = ReviewTargetId::from_uuid(uuid(0x774));
+    store
+        .insert_target(
+            &ReviewTarget::try_new(
+                target,
+                key("example-code-host"),
+                key("example/admission-repository"),
+                ReviewTargetSubject::Commit,
+                key("admission-head"),
+                Some(key("admission-base")),
+                None,
+            )
+            .expect("admission target is valid"),
+        )
+        .await
+        .expect("admission target persists");
+    let run_reference = ReviewRunRef::new(target, ReviewRunId::from_uuid(uuid(0x775)));
+    let pass_reference = ReviewPassRef::new(run_reference, ReviewPassId::from_uuid(uuid(0x776)));
+    let mut run = ReviewRun::new(
+        run_reference,
+        ReviewWorkflowKind::ReadOnlyReview,
+        ReviewPolicy::version_one(),
+    );
+    let pass = ReviewPass::try_new(
+        pass_reference,
+        ReviewPassKind::ReadOnlyReview,
+        &mut run,
+        session,
+        ReviewPassAcceptedInputEvidence::new(accepted_input, session, Some(origin_turn)),
+    )
+    .expect("admission pass is valid");
+    ReviewCommandAdmissionFixture {
+        store,
+        target,
+        run,
+        pass,
+        session,
+        accepted_input,
+        origin_turn,
+    }
+}
+
 async fn insert_fixture_pass(
     fixture: &PersistedReviewPassFixture,
     identity: u128,
@@ -6656,6 +6714,100 @@ async fn review_workflow_command_receipts_replay_and_recover() -> Result<(), Box
         store.load_target(recovered_target.id()).await?,
         Some(recovered_target),
     );
+    Ok(())
+}
+
+/// INV-012: a formerly legal run-only commit remains loadable and its exact
+/// command retry completes the admitted pass.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_start_run_recovers_a_loadable_run_only_commit() -> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x777;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = review_command_admission_fixture(&pool).await;
+    fixture.store.insert_run(&fixture.run).await?;
+    let partial = fixture
+        .store
+        .load_run_with_pass(fixture.run.reference().run())
+        .await?
+        .expect("run-only admission remains loadable");
+    assert_eq!(partial.0.reference(), fixture.run.reference());
+    assert_eq!(partial.0.workflow(), fixture.run.workflow());
+    assert_eq!(partial.0.policy(), fixture.run.policy());
+    assert_eq!(partial.0.recorded_pass(), None);
+    assert_eq!(partial.1, None);
+
+    let command = ReviewWorkflowCommand::new(
+        DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY)),
+        [13; 32],
+        ReviewWorkflowOperation::StartRun {
+            run: fixture.run.clone(),
+            pass: fixture.pass.clone(),
+        },
+    );
+    let expected =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::RunStarted {
+            run: fixture.run.reference().run(),
+            pass: fixture.pass.reference().pass(),
+        });
+    let mut service = ReviewWorkflowCommandService::new(fixture.store.clone());
+
+    assert_eq!(service.execute(command).await?, expected);
+    assert_eq!(
+        fixture
+            .store
+            .load_run_with_pass(fixture.run.reference().run())
+            .await?,
+        Some((fixture.run, Some(fixture.pass))),
+    );
+    Ok(())
+}
+
+/// INV-012: a rejected fresh admission cannot leave a run-only aggregate.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_start_run_rolls_back_run_when_pass_admission_fails() -> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x778;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = review_command_admission_fixture(&pool).await;
+    fixture
+        .store
+        .insert_run_and_pass(&fixture.run, &fixture.pass)
+        .await?;
+    let run_reference = ReviewRunRef::new(fixture.target, ReviewRunId::from_uuid(uuid(0x779)));
+    let pass_reference = ReviewPassRef::new(run_reference, ReviewPassId::from_uuid(uuid(0x77a)));
+    let mut rejected_run = ReviewRun::new(
+        run_reference,
+        ReviewWorkflowKind::ReadOnlyReview,
+        ReviewPolicy::version_one(),
+    );
+    let rejected_pass = ReviewPass::try_new(
+        pass_reference,
+        ReviewPassKind::ReadOnlyReview,
+        &mut rejected_run,
+        fixture.session,
+        ReviewPassAcceptedInputEvidence::new(
+            fixture.accepted_input,
+            fixture.session,
+            Some(fixture.origin_turn),
+        ),
+    )
+    .expect("the conflicting pass fixture is domain-valid");
+    let command = ReviewWorkflowCommand::new(
+        DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY)),
+        [14; 32],
+        ReviewWorkflowOperation::StartRun {
+            run: rejected_run,
+            pass: rejected_pass,
+        },
+    );
+    let mut service = ReviewWorkflowCommandService::new(fixture.store.clone());
+
+    assert!(service.execute(command).await.is_err());
+    assert_eq!(fixture.store.load_run(run_reference.run()).await?, None);
+    assert_eq!(fixture.store.load_pass(pass_reference.pass()).await?, None);
     Ok(())
 }
 

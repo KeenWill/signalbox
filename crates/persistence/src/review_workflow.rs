@@ -309,6 +309,74 @@ impl ReviewWorkflowStore {
         Ok(())
     }
 
+    /// Inserts one queued run and its first queued pass atomically.
+    pub async fn insert_run_and_pass(
+        &self,
+        run: &ReviewRun,
+        pass: &ReviewPass,
+    ) -> Result<(), ReviewWorkflowStoreError> {
+        if run.state() != ReviewRunState::Queued {
+            return Err(ReviewWorkflowStoreError::InvalidInsertion(
+                ReviewWorkflowInsertionError::RunNotQueued {
+                    state: Box::new(run.state()),
+                },
+            ));
+        }
+        if pass.state() != &ReviewPassState::Queued {
+            return Err(ReviewWorkflowStoreError::InvalidInsertion(
+                ReviewWorkflowInsertionError::PassNotQueued {
+                    state: Box::new(pass.state().clone()),
+                },
+            ));
+        }
+        let (run_state_kind, run_state_pass_id) = encode_run_state(run.state());
+        let policy = run.policy();
+        let pass_state = encode_pass_state(pass.state());
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO review_run
+                (run_id, target_id, workflow_kind, policy_version,
+                 minimum_judge_confidence, minimum_publication_confidence,
+                 state_kind, state_pass_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(run.reference().run().into_uuid())
+        .bind(run.reference().target().into_uuid())
+        .bind(encode_workflow_kind(run.workflow()))
+        .bind(i64::from(policy.version().get()))
+        .bind(i32::from(policy.minimum_judge_confidence().basis_points()))
+        .bind(i32::from(
+            policy.minimum_publication_confidence().basis_points(),
+        ))
+        .bind(run_state_kind)
+        .bind(run_state_pass_id.map(ReviewPassId::into_uuid))
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO review_pass
+                (pass_id, run_id, target_id, pass_kind, session_id,
+                 accepted_input_id, origin_turn_id, state_kind, turn_id,
+                 output_frontier_id)
+             VALUES (
+                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+             )",
+        )
+        .bind(pass.reference().pass().into_uuid())
+        .bind(pass.reference().run().run().into_uuid())
+        .bind(pass.reference().target().into_uuid())
+        .bind(encode_pass_kind(pass.kind()))
+        .bind(pass.session().into_uuid())
+        .bind(pass.accepted_input().into_uuid())
+        .bind(pass.origin_turn().into_uuid())
+        .bind(pass_state.kind)
+        .bind(pass_state.turn.map(TurnId::into_uuid))
+        .bind(pass_state.frontier.map(ContextFrontierId::into_uuid))
+        .execute(&mut *transaction)
+        .await?;
+        commit_mutation(transaction).await?;
+        Ok(())
+    }
+
     /// Loads and validates one pass projection.
     pub async fn load_pass(
         &self,

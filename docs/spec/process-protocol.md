@@ -259,19 +259,27 @@ frame version and request identity are excluded. The typed append-only receipt
 stores the complete stable success response. A recorded receipt is inspected
 before mutable aggregate-state preconditions, so an equal retry returns that
 response even after the operation changed the aggregate state. Each aggregate
-effect uses its owning store transaction. If that effect commits before the
-receipt and the process exits, an equal retry recognizes the exact complete
-effect, records the missing receipt, and returns the stable result. Reusing the
-command identity for a different digest, operation kind, aggregate payload,
-complete inventory, event, or attachment fails closed. The
+effect uses its owning store transaction. Fresh run admission creates its run
+and sole pass in one transaction; recovery also recognizes and completes a
+matching run-only intermediate committed by the earlier multi-transaction
+implementation. The
+[atomic run-admission decision](../decisions.md#2026-07-26--admit-review-run-and-pass-roots-atomically)
+owns this refinement. If an effect commits before the receipt and the process
+exits, an equal retry recognizes the exact complete effect, records the missing
+receipt, and returns the stable result. Reusing the command identity for a
+different digest, operation kind, aggregate payload, complete inventory, event,
+or attachment fails closed. The
 [durable review-command decision](../decisions.md#2026-07-26--recover-review-commands-from-their-exact-aggregate-effects)
 owns this representation choice.
 
 The daemon admits one review mutation at a time and retains that admission
-through claim inspection, aggregate effect recovery, and receipt recording.
-Review reads remain concurrent. This bound composes with the snapshot-reader
-reservation so an open claim cannot form a circular pool wait with its nested
-aggregate transaction; the
+through claim inspection, aggregate effect recovery, and receipt recording. A
+decoded review mutation retains its inbound-frame budget slot while it waits for
+that admission, so queued maximum-size requests remain inside the same 64 MiB
+aggregate frame budget; the frame slot is released after the review permit is
+acquired and before application handling. Review reads remain concurrent. This
+bound composes with the snapshot-reader reservation so an open claim cannot form
+a circular pool wait with its nested aggregate transaction; the
 [review-command admission decision](../decisions.md#2026-07-26--serialize-durable-review-command-claims)
 owns the capacity choice.
 
@@ -622,9 +630,9 @@ the exact command identity and payload to discover the recorded outcome. A
 `reconcile_turn` or `decide_tool_request` retry reaches that recorded outcome
 unconditionally, because a claimed command identity bypasses the precondition
 the first handling already satisfied. Once a review aggregate effect has been
-applied or recovered, any typed-receipt insertion or claim-commit failure is
-likewise `commit_ambiguous`. A definitely pre-commit infrastructure failure maps
-to `unavailable`.
+applied or recovered, any database failure during post-effect verification,
+typed-receipt insertion, or claim commit is likewise `commit_ambiguous`. A
+definitely pre-commit infrastructure failure maps to `unavailable`.
 
 Conversation import carries no durable command identity because exact
 format-and-source replay already resolves through the import digest. A selected
@@ -1073,10 +1081,16 @@ reconnects for a fresh snapshot.
 
 Review mutations print a generated command identity before socket I/O and an
 ambiguous diagnostic directs the operator to repeat the same verb, identifiers,
-and content with that identity. Review reads validate selected identities;
-finding lists additionally validate their start marker, strict identity order,
-terminal count, and end marker before success. Every process-derived review text
-field follows the same terminal-safe escaping and `--raw-output` opt-in below.
+and content with that identity. Review reads validate selected identities and a
+run response's pass presence, pass identity, run ancestry, and target ancestry
+before writing output; finding lists additionally validate their start marker,
+strict identity order, terminal count, and end marker before success. Every
+process-derived review text field follows the same terminal-safe escaping and
+`--raw-output` opt-in below. Target output distinguishes an absent base revision
+from every present value, run output carries its complete frozen policy, and
+finding output carries every immutable content field, location, severity,
+confidence, category, optional-repair presence, ancestry identity, status, and
+event count.
 
 The client validates each complete snapshot and its terminal counts into an
 owner-private anonymous temporary-file spool before replay or presentation. Turn

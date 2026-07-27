@@ -366,12 +366,14 @@ identity-ordered run finding list. Exact wire shapes and compatibility are owned
 by [the process protocol](process-protocol.md#client-requests).
 
 Starting a run requires an existing target plus an accepted input whose
-canonical session and origin turn agree with the requested pass. Run and pass
-admission is crash-recoverable: either valid root may precede the other, and an
-exact retry completes the pair. Activation requires that origin turn to be the
-session's canonical active turn and atomically projects the run and pass to
-running. Completion requests authenticate the named turn's canonical terminal
-outcome and output frontier before entering the aggregate transaction.
+canonical session and origin turn agree with the requested pass. Fresh run and
+pass admission commits both valid roots in one transaction. An exact retry may
+also complete a compatible run-only intermediate committed by the earlier
+multi-transaction implementation; every such intermediate remains loadable.
+Activation requires that origin turn to be the session's canonical active turn
+and atomically projects the run and pass to running. Completion requests
+authenticate the named turn's canonical terminal outcome and output frontier
+before entering the aggregate transaction.
 
 Read-only success is admission-atomic. The public command that records findings
 transitions the run and pass to succeeded, binds `ProducedFindings`, and inserts

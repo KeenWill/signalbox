@@ -22,8 +22,9 @@ use rustix::{
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportFormat,
     ConversationImportSource, ErrorCode, InputContent, MAX_FRAME_BYTES, ModelCallDisposition,
-    ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
-    ToolDecision, TurnState, decode_server_line, encode_server_line,
+    ModelCallState, ModelSelection, ReviewPassSnapshot, ReviewRunSnapshot, ServerFrame,
+    ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_server_line,
+    encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -1849,7 +1850,10 @@ async fn review(
                 .request(ClientRequest::ReadReviewRun { run_id })
                 .await?;
             match connection.message().await? {
-                ServerMessage::ReviewRun { run, pass } if run.run_id == run_id => {
+                ServerMessage::ReviewRun { run, pass }
+                    if run.run_id == run_id
+                        && review_run_response_is_coherent(&run, pass.as_ref()) =>
+                {
                     output.review_run(&run, pass.as_ref())?;
                     Ok(())
                 }
@@ -1965,6 +1969,19 @@ async fn review(
     }
 }
 
+fn review_run_response_is_coherent(
+    run: &ReviewRunSnapshot,
+    pass: Option<&ReviewPassSnapshot>,
+) -> bool {
+    match (run.pass_id, pass) {
+        (None, None) => true,
+        (Some(pass_id), Some(pass)) => {
+            pass.pass_id == pass_id && pass.run_id == run.run_id && pass.target_id == run.target_id
+        }
+        (None, Some(_)) | (Some(_), None) => false,
+    }
+}
+
 fn review_command_identity(
     output: &mut Output<'_>,
     supplied: Option<CommandId>,
@@ -2011,8 +2028,10 @@ mod tests {
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, InputContent, ModelCallDisposition,
         ModelCallState, ModelSelection, ReviewFindingInput, ReviewFindingSnapshot,
-        ReviewFindingStatus, ReviewSeverity, ServerFrame, ServerMessage, SessionEvent,
-        ToolBatchState, ToolDecision, TurnState, decode_client_line, encode_server_line,
+        ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot,
+        ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame,
+        ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
+        encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -2030,6 +2049,33 @@ mod tests {
         terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
+
+    #[test]
+    fn coherent_review_run_response_is_accepted() {
+        let pass = review_pass_snapshot();
+        let run = review_run_snapshot(Some(pass.pass_id));
+
+        assert!(super::review_run_response_is_coherent(&run, Some(&pass)));
+    }
+
+    #[test]
+    fn review_run_response_rejects_a_missing_recorded_pass() {
+        let recorded_pass = review_pass_snapshot();
+        let run = review_run_snapshot(Some(recorded_pass.pass_id));
+
+        assert!(!super::review_run_response_is_coherent(&run, None));
+    }
+
+    #[test]
+    fn review_run_response_rejects_cross_wired_pass_ancestry() {
+        const FOREIGN_TARGET_IDENTITY: u128 = 4;
+
+        let mut pass = review_pass_snapshot();
+        let run = review_run_snapshot(Some(pass.pass_id));
+        pass.target_id = CanonicalUuid::from_uuid(Uuid::from_u128(FOREIGN_TARGET_IDENTITY));
+
+        assert!(!super::review_run_response_is_coherent(&run, Some(&pass)));
+    }
 
     #[test]
     fn empty_standard_input_is_rejected() {
@@ -2953,5 +2999,32 @@ mod tests {
         assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
         server.await??;
         Ok(())
+    }
+    fn review_run_snapshot(pass_id: Option<CanonicalUuid>) -> ReviewRunSnapshot {
+        ReviewRunSnapshot {
+            target_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            run_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            workflow: ReviewWorkflow::ReadOnlyReview,
+            policy_version: CanonicalU64::new(1),
+            minimum_judge_confidence: CanonicalU64::new(8_000),
+            minimum_publication_confidence: CanonicalU64::new(9_000),
+            state: ReviewRunLifecycle::Queued,
+            pass_id,
+        }
+    }
+
+    fn review_pass_snapshot() -> ReviewPassSnapshot {
+        ReviewPassSnapshot {
+            pass_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+            run_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            target_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            kind: ReviewPassKind::ReadOnlyReview,
+            session_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+            accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(6)),
+            origin_turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(7)),
+            state: ReviewPassLifecycle::Queued,
+            turn_id: None,
+            output_frontier_id: None,
+        }
     }
 }

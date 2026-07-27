@@ -10,6 +10,56 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Renumber review-command migration after its parent advanced
+
+**Context.** The version-eleven review-command migration was introduced as
+`202607280203` while its stack parent ended at `202607280202`. Before this pull
+request converged, the updated `main` parent acquired
+`202607280301_terminal_continuation_steering_suffix.sql`. Keeping the lower
+unmerged number would introduce new schema history behind a ledger entry an
+upgraded database already records.
+
+**Decision.** Rename the unmerged artifact to
+`202607280302_review_workflow_commands.sql`, strictly above the highest
+migration on its current parent. The migration body and behavior are unchanged.
+
+**Rejected alternatives.** Retaining `202607280203` violates forward-only ledger
+order. Editing or renumbering the migration already merged on `main` rewrites
+published history. Reserving a wider gap adds no protection because every open
+stack must reverify against its ultimate parent before merge.
+
+**Affects.** The review-command migration filename and the implemented migration
+inventory checked by persistence integration tests.
+
+## 2026-07-26 — Admit review run and pass roots atomically
+
+**Context.** The first durable review-command implementation inserted a queued
+run and its sole pass in separate transactions. A crash or a pass uniqueness
+failure after the run commit left a run-only aggregate. That state remained
+domain-valid and loadable, but the command retry compared it with the requested
+run after pass construction had recorded pass evidence and rejected the only
+public recovery path.
+
+**Decision.** Fresh `StartRun` handling validates and inserts the queued run and
+pass in one store transaction. A pass insertion failure therefore rolls back the
+run. Recovery continues to admit a compatible run-only intermediate written by
+the earlier implementation and inserts its pass; both the intermediate and the
+completed aggregate must reconstitute. This supersedes the durable
+review-command decision's statement that run admission intentionally spans
+transactions. The lower-level single-root store operations remain available for
+focused aggregate construction and migration tests; the process surface does not
+build on the dead `transition_pass` operation.
+
+**Rejected alternatives.** Merely loosening replay equality would recover a
+crash-created intermediate but still let a fresh invalid pass strand its run.
+Prechecking accepted-input ownership has a race and cannot replace the database
+constraint. Removing the single-root store operations or unrelated dead
+transition API would broaden this repair beyond command admission.
+
+**Affects.** Review-workflow run/pass persistence and command recovery, the
+version-eleven `start_review_run` process path, its PostgreSQL regressions, and
+the review-workflow and process-protocol specifications.
+
 ## 2026-07-26 — Serialize durable review-command claims
 
 **Context.** A review-command claim holds one application-pool connection while

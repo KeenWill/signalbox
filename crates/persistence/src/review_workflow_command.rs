@@ -172,15 +172,22 @@ async fn apply_or_recover(
             })
         }
         ReviewWorkflowOperation::StartRun { run, pass } => {
-            match store.load_run(run.reference().run()).await? {
-                Some(existing) if same_run_admission(&existing, run) => {}
-                Some(_) => return Err(command_conflict("run identity names another workflow")),
-                None => store.insert_run(run).await?,
-            }
-            match store.load_pass(pass.reference().pass()).await? {
-                Some(existing) if same_pass_admission(&existing, pass) => {}
-                Some(_) => return Err(command_conflict("pass identity names another execution")),
-                None => store.insert_pass(pass).await?,
+            let existing_run = store.load_run(run.reference().run()).await?;
+            let existing_pass = store.load_pass(pass.reference().pass()).await?;
+            match (existing_run, existing_pass) {
+                (Some(existing_run), Some(existing_pass))
+                    if same_run_admission(&existing_run, run)
+                        && same_pass_admission(&existing_pass, pass) => {}
+                (Some(existing_run), None) if same_run_admission(&existing_run, run) => {
+                    store.insert_pass(pass).await?;
+                }
+                (None, None) => store.insert_run_and_pass(run, pass).await?,
+                (Some(_), _) => {
+                    return Err(command_conflict("run identity names another workflow"));
+                }
+                (None, Some(_)) => {
+                    return Err(command_conflict("pass identity names another execution"));
+                }
             }
             Ok(ReviewWorkflowCommandResult::RunStarted {
                 run: run.reference().run(),
@@ -227,7 +234,10 @@ async fn apply_or_recover(
             {
                 store.insert_findings(pass, findings).await?;
             }
-            let loaded = store.list_findings(pass.reference().run().run()).await?;
+            let loaded = store
+                .list_findings(pass.reference().run().run())
+                .await
+                .map_err(post_effect_verification_error)?;
             if !same_finding_inventory(&loaded, findings) {
                 return Err(command_conflict(
                     "finding inventory differs from the recorded result",
@@ -321,7 +331,8 @@ fn same_run_admission(existing: &ReviewRun, requested: &ReviewRun) -> bool {
     existing.reference() == requested.reference()
         && existing.workflow() == requested.workflow()
         && existing.policy() == requested.policy()
-        && existing.recorded_pass() == requested.recorded_pass()
+        && (existing.recorded_pass() == requested.recorded_pass()
+            || (existing.recorded_pass().is_none() && existing.state() == ReviewRunState::Queued))
         && requested.state() == ReviewRunState::Queued
 }
 
@@ -594,6 +605,15 @@ fn registry_error(error: RegistryInspectionError) -> ReviewWorkflowStoreError {
     }
 }
 
+fn post_effect_verification_error(error: ReviewWorkflowStoreError) -> ReviewWorkflowStoreError {
+    match error {
+        ReviewWorkflowStoreError::Database(error) => {
+            ReviewWorkflowStoreError::CommitAmbiguous(error)
+        }
+        error => error,
+    }
+}
+
 fn command_conflict(detail: &str) -> ReviewWorkflowStoreError {
     super::review_workflow::corruption("review_workflow_command", detail.to_owned())
 }
@@ -605,4 +625,24 @@ async fn commit_claim(
         .commit()
         .await
         .map_err(ReviewWorkflowStoreError::CommitAmbiguous)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReviewWorkflowStoreError, post_effect_verification_error};
+
+    #[test]
+    fn post_effect_database_failure_is_commit_ambiguous() {
+        assert_commit_ambiguous(post_effect_verification_error(
+            ReviewWorkflowStoreError::Database(sqlx::Error::PoolClosed),
+        ));
+    }
+
+    #[track_caller]
+    fn assert_commit_ambiguous(error: ReviewWorkflowStoreError) {
+        let ReviewWorkflowStoreError::CommitAmbiguous(source) = error else {
+            panic!("expected commit ambiguity, got {error}");
+        };
+        assert!(matches!(source, sqlx::Error::PoolClosed));
+    }
 }
