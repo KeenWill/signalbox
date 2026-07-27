@@ -398,47 +398,6 @@ impl ReviewWorkflowStore {
         Ok(pass)
     }
 
-    /// Applies one domain-validated pass transition under row lock.
-    pub async fn transition_pass(
-        &self,
-        pass: ReviewPassId,
-        next: ReviewPassState,
-    ) -> Result<Option<ReviewPass>, ReviewWorkflowStoreError> {
-        if pass_state_result(&next).is_some() {
-            return Err(ReviewWorkflowStoreError::NonAtomicPassResult);
-        }
-        let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(crate::lock_inventory::REVIEW_PASS_TRANSITION)
-            .bind(pass.into_uuid())
-            .bind(encode_pass_state(&next).turn.map(TurnId::into_uuid))
-            .fetch_optional(&mut *transaction)
-            .await?;
-        let Some(row) = row else {
-            transaction.rollback().await?;
-            return Ok(None);
-        };
-        let (current, turn_evidence) = decode_pass_for_transition(row)?;
-        let transitioned = current.transition(next, turn_evidence).map_err(|error| {
-            ReviewWorkflowStoreError::InvalidTransition(ReviewWorkflowTransitionError::Pass(error))
-        })?;
-        let state = encode_pass_state(transitioned.state());
-        sqlx::query(
-            "UPDATE review_pass
-                SET state_kind = $2,
-                    turn_id = $3,
-                    output_frontier_id = $4
-              WHERE pass_id = $1",
-        )
-        .bind(pass.into_uuid())
-        .bind(state.kind)
-        .bind(state.turn.map(TurnId::into_uuid))
-        .bind(state.frontier.map(ContextFrontierId::into_uuid))
-        .execute(&mut *transaction)
-        .await?;
-        commit_mutation(transaction).await?;
-        Ok(Some(transitioned))
-    }
-
     /// Applies one pass transition and its matching run projection atomically.
     pub async fn transition_run_and_pass(
         &self,

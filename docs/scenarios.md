@@ -1079,6 +1079,34 @@ those tests.
 - **Remaining questions:** Richer client model discovery and non-Anthropic
   daemon composition remain outside this scenario.
 
+## S34 — Set the session system prompt
+
+- **User intent:** Give one session standing instructions that every model call
+  receives, set at creation or replaced later, without templates or profiles.
+- **Durable commands:** `CreateSession` carries one optional bounded system
+  prompt inside its complete initial defaults. `ReplaceSessionDefaults`
+  compare-and-sets the caller-observed epoch and installs the complete
+  successor, including its optional prompt.
+- **State transitions:** The current defaults pointer advances exactly as for a
+  model change. Turns keep freezing only the epoch version; model-call
+  preparation reads the prompt through that frozen version, and the provider
+  bridge sets the runtime operation's system instructions on every call it
+  prepares. A prompt-only replacement appends no semantic transcript entry.
+- **Transient updates:** None.
+- **Owning component:** The domain owns the bounded prompt value and epoch laws;
+  Postgres stores and constrains it, including digest-keyed command/defaults
+  agreement; protocol version nine and the terminal create/model verbs expose
+  the owner surface.
+- **Failure behavior:** An empty, U+0000-bearing, or over-bound prompt fails
+  before any command identity is claimed. A pre-version-nine replacement
+  targeting a session whose current epoch carries a prompt is refused as
+  requiring version nine before mutation. Stale epochs, conflicting reuse,
+  unknown catalog selections, and commit ambiguity retain their S33 outcomes.
+- **Required invariants:** INV-008, INV-012, INV-033, INV-046.
+- **Remaining questions:** Prompt composition — base, per-use-case, and
+  instruction-file contributions — and templates remain the open
+  configuration-category capability.
+
 ## Coverage note
 
 The accepted foundation decisions govern retry identity and baseline input

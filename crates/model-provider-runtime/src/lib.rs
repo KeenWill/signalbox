@@ -828,6 +828,10 @@ where
             messages,
             ModelSettings::new(definition.max_output_tokens()),
         );
+        // The session system prompt frozen through the calling turn's
+        // defaults epoch rides every operation; adapters translate a `None`
+        // as no system instructions (docs/spec/sessions-and-transcript.md).
+        runtime_operation.system = operation.system_prompt().map(str::to_owned);
         runtime_operation.tools = tools;
         runtime_operation.delivery = DeliveryMode::Streamed;
         match self

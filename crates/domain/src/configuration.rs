@@ -9,7 +9,12 @@
 //! per-turn resources, and interpreting-policy selections are unavailable
 //! baseline capabilities, not latent optional fields. The `Scope` section
 //! on [`EffectiveConfiguration`] lists what these pure values deliberately
-//! omit.
+//! omit. The optional bounded [`SessionSystemPrompt`] lives on the session
+//! defaults value, not in per-turn effective configuration: turns freeze
+//! only the epoch version and calls read the prompt through it
+//! (`docs/spec/sessions-and-transcript.md`).
+
+use core::fmt;
 
 use crate::DangerousToolAutoApproval;
 
@@ -229,11 +234,138 @@ impl SessionConfigurationDefaultsVersion {
     }
 }
 
+/// One exact session-level system prompt.
+///
+/// Admission rejects empty text, any text containing U+0000 (which
+/// PostgreSQL text cannot store), and text whose UTF-8 encoding exceeds
+/// [`Self::MAX_UTF8_BYTES`]. Admitted text is never trimmed, normalized,
+/// case-folded, or otherwise rewritten; equality is the exact ordered
+/// scalar sequence. Absence of a prompt is `Option::None` on the owning
+/// defaults value, never an empty prompt.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct SessionSystemPrompt(String);
+
+impl fmt::Debug for SessionSystemPrompt {
+    /// Renders only the content length: prompt text never reaches logs or
+    /// panic output through `{:?}` (mirroring `ImportedText`).
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionSystemPrompt")
+            .field("utf8_len", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SessionSystemPrompt {
+    /// The admission bound in UTF-8 bytes, mirroring the accepted-input
+    /// content bound (docs/spec/sessions-and-transcript.md).
+    pub const MAX_UTF8_BYTES: usize = 1_048_576;
+
+    /// Checks the admission rules without rewriting the value.
+    pub fn try_new(value: String) -> Result<Self, SessionSystemPromptError> {
+        let failure = if value.is_empty() {
+            Some(SessionSystemPromptFailure::Empty)
+        } else if value.len() > Self::MAX_UTF8_BYTES {
+            Some(SessionSystemPromptFailure::TooLarge { bytes: value.len() })
+        } else if value.contains('\0') {
+            Some(SessionSystemPromptFailure::ContainsNull)
+        } else {
+            None
+        };
+        match failure {
+            Some(failure) => Err(SessionSystemPromptError { value, failure }),
+            None => Ok(Self(value)),
+        }
+    }
+
+    /// Borrows the exact admitted prompt text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the exact admitted prompt text.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+/// Why a session system prompt was not admitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionSystemPromptFailure {
+    /// The prompt was empty; absence is `None`, never empty text.
+    Empty,
+    /// The prompt exceeded the admission bound.
+    TooLarge {
+        /// The observed UTF-8 byte count.
+        bytes: usize,
+    },
+    /// The prompt contained U+0000.
+    ContainsNull,
+}
+
+/// Failed system-prompt construction retaining the rejected value.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SessionSystemPromptError {
+    value: String,
+    failure: SessionSystemPromptFailure,
+}
+
+impl fmt::Debug for SessionSystemPromptError {
+    /// Renders the failure and only the rejected content's length, so `{:?}`
+    /// never leaks the withheld text `Display` also omits.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionSystemPromptError")
+            .field("utf8_len", &self.value.len())
+            .field("failure", &self.failure)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SessionSystemPromptError {
+    /// Borrows the rejected text.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Returns the admission failure.
+    pub const fn failure(&self) -> SessionSystemPromptFailure {
+        self.failure
+    }
+
+    /// Returns the rejected text and failure.
+    pub fn into_parts(self) -> (String, SessionSystemPromptFailure) {
+        (self.value, self.failure)
+    }
+}
+
+impl std::fmt::Display for SessionSystemPromptError {
+    /// Renders the failure without the rejected content.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.failure {
+            SessionSystemPromptFailure::Empty => {
+                write!(f, "a session system prompt cannot be empty")
+            }
+            SessionSystemPromptFailure::TooLarge { bytes } => write!(
+                f,
+                "a session system prompt is {bytes} UTF-8 bytes; the maximum is {}",
+                SessionSystemPrompt::MAX_UTF8_BYTES
+            ),
+            SessionSystemPromptFailure::ContainsNull => {
+                write!(f, "a session system prompt cannot contain U+0000")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SessionSystemPromptError {}
+
 /// One complete normalized model-selection default value.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SessionConfigurationDefaults {
     model: ModelSelectionRequest,
     dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    system_prompt: Option<SessionSystemPrompt>,
 }
 
 impl SessionConfigurationDefaults {
@@ -242,6 +374,7 @@ impl SessionConfigurationDefaults {
         Self {
             model,
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+            system_prompt: None,
         }
     }
 
@@ -253,6 +386,20 @@ impl SessionConfigurationDefaults {
         Self {
             model,
             dangerous_tool_auto_approval,
+            system_prompt: None,
+        }
+    }
+
+    /// Creates a complete defaults value stating every field explicitly.
+    pub const fn complete(
+        model: ModelSelectionRequest,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        system_prompt: Option<SessionSystemPrompt>,
+    ) -> Self {
+        Self {
+            model,
+            dangerous_tool_auto_approval,
+            system_prompt,
         }
     }
 
@@ -265,6 +412,11 @@ impl SessionConfigurationDefaults {
     pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval {
         self.dangerous_tool_auto_approval
     }
+
+    /// Borrows the optional session system prompt.
+    pub const fn system_prompt(&self) -> Option<&SessionSystemPrompt> {
+        self.system_prompt.as_ref()
+    }
 }
 
 /// The current immutable version of a session's model-selection defaults.
@@ -272,7 +424,7 @@ impl SessionConfigurationDefaults {
 /// Replacement installs a complete later version; it never mutates an
 /// existing one. Whether an update affects only subsequently accepted origin
 /// input is an aggregate acceptance rule, not a property of this value.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct VersionedSessionConfigurationDefaults {
     version: SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
@@ -302,7 +454,7 @@ impl VersionedSessionConfigurationDefaults {
 
     /// Installs a complete replacement as the next immutable version, or
     /// `None` when the version counter is exhausted.
-    pub fn replace(self, defaults: SessionConfigurationDefaults) -> Option<Self> {
+    pub fn replace(&self, defaults: SessionConfigurationDefaults) -> Option<Self> {
         Some(Self {
             version: self.version.checked_next()?,
             defaults,
@@ -527,12 +679,78 @@ mod tests {
         FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback,
         ModelParameters, ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-        SessionDefaultsVersionMismatch, TurnConfigurationProvenance,
-        VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
+        SessionDefaultsVersionMismatch, SessionSystemPrompt, SessionSystemPromptFailure,
+        TurnConfigurationProvenance, VersionCheckedConfigurationRequest,
+        VersionedSessionConfigurationDefaults,
     };
     use crate::test_support::{alias, direct, turn_id};
     use crate::{DangerousToolAutoApproval, SteeringBinding};
     use uuid::Uuid;
+
+    /// S34 / INV-046: the session system prompt admits exactly the
+    /// 1,048,576-UTF-8-byte bound, splitting at a multibyte scalar so the
+    /// byte measure is what binds; empty and U+0000-bearing text is rejected
+    /// with the value retained unchanged.
+    #[test]
+    fn s34_inv046_system_prompt_binds_at_the_exact_utf8_byte_bound() {
+        let exact =
+            "y".repeat(SessionSystemPrompt::MAX_UTF8_BYTES - '\u{221a}'.len_utf8()) + "\u{221a}";
+        assert_eq!(exact.len(), SessionSystemPrompt::MAX_UTF8_BYTES);
+        let admitted =
+            SessionSystemPrompt::try_new(exact.clone()).expect("the exact cap is admitted");
+        assert_eq!(admitted.as_str(), exact);
+        assert_eq!(admitted.clone().into_string(), exact);
+
+        let oversized = exact + "y";
+        let oversized_length = oversized.len();
+        let error = SessionSystemPrompt::try_new(oversized.clone())
+            .expect_err("one byte over the cap is rejected");
+        assert_eq!(
+            error.failure(),
+            SessionSystemPromptFailure::TooLarge {
+                bytes: oversized_length,
+            }
+        );
+        assert_eq!(error.value(), oversized);
+
+        let empty = SessionSystemPrompt::try_new(String::new())
+            .expect_err("absence is None, never empty text");
+        assert_eq!(empty.failure(), SessionSystemPromptFailure::Empty);
+
+        let with_null = SessionSystemPrompt::try_new(String::from("a\u{0}b"))
+            .expect_err("PostgreSQL text cannot store U+0000");
+        assert_eq!(
+            with_null.failure(),
+            SessionSystemPromptFailure::ContainsNull
+        );
+        assert_eq!(with_null.into_parts().0, "a\u{0}b");
+    }
+
+    /// S34 / INV-046: the complete defaults value carries the optional prompt
+    /// in structural equality, so an epoch differing only in its prompt is a
+    /// different replacement payload.
+    #[test]
+    fn s34_inv046_defaults_equality_covers_the_system_prompt() {
+        let model = ModelSelectionRequest::Direct(direct(1));
+        let prompt = SessionSystemPrompt::try_new(String::from("exact session instructions"))
+            .expect("test prompt is admissible");
+        let promptless = SessionConfigurationDefaults::complete(
+            model,
+            DangerousToolAutoApproval::Disabled,
+            None,
+        );
+        let prompted = SessionConfigurationDefaults::complete(
+            model,
+            DangerousToolAutoApproval::Disabled,
+            Some(prompt.clone()),
+        );
+
+        assert_eq!(promptless, SessionConfigurationDefaults::new(model));
+        assert_ne!(prompted, promptless);
+        assert_eq!(prompted.system_prompt(), Some(&prompt));
+        assert_eq!(promptless.system_prompt(), None);
+        assert_eq!(prompted.model(), model);
+    }
 
     #[test]
     fn selection_keys_expose_their_uuid_values() {
@@ -701,7 +919,7 @@ mod tests {
     #[test]
     fn session_creation_establishes_defaults_version_one() {
         let initial = defaults(1);
-        let established = VersionedSessionConfigurationDefaults::establish(initial);
+        let established = VersionedSessionConfigurationDefaults::establish(initial.clone());
 
         assert_eq!(
             established.version(),
@@ -720,7 +938,7 @@ mod tests {
         let replacement_version = SessionConfigurationDefaultsVersion(2);
         let established = VersionedSessionConfigurationDefaults::establish(initial);
         let replaced = established
-            .replace(replacement)
+            .replace(replacement.clone())
             .expect("an unexhausted version counter installs the next version");
 
         assert_eq!(established.version(), established_version);

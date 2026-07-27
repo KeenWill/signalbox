@@ -2138,3 +2138,127 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
     drop(container);
     Ok(())
 }
+
+/// S34 / INV-046: the terminal client creates a prompted
+/// session from a file, copies the exact prompt forward through a model-only
+/// replacement, and clears it explicitly, with the immutable epoch rows
+/// holding the exact text throughout.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s34_inv046_terminal_client_carries_the_session_system_prompt() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = postgres().await?;
+    let socket_directory = SocketDirectory::create()?;
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let listener = LocalProcessListener::bind(socket_directory.socket())?;
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        InProcessToolDispatchGate::default(),
+        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+    );
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
+    let first_selection = Uuid::from_u128(1).hyphenated().to_string();
+    let second_selection = Uuid::from_u128(3).hyphenated().to_string();
+    let prompt_text = "exact review instructions\nsecond exact line\n";
+    let prompt_directory = tempfile::tempdir()?;
+    let prompt_path = prompt_directory.path().join("system-prompt.txt");
+    std::fs::write(&prompt_path, prompt_text)?;
+
+    let created = run_client(
+        socket_directory.socket().to_owned(),
+        vec![
+            String::from("create"),
+            String::from("--model"),
+            first_selection.clone(),
+            String::from("--system-prompt-file"),
+            prompt_path.display().to_string(),
+        ],
+        None,
+    )
+    .await?;
+    assert!(created.status.success());
+    let session_id = String::from_utf8(created.stdout)?.trim().to_owned();
+    let session_uuid = Uuid::parse_str(&session_id)?;
+
+    let stored_initial: Option<String> = sqlx::query_scalar(
+        "SELECT system_prompt FROM session_defaults_version
+          WHERE session_id = $1 AND version = 1",
+    )
+    .bind(session_uuid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored_initial.as_deref(), Some(prompt_text));
+
+    // A model-only replacement copies the exact prompt forward.
+    let replaced = run_client(
+        socket_directory.socket().to_owned(),
+        vec![
+            String::from("model"),
+            session_id.clone(),
+            String::from("--model"),
+            second_selection.clone(),
+        ],
+        None,
+    )
+    .await?;
+    assert!(replaced.status.success());
+    assert_eq!(
+        String::from_utf8(replaced.stdout)?,
+        format!("session={session_id} defaults_version=2 model={second_selection}\n")
+    );
+    let recovery = String::from_utf8(replaced.stderr)?;
+    assert!(recovery.contains("defaults_version=1\n"));
+    assert!(recovery.contains("dangerous_tool_auto_approval=disabled\n"));
+    assert!(!recovery.contains("exact review instructions"));
+    let stored_copied: Option<String> = sqlx::query_scalar(
+        "SELECT system_prompt FROM session_defaults_version
+          WHERE session_id = $1 AND version = 2",
+    )
+    .bind(session_uuid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored_copied.as_deref(), Some(prompt_text));
+
+    // An explicit clear installs a promptless successor while the prompted
+    // epochs remain exact history.
+    let cleared = run_client(
+        socket_directory.socket().to_owned(),
+        vec![
+            String::from("model"),
+            session_id.clone(),
+            String::from("--model"),
+            first_selection.clone(),
+            String::from("--clear-system-prompt"),
+        ],
+        None,
+    )
+    .await?;
+    assert!(cleared.status.success());
+    let stored_cleared: Option<String> = sqlx::query_scalar(
+        "SELECT system_prompt FROM session_defaults_version
+          WHERE session_id = $1 AND version = 3",
+    )
+    .bind(session_uuid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored_cleared, None);
+    let stored_history: Option<String> = sqlx::query_scalar(
+        "SELECT system_prompt FROM session_defaults_version
+          WHERE session_id = $1 AND version = 1",
+    )
+    .bind(session_uuid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored_history.as_deref(), Some(prompt_text));
+
+    shutdown.send(true)?;
+    timeout(Duration::from_secs(10), process_task).await???;
+    pool.close().await;
+    socket_directory.cleanup()?;
+    drop(container);
+    Ok(())
+}
