@@ -6,8 +6,9 @@ use std::{
 #[cfg(test)]
 use signalbox_process_protocol::ProtocolVersion;
 use signalbox_process_protocol::{
-    CanonicalUuid, ContentFragment, ModelCallTokenUsage, ServerFrame, ServerMessage,
-    TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
+    CanonicalUuid, ContentFragment, MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION, ModelCallTokenUsage,
+    ServerFrame, ServerMessage, TranscriptEntry, TranscriptTextEntry, TurnState,
+    decode_server_line, encode_server_line,
 };
 
 use crate::{connection::Connection, error::ClientError};
@@ -198,8 +199,10 @@ pub(crate) async fn read_snapshot(
     let mut turn_count = 0_u64;
     let mut model_call_count = 0_u64;
     let mut entry_count = 0_u64;
+    let requires_model_call_usage =
+        connection.version().as_u64() >= MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION;
     let mut model_calls_started = false;
-    let mut model_calls_ended = false;
+    let mut model_calls_ended = !requires_model_call_usage;
     let mut entries_started = false;
     loop {
         let frame = connection.frame().await?;
