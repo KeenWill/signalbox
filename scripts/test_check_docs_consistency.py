@@ -1013,6 +1013,45 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("src/uncited.rs", failures[0].message)
 
+    def test_cyclic_module_declarations_terminate(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            "mod first;\n", encoding="utf-8"
+        )
+        (self.root / "src/first.rs").write_text(
+            '#[path = "second.rs"]\nmod inv_001;\n', encoding="utf-8"
+        )
+        (self.root / "src/second.rs").write_text(
+            '#[path = "first.rs"]\nmod back;\n#[test]\nfn rejects() {}\n',
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/second.rs", failures[0].message)
+
+    def test_parent_relative_module_path_resolves(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            "mod nested;\n", encoding="utf-8"
+        )
+        (self.root / "src/nested.rs").write_text(
+            '#[path = "../outer.rs"]\nmod inv_001;\n', encoding="utf-8"
+        )
+        (self.root / "outer.rs").write_text(
+            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("outer.rs", failures[0].message)
+
     def test_reference_style_citation_keeps_occurrence_order(self) -> None:
         (self.root / "src/tagged.rs").write_text(
             "#[test]\nfn s01_inv_001_tagged_test() {}\n",

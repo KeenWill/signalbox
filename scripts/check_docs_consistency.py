@@ -2034,7 +2034,9 @@ def rust_module_child(
         relatives = [f"{name}.rs", f"{name}/mod.rs"]
     for directory in directories:
         for relative in relatives:
-            candidate = directory / relative
+            # Normalized lexically so a `..` in `#[path]` still names the same
+            # entry the file scan produced, without resolving symlinks.
+            candidate = Path(os.path.normpath(directory / relative))
             if candidate.is_file():
                 return candidate
     return None
@@ -2047,9 +2049,10 @@ def rust_module_prefixes(
 
     A file several active declarations reach keeps every one of those paths,
     since the harness registers its tests once under each. Paths are visited
-    breadth-first from the files no declaration reaches and each is recorded
-    once, so a cyclic or repeated declaration terminates and the result never
-    depends on filesystem iteration order.
+    breadth-first from the files no declaration reaches, and a path never
+    revisits a file it already contains, so only simple paths are walked and
+    a cyclic declaration terminates instead of growing forever. Recording each
+    path once keeps the result independent of filesystem iteration order.
     """
     children: dict[Path, list[tuple[str, Path]]] = {}
     declared: set[Path] = set()
@@ -2075,15 +2078,21 @@ def rust_module_prefixes(
             declared.add(child)
 
     prefixes: dict[Path, list[tuple[str, ...]]] = {}
-    pending = [(source, ()) for source in sources if source not in declared]
+    pending: list[tuple[Path, tuple[str, ...], frozenset[Path]]] = [
+        (source, (), frozenset({source}))
+        for source in sources
+        if source not in declared
+    ]
     while pending:
-        source, prefix = pending.pop(0)
+        source, prefix, walked = pending.pop(0)
         recorded = prefixes.setdefault(source, [])
         if prefix in recorded:
             continue
         recorded.append(prefix)
         for name, child in children.get(source, []):
-            pending.append((child, (*prefix, name)))
+            if child in walked:
+                continue
+            pending.append((child, (*prefix, name), walked | {child}))
     return {source: tuple(paths) for source, paths in prefixes.items()}
 
 
