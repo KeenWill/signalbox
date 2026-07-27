@@ -185,6 +185,11 @@ BEFORE UPDATE OR DELETE ON runner_enrollment_audit_allowed_class
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE TRIGGER runner_enrollment_audit_allowed_class_rejects_truncate
+BEFORE TRUNCATE ON runner_enrollment_audit_allowed_class
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
+
 CREATE FUNCTION require_runner_enrollment_audit_installed()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -2820,10 +2825,12 @@ BEGIN
       JOIN runner_session_placement_record AS record
         ON record.session_id = current_placement.session_id
        AND record.event_ordinal = current_placement.event_ordinal
-     WHERE current_placement.session_id = NEW.session_id;
+     WHERE current_placement.session_id = NEW.session_id
+       FOR SHARE OF current_placement;
     SELECT state_kind INTO enrollment_state
       FROM runner_enrollment
-     WHERE enrollment_id = NEW.registration_enrollment_id;
+     WHERE enrollment_id = NEW.registration_enrollment_id
+       FOR SHARE;
     SELECT request.tool_name, attempt.effect_class, attempt.state_kind,
            attempt.request_id
       INTO attempted_tool, attempted_effect, attempted_state, attempted_request

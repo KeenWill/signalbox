@@ -581,6 +581,54 @@ async fn stored_later_lease_fixture(
     Ok((store, expected_enrollment, registration, pin, lease))
 }
 
+async fn insert_lease_generation_direct(
+    pool: &PgPool,
+    lease: &RunnerLease,
+) -> Result<(), sqlx::Error> {
+    let correlation = lease.correlation();
+    sqlx::query(
+        "INSERT INTO runner_lease_generation
+            (lease_id, generation, attempt_id, session_id, runner_id,
+             tool_name, effect_class, placement_event_ordinal,
+             registration_enrollment_id, registration_revision,
+             credential_profile_name,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision, credential_approval_kind,
+             predecessor_generation)
+         SELECT $1, $2, $3, record.session_id, $4,
+                $5, registered.effect_class, record.event_ordinal,
+                record.registration_enrollment_id, record.registration_revision,
+                record.pinned_credential_profile_name,
+                record.credential_grant_lineage_origin_ordinal,
+                record.credential_grant_revision, approval.approval_kind, NULL
+           FROM runner_current_session_placement AS current_placement
+           JOIN runner_session_placement_record AS record
+             ON record.session_id = current_placement.session_id
+            AND record.event_ordinal = current_placement.event_ordinal
+           JOIN runner_registration_tool AS registered
+             ON registered.enrollment_id = record.registration_enrollment_id
+            AND registered.registration_revision = record.registration_revision
+            AND registered.tool_name = $5
+           LEFT JOIN runner_credential_grant_tool AS approval
+             ON approval.session_id = record.session_id
+            AND approval.lineage_origin_event_ordinal =
+                record.credential_grant_lineage_origin_ordinal
+            AND approval.runner_id = record.pinned_runner_id
+            AND approval.grant_revision = record.credential_grant_revision
+            AND approval.tool_name = $5
+          WHERE current_placement.session_id = $6",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .bind(correlation.dispatch.attempt().into_uuid())
+    .bind(correlation.runner.into_uuid())
+    .bind(correlation.tool.as_str())
+    .bind(correlation.dispatch.session().into_uuid())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn insert_session_for(pool: &PgPool, session: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query("ALTER TABLE session DISABLE TRIGGER ALL")
         .execute(pool)
@@ -1411,6 +1459,21 @@ async fn s30_inv042_current_registration_head_rejects_truncate() -> Result<(), B
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s30_inv042_enrollment_audit_classes_reject_truncate() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, _) = stored_pin_fixture(&pool).await?;
+    let truncated = sqlx::query("TRUNCATE runner_enrollment_audit_allowed_class")
+        .execute(&pool)
+        .await
+        .expect_err("immutable enrollment audit classes cannot be truncated");
+
+    assert_check_violation(truncated);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s30_inv042_registration_inventories_reject_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, _) = stored_pin_fixture(&pool).await?;
@@ -1666,6 +1729,58 @@ async fn s31_inv042_concurrent_enrollment_revocation_blocks_a_later_lease()
         .expect_err("a concurrently revoked enrollment cannot authorize the lease");
 
     assert_store_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s31_inv042_direct_lease_admission_serializes_enrollment_revocation()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let enrollment = expected_enrollment.enrollment().into_uuid();
+    let mut revocation = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_enrollment_audit
+            (enrollment_id, revision, runner_id,
+             authentication_reference_id, allowed_class_count, state_kind)
+         SELECT enrollment_id, 2, runner_id,
+                authentication_reference_id, allowed_class_count, 'revoked'
+           FROM runner_enrollment_audit
+          WHERE enrollment_id = $1 AND revision = 1",
+    )
+    .bind(enrollment)
+    .execute(&mut *revocation)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_enrollment_audit_allowed_class
+            (enrollment_id, revision, capability_class)
+         SELECT enrollment_id, 2, capability_class
+           FROM runner_enrollment_audit_allowed_class
+          WHERE enrollment_id = $1 AND revision = 1",
+    )
+    .bind(enrollment)
+    .execute(&mut *revocation)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_enrollment
+            SET revision = 2, state_kind = 'revoked'
+          WHERE enrollment_id = $1",
+    )
+    .bind(enrollment)
+    .execute(&mut *revocation)
+    .await?;
+    let mut direct_admission = Box::pin(insert_lease_generation_direct(&pool, &lease));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut direct_admission)
+        .await
+        .expect_err("the trigger must wait for direct enrollment revocation");
+    revocation.commit().await?;
+    let rejected = direct_admission
+        .await
+        .expect_err("a directly inserted lease cannot use revoked enrollment authority");
+
+    assert_check_violation(rejected);
     drop(pool);
     Ok(())
 }
@@ -2442,6 +2557,35 @@ async fn s32_inv044_loaded_placement_retains_reconciliation_registration()
     assert_eq!(reloaded.placement(), &lost);
     assert_eq!(reloaded.registration(), Some(&historical));
     assert_eq!(reloaded.grant(), pin.grant.as_ref());
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv044_direct_lease_admission_serializes_runner_loss() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin, lease) = stored_later_lease_fixture(&pool).await?;
+    let mut runner_loss = pool.begin().await?;
+    append_runner_lost_without_advancing_head(&mut runner_loss, pin.placement.session()).await?;
+    sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = event_ordinal + 1
+          WHERE session_id = $1",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .execute(&mut *runner_loss)
+    .await?;
+    let mut direct_admission = Box::pin(insert_lease_generation_direct(&pool, &lease));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut direct_admission)
+        .await
+        .expect_err("the trigger must wait for the placement head transition");
+    runner_loss.commit().await?;
+    let rejected = direct_admission
+        .await
+        .expect_err("a directly inserted lease cannot use the lost runner placement");
+
+    assert_check_violation(rejected);
     drop(pool);
     Ok(())
 }
@@ -3459,8 +3603,35 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
         lost.lost().state(),
         signalbox_domain::RunnerLeaseState::LostClaimed
     );
-    let prepared_replacement =
+    let initially_prepared =
         authorize_fixture_claimed_retry(&store, &lost, ToolEffectClass::EffectFree).await?;
+    let reserved = store
+        .load_claimed_retry_attempt_reservation(
+            RunnerLeaseId::from_uuid(uuid(LEASE)),
+            RunnerGeneration::one(),
+        )
+        .await?
+        .expect("the interrupted retry retains its exact durable reservation");
+    assert_eq!(reserved, initially_prepared.replacement());
+    let resumable_loss = store
+        .load_lease_loss(
+            RunnerLeaseId::from_uuid(uuid(LEASE)),
+            RunnerGeneration::one(),
+        )
+        .await?
+        .expect("a reservation without its attempt remains resumable");
+    let resumed_replacement = resumable_loss
+        .retry()
+        .expect("the incomplete reservation has not consumed retry authority")
+        .prepare_claimed_attempt(
+            claimed_batch_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::EffectFree),
+            reserved.attempt(),
+        )
+        .expect("the exact reserved replacement can be reconstructed");
+    store
+        .store_claimed_retry_attempt_authority(&resumable_loss, &resumed_replacement)
+        .await?;
+    insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
     let consumed_loss = store
         .load_lease_loss(
             RunnerLeaseId::from_uuid(uuid(LEASE)),
@@ -3475,15 +3646,14 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
             claimed_batch_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::EffectFree),
             ToolAttemptId::from_uuid(uuid(RETRY_ATTEMPT)),
         );
-    insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
-    let (_batch, _retired, retry_authorization) = prepared_replacement.into_parts();
+    let (_batch, _retired, retry_authorization) = resumed_replacement.into_parts();
     let retry = pin
         .placement
         .offer_retry(
             &expected_enrollment,
             registration.registration(),
             pin.grant.as_ref(),
-            lost,
+            resumable_loss,
             retry_authorization,
         )
         .expect("claimed pure work requires a fresh physical attempt");

@@ -3213,13 +3213,7 @@ impl CurrentToolAttempt {
     // generation(), state()
 }
 pub struct AuthorizedToolAttempt { /* private */ }
-impl AuthorizedToolAttempt {
-    pub fn reconstitute(
-        attempt: CurrentToolAttempt,
-        recorded_correlation: ToolAttemptDispatchCorrelation,
-    ) -> Result<Self, ToolAttemptTransitionError>;
-    // accessors: attempt(), correlation(), into_parts()
-}
+// accessors: attempt(), correlation(), into_parts()
 pub struct EndedToolAttempt { /* private */ }
 // accessors: attempt(), request(), session(), turn(), issuing_attempt(), effect_class(),
 // generation(), end()

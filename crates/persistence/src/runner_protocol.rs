@@ -679,7 +679,8 @@ impl RunnerProtocolStore {
             .await
     }
 
-    /// Durably consumes one retryable claimed loss for an exact replacement attempt.
+    /// Durably reserves one retryable claimed loss for an exact replacement attempt.
+    /// Replaying the same reservation is idempotent after an interrupted write sequence.
     pub async fn store_claimed_retry_attempt_authority(
         &self,
         loss: &RunnerLeaseLoss,
@@ -699,13 +700,14 @@ impl RunnerProtocolStore {
         }
         let replacement = replacement.replacement();
         let mut transaction = self.pool.begin().await?;
-        sqlx::query(
+        let inserted = sqlx::query(
             "INSERT INTO runner_claimed_retry_attempt_authority
                 (source_lease_id, source_generation,
                  replacement_attempt_id, replacement_session_id,
                  replacement_turn_id, replacement_issuing_turn_attempt_id,
                  replacement_request_id, replacement_dispatch_generation)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (source_lease_id, source_generation) DO NOTHING",
         )
         .bind(source.lease.into_uuid())
         .bind(Decimal::from(source.generation.get()))
@@ -717,7 +719,74 @@ impl RunnerProtocolStore {
         .bind(Decimal::from(replacement.generation().as_u64()))
         .execute(&mut *transaction)
         .await?;
+        if inserted.rows_affected() == 0 {
+            let reserved = sqlx::query(
+                "SELECT replacement_attempt_id, replacement_session_id,
+                        replacement_turn_id, replacement_issuing_turn_attempt_id,
+                        replacement_request_id, replacement_dispatch_generation
+                   FROM runner_claimed_retry_attempt_authority
+                  WHERE source_lease_id = $1 AND source_generation = $2",
+            )
+            .bind(source.lease.into_uuid())
+            .bind(Decimal::from(source.generation.get()))
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let exact = reserved.is_some_and(|row| {
+                row.get::<Uuid, _>("replacement_attempt_id") == replacement.attempt().into_uuid()
+                    && row.get::<Uuid, _>("replacement_session_id")
+                        == replacement.session().into_uuid()
+                    && row.get::<Uuid, _>("replacement_turn_id") == replacement.turn().into_uuid()
+                    && row.get::<Uuid, _>("replacement_issuing_turn_attempt_id")
+                        == replacement.issuing_attempt().into_uuid()
+                    && row.get::<Uuid, _>("replacement_request_id")
+                        == replacement.request().into_uuid()
+                    && row.get::<Decimal, _>("replacement_dispatch_generation")
+                        == Decimal::from(replacement.generation().as_u64())
+            });
+            if !exact {
+                transaction.rollback().await?;
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::CorrelationMismatch,
+                ));
+            }
+        }
         commit_mutation(transaction).await
+    }
+
+    /// Loads an exact claimed-retry reservation for crash-resumable replay.
+    pub async fn load_claimed_retry_attempt_reservation(
+        &self,
+        lease: RunnerLeaseId,
+        generation: RunnerGeneration,
+    ) -> Result<Option<ToolAttemptDispatchCorrelation>, RunnerProtocolStoreError> {
+        let row = sqlx::query(
+            "SELECT replacement_attempt_id, replacement_session_id,
+                    replacement_turn_id, replacement_issuing_turn_attempt_id,
+                    replacement_request_id, replacement_dispatch_generation
+               FROM runner_claimed_retry_attempt_authority
+              WHERE source_lease_id = $1 AND source_generation = $2",
+        )
+        .bind(lease.into_uuid())
+        .bind(Decimal::from(generation.get()))
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok::<_, RunnerProtocolStoreError>(ToolAttemptDispatchCorrelation::reconstitute(
+                ToolAttemptDispatchCorrelationReconstitutionInput {
+                    session: session_id(row.get("replacement_session_id")),
+                    turn: TurnId::from_uuid(row.get("replacement_turn_id")),
+                    issuing_attempt: TurnAttemptId::from_uuid(
+                        row.get("replacement_issuing_turn_attempt_id"),
+                    ),
+                    request: ToolRequestId::from_uuid(row.get("replacement_request_id")),
+                    attempt: tool_attempt_id(row.get("replacement_attempt_id")),
+                    generation: decode_dispatch_generation(
+                        row.get("replacement_dispatch_generation"),
+                    )?,
+                },
+            ))
+        })
+        .transpose()
     }
 
     async fn store_lease_with_proof(
@@ -928,8 +997,18 @@ impl RunnerProtocolStore {
         let retry_prepared: bool = sqlx::query_scalar(
             "SELECT EXISTS (
                  SELECT 1
-                   FROM runner_claimed_retry_attempt_authority
-                  WHERE source_lease_id = $1 AND source_generation = $2
+                   FROM runner_claimed_retry_attempt_authority AS authority
+                   JOIN tool_attempt AS replacement
+                     ON replacement.attempt_id = authority.replacement_attempt_id
+                    AND replacement.session_id = authority.replacement_session_id
+                    AND replacement.turn_id = authority.replacement_turn_id
+                    AND replacement.issuing_turn_attempt_id =
+                        authority.replacement_issuing_turn_attempt_id
+                    AND replacement.request_id = authority.replacement_request_id
+                    AND replacement.dispatch_generation =
+                        authority.replacement_dispatch_generation
+                  WHERE authority.source_lease_id = $1
+                    AND authority.source_generation = $2
                  UNION ALL
                  SELECT 1
                    FROM runner_lease_generation

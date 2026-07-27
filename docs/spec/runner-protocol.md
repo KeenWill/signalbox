@@ -39,7 +39,11 @@ Revocation flips the enrollment-shared active fence, so an existing validated
 registration becomes non-current for later leases, reconciliation, runner
 replacement, or grant replacement. A lease offer rechecks the active enrollment
 and its exact enrollment, runner, and authentication-reference correlations; a
-lease already offered is unaffected.
+lease already offered is unaffected. The Postgres admission trigger locks the
+current enrollment and placement heads before accepting even a direct lease-row
+insert, so concurrent revocation, runner loss, or runner replacement wins before
+the stale offer can commit. Enrollment audit-class evidence rejects row mutation
+and statement-level truncation.
 
 A registration carries availability claims only:
 
@@ -201,10 +205,14 @@ interpreted as proof either way by transport alone. The Postgres representation
 commits the proof atomically with the lost-unclaimed event and requires it
 before a successor generation can consume that retry path. Claimed retry instead
 requires a durable record binding the complete lost lease correlation to the
-exact fresh physical-attempt dispatch. Without the proof, losing even an
-`Offered` lease conservatively follows the execution-possible law: pure or
-idempotent work requires a fresh physical attempt, while side-effecting work
-requires crash classification.
+exact fresh physical-attempt dispatch. That record is an idempotent reservation:
+if a process exits before the replacement attempt is stored, recovery loads the
+exact reserved dispatch and may replay only that replacement. The loss becomes
+durably consumed once the exact replacement attempt or successor lease
+generation exists; a different replacement cannot overwrite the reservation.
+Without the proof, losing even an `Offered` lease conservatively follows the
+execution-possible law: pure or idempotent work requires a fresh physical
+attempt, while side-effecting work requires crash classification.
 
 With that proof, loss before claim permits every effect class to be re-leased at
 the checked successor lease-lineage generation. Loss after claim follows the
