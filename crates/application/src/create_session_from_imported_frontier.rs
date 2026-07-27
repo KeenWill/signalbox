@@ -652,11 +652,10 @@ mod tests {
         );
 
         let outcome = run_ready(service.execute(request)).expect("handling succeeds");
-        assert!(matches!(
-            outcome,
-            CreateSessionFromImportedFrontierOutcome::Applied(result)
-                if result.session() == expected_session
-        ));
+        let CreateSessionFromImportedFrontierOutcome::Applied(result) = outcome else {
+            panic!("the imported-frontier creation must apply");
+        };
+        assert_eq!(result.session(), expected_session);
 
         let (ids, transaction) = service.into_parts();
         assert_eq!(ids.session_calls, 1);

@@ -676,8 +676,9 @@ admits
 `assistant_tool_use { turn_id, model_call_id, tool_request_id, tool_name, arguments }`,
 `tool_execution_result { tool_request_id, tool_attempt_id, content }`,
 `tool_denied { tool_request_id, content }`, and
-`tool_closed { tool_request_id, content }`. Versions six and nine additionally
-admit `model_identity_changed { turn_id, defaults_version, selected_model_id }`,
+`tool_closed { tool_request_id, content }`. Versions six through nine
+additionally admit
+`model_identity_changed { turn_id, defaults_version, selected_model_id }`,
 naming the first started turn bound to a changed frozen direct selection. A
 native text member begins with
 `transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
@@ -1032,7 +1033,7 @@ assistant text produced for its exact turn. A failed or refused turn produces a
 typed diagnostic and a nonzero exit without reply text; cancelled and
 reconciliation-required turns do the same with their distinct typed diagnostics.
 `follow` prints the initial transcript and subsequent typed durable updates
-until interrupted. Version-six and version-nine snapshots render a model
+until interrupted. Version-six through version-nine snapshots render a model
 boundary as `model_identity_changed` with its turn, defaults version, selected
 model, source session, and entry identity. By default every process-derived text
 field written to a terminal preserves line feed but renders every other C0 code

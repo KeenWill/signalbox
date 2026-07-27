@@ -1618,7 +1618,7 @@ where
                         .ok_or(ProcessConnectionError::EncodeInvariant)?,
                 )
             };
-            write_message_via_spool(
+            write_mutation_receipt_via_spool(
                 writer,
                 version,
                 request_id,
@@ -3601,6 +3601,53 @@ where
         }
     };
     write_spooled_file(writer, &mut file).await
+}
+
+/// Writes one committed mutation receipt through a temporary-file spool.
+///
+/// The receipt's mutation has already durably committed, so a pre-transmission
+/// spool failure must answer `commit_ambiguous` — the caller retries the exact
+/// command identity to discover the recorded outcome — never `unavailable`,
+/// whose contract states no requested mutation may have committed
+/// (docs/spec/process-protocol.md).
+async fn write_mutation_receipt_via_spool<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    message: ServerMessage,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let spool_result = spool_single_message(version, request_id, message).await;
+    let mut file = match spool_result {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(
+                error = %spool_error_display(&error),
+                "committed defaults receipt spooling failed before response"
+            );
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await;
+        }
+    };
+    write_spooled_file(writer, &mut file).await
+}
+
+fn spool_error_display(error: &SnapshotSpoolError) -> String {
+    match error {
+        SnapshotSpoolError::Io(error) => error.to_string(),
+        SnapshotSpoolError::MessageRequiresVersion(required) => {
+            format!("message requires protocol version {required}")
+        }
+        SnapshotSpoolError::Encode(error) => error.to_string(),
+        SnapshotSpoolError::EncodeInvariant => String::from("encode invariant violated"),
+    }
 }
 
 /// Encodes one message into a rewound temporary-file spool, classifying every

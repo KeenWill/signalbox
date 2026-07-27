@@ -9351,16 +9351,14 @@ async fn inv002_inv003_inv008_current_session_corruption_fails_closed() -> Resul
     let malformed_selected = prepared(0x514, 0x914, direct(0x814));
     let unknown_provenance = prepared(0x515, 0x915, direct(0x815));
     let duplicate_projection = prepared(0x516, 0x916, direct(0x816));
-    for creation in [
-        missing_pointer.clone(),
-        invalid_pointer.clone(),
-        missing_selected.clone(),
-        malformed_selected.clone(),
-        unknown_provenance.clone(),
-        duplicate_projection.clone(),
-    ] {
-        create_repository.handle(creation).await?;
-    }
+    create_repository.handle(missing_pointer.clone()).await?;
+    create_repository.handle(invalid_pointer.clone()).await?;
+    create_repository.handle(missing_selected.clone()).await?;
+    create_repository.handle(malformed_selected.clone()).await?;
+    create_repository.handle(unknown_provenance.clone()).await?;
+    create_repository
+        .handle(duplicate_projection.clone())
+        .await?;
 
     sqlx::query(
         "ALTER TABLE session
