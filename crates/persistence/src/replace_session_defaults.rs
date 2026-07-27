@@ -230,7 +230,8 @@ impl ReplaceSessionDefaultsRepository {
             Some(
                 CommandKind::ReplaceSessionMetadata
                 | CommandKind::SubmitInput
-                | CommandKind::DecideToolRequest,
+                | CommandKind::DecideToolRequest
+                | CommandKind::ReviewWorkflow,
             ) => {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id });
@@ -267,7 +268,8 @@ impl ReplaceSessionDefaultsRepository {
                     | CommandKind::CreateSessionFromImportedFrontier
                     | CommandKind::ReplaceSessionMetadata
                     | CommandKind::SubmitInput
-                    | CommandKind::DecideToolRequest,
+                    | CommandKind::DecideToolRequest
+                    | CommandKind::ReviewWorkflow,
                 ) => ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
@@ -349,7 +351,8 @@ impl ReplaceSessionDefaultsRepository {
             Some(
                 CommandKind::ReplaceSessionMetadata
                 | CommandKind::SubmitInput
-                | CommandKind::DecideToolRequest,
+                | CommandKind::DecideToolRequest
+                | CommandKind::ReviewWorkflow,
             ) => Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id }),
         }
     }

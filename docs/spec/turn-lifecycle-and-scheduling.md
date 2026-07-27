@@ -4,9 +4,11 @@ This page specifies the implemented behavior of turns, turn attempts,
 eligibility derivation, the scheduler, and startup recovery, as verified against
 the implementing stack through PR #230 (`agent/frontier-scaling`); the
 parked-approval interrupt delivery outcome was verified through PR #254
-(`agent/fix-parked-approval-interrupt`), and model-identity turn-start
-boundaries were verified through PR #272 (`agent/mid-session-model`). Code
-homes: `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
+(`agent/fix-parked-approval-interrupt`), model-identity turn-start boundaries
+were verified through PR #272 (`agent/mid-session-model`), and the tool-round
+continuation reconstitution and terminal shapes were verified through PR #292
+(`agent/continuation-reconstitution`). Code homes:
+`crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,`
@@ -494,7 +496,13 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   the complete owner-sourced denial resolutions backing every `ToolDenied`
   result entry in the terminal suffix; a `ToolDenied` entry whose request lacks
   an exact `Deny` resolution — including a missing or approving decision — fails
-  reconstitution rather than fabricating an owner denial.
+  reconstitution rather than fabricating an owner denial. A failed turn may
+  instead name the round's own continuation call — created at the continuation
+  boundary and later lost or known-failed. Reconstitution accepts that call
+  exactly when its whole frontier is the completed round's batch-correlated
+  result projection, extended by any steering it consumed, and the terminal
+  frontier extends the call frontier by the failure marker alone; a
+  round-completed continuation window never contains a turn-end closure.
 - A cancelled terminal turn reconstructs only from
   `CancelledTurnExecutionReconstitutionInput`: its exact ended attempt carries
   `AfterCancellation(Cancelled)` and the same complete applied-interrupt result
@@ -507,7 +515,12 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   batch-correlated result entry per request in proposal order before the
   correlated `TurnCancelled` marker. Each `ToolDenied` entry in that suffix is
   batch-correlated only against a named owner-sourced `Deny` resolution for its
-  exact request; a missing or approving decision fails reconstitution.
+  exact request; a missing or approving decision fails reconstitution. A
+  cancelled continuation call — prepared at the continuation boundary and
+  interrupted before or during send — is admitted on the same terms as the
+  failed form: its whole frontier is the completed round's batch-correlated
+  result projection extended by any steering it consumed, and the terminal
+  frontier extends it by the cancellation marker alone.
 - A reconciliation-required terminal turn names its exact ended turn attempt and
   exactly one required terminal `ambiguous` model call or tool attempt. The
   attempt end is either `WithoutStop(Ambiguous|Lost)` with a later
@@ -519,6 +532,18 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   proposal order, with the ambiguous request represented as `ToolClosed`. The
   checked scheduling input validates those correlations before the turn can
   serve as a terminal predecessor.
+- A consumed steering input reconstitutes only against its exact consuming call,
+  whose frontier is the turn's starting frontier — or, for a call prepared at a
+  tool-round continuation boundary, the round's batch-correlated result
+  projection, proven by the round's durable result evidence — extended by the
+  consumed steering entries in acceptance order. The same evidence is what
+  admits the durable continuation pair of a `Running` continuation attempt
+  owning a `Prepared` steering-consuming call ([tool-loop](tool-loop.md) owns
+  the continuation transaction that commits it). A consumer that completed by
+  proposing a tool round stays correlated through its validated assistant
+  history for the rest of the turn — later safe points, parked waits, and every
+  terminal shape included — rather than through the current phase's attempt or
+  the turn's terminal call.
 - Every active turn's projection must carry a session-scoped acceptance tail
   anchored at the turn's exact origin and extending gap-free through the
   observed last acceptance position, with unique identities, same- session

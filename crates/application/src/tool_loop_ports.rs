@@ -69,7 +69,7 @@ impl ResolvedToolConversationEntry {
 }
 
 /// Authoritative reread after an ambiguous attempt-authorization commit.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum ToolAttemptAuthorizationStatus {
     /// Authorization did not commit; the exact attempt remains prepared.
     Prepared(CurrentToolAttempt),

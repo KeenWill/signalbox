@@ -103,6 +103,7 @@ jobs:
             command: >-
               cargo test -p signalbox-client
               --test end_to_end
+              terminal_client_completes_an_offline
               -- --ignored --test-threads=4
               terminal_client_completes_an_offline_scripted_conversation
               terminal_client_approval_from_a_second_client_completes_a_waiting_send

@@ -5,13 +5,15 @@ against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
 verified through PR #258 (`agent/signalboxd-rename`), and the Tier 0 catalog
 extension through PR #265 (`agent/tool-batch-tier0`). The Tier 1 code-host
-catalog extension is verified through PR #270 (`agent/tool-batch-tier1`), and
-the failed-attempt operator event together with the credential-shaped code-host
-detail through PR #285 (`agent/dev-instance-code-host-credential`), and the
-client decision surface through PR #291 (`agent/turn-control-verbs`). It owns
-logical tool requests, approval policy and decisions, physical tool attempts,
-result admission, intra-turn continuation, crash classification, the compiled
-registry, and the daemon-local catalog. Turn and attempt lifecycle law lives in
+catalog extension is verified through PR #270 (`agent/tool-batch-tier1`), the
+failed-attempt operator event together with the credential-shaped code-host
+detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
+decision surface through PR #291 (`agent/turn-control-verbs`), and
+runner-protocol batch reconstitution through PR #260
+(`agent/runner-protocol-domain`). It owns logical tool requests, approval policy
+and decisions, physical tool attempts, result admission, intra-turn
+continuation, crash classification, the compiled registry, and the daemon-local
+catalog. Turn and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
 model-call staging and provider translation in

@@ -42,6 +42,14 @@ pub const TURN_RECONCILIATION_PROTOCOL_VERSION: u64 = 7;
 /// The client turn-control protocol version.
 pub const TURN_CONTROL_PROTOCOL_VERSION: u64 = 8;
 
+/// The imported-frontier session-creation protocol version.
+///
+/// Version nine was reserved by concurrent protocol work when this version was selected.
+pub const IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION: u64 = 10;
+
+/// The review-workflow protocol version.
+pub const REVIEW_WORKFLOW_PROTOCOL_VERSION: u64 = 11;
+
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProtocolVersion {
@@ -61,6 +69,10 @@ pub enum ProtocolVersion {
     Seven,
     /// Client turn-control vocabulary.
     Eight,
+    /// Imported-frontier session-creation vocabulary.
+    Ten,
+    /// Review-workflow command and read vocabulary.
+    Eleven,
 }
 
 impl ProtocolVersion {
@@ -75,6 +87,8 @@ impl ProtocolVersion {
             Self::Six => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
             Self::Seven => TURN_RECONCILIATION_PROTOCOL_VERSION,
             Self::Eight => TURN_CONTROL_PROTOCOL_VERSION,
+            Self::Ten => IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION,
+            Self::Eleven => REVIEW_WORKFLOW_PROTOCOL_VERSION,
         }
     }
 
@@ -88,6 +102,8 @@ impl ProtocolVersion {
             MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION => Some(Self::Six),
             TURN_RECONCILIATION_PROTOCOL_VERSION => Some(Self::Seven),
             TURN_CONTROL_PROTOCOL_VERSION => Some(Self::Eight),
+            IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION => Some(Self::Ten),
+            REVIEW_WORKFLOW_PROTOCOL_VERSION => Some(Self::Eleven),
             _ => None,
         }
     }
@@ -328,6 +344,294 @@ impl InputContent {
     pub fn into_string(self) -> String {
         self.0
     }
+}
+
+/// One closed review target subject at the process boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReviewTargetSubject {
+    /// A change request frozen at exact head and base revisions.
+    ChangeRequest {
+        /// Positive provider-local change-request number.
+        number: CanonicalU64,
+    },
+    /// One immutable commit revision.
+    Commit {},
+}
+
+/// One immutable review target snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewTargetSnapshot {
+    /// Stable target identity.
+    pub target_id: CanonicalUuid,
+    /// Opaque canonical provider key.
+    pub provider: String,
+    /// Opaque canonical repository key.
+    pub repository: String,
+    /// Exact subject kind.
+    pub subject: ReviewTargetSubject,
+    /// Frozen head revision.
+    pub head_revision: String,
+    /// Frozen comparison revision when the subject has one.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub base_revision: Option<String>,
+    /// Immediate stack parent snapshot when present.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub stack_parent_target_id: Option<CanonicalUuid>,
+}
+
+/// One admitted review workflow.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewWorkflow {
+    /// Import provider-side review context.
+    ImportExternalContext,
+    /// Produce findings without mutation.
+    ReadOnlyReview,
+    /// Judge proposed findings.
+    JudgeFindings,
+    /// Deduplicate proposed findings.
+    DedupeFindings,
+    /// Publish findings to the provider.
+    PublishReview,
+    /// Repair accepted findings.
+    FixFindings,
+    /// Propagate one reviewed stack edge.
+    PropagateStack,
+}
+
+/// One review pass purpose.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewPassKind {
+    /// Import provider-side context.
+    ImportExternalContext,
+    /// Produce read-only findings.
+    ReadOnlyReview,
+    /// Judge findings.
+    Judge,
+    /// Deduplicate findings.
+    Dedupe,
+    /// Publish findings.
+    Publish,
+    /// Repair findings.
+    Fix,
+    /// Propagate one stack edge.
+    PropagateStack,
+}
+
+/// One projected run lifecycle state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewRunLifecycle {
+    /// Waiting for its pass turn.
+    Queued,
+    /// Its pass turn is active.
+    Running,
+    /// Its pass completed successfully.
+    Succeeded,
+    /// Its pass failed.
+    Failed,
+    /// Its pass needs external resolution.
+    Blocked,
+    /// It was cancelled.
+    Cancelled,
+}
+
+/// One projected pass lifecycle state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewPassLifecycle {
+    /// Accepted input exists but its turn is not active.
+    Queued,
+    /// The pass turn is active.
+    Running,
+    /// The pass turn completed successfully.
+    Succeeded,
+    /// The pass turn failed.
+    Failed,
+    /// The pass needs external resolution.
+    Blocked,
+    /// The pass was cancelled.
+    Cancelled,
+}
+
+/// One complete review-run read projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewRunSnapshot {
+    /// Owning target.
+    pub target_id: CanonicalUuid,
+    /// Stable run identity.
+    pub run_id: CanonicalUuid,
+    /// Frozen workflow.
+    pub workflow: ReviewWorkflow,
+    /// Frozen policy version.
+    pub policy_version: CanonicalU64,
+    /// Minimum judgment confidence in basis points.
+    pub minimum_judge_confidence: CanonicalU64,
+    /// Minimum publication confidence in basis points.
+    pub minimum_publication_confidence: CanonicalU64,
+    /// Current lifecycle projection.
+    pub state: ReviewRunLifecycle,
+    /// The run's sole pass when admitted.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub pass_id: Option<CanonicalUuid>,
+}
+
+/// One complete review-pass read projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewPassSnapshot {
+    /// Stable pass identity.
+    pub pass_id: CanonicalUuid,
+    /// Owning run.
+    pub run_id: CanonicalUuid,
+    /// Owning target.
+    pub target_id: CanonicalUuid,
+    /// Exact pass purpose.
+    pub kind: ReviewPassKind,
+    /// Bound session.
+    pub session_id: CanonicalUuid,
+    /// Bound accepted input.
+    pub accepted_input_id: CanonicalUuid,
+    /// Bound origin turn.
+    pub origin_turn_id: CanonicalUuid,
+    /// Current lifecycle projection.
+    pub state: ReviewPassLifecycle,
+    /// Exact active or terminal turn when present.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub turn_id: Option<CanonicalUuid>,
+    /// Exact successful output frontier when present.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub output_frontier_id: Option<CanonicalUuid>,
+}
+
+/// Finding location side relative to a frozen comparison.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDiffSide {
+    /// Frozen base side.
+    Left,
+    /// Frozen head side.
+    Right,
+}
+
+/// Finding severity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewSeverity {
+    /// Informational observation.
+    Info,
+    /// Low-severity defect.
+    Low,
+    /// Medium-severity defect.
+    Medium,
+    /// High-severity defect.
+    High,
+    /// Critical defect.
+    Critical,
+}
+
+/// Immutable finding content admitted with one read-only pass result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewFindingInput {
+    /// Stable finding identity.
+    pub finding_id: CanonicalUuid,
+    /// Exact repository-relative file path.
+    pub file_path: String,
+    /// Optional positive first line.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub line_start: Option<CanonicalU64>,
+    /// Optional positive final line.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub line_end: Option<CanonicalU64>,
+    /// Optional frozen diff side.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub diff_side: Option<ReviewDiffSide>,
+    /// Short exact title.
+    pub title: String,
+    /// Exact explanatory body.
+    pub body: String,
+    /// Severity classification.
+    pub severity: ReviewSeverity,
+    /// Producer confidence in basis points.
+    pub confidence: CanonicalU64,
+    /// Opaque canonical category key.
+    pub category: String,
+    /// Optional exact recommended repair.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub recommended_fix: Option<String>,
+}
+
+/// Current finding lifecycle status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewFindingStatus {
+    /// Proposed and not yet judged.
+    Open,
+    /// Accepted by judgment.
+    Accepted,
+    /// Rejected by judgment.
+    Rejected,
+    /// Classified as a duplicate.
+    Duplicate,
+    /// Replaced by a later finding.
+    Superseded,
+    /// No longer applies.
+    Stale,
+    /// Published externally.
+    Posted,
+    /// Repaired.
+    Fixed,
+    /// Publication or repair was blocked.
+    BlockedWithReason,
+}
+
+/// One complete finding read projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewFindingSnapshot {
+    /// Owning target.
+    pub target_id: CanonicalUuid,
+    /// Owning run.
+    pub run_id: CanonicalUuid,
+    /// Producing read-only pass.
+    pub producing_pass_id: CanonicalUuid,
+    /// Immutable content.
+    pub finding: ReviewFindingInput,
+    /// Current derived lifecycle status.
+    pub status: ReviewFindingStatus,
+    /// Number of committed lifecycle events.
+    pub event_count: CanonicalU64,
+}
+
+/// A basic judgment disposition recorded by one judge pass.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReviewFindingDisposition {
+    /// Accept the finding.
+    Accepted {},
+    /// Reject with an exact nonempty reason.
+    Rejected { reason: String },
+    /// Mark stale against the frozen target.
+    Stale {},
+}
+
+/// Provider object kind reserved for one review aggregate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewExternalObjectKind {
+    /// Provider review object.
+    Review,
+    /// Provider review thread.
+    ReviewThread,
+    /// Provider inline review comment.
+    ReviewComment,
+    /// Provider change-request comment.
+    ChangeRequestComment,
 }
 
 /// One bounded transcript-content fragment.
@@ -836,6 +1140,16 @@ pub struct MetadataLastWriter {
     actor: MetadataActor,
 }
 
+/// How a new live session relates to one selected imported frontier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportedSessionRelationship {
+    /// Continue from the selected imported boundary.
+    Resume,
+    /// Branch from the selected imported boundary.
+    Fork,
+}
+
 impl MetadataLastWriter {
     /// Constructs one exact last-writer stamp.
     pub const fn new(updated_at_unix_micros: CanonicalU64, actor: MetadataActor) -> Self {
@@ -940,6 +1254,19 @@ pub enum ClientRequest {
         /// Exact complete source bytes.
         source: ConversationImportSource,
     },
+    /// Create a live session from one inclusive imported entry boundary.
+    CreateSessionFromImportedFrontier {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Immutable imported conversation to continue.
+        imported_conversation_id: CanonicalUuid,
+        /// Inclusive one-based imported entry position.
+        through_position: CanonicalU64,
+        /// Creation-time resume or fork intent.
+        relationship: ImportedSessionRelationship,
+        /// Initial session model-selection defaults.
+        initial_model_selection: ModelSelection,
+    },
     /// Reconcile the exact active turn parked on an ambiguous model call.
     ///
     /// The named turn must be the session's active turn and must be parked in
@@ -958,6 +1285,87 @@ pub enum ClientRequest {
         /// Caller-observed defaults version.
         expected_defaults_version: CanonicalU64,
     },
+    /// Register one immutable external review target snapshot.
+    CreateReviewTarget {
+        command_id: CommandId,
+        target_id: CanonicalUuid,
+        provider: String,
+        repository: String,
+        subject: ReviewTargetSubject,
+        head_revision: String,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        base_revision: Option<String>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        stack_parent_target_id: Option<CanonicalUuid>,
+    },
+    /// Admit one run and its sole session-backed pass.
+    StartReviewRun {
+        command_id: CommandId,
+        target_id: CanonicalUuid,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        workflow: ReviewWorkflow,
+        session_id: CanonicalUuid,
+        accepted_input_id: CanonicalUuid,
+    },
+    /// Atomically bind one queued run and pass to their already-active turn.
+    ActivateReviewPass {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Owning run.
+        run_id: CanonicalUuid,
+        /// Pass to activate.
+        pass_id: CanonicalUuid,
+        /// Canonical active turn created from the pass's accepted input.
+        turn_id: CanonicalUuid,
+    },
+    RecordReviewFindings {
+        command_id: CommandId,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        output_frontier_id: CanonicalUuid,
+        findings: Vec<ReviewFindingInput>,
+    },
+    /// Atomically conclude a judge pass and append a finding disposition.
+    RecordReviewFindingDisposition {
+        command_id: CommandId,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        output_frontier_id: CanonicalUuid,
+        finding_id: CanonicalUuid,
+        /// Exact contiguous event ordinal the appended disposition occupies.
+        event_ordinal: CanonicalU64,
+        disposition: ReviewFindingDisposition,
+    },
+    /// Reserve one provider object identity before an external write.
+    ReserveReviewExternalLink {
+        command_id: CommandId,
+        external_link_id: CanonicalUuid,
+        finding_id: CanonicalUuid,
+        provider: String,
+        object_kind: ReviewExternalObjectKind,
+    },
+    /// Attach a provider identity through an exact publish-pass result.
+    AttachReviewExternalLink {
+        command_id: CommandId,
+        external_link_id: CanonicalUuid,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        output_frontier_id: CanonicalUuid,
+        external_object: String,
+        event_ordinal: CanonicalU64,
+    },
+    /// Read one immutable target snapshot.
+    ReadReviewTarget { target_id: CanonicalUuid },
+    /// Read one run and its sole pass projection.
+    ReadReviewRun { run_id: CanonicalUuid },
+    /// Read one complete finding aggregate projection.
+    ReadReviewFinding { finding_id: CanonicalUuid },
+    /// List findings produced by one exact run in identity order.
+    ListReviewFindings { run_id: CanonicalUuid },
     /// Stop the exact active turn through the accepted interrupt treatment.
     ///
     /// The request applies the `Interrupt` delivery to the named active turn:
@@ -1015,7 +1423,21 @@ impl ClientRequest {
             Self::ImportConversation { .. } => CONVERSATION_IMPORT_PROTOCOL_VERSION,
             Self::ReplaceSessionDefaults { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
             Self::ReconcileTurn { .. } => TURN_RECONCILIATION_PROTOCOL_VERSION,
+            Self::CreateReviewTarget { .. }
+            | Self::StartReviewRun { .. }
+            | Self::RecordReviewFindings { .. }
+            | Self::ActivateReviewPass { .. }
+            | Self::RecordReviewFindingDisposition { .. }
+            | Self::ReserveReviewExternalLink { .. }
+            | Self::AttachReviewExternalLink { .. }
+            | Self::ReadReviewTarget { .. }
+            | Self::ReadReviewRun { .. }
+            | Self::ReadReviewFinding { .. }
+            | Self::ListReviewFindings { .. } => REVIEW_WORKFLOW_PROTOCOL_VERSION,
             Self::StopTurn { .. } | Self::DecideToolRequest { .. } => TURN_CONTROL_PROTOCOL_VERSION,
+            Self::CreateSessionFromImportedFrontier { .. } => {
+                IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION
+            }
             Self::CreateSession { .. }
             | Self::ListSessions {}
             | Self::SubmitInput { .. }
@@ -1025,6 +1447,13 @@ impl ClientRequest {
     }
 
     fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::CreateSessionFromImportedFrontier {
+            through_position, ..
+        } = self
+            && through_position.value() == 0
+        {
+            return Err(FrameValidationError::ImportedFrontierShape);
+        }
         if let Self::ListSessionMetadata {
             required_tags,
             title_contains,
@@ -2277,6 +2706,86 @@ pub enum ServerMessage {
         /// Exact typed update.
         event: SessionEvent,
     },
+    /// One immutable target registration was recorded or equally replayed.
+    ReviewTargetCreated {
+        /// Registered target.
+        target_id: CanonicalUuid,
+    },
+    /// One run and its sole pass were admitted or equally replayed.
+    ReviewRunStarted {
+        /// Admitted run.
+        run_id: CanonicalUuid,
+        /// Admitted pass.
+        pass_id: CanonicalUuid,
+    },
+    /// One queued run and pass were atomically activated or equally replayed.
+    ReviewPassActivated {
+        /// Activated run.
+        run_id: CanonicalUuid,
+        /// Activated pass.
+        pass_id: CanonicalUuid,
+    },
+    /// One read-only result and complete finding inventory were committed.
+    ReviewFindingsRecorded {
+        /// Concluding run.
+        run_id: CanonicalUuid,
+        /// Concluding pass.
+        pass_id: CanonicalUuid,
+        /// Exact committed finding count.
+        finding_count: CanonicalU64,
+    },
+    /// One finding disposition was committed.
+    ReviewFindingDispositionRecorded {
+        /// Updated finding.
+        finding_id: CanonicalUuid,
+        /// Current derived status.
+        status: ReviewFindingStatus,
+    },
+    /// One pre-effect external-link reservation was recorded.
+    ReviewExternalLinkReserved {
+        /// Stable reservation identity.
+        external_link_id: CanonicalUuid,
+    },
+    /// One provider object identity was attached.
+    ReviewExternalLinkAttached {
+        /// Consumed reservation identity.
+        external_link_id: CanonicalUuid,
+        /// Canonical provider object key.
+        external_object: String,
+    },
+    /// One immutable target read.
+    ReviewTarget {
+        /// Complete target snapshot.
+        target: ReviewTargetSnapshot,
+    },
+    /// One run and its optional pass read.
+    ReviewRun {
+        /// Complete run snapshot.
+        run: ReviewRunSnapshot,
+        /// Complete pass snapshot after admission.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        pass: Option<ReviewPassSnapshot>,
+    },
+    /// One complete finding read.
+    ReviewFinding {
+        /// Complete finding snapshot.
+        finding: ReviewFindingSnapshot,
+    },
+    /// Begins one finding list sequence.
+    ReviewFindingsStart {
+        /// Selected run.
+        run_id: CanonicalUuid,
+    },
+    /// One finding in identity order.
+    ReviewFindingItem {
+        /// Complete finding snapshot.
+        finding: ReviewFindingSnapshot,
+    },
+    /// Completes one finding list sequence.
+    ReviewFindingsEnd {
+        /// Number of preceding items.
+        finding_count: CanonicalU64,
+    },
     /// Stable, sanitized failure.
     Error {
         /// Stable error code.
@@ -2308,6 +2817,19 @@ impl ServerMessage {
                 CONVERSATION_IMPORT_PROTOCOL_VERSION
             }
             Self::SessionDefaultsReplaced { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
+            Self::ReviewTargetCreated { .. }
+            | Self::ReviewRunStarted { .. }
+            | Self::ReviewFindingsRecorded { .. }
+            | Self::ReviewFindingDispositionRecorded { .. }
+            | Self::ReviewExternalLinkReserved { .. }
+            | Self::ReviewPassActivated { .. }
+            | Self::ReviewExternalLinkAttached { .. }
+            | Self::ReviewTarget { .. }
+            | Self::ReviewRun { .. }
+            | Self::ReviewFinding { .. }
+            | Self::ReviewFindingsStart { .. }
+            | Self::ReviewFindingItem { .. }
+            | Self::ReviewFindingsEnd { .. } => REVIEW_WORKFLOW_PROTOCOL_VERSION,
             Self::ToolRequestDecided { .. } => TURN_CONTROL_PROTOCOL_VERSION,
             Self::Error { detail, .. } => detail.minimum_protocol_version(),
             Self::SessionCreated { .. }
@@ -2507,6 +3029,8 @@ pub enum FrameValidationError {
     TurnStateShape,
     /// A metadata request or response carried an invalid correlated shape.
     MetadataShape,
+    /// An imported-frontier request carried a nonpositive position.
+    ImportedFrontierShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -2521,6 +3045,7 @@ impl fmt::Display for FrameValidationError {
             Self::ErrorDetailShape => "server error detail does not match its code",
             Self::TurnStateShape => "transcript turn state is inconsistent",
             Self::MetadataShape => "session metadata frame shape is inconsistent",
+            Self::ImportedFrontierShape => "imported frontier position is not positive",
         })
     }
 }
@@ -2574,7 +3099,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, 6, 7, and 8",
+                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, 6, 7, 8, 10, and 11",
             ),
         }
     }
@@ -2785,7 +3310,7 @@ fn probe_header(
     }
     if !matches!(
         version_spelling,
-        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8"
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "10" | "11"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -2897,6 +3422,8 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "6" => Some(ProtocolVersion::Six),
         "7" => Some(ProtocolVersion::Seven),
         "8" => Some(ProtocolVersion::Eight),
+        "10" => Some(ProtocolVersion::Ten),
+        "11" => Some(ProtocolVersion::Eleven),
         _ => None,
     }
 }
@@ -2941,12 +3468,13 @@ mod tests {
         ConversationImportFormat, ConversationImportSource, CurrentModelCall,
         CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallDisposition,
         FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
-        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent,
-        MAX_CONTENT_FRAGMENT_BYTES, MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
-        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
-        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MetadataActor,
-        MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION,
-        ProtocolVersion, RejectionDetail, RequestId, SESSION_METADATA_PROTOCOL_VERSION,
+        ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker, ImportedSpeaker,
+        InputContent, MAX_CONTENT_FRAGMENT_BYTES, MAX_JSON_CONTAINER_DEPTH,
+        MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
+        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MetadataActor, MetadataLastWriter,
+        ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
+        RejectionDetail, RequestId, ReviewTargetSubject, SESSION_METADATA_PROTOCOL_VERSION,
         ServerFrame, ServerMessage, SessionEvent, SessionMetadata, ToolBatchState, ToolDecision,
         TranscriptEntry, TranscriptTextEntry, TurnState, decode_client_line, decode_server_line,
         encode_client_line, encode_server_line,
@@ -3031,7 +3559,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1, 2, 3, 4, 5, 6, 7, and 8")
+                .contains("supported versions are 1, 2, 3, 4, 5, 6, 7, 8, 10, and 11")
         );
     }
 
@@ -3041,7 +3569,7 @@ mod tests {
             r#"{"future":"#.repeat(payload_depth),
             "}".repeat(payload_depth)
         );
-        format!("{{\"version\":9,\"request_id\":\"9\",\"request\":{payload}}}")
+        format!("{{\"version\":12,\"request_id\":\"9\",\"request\":{payload}}}")
     }
 
     #[track_caller]
@@ -3230,7 +3758,7 @@ mod tests {
     #[test]
     fn inv033_unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
-        assert_unsupported_version("9");
+        assert_unsupported_version("12");
         assert_unsupported_version("18446744073709551616");
         assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
@@ -3856,6 +4384,130 @@ mod tests {
         Ok(())
     }
 
+    /// INV-033: version ten admits imported-frontier session creation with its
+    /// exact closed request shape while the reserved gap remains unsupported.
+    #[test]
+    fn inv033_version_ten_imported_frontier_creation_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let request_value = ClientRequest::CreateSessionFromImportedFrontier {
+            command_id: command(4)?,
+            imported_conversation_id: uuid(5),
+            through_position: CanonicalU64::new(2),
+            relationship: ImportedSessionRelationship::Resume,
+            initial_model_selection: ModelSelection::Direct {
+                selection_id: uuid(6),
+            },
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Seven,
+                request_id,
+                request_value.clone(),
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::Ten, request_id, request_value)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":10,\"request_id\":\"1\",\"request\":{\"type\":\"create_session_from_imported_frontier\",\"command_id\":\"00000000-0000-0000-0000-000000000004\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\",\"through_position\":\"2\",\"relationship\":\"resume\",\"initial_model_selection\":{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000006\"}}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: version eleven retains version ten's imported-frontier request.
+    #[test]
+    fn inv033_version_eleven_retains_version_ten_imported_frontier_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Eleven,
+            request(1)?,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id: command(4)?,
+                imported_conversation_id: uuid(5),
+                through_position: CanonicalU64::new(2),
+                relationship: ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: uuid(6),
+                },
+            },
+        )?;
+        let encoded = encode_client_line(&frame)?;
+
+        assert_eq!(frame.version(), ProtocolVersion::Eleven);
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: a version-ten imported-frontier request rejects position zero.
+    #[test]
+    fn inv033_version_ten_imported_frontier_rejects_zero_position()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Ten,
+            request(2)?,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id: command(4)?,
+                imported_conversation_id: uuid(5),
+                through_position: CanonicalU64::new(0),
+                relationship: ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: uuid(6),
+                },
+            },
+        );
+
+        assert_eq!(frame, Err(FrameValidationError::ImportedFrontierShape));
+        Ok(())
+    }
+
+    /// INV-033: version ten retains every earlier request unchanged.
+    #[test]
+    fn inv033_version_ten_retains_the_earlier_request_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Ten,
+            request(1)?,
+            ClientRequest::SubmitInput {
+                command_id: command(4)?,
+                session_id: uuid(6),
+                content: InputContent::new(String::from("ordinary work")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )?;
+        let encoded = encode_client_line(&frame)?;
+
+        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":10,"));
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: version ten retains version eight's turn-control vocabulary.
+    #[test]
+    fn inv033_version_ten_retains_version_eight_turn_control_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Ten,
+            request(1)?,
+            ClientRequest::StopTurn {
+                command_id: command(4)?,
+                session_id: uuid(6),
+                expected_active_turn_id: uuid(7),
+                content: InputContent::new(String::from("continue after the stop")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )?;
+        let encoded = encode_client_line(&frame)?;
+
+        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":10,"));
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
     /// INV-033: the reconciliation request is admitted only by version seven
     /// and keeps its exact closed shape across one encode/decode round trip.
     #[test]
@@ -3970,6 +4622,84 @@ mod tests {
         assert_client_malformed(
             r#"{"version":5,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AA==="}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_version_eleven_retains_baseline_submit_exchange()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let request_frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Eleven,
+            request_id,
+            ClientRequest::SubmitInput {
+                command_id: command(2)?,
+                session_id: uuid(3),
+                content: InputContent::new(String::from("content")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )?;
+        let encoded_request = encode_client_line(&request_frame)?;
+        assert_eq!(decode_client_line(&encoded_request)?, request_frame);
+        let response_frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Eleven,
+            request_id,
+            ServerMessage::InputSubmitted {
+                session_id: uuid(3),
+                accepted_input_id: uuid(4),
+                acceptance_position: CanonicalU64::new(1),
+                turn_id: uuid(5),
+            },
+        )?;
+        let encoded_response = encode_server_line(&response_frame)?;
+        assert_eq!(decode_server_line(&encoded_response)?, response_frame);
+        Ok(())
+    }
+
+    /// INV-033: review target registration enters the closed vocabulary only
+    /// at version eleven and retains its exact nullable snapshot shape.
+    #[test]
+    fn inv033_version_eleven_review_target_exchange_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let request_value = ClientRequest::CreateReviewTarget {
+            command_id: command(2)?,
+            target_id: uuid(3),
+            provider: String::from("example-host"),
+            repository: String::from("owner/repository"),
+            subject: ReviewTargetSubject::ChangeRequest {
+                number: CanonicalU64::new(42),
+            },
+            head_revision: String::from("head-revision"),
+            base_revision: Some(String::from("base-revision")),
+            stack_parent_target_id: None,
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Ten,
+                request_id,
+                request_value.clone(),
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::Eleven, request_id, request_value)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":11,\"request_id\":\"1\",\"request\":{\"type\":\"create_review_target\",\
+             \"command_id\":\"00000000-0000-0000-0000-000000000002\",\
+             \"target_id\":\"00000000-0000-0000-0000-000000000003\",\
+             \"provider\":\"example-host\",\"repository\":\"owner/repository\",\
+             \"subject\":{\"kind\":\"change_request\",\"number\":\"42\"},\
+             \"head_revision\":\"head-revision\",\"base_revision\":\"base-revision\",\
+             \"stack_parent_target_id\":null}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        assert_server_message_round_trip(
+            request_id,
+            ServerMessage::ReviewTargetCreated { target_id: uuid(3) },
+            r#"{"type":"review_target_created","target_id":"00000000-0000-0000-0000-000000000003"}"#,
+        )
     }
 
     #[test]

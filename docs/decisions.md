@@ -38,6 +38,259 @@ documentation, so reverse discovery is limited to test declarations.
 checkout, and [the invariant catalog](invariants.md). Reachability does not
 judge whether a verification PR is the newest relevant implementation.
 
+## 2026-07-26 — Renumber review-command migration after its parent advanced
+
+**Context.** The version-eleven review-command migration was introduced as
+`202607280203` while its stack parent ended at `202607280202`. Before this pull
+request converged, the updated `main` parent acquired
+`202607280301_terminal_continuation_steering_suffix.sql`. Keeping the lower
+unmerged number would introduce new schema history behind a ledger entry an
+upgraded database already records.
+
+**Decision.** Rename the unmerged artifact to
+`202607280302_review_workflow_commands.sql`, strictly above the highest
+migration on its current parent. The migration body and behavior are unchanged.
+
+**Rejected alternatives.** Retaining `202607280203` violates forward-only ledger
+order. Editing or renumbering the migration already merged on `main` rewrites
+published history. Reserving a wider gap adds no protection because every open
+stack must reverify against its ultimate parent before merge.
+
+**Affects.** The review-command migration filename and the implemented migration
+inventory checked by persistence integration tests.
+
+## 2026-07-26 — Admit review run and pass roots atomically
+
+**Context.** The first durable review-command implementation inserted a queued
+run and its sole pass in separate transactions. A crash or a pass uniqueness
+failure after the run commit left a run-only aggregate. That state remained
+domain-valid and loadable, but the command retry compared it with the requested
+run after pass construction had recorded pass evidence and rejected the only
+public recovery path.
+
+**Decision.** Fresh `StartRun` handling validates and inserts the queued run and
+pass in one store transaction. A pass insertion failure therefore rolls back the
+run. Recovery continues to admit a compatible run-only intermediate written by
+the earlier implementation and inserts its pass; both the intermediate and the
+completed aggregate must reconstitute. This supersedes the durable
+review-command decision's statement that run admission intentionally spans
+transactions. The lower-level single-root store operations remain available for
+focused aggregate construction and migration tests; the process surface does not
+build on the dead `transition_pass` operation.
+
+**Rejected alternatives.** Merely loosening replay equality would recover a
+crash-created intermediate but still let a fresh invalid pass strand its run.
+Prechecking accepted-input ownership has a race and cannot replace the database
+constraint. Removing the single-root store operations or unrelated dead
+transition API would broaden this repair beyond command admission.
+
+**Affects.** Review-workflow run/pass persistence and command recovery, the
+version-eleven `start_review_run` process path, its PostgreSQL regressions, and
+the review-workflow and process-protocol specifications.
+
+## 2026-07-26 — Serialize durable review-command claims
+
+**Context.** A review-command claim holds one application-pool connection while
+its already-focused aggregate operation acquires another. A pool-sized command
+burst can therefore occupy every connection with claims, and the snapshot reader
+budget deliberately leaves only two connections for non-snapshot work.
+
+**Decision.** Share one daemon-owned semaphore across all seven review mutation
+requests and admit exactly one such mutation at a time. Acquire its permit
+before opening the durable claim and retain it through effect recovery and
+receipt recording. Review reads remain concurrent. Together with the existing
+snapshot-reader reservation, one claim and its nested aggregate transaction fit
+without a circular pool wait.
+
+**Rejected alternatives.** A `pool size - 1` review limit still lets two claims
+consume both connections reserved outside snapshot work. Rebuilding each
+aggregate operation inside the claim transaction would replace its tested
+transaction boundary. A committed pre-effect claim still requires the takeover
+protocol rejected by the durable review-command decision.
+
+**Affects.** Version-eleven review mutation admission, process-runtime resource
+budgets, and their concurrency regression tests.
+
+## 2026-07-26 — Recover review commands from their exact aggregate effects
+
+**Context.** Protocol-driven review operations can commit their aggregate effect
+before a client observes the response. Several effects already own focused
+transactions, and run admission intentionally spans the independently valid run
+and pass roots. Requiring one new transaction to enclose every operation would
+duplicate those store boundaries, while recording only a command claim before
+the effect would strand retries after a process crash.
+
+**Decision.** Version-eleven review mutations bind each owner-global command
+identity to SHA-256 of the validated semantic request object and its closed
+operation kind. An append-only typed receipt stores the stable result. Handling
+claims the registry identity, applies the existing aggregate transaction or
+transactions, then records the receipt. If a crash leaves the exact requested
+aggregate effect without its receipt, an equal retry recognizes that complete
+effect, records the missing receipt, and returns the same result. Once present,
+the receipt is inspected before mutable-state validation and stores every fact
+needed to reproduce the original response. A different digest, operation kind,
+identity payload, inventory, event, or attachment fails closed as conflicting
+reuse or corruption; recovery never invents a compensating mutation. Frame
+version and request identity are transport facts and do not enter the semantic
+digest.
+
+**Rejected alternatives.** A receipt-only transaction cannot make the aggregate
+effect atomic and loses crash recovery. A pre-effect committed claim needs a
+durable in-progress state and takeover protocol. Rebuilding every store
+operation inside one command transaction would replace already-tested aggregate
+boundaries and still would not make an external provider write atomic with
+PostgreSQL.
+
+**Affects.** Review-workflow application commands, the PostgreSQL
+durable-command registry and typed receipt, protocol-version-eleven daemon
+handling, and exact retry diagnostics.
+
+## 2026-07-26 — Fail bounded native snapshot work into typed recovery
+
+**Context.** The native synchronization machine retains authoritative snapshots
+and followed events while it validates or merges transcript work. The wire
+protocol bounds individual frames but does not bound the aggregate records or
+UTF-8 content retained across that client-side work.
+
+**Decision.** Require callers to supply separate record/UTF-8 capacities for one
+snapshot and event/UTF-8 capacities for events buffered behind snapshot work.
+Reject an over-capacity snapshot before publication, and abandon an
+over-capacity event buffer or side-refresh trigger through the same typed,
+bounded recovery lifecycle as other transient synchronization failures.
+
+**Rejected alternatives.** A frame limit alone does not bound aggregate
+retention. Unbounded arrays allow a valid stream to exhaust client memory.
+Publishing a partial snapshot or dropping selected buffered events would make
+the client present state that is neither authoritative nor cursor-complete.
+
+**Affects.** Native synchronization policy inputs, snapshot accumulation,
+followed-event buffering, side-refresh admission, diagnostics, and recovery
+tests.
+
+## 2026-07-26 — Retry only transient native synchronization failures
+
+**Context.** A followed session can fail because its snapshot is stale, its
+transport or deadline failed, the daemon requires resynchronization, or the
+daemon returned a definitive request/protocol error. The protocol fixes the
+error vocabulary but does not choose a native-client reconnect lifecycle.
+
+**Decision.** Route transport, deadline, stale-snapshot, malformed-projection,
+`resync_required`, `unavailable`, and `internal` failures through the one typed,
+bounded reconnect schedule. Treat `malformed_frame`, `unsupported_version`,
+`invalid_request`, `not_found`, `conflicting_reuse`, `rejected`, and
+`commit_ambiguous` as terminal for that synchronization. Every path preserves
+its diagnostic and closes active transports before retry or termination.
+
+**Rejected alternatives.** Retrying every server error can repeat requests that
+the daemon has definitively rejected. Retrying nothing makes ordinary transport
+loss and explicit resynchronization terminal. Separate implicit retry loops
+would bypass the typed cap and deadline policy.
+
+**Affects.** Native session synchronization error classification, recovery
+effects, and scripted reducer tests.
+
+## 2026-07-26 — Bound retained native metadata-list text at 32 MiB
+
+**Context.** Each metadata page and summary has a row and UTF-8 bound, and the
+number of pages is capped, but the native client retained every admitted title
+and tag until pagination completed. The product of those independent limits was
+larger than the client should retain for one list operation.
+
+**Decision.** Give metadata-list accumulation its own typed policy parameter and
+set the native default to 32 MiB of title and tag UTF-8. Reject the operation
+before appending a page that would exceed the cap or overflow its byte count.
+
+**Rejected alternatives.** Relying on page count alone leaves a much larger
+implicit memory budget. Truncating metadata silently changes authoritative
+values. Charging fixed-size identifiers does not materially improve the bound
+and obscures what this capacity controls.
+
+**Affects.** Native process-service metadata pagination and its integration
+tests.
+
+## 2026-07-26 — Select bounded native-client operational policies
+
+**Context.** The native synchronization and application layers require concrete
+deadlines, reconnect schedules, memory capacities, metadata pagination limits,
+and ambiguous-mutation retry timing. The process protocol fixes none of these
+client-operational values, and the synchronization policy deliberately keeps
+deadlines separate from heartbeat concerns.
+
+**Decision.** The app allows 5 seconds for connect and hello, 20 seconds for
+initial or side history, and 5 seconds for replay. Reconnect waits are 250 ms, 1
+second, 3 seconds, and 8 seconds, then stop. A snapshot admits at most 50,000
+records and 32 MiB of retained UTF-8; an event buffer admits 2,000 events and 8
+MiB. One-shot application exchanges allow 20 seconds for connection opening and
+for each response frame. Metadata uses 100-row pages with a 100-page cap. An
+exact `commit_ambiguous` mutation retries after 250 ms, 750 ms, and 2 seconds,
+then stops. Each list is the complete cap; there is no implicit retry.
+
+**Rejected alternatives.** Unbounded retries and memory permit indefinite work
+or heap growth. One shared timeout conflates stages with different costs.
+Heartbeat-derived deadlines add a concern absent from the Unix-socket protocol.
+Using the wire frame limit as an aggregate history limit does not bound a
+multi-frame snapshot. Timing only response reads leaves socket opening
+unbounded.
+
+**Affects.** Native application composition, one-shot request exchange, metadata
+paging, mutation retry, and synchronization runtime behavior.
+
+## 2026-07-26 — Bound retained native diagnostic messages at 4 KiB
+
+**Context.** The native synchronization machine retains the latest 128
+diagnostics across fallback and reconnect. Count bounds fixed record overhead,
+but a diagnostic derived from an unknown wire kind or decoding path could retain
+nearly one full 8 MiB frame in its message, so tolerated malformed or future
+input could still make the bounded history retain roughly a gigabyte.
+
+**Decision.** Continue emitting each complete diagnostic to the current caller,
+but retain at most 4,096 UTF-8 bytes of its message in machine history,
+truncating only at a Unicode-scalar boundary. Together with the existing
+128-record cap, retained diagnostic-message text is bounded at 512 KiB. The cap
+applies to every diagnostic source so later wire-derived paths cannot reopen the
+heap-growth path.
+
+**Rejected alternatives.** A count-only limit leaves frame-sized strings
+unbounded in aggregate. Sanitizing only unknown kind names misses decoding paths
+and future diagnostic sources. Bounding emitted diagnostics would discard useful
+immediate evidence even though the caller need not retain it.
+
+**Affects.** Native synchronization diagnostic retention and its scripted tests;
+diagnostic effects remain complete.
+
+## 2026-07-26 — Address imported continuation by position
+
+**Context.** The application and PostgreSQL layers already create a session from
+a sealed `ImportedTranscriptFrontier`, but the process protocol could not invoke
+that command. Import receipts expose the immutable conversation identity, while
+entry position is the stable human-addressable boundary already carried by every
+frontier; the sealed frontier constructor deliberately remains a domain-owned
+mapping.
+
+**Decision.** Protocol version ten adds `create_session_from_imported_frontier`,
+carrying command and conversation identities, a positive inclusive imported
+position, explicit `resume` or `fork` intent, and the initial model selection.
+Eight was taken while seven was reserved by then-open PR #281; #281 merged
+before this branch began. PR #291 subsequently merged version eight. Nine
+remains taken by then-open PR #286. The daemon checks a claimed command for
+replay or conflict first; for an unseen command it loads the immutable
+conversation, resolves the position to its canonical sealed frontier, and
+invokes the existing application service. The terminal verb is `continue`, and
+it requires position, relationship, and model selection rather than guessing any
+of them.
+
+**Rejected alternatives.** Sending an imported entry identity or a complete
+frontier would expose identifiers the import receipt does not provide and would
+duplicate the sealed domain mapping. Adding a public frontier constructor would
+weaken that boundary. Implicitly selecting the last entry or defaulting to
+`Resume` would hide session ancestry intent. Rebuilding the command or adding a
+persistence path would duplicate the already-tested application transaction.
+
+**Affects.** Process-protocol versioning and request mapping, the daemon
+adapter, the terminal client and its synthetic end-to-end continuation test, and
+the process-protocol and sessions specifications. The domain spine, persistence
+schema, and migrations are unchanged.
+
 ## 2026-07-26 — Retire the superseded startup steering blocker
 
 **Context.** The 2026-07-22 pending-steering boundary commissioned a temporary
@@ -422,6 +675,31 @@ in [model-call-execution](spec/model-call-execution.md), the adapter contract in
 model-identifier-normalization half of the model fallback and provenance
 question.
 
+## 2026-07-26 — Carry credential lineage in runner placement
+
+**Context.** Runner replacement can intentionally move from a credential-bearing
+placement to a profileless one. The terminal grant tombstone advances the
+revision, but a later caller could omit that separate value and the pure
+replacement function had no fact from which to distinguish a never-profiled
+placement from a lineage whose tombstone was dropped.
+
+**Decision.** Every pinned placement carries the optional exact last-grant
+identity: runner and positive revision. Initial profile selection records
+revision one; profile and runner replacements advance the identity from the
+checked predecessor, including a revoked tombstone for a profileless successor.
+A replacement must supply the grant named by existing placement evidence, while
+a placement with no lineage may begin at revision one. Reconstitution validates
+the placement evidence and persistence validates the named grant record.
+
+**Rejected alternatives.** Letting callers omit a profileless tombstone can
+recreate a retired session/runner/profile/revision tuple. A revision-only marker
+cannot distinguish cross-runner grant ancestry. A global lookup inside the pure
+domain transition would move storage authority into the domain boundary.
+
+**Affects.** `PinnedRunnerPlacement`, credential-grant replacement and
+reconstitution, INV-044 and INV-045, S32, and the
+[runner-protocol specification](spec/runner-protocol.md).
+
 ## 2026-07-26 — Add sccache as the devenv shared compiler cache
 
 **Context.** Every checkout and worktree cold-builds the full dependency graph,
@@ -476,6 +754,32 @@ reservation and merged filename differ.
 and interpretation of the earlier review-workflow decision entries' affected
 slice.
 
+## 2026-07-26 — Select execution locus before authorization
+
+**Context.** A combined-locus tool can use a runner-resident credential profile
+or execute daemon-locally without that profile. Runner re-registration may make
+the first locus unavailable while leaving the second admissible. Reusing the
+runner pair's automatic approval for daemon execution would silently cross both
+the credential and tool-policy boundaries.
+
+**Decision.** The runner domain retains daemon fallback as admissibility only:
+runner lease creation returns `ToolUnavailable` and consumes no reusable
+daemon-execution authority. Later application orchestration must select a locus
+before authorization. If runner availability changes before dispatch, daemon
+fallback discards the runner-pair authorization and resolves the daemon-local
+tool policy without the runner-resident credential profile. Locus is a material
+approval constraint and is never selected by the model or runner.
+
+**Rejected alternatives.** Reusing runner-pair `Automatic` authority can bypass
+a daemon-local `Confirm` default and cannot supply the runner-resident
+credential. Silently disabling daemon fallback contradicts the combined-locus
+declaration. Letting the executor choose after approval makes policy depend on
+ambient availability rather than recorded intent.
+
+**Affects.** `ToolAdmissibleLoci`, combined-locus registration reconciliation,
+approval orchestration, INV-019 and INV-042, S16, and the
+[runner-protocol specification](spec/runner-protocol.md).
+
 ## 2026-07-26 — Make runner lease authority single-use and tool-bound
 
 **Context.** An authorized physical attempt identifies its request, session,
@@ -505,6 +809,73 @@ forward narrowing.
 **Affects.** `RunnerToolAttemptAuthorization`, `AuthorizedToolAttempt`,
 `RunnerLease`, placement reconstitution, INV-043 and INV-044, S12, S30, S31, and
 the [runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-26 — Bound native followed-event buffering in memory
+
+**Context.** The native synchronization machine buffers followed events while it
+validates initial history and while a side snapshot is in flight. Neither the
+process protocol nor session lifetime bounds how many events can arrive or how
+much variable-size content they retain before snapshot work completes.
+
+**Decision.** Every native synchronization policy supplies an event-buffer
+capacity: a maximum event count for fixed overhead and a maximum retained UTF-8
+byte count for content and the re-encoded future-event JSON object, including
+container and scalar nodes. Crossing either bound rejects the connection through
+bounded recovery without advancing the cursor past the unadmitted event. The
+application wiring owns the concrete operational values.
+
+**Rejected alternatives.** An unbounded array permits heap growth under a slow
+or stalled snapshot. Bounding count alone leaves large event content unbounded.
+Dropping oldest events creates an unrecoverable cursor gap, and spilling to disk
+adds lifecycle and failure modes disproportionate to this phase.
+
+**Affects.** The native synchronization policy, replay and side-snapshot event
+buffers, scripted transport tests, and application composition that selects the
+capacity.
+
+## 2026-07-26 — Retain a bounded native synchronization diagnostic history
+
+**Context.** The native synchronization machine reports every diagnostic as an
+effect and also retains recent diagnostics so a fallback does not erase the
+reason it occurred. A long-lived follow can encounter arbitrarily many future
+unknown events, stale completions, and recoveries, so retaining the complete
+history would make tolerated input an unbounded heap-growth path.
+
+**Decision.** Retain the most recent 128 synchronization diagnostics in the
+machine while continuing to emit every diagnostic to the caller. New diagnostics
+evict the oldest retained entries after the bound. Recovery and successful
+reconnection preserve the bounded history.
+
+**Rejected alternatives.** Retaining every diagnostic permits unbounded growth.
+Retaining only the latest diagnostic loses nearby fallback context. Moving all
+history to the application would duplicate a machine-owned diagnostic-state
+requirement without changing the need for an explicit bound.
+
+**Affects.** The native synchronization machine and its scripted transport
+tests.
+
+## 2026-07-26 — Bound native snapshot validation in memory
+
+**Context.** The process protocol deliberately has no aggregate transcript-size
+limit, while the native synchronization machine must validate a complete
+snapshot before publishing it. Retaining every record and its identity indexes
+without a client-side bound lets one snapshot consume unbounded memory. The
+bound is an operational client concern rather than a wire restriction.
+
+**Decision.** Every native synchronization policy supplies an explicit snapshot
+capacity: a maximum record count for fixed per-record overhead and a maximum
+retained UTF-8 byte count for wire strings and unknown JSON payloads. Crossing
+either bound rejects the snapshot through the existing bounded recovery path;
+the machine never publishes the partial snapshot. The application wiring owns
+the concrete operational values.
+
+**Rejected alternatives.** Unbounded retention leaves the client exposed to
+unbounded heap growth. A disk-backed spool and identity index would add storage
+lifecycle and failure modes disproportionate to this phase. Silent truncation
+would publish state the server never described.
+
+**Affects.** The native synchronization policy, snapshot accumulator, scripted
+transport tests, and application composition that selects the capacity.
 
 ## 2026-07-25 — Use a bounded GitHub adapter for the first code-host tools
 
