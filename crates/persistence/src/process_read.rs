@@ -56,6 +56,95 @@ impl ProcessSessionSummary {
     }
 }
 
+/// One complete immutable session-defaults epoch read for the process
+/// boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessSessionDefaults {
+    session: SessionId,
+    version: signalbox_domain::SessionConfigurationDefaultsVersion,
+    defaults: signalbox_domain::SessionConfigurationDefaults,
+}
+
+impl ProcessSessionDefaults {
+    /// Returns the selected session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the read immutable epoch's version.
+    pub const fn version(&self) -> signalbox_domain::SessionConfigurationDefaultsVersion {
+        self.version
+    }
+
+    /// Borrows the complete defaults value on that epoch.
+    pub const fn defaults(&self) -> &signalbox_domain::SessionConfigurationDefaults {
+        &self.defaults
+    }
+}
+
+/// Typed outcome of one session-defaults epoch read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProcessSessionDefaultsRead {
+    /// The selected epoch with its complete defaults value.
+    Read(ProcessSessionDefaults),
+    /// The selected session does not exist in the read snapshot.
+    SessionNotFound,
+    /// The session exists but the named epoch was never installed.
+    VersionNotFound,
+}
+
+fn decode_session_defaults_value(
+    row: &PgRow,
+) -> Result<signalbox_domain::SessionConfigurationDefaults, ProcessReadError> {
+    let kind: String = row
+        .try_get::<Option<String>, _>("model_selection_kind")?
+        .ok_or(ProcessReadCorruption::Missing("model_selection_kind"))?;
+    let direct: Option<Uuid> = row.try_get("direct_model_selection_id")?;
+    let alias: Option<Uuid> = row.try_get("model_alias_id")?;
+    let model = match (kind.as_str(), direct, alias) {
+        ("direct", Some(value), None) => {
+            signalbox_domain::ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(value))
+        }
+        ("alias", None, Some(value)) => {
+            signalbox_domain::ModelSelectionRequest::Alias(ModelAlias::from_uuid(value))
+        }
+        ("direct" | "alias", _, _) => {
+            return Err(ProcessReadCorruption::Inconsistent("model selection").into());
+        }
+        _ => {
+            return Err(ProcessReadCorruption::Unsupported {
+                field: "model_selection_kind",
+                value: kind,
+            }
+            .into());
+        }
+    };
+    let tool_approval: String = row
+        .try_get::<Option<String>, _>("dangerous_tool_auto_approval")?
+        .ok_or(ProcessReadCorruption::Missing(
+            "dangerous_tool_auto_approval",
+        ))?;
+    let dangerous_tool_auto_approval = crate::mapping::dangerous_tool_auto_approval_from_str(
+        &tool_approval,
+    )
+    .ok_or(ProcessReadCorruption::Unsupported {
+        field: "dangerous_tool_auto_approval",
+        value: tool_approval,
+    })?;
+    let system_prompt = row
+        .try_get::<Option<String>, _>("system_prompt")?
+        .map(|value| {
+            signalbox_domain::SessionSystemPrompt::try_new(value)
+                .map_err(|_| ProcessReadCorruption::Inconsistent("system prompt admission"))
+        })
+        .transpose()?;
+    Ok(signalbox_domain::SessionConfigurationDefaults::complete(
+        model,
+        dangerous_tool_auto_approval,
+        system_prompt,
+    ))
+}
+
 /// One repeatable-read session-summary cursor that owns at most one decoded row.
 ///
 /// Call [`Self::next_summary`] until it returns `None`. That terminal call
@@ -949,6 +1038,83 @@ impl ProcessReadRepository {
     /// Uses the supplied pool for independent repeatable-read snapshots.
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Reads one complete current or named immutable session-defaults epoch.
+    ///
+    /// A `None` version selects the epoch named by the session's current
+    /// pointer; a named version selects exactly that immutable epoch. The
+    /// read is one statement-consistent SELECT. For an existing session, a
+    /// missing current pointer or missing pointed-at epoch fails closed as
+    /// corruption; only a named version that was never installed is the typed
+    /// absent-version outcome.
+    pub async fn read_session_defaults(
+        &self,
+        session: SessionId,
+        version: Option<signalbox_domain::SessionConfigurationDefaultsVersion>,
+    ) -> Result<ProcessSessionDefaultsRead, ProcessReadError> {
+        let named = version.map(|value| Decimal::from(value.as_u64()));
+        let row = sqlx::query(
+            "SELECT
+                session_row.session_id,
+                current_defaults.current_version,
+                current_epoch.version AS current_epoch_version,
+                selected_defaults.version AS selected_version,
+                selected_defaults.model_selection_kind,
+                selected_defaults.direct_model_selection_id,
+                selected_defaults.model_alias_id,
+                selected_defaults.dangerous_tool_auto_approval,
+                selected_defaults.system_prompt
+               FROM session AS session_row
+               LEFT JOIN session_current_defaults AS current_defaults
+                 ON current_defaults.session_id = session_row.session_id
+               LEFT JOIN session_defaults_version AS current_epoch
+                 ON current_epoch.session_id = session_row.session_id
+                AND current_epoch.version = current_defaults.current_version
+               LEFT JOIN session_defaults_version AS selected_defaults
+                 ON selected_defaults.session_id = session_row.session_id
+                AND selected_defaults.version =
+                        COALESCE($2, current_defaults.current_version)
+              WHERE session_row.session_id = $1",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(named)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(ProcessSessionDefaultsRead::SessionNotFound);
+        };
+        // An existing session must carry a current pointer that resolves to
+        // an installed epoch even when a named historical epoch is selected:
+        // a missing pointer or a dangling pointer is corruption, not a
+        // servable read (INV-008).
+        let current_version: Option<Decimal> = row.try_get("current_version")?;
+        if current_version.is_none() {
+            return Err(ProcessReadCorruption::Missing("current defaults pointer").into());
+        }
+        let current_epoch_version: Option<Decimal> = row.try_get("current_epoch_version")?;
+        if current_epoch_version.is_none() {
+            return Err(ProcessReadCorruption::Missing("current defaults epoch").into());
+        }
+        let selected_version: Option<Decimal> = row.try_get("selected_version")?;
+        let Some(selected_version) = selected_version else {
+            return if named.is_some() {
+                Ok(ProcessSessionDefaultsRead::VersionNotFound)
+            } else {
+                Err(ProcessReadCorruption::Missing("current defaults epoch").into())
+            };
+        };
+        let selected_version = signalbox_domain::SessionConfigurationDefaultsVersion::try_from_u64(
+            u64::try_from(selected_version)
+                .map_err(|_| ProcessReadCorruption::InvalidOrdinal("selected_version"))?,
+        )
+        .ok_or(ProcessReadCorruption::InvalidOrdinal("selected_version"))?;
+        let defaults = decode_session_defaults_value(&row)?;
+        Ok(ProcessSessionDefaultsRead::Read(ProcessSessionDefaults {
+            session,
+            version: selected_version,
+            defaults,
+        }))
     }
 
     /// Collects every current session summary in session-identity order.

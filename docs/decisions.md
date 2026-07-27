@@ -37,6 +37,91 @@ would duplicate transcript session selection and its validated snapshot path.
 transcript version fourteen, `signalbox transcript`, and the model-call,
 persistence, and process-protocol specifications.
 
+## 2026-07-27 — Renumber the system-prompt migration after main advanced
+
+**Context.** This branch reserved `202607280301_session_system_prompt.sql` while
+its parent's highest migration was `202607280202`. Before it converged, `main`
+merged `202607280301_terminal_continuation_steering_suffix.sql` and
+`202607280302_review_workflow_commands.sql`, so the reserved number now names a
+different applied file. A duplicate version is ambiguous in the
+`_sqlx_migrations` ledger and would place new schema history behind an entry an
+upgraded database already records.
+
+**Decision.** Rename the unmerged artifact to
+`202607280303_session_system_prompt.sql`, strictly above the highest migration
+on its current parent. The migration body and behavior are unchanged.
+
+**Rejected alternatives.** Retaining `202607280301` collides with published
+history. Editing or renumbering either migration already merged on `main`
+rewrites that history. Opening a wider reserved block adds no protection,
+because every open stack reverifies its number against its ultimate parent
+before merge.
+
+**Affects.** The system-prompt migration filename, the migration inventory
+stated in [persistence protocol](spec/persistence-protocol.md), and the
+migration name cited in
+[sessions and transcript](spec/sessions-and-transcript.md).
+
+## 2026-07-26 — Bound the session system prompt as a defaults-epoch value
+
+**Context.** `ModelOperation.system` existed but nothing set it: no session
+could carry a system prompt. The owner needs one prompt per review session now,
+while the backlog's Templates and context-assembly entries hold every richer
+composition surface. The repository already has a forward-only defaults-epoch
+mechanism, a bounded-user-content precedent at 1,048,576 UTF-8 bytes, and the
+rule that large content has exactly one authoritative copy.
+
+**Decision.** Session defaults gain one optional bounded system prompt: nonempty
+exact Unicode text, no U+0000, at most 1,048,576 UTF-8 bytes —
+`SessionSystemPrompt::MAX_UTF8_BYTES`, mirroring the accepted-input bound —
+checked at construction and by storage CHECK constraints. The prompt is set at
+creation and replaced only through `ReplaceSessionDefaults` epochs, so INV-046's
+forward-only binding covers it unchanged. The immutable epoch row is the single
+content authority: turns keep freezing only the epoch version, per-turn origin
+rows copy no prompt text, and model-call preparation reads the prompt through
+the turn's frozen version. Command/defaults schema agreement extends through an
+exact-encoding SHA-256 digest column because megabyte text cannot join a btree
+key.
+
+**Rejected alternatives.** Session templates or named profiles would build the
+store the backlog holds blocked. Copying prompt text into per-turn origin rows
+would duplicate megabyte content that the frozen version already pins. An
+unbounded prompt would abandon the bounded-user-content discipline; a smaller
+special-case bound would invent a second content ceiling without a reason.
+
+**Affects.** `SessionConfigurationDefaults` and every command carrying it,
+defaults storage and its agreement keys (migration
+`202607280303_session_system_prompt.sql`), the provider bridge, process protocol
+version nine, and [sessions and transcript](spec/sessions-and-transcript.md).
+
+## 2026-07-26 — Deliver system-prompt changes without a transcript boundary
+
+**Context.** A mid-session model change appends a durable `ModelIdentityChanged`
+entry rendered into the conversation as an injected user-role event, because the
+recorded direction requires the new model to learn its identity through the
+frontier. A system-prompt change raised the same question: should the successor
+turn's frontier carry a boundary entry?
+
+**Decision.** No semantic entry is appended when a replacement changes only the
+system prompt. The prompt reaches the provider out of band as
+`ModelOperation.system` on every call, so the new instructions are delivered
+whole to the model rather than announced inside conversation history, and each
+turn's frozen epoch already records durably which exact prompt governed it.
+Executed history therefore stays reconstructible without a second copy, and
+transcript readers, schema entry/turn-state assertions, and pre-version-nine
+protocol readers are untouched.
+
+**Rejected alternatives.** A boundary entry naming turn and epoch would
+duplicate provenance the frozen epoch already pins, and unlike model identity
+there is no injected-event content the model needs — the replacement prompt
+itself is sent. Copying prompt text into an entry would create a second content
+authority. A later decision may still add a reader-facing marker by the same
+grandfathering mechanism the model-identity boundary used.
+
+**Affects.** Semantic transcript entries (no new variant), turn-start frontier
+construction (unchanged), the provider bridge, and
+[sessions and transcript](spec/sessions-and-transcript.md).
+
 ## 2026-07-26 — Renumber review-command migration after its parent advanced
 
 **Context.** The version-eleven review-command migration was introduced as

@@ -44,8 +44,8 @@ use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::{
     mapping::{
-        durable_command_id_from_uuid, durable_command_id_to_uuid, session_id_from_uuid,
-        session_id_to_uuid, tool_request_id_to_uuid, turn_id_to_uuid,
+        defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
+        session_id_from_uuid, session_id_to_uuid, tool_request_id_to_uuid, turn_id_to_uuid,
     },
     outbox::{self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
@@ -304,6 +304,15 @@ impl PostgresModelCallRepository {
                             .configuration()
                             .effective()
                             .dangerous_tool_auto_approval();
+                        let system_prompt = load_frozen_epoch_system_prompt(
+                            &mut transaction,
+                            session,
+                            execution
+                                .active_turn()
+                                .configuration()
+                                .session_defaults_version(),
+                        )
+                        .await?;
                         let tool_entries =
                             load_tool_conversation_entries(&mut transaction, &request).await?;
                         Ok((
@@ -312,6 +321,7 @@ impl PostgresModelCallRepository {
                                 request: Box::new(request),
                                 credential_reference,
                                 dangerous_tool_auto_approval,
+                                system_prompt,
                                 tool_entries,
                             },
                         ))
@@ -3194,6 +3204,35 @@ async fn load_call_credential_reference(
     .await?
     .ok_or(ModelCallCorruption::Missing("prepared model call"))?;
     Ok(ModelCallCredentialReference::new(reference))
+}
+
+/// Loads the optional session system prompt from the exact immutable defaults
+/// epoch the calling turn froze at origin acceptance.
+///
+/// The epoch row must exist for a live execution; its absence or an
+/// inadmissible stored prompt fails closed as corruption rather than sending
+/// a call without the instructions the epoch records.
+async fn load_frozen_epoch_system_prompt(
+    connection: &mut PgConnection,
+    session: SessionId,
+    defaults_version: signalbox_domain::SessionConfigurationDefaultsVersion,
+) -> Result<Option<signalbox_domain::SessionSystemPrompt>, ModelCallRepositoryError> {
+    let row = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT system_prompt
+           FROM session_defaults_version
+          WHERE session_id = $1
+            AND version = $2",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(defaults_version_to_numeric(defaults_version))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(ModelCallCorruption::Missing("frozen defaults epoch"))?;
+    row.map(|value| {
+        signalbox_domain::SessionSystemPrompt::try_new(value)
+            .map_err(|_| ModelCallCorruption::Inconsistent("system prompt admission").into())
+    })
+    .transpose()
 }
 
 async fn persist_authorization(

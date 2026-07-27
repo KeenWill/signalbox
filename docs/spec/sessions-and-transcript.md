@@ -8,7 +8,8 @@ content, and actor attribution. It was verified against the implementing stack
 through PR #265 (`agent/tool-batch-tier0`); the defaults-epoch and
 model-identity boundary were additionally verified through PR #272
 (`agent/mid-session-model`); the imported-frontier process surface was verified
-through PR #294 (`agent/continue-imported-conversation`). The
+through PR #294 (`agent/continue-imported-conversation`); and the session system
+prompt was verified through PR #286 (`agent/session-system-prompt`). The
 imported-conversation record and converter are owned by
 [conversation-import](conversation-import.md). Where a law is cited as
 `INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
@@ -207,10 +208,10 @@ identity; neither reconstructs authority by minting another frontier.
 
 ## Session defaults and replacement
 
-Session configuration defaults contain the model-selection request and the
+Session configuration defaults contain the model-selection request, the
 dangerously named tool blanket
-`DangerousToolAutoApproval::{Disabled, ApproveAll}`. The selection algebra and
-model configuration are owned by
+`DangerousToolAutoApproval::{Disabled, ApproveAll}`, and one optional session
+system prompt. The selection algebra and model configuration are owned by
 [configuration-and-credentials](configuration-and-credentials.md); blanket
 semantics and per-turn freeze are owned by [tool-loop](tool-loop.md). Defaults
 are immutable epochs identified by a positive `u64` ordinal:
@@ -236,6 +237,40 @@ pins its target and non-secret credential reference at its own model-call
 boundary. The predecessor's prepared or in-flight call retains its existing
 pins, so credential affinity and provider prompt-cache prefixes do not move
 mid-call (INV-046).
+
+### Session system prompt
+
+A present session system prompt (`SessionSystemPrompt`) is nonempty exact
+Unicode text that rejects U+0000 and carries at most
+`SessionSystemPrompt::MAX_UTF8_BYTES` = 1,048,576 UTF-8 bytes, mirroring the
+accepted-input content bound below; construction rejects excess without
+truncating or rewriting, and equality is the exact ordered scalar sequence.
+Absence is typed `None`, never empty text. `CreateSession` and
+`CreateSessionFromImportedFrontier` carry the optional prompt inside their
+complete unversioned initial defaults, and `ReplaceSessionDefaults` replaces it
+only as part of the complete successor epoch — there is no prompt-only mutation,
+template, or named profile; the
+[bound-and-placement decision](../decisions.md#2026-07-26--bound-the-session-system-prompt-as-a-defaults-epoch-value)
+records the capacity and epoch-placement choice. Matching
+`octet_length(convert_to(system_prompt, 'UTF8'))` CHECK constraints protect the
+durable epoch and command columns (migration
+`202607280303_session_system_prompt.sql`), and command/defaults schema agreement
+extends through a generated exact-encoding SHA-256 digest column because
+megabyte text cannot join a btree key.
+
+The immutable epoch row is the prompt's single content authority. Origin
+acceptance keeps freezing only the epoch; per-turn origin rows copy no prompt
+text, and model-call preparation reads the prompt through the calling turn's
+frozen defaults version — including a reclassified-steering origin's inherited
+version — so every call the turn prepares sets `ModelOperation.system` to
+exactly that epoch's prompt, or none. A replacement that changes only the system
+prompt appends no semantic transcript entry: the new instructions reach the
+provider whole and out of band on the successor turn's calls, and the turn's
+frozen epoch already records durably which prompt governed it, as recorded by
+the
+[no-transcript-boundary decision](../decisions.md#2026-07-26--deliver-system-prompt-changes-without-a-transcript-boundary).
+The `ModelIdentityChanged` boundary below remains keyed to the frozen direct
+model selection alone.
 
 `ReplaceSessionDefaults` carries exactly command identity, target session,
 expected current version, and the complete replacement; equality excludes only
@@ -357,11 +392,14 @@ reconstruct. Destructive retention remains a separate open question.
 
 The paginated list projection joins current defaults with metadata but does not
 reconstitute the `Session` aggregate. Each result carries session identity, the
-complete current defaults (model selection and dangerous-tool auto-approval
-flag), title, tags, archive state, and optional last-writer stamp; attributes
-remain available through the single-session metadata read. A query has an exact
-tag set of at most 256 members, optional exact case-sensitive title substring,
-`include_archived`, a page size from 1 through 100, and an exclusive
+current defaults version, model selection, and dangerous-tool auto-approval
+flag, title, tags, archive state, and optional last-writer stamp; attributes
+remain available through the single-session metadata read, and the current
+epoch's optional system prompt is deliberately absent from list rows — the
+process boundary's single-session defaults read
+([process-protocol](process-protocol.md)) returns it exactly. A query has an
+exact tag set of at most 256 members, optional exact case-sensitive title
+substring, `include_archived`, a page size from 1 through 100, and an exclusive
 `after_session_id` cursor. Required tags use the metadata tag rules, a present
 title substring is nonempty and rejects U+0000, and all filter strings together
 carry at most 262,144 UTF-8 bytes:
@@ -659,8 +697,9 @@ completed- and failed-turn markers. The version-one wire mapping, update
 synchronization, and presentation rules are owned by
 [process-protocol](process-protocol.md). The provider-prompt projection is also
 implemented: `PreparedModelOperation::render` maps frontier entries to
-provider-neutral messages; system-prompt composition remains deferred under the
-open edges of [model-call-execution](model-call-execution.md).
+provider-neutral messages and binds the frozen epoch's optional session system
+prompt; multi-source system-prompt composition remains deferred under the open
+edges of [model-call-execution](model-call-execution.md).
 
 ## Open edges
 
@@ -696,3 +735,7 @@ open edges of [model-call-execution](model-call-execution.md).
 - The 1 MiB content bound is a provisional owner floor; the resource-governance
   limit question stays open, and non-text content kinds remain unconstructible
   pending their owning decisions.
+- The session system prompt is one optional bounded string per session.
+  Composition from base, per-use-case, and instruction-file sources, templates,
+  and named profiles remain the open
+  [configuration-category capability](../open-questions.md#configuration-categories).

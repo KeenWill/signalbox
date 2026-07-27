@@ -24,12 +24,13 @@ use crate::InvalidDurableCommandId;
 /// construction through this boundary. The request contains exactly the
 /// canonical command's caller-supplied fields and no loaded session, current
 /// version, installed version, or persistence representation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReplaceSessionDefaultsRequest {
     command_id: DurableCommandId,
     session: SessionId,
     expected_current_version: SessionConfigurationDefaultsVersion,
     replacement: SessionConfigurationDefaults,
+    prompt_member: PromptMemberStatement,
 }
 
 impl ReplaceSessionDefaultsRequest {
@@ -39,6 +40,7 @@ impl ReplaceSessionDefaultsRequest {
         session: SessionId,
         expected_current_version: SessionConfigurationDefaultsVersion,
         replacement: SessionConfigurationDefaults,
+        prompt_member: PromptMemberStatement,
     ) -> Result<Self, InvalidDurableCommandId> {
         if command_id.as_uuid().is_nil() {
             return Err(InvalidDurableCommandId::Nil);
@@ -52,6 +54,7 @@ impl ReplaceSessionDefaultsRequest {
             session,
             expected_current_version,
             replacement,
+            prompt_member,
         })
     }
 
@@ -70,14 +73,35 @@ impl ReplaceSessionDefaultsRequest {
         self.expected_current_version
     }
 
-    /// Returns the complete replacement defaults.
-    pub const fn replacement(&self) -> SessionConfigurationDefaults {
-        self.replacement
+    /// Borrows the complete replacement defaults.
+    pub const fn replacement(&self) -> &SessionConfigurationDefaults {
+        &self.replacement
+    }
+
+    /// Returns whether the caller's boundary could state the prompt member.
+    pub const fn prompt_member(&self) -> PromptMemberStatement {
+        self.prompt_member
     }
 }
 
-/// The closed application result of one atomic replacement handling.
+/// Whether the requesting boundary could state the system-prompt member.
+///
+/// A caller whose protocol version admits the member (stating a prompt,
+/// copying one, or explicitly clearing one) is `Stated`. A caller whose
+/// protocol cannot represent the member is `Unstated`: its replacement must
+/// not silently clear a prompt the current epoch carries, and the atomic
+/// transaction refuses it against a prompted current epoch
+/// (docs/spec/process-protocol.md).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptMemberStatement {
+    /// The boundary stated the member (present or explicit null).
+    Stated,
+    /// The boundary cannot represent the member.
+    Unstated,
+}
+
+/// The closed application result of one atomic replacement handling.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReplaceSessionDefaultsOutcome {
     /// First handling or equal replay returned the recorded domain result.
     ///
@@ -89,6 +113,9 @@ pub enum ReplaceSessionDefaultsOutcome {
         /// The identity whose existing meaning remains intact.
         command_id: DurableCommandId,
     },
+    /// An unstated prompt member met a prompted current epoch; nothing was
+    /// recorded, and the caller needs a member-stating protocol version.
+    PromptRequiresStatedMember,
 }
 
 /// Atomic command-handling boundary for session-defaults replacement.
@@ -104,9 +131,13 @@ pub trait ReplaceSessionDefaultsTransaction {
     type Error;
 
     /// Handles one canonical command through the atomic persistence boundary.
+    ///
+    /// An `Unstated` prompt member must be refused atomically against a
+    /// prompted current epoch, recording nothing.
     fn handle(
         &mut self,
         command: DomainReplaceSessionDefaults,
+        prompt_member: PromptMemberStatement,
     ) -> impl Future<Output = Result<ReplaceSessionDefaultsOutcome, Self::Error>> + Send;
 }
 
@@ -147,7 +178,9 @@ where
             request.expected_current_version,
             request.replacement,
         );
-        self.transaction.handle(command).await
+        self.transaction
+            .handle(command, request.prompt_member)
+            .await
     }
 }
 
@@ -215,13 +248,12 @@ mod tests {
     /// when the session's current version equals the command's expectation,
     /// for scripting a fake transaction's response.
     fn recorded_applied(command: DomainReplaceSessionDefaults) -> ReplaceSessionDefaultsResult {
+        let current = current_session(command.session(), command.expected_current_version());
         command
-            .prepare_against(&current_session(
-                command.session(),
-                command.expected_current_version(),
-            ))
+            .prepare_against(&current)
             .expect("test command and session identities match")
             .result()
+            .clone()
     }
 
     /// The recorded rejection the authoritative transaction would return when
@@ -234,10 +266,12 @@ mod tests {
             .expected_current_version()
             .checked_next()
             .expect("test expected versions have a successor");
+        let current = current_session(command.session(), moved_past);
         command
-            .prepare_against(&current_session(command.session(), moved_past))
+            .prepare_against(&current)
             .expect("test command and session identities match")
             .result()
+            .clone()
     }
 
     fn run_ready<Output>(future: impl Future<Output = Output>) -> Output {
@@ -285,6 +319,7 @@ mod tests {
         fn handle(
             &mut self,
             command: DomainReplaceSessionDefaults,
+            _prompt_member: super::PromptMemberStatement,
         ) -> impl Future<Output = Result<ReplaceSessionDefaultsOutcome, Self::Error>> + Send
         {
             self.observed.push(command);
@@ -308,6 +343,7 @@ mod tests {
                 target,
                 version(1),
                 defaults(2),
+                super::PromptMemberStatement::Stated,
             ),
             Err(InvalidDurableCommandId::Nil)
         );
@@ -317,6 +353,7 @@ mod tests {
                 target,
                 version(1),
                 defaults(2),
+                super::PromptMemberStatement::Stated,
             ),
             Err(InvalidDurableCommandId::Max)
         );
@@ -334,25 +371,27 @@ mod tests {
             session_id(2),
             version(3),
             defaults(4),
+            super::PromptMemberStatement::Stated,
         )
         .expect("ordinary command identity is admitted");
         let recorded = recorded_applied(DomainReplaceSessionDefaults::new(
             request.command_id(),
             request.session(),
             request.expected_current_version(),
-            request.replacement(),
+            request.replacement().clone(),
         ));
         let expected_outcome = ReplaceSessionDefaultsOutcome::Recorded(recorded);
-        let mut service =
-            ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected_outcome)]));
+        let mut service = ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(
+            expected_outcome.clone(),
+        )]));
 
-        let outcome =
-            run_ready(service.execute(request)).expect("fake transaction returns its result");
+        let outcome = run_ready(service.execute(request.clone()))
+            .expect("fake transaction returns its result");
 
         assert_eq!(outcome, expected_outcome);
         let transaction = service.into_transaction();
         assert_eq!(transaction.observed.len(), 1);
-        let observed = transaction.observed[0];
+        let observed = &transaction.observed[0];
         assert_eq!(observed.command_id(), request.command_id());
         assert_eq!(observed.session(), request.session());
         assert_eq!(
@@ -372,18 +411,19 @@ mod tests {
             version(1),
             defaults(2),
         );
-        let applied = recorded_applied(command);
+        let applied = recorded_applied(command.clone());
         assert!(matches!(applied, ReplaceSessionDefaultsResult::Applied(_)));
         let request = ReplaceSessionDefaultsRequest::try_new(
             command.command_id(),
             command.session(),
             command.expected_current_version(),
-            command.replacement(),
+            command.replacement().clone(),
+            super::PromptMemberStatement::Stated,
         )
         .expect("ordinary command identity is admitted");
         let expected = ReplaceSessionDefaultsOutcome::Recorded(applied);
         let mut service =
-            ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected)]));
+            ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected.clone())]));
 
         let actual =
             run_ready(service.execute(request)).expect("recorded replay result is returned");
@@ -402,7 +442,7 @@ mod tests {
             version(1),
             defaults(3),
         );
-        let rejected = recorded_stale_rejection(command);
+        let rejected = recorded_stale_rejection(command.clone());
         assert!(matches!(
             rejected,
             ReplaceSessionDefaultsResult::Rejected(
@@ -413,12 +453,13 @@ mod tests {
             command.command_id(),
             command.session(),
             command.expected_current_version(),
-            command.replacement(),
+            command.replacement().clone(),
+            super::PromptMemberStatement::Stated,
         )
         .expect("ordinary command identity is admitted");
         let expected = ReplaceSessionDefaultsOutcome::Recorded(rejected);
         let mut service =
-            ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected)]));
+            ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected.clone())]));
 
         let actual =
             run_ready(service.execute(request)).expect("recorded replay result is returned");
@@ -436,13 +477,14 @@ mod tests {
             session_id(2),
             version(1),
             defaults(3),
+            super::PromptMemberStatement::Stated,
         )
         .expect("ordinary command identity is admitted");
         let expected = ReplaceSessionDefaultsOutcome::ConflictingReuse {
             command_id: request.command_id(),
         };
         let mut service =
-            ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected)]));
+            ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected.clone())]));
 
         let actual = run_ready(service.execute(request)).expect("conflict is a terminal outcome");
 
@@ -459,6 +501,7 @@ mod tests {
             session_id(2),
             version(1),
             defaults(3),
+            super::PromptMemberStatement::Stated,
         )
         .expect("ordinary command identity is admitted");
         let mut service = ReplaceSessionDefaultsService::new(FakeTransaction::returning([Err(

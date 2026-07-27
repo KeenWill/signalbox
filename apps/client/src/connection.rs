@@ -185,6 +185,7 @@ mod tests {
         assert_pre_admission_errors_are_admitted(ProtocolVersion::Six)?;
         assert_pre_admission_errors_are_admitted(ProtocolVersion::Seven)?;
         assert_pre_admission_errors_are_admitted(ProtocolVersion::Eight)?;
+        assert_pre_admission_errors_are_admitted(ProtocolVersion::Nine)?;
         assert_pre_admission_errors_are_admitted(ProtocolVersion::Ten)?;
         assert_pre_admission_errors_are_admitted(ProtocolVersion::Fourteen)?;
         Ok(())
@@ -200,6 +201,7 @@ mod tests {
         assert_application_error_is_rejected(ProtocolVersion::Six)?;
         assert_application_error_is_rejected(ProtocolVersion::Seven)?;
         assert_application_error_is_rejected(ProtocolVersion::Eight)?;
+        assert_application_error_is_rejected(ProtocolVersion::Nine)?;
         assert_application_error_is_rejected(ProtocolVersion::Ten)?;
         assert_application_error_is_rejected(ProtocolVersion::Fourteen)?;
         Ok(())

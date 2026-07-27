@@ -8,6 +8,7 @@ use signalbox_process_protocol::{
 pub(crate) enum ClientError {
     Io(io::Error),
     SourceFile(io::Error),
+    SystemPromptFile(io::Error),
     ScanDirectory(io::Error),
     SourceExceedsFrame,
     ScanIncomplete {
@@ -43,6 +44,10 @@ impl ClientError {
         Self::SourceFile(error)
     }
 
+    pub(crate) fn system_prompt_file(error: io::Error) -> Self {
+        Self::SystemPromptFile(error)
+    }
+
     pub(crate) fn scan_directory(error: io::Error) -> Self {
         Self::ScanDirectory(error)
     }
@@ -53,7 +58,10 @@ impl ClientError {
                 code: ErrorCode::CommitAmbiguous,
                 ..
             } => Self::AmbiguousMutation,
-            Self::Remote { .. } | Self::SourceFile(_) | Self::SourceExceedsFrame => self,
+            Self::Remote { .. }
+            | Self::SourceFile(_)
+            | Self::SystemPromptFile(_)
+            | Self::SourceExceedsFrame => self,
             Self::Io(_)
             | Self::ScanDirectory(_)
             | Self::ScanIncomplete { .. }
@@ -77,6 +85,9 @@ impl fmt::Display for ClientError {
             Self::Io(_) => formatter.write_str("local process communication failed"),
             Self::SourceFile(_) => {
                 formatter.write_str("the conversation import source file could not be read")
+            }
+            Self::SystemPromptFile(_) => {
+                formatter.write_str("the system prompt file could not be read")
             }
             Self::ScanDirectory(_) => {
                 formatter.write_str("the conversation import scan directory could not be read")
@@ -126,7 +137,10 @@ impl fmt::Display for ClientError {
 impl Error for ClientError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Io(error) | Self::SourceFile(error) | Self::ScanDirectory(error) => Some(error),
+            Self::Io(error)
+            | Self::SourceFile(error)
+            | Self::SystemPromptFile(error)
+            | Self::ScanDirectory(error) => Some(error),
             Self::Encode(error) => Some(error),
             Self::Decode(error) => Some(error),
             Self::Protocol(_)
