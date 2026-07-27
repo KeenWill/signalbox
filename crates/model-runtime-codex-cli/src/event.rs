@@ -12,7 +12,7 @@ use signalbox_model_runtime::{
     validate_provider_json_nesting,
 };
 
-use crate::redaction::{RedactingSink, redact_text};
+use crate::redaction::{RedactingSink, redact_text, trailing_credential_context};
 use crate::status::classify_error;
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{
@@ -390,6 +390,11 @@ impl<C: Clone> EventDecoder<C> {
             return Ok(content);
         }
 
+        // The tool fields need only the final text's trailing credential
+        // context, not the whole (possibly multi-megabyte) text, so a
+        // credential spanning the text end and a field is caught without
+        // rescanning the full text per call.
+        let final_text_context = trailing_credential_context(&envelope.text);
         let mut raw_ids = HashSet::new();
         let mut clean_ids = HashSet::new();
         for call in &envelope.tool_calls {
@@ -400,7 +405,7 @@ impl<C: Clone> EventDecoder<C> {
             // cross-fragment lookbehind (including the same-envelope final
             // text) would redact it, so a marker held from reasoning or ending
             // the final text cannot leave a matching id in the clean set.
-            let sanitized = sink.redact_provider_id(&envelope.text, &call.id);
+            let sanitized = sink.redact_provider_id(final_text_context, &call.id);
             if sanitized == call.id {
                 clean_ids.insert(sanitized);
             }
@@ -412,7 +417,7 @@ impl<C: Clone> EventDecoder<C> {
             if !allowed {
                 return Err(format!(
                     "response proposed undeclared tool `{}`",
-                    sink.redact_provider_id(&envelope.text, &call.name)
+                    sink.redact_provider_id(final_text_context, &call.name)
                 ));
             }
             // The envelope carries the argument object as JSON text inside a
@@ -424,7 +429,7 @@ impl<C: Clone> EventDecoder<C> {
             // The id consults the same held lookbehind the arguments do —
             // including the same-envelope final text — so an id extending a
             // credential marker gets a safe surrogate instead of leaking.
-            let sanitized = sink.redact_provider_id(&envelope.text, &call.id);
+            let sanitized = sink.redact_provider_id(final_text_context, &call.id);
             let id = if sanitized == call.id {
                 sanitized
             } else {
@@ -438,7 +443,7 @@ impl<C: Clone> EventDecoder<C> {
                 // sanitized value feeds the streamed argument delta and the
                 // terminal proposal, so a credential whose marker arrived in
                 // an earlier fragment cannot escape through tool arguments.
-                arguments_json: sink.redact_tool_arguments(&envelope.text, &call.arguments),
+                arguments_json: sink.redact_tool_arguments(final_text_context, &call.arguments),
             }));
         }
         if let Some(contract_name) = &self.output_contract_name {

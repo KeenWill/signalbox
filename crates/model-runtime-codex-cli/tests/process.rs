@@ -1683,6 +1683,39 @@ async fn stderr_is_classified_before_credential_redaction() {
     );
 }
 
+/// Work-first: a cancellation arriving after a terminal marker but a nonzero
+/// exit classifies the failed invocation as a provider error, so cancellation
+/// cannot launder it into the recorded completion.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancellation_after_terminal_marker_preserves_a_nonzero_exit() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = completed_then_nonzero_exit_cli(temporary.path());
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(60));
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let cancellation =
+        cancel_after_record(temporary.path().join("fake-codex-completed-nonzero-ready"));
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, cancellation)
+        .await;
+
+    assert!(
+        matches!(report.evidence, TerminalEvidence::ProviderError(_)),
+        "a nonzero exit after a terminal marker is a provider error, got {:?}",
+        report.evidence
+    );
+}
+
 /// Work-first: a cancellation arriving after the leader has already exited
 /// nonzero keeps the definitive provider-error evidence instead of reporting
 /// cancellation loss.
@@ -2504,6 +2537,30 @@ exec 2>&-
 exit 7
 "#;
     script_cli(directory, "stderr-masked-codex", script)
+}
+
+/// Scripts a CLI that finishes a complete `turn.completed` exchange, then
+/// exits nonzero while a descendant holds stdout open and — after the leader
+/// exits — signals readiness. A cancellation arriving after the exit must not
+/// launder the failed invocation into the recorded completion.
+#[cfg(unix)]
+fn completed_then_nonzero_exit_cli(directory: &Path) -> std::path::PathBuf {
+    // The leader exits at once, becoming an unreaped zombie the adapter only
+    // reaps at its deadline; a `kill -0` poll cannot see that exit (zombies
+    // still answer the signal probe), so a fixed delay well under the long
+    // exchange timeout below lets the cancellation fire while the leader is
+    // already exited, deterministically reaching the cancellation arm.
+    let script = format!(
+        r#"#!/bin/sh
+{lines}( sleep 3
+  printf 'ready\n' > fake-codex-completed-nonzero-ready
+  sleep 60 ) 0<&- 2>&- &
+printf 'process_group=%s\ndescendant=%s\n' "$$" "$!" > fake-codex-completed-nonzero-group
+exit 7
+"#,
+        lines = completed_exchange_script_lines()
+    );
+    script_cli(directory, "completed-nonzero-codex", &script)
 }
 
 /// Scripts a CLI that exits nonzero after a classifiable stderr while a

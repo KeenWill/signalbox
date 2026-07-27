@@ -601,12 +601,13 @@ async fn execute_process<C: Clone + Send + Sync>(
             ProcessStep::Cancelled => {
                 // Work-first: a leader that has already exited on its own is
                 // definitive evidence a simultaneous cancellation must not
-                // discard. Probe without reaping and, if it exited, hand the
-                // status to the exit-classification path below instead of
-                // reporting cancellation.
-                if !terminal_observed
-                    && let Some((status, detail)) =
-                        reap_exited_leader(&mut child, &mut stderr_task).await
+                // discard — even after a terminal marker, because a nonzero
+                // exit must classify as a provider error rather than let
+                // cancellation launder it into the recorded completion. Probe
+                // without reaping and, if it exited, hand the status to the
+                // exit-classification path below.
+                if let Some((status, detail)) =
+                    reap_exited_leader(&mut child, &mut stderr_task).await
                 {
                     reaped_status = Some(status);
                     deadline_stderr = Some(detail);
@@ -686,42 +687,43 @@ async fn execute_process<C: Clone + Send + Sync>(
         biased;
         result = &mut stderr_task => stderr_result(result),
         () = &mut *cancellation => {
-            if !terminal_observed {
-                // Work-first: an already-exited leader's status outranks a
-                // cancellation even when a descendant still holds stderr open.
-                if let Some((status, detail)) =
-                    reap_exited_leader(&mut child, &mut stderr_task).await
-                {
-                    reaped_status = Some(status);
-                    detail
-                } else {
-                    interrupt_then_kill(
-                        &mut child,
-                        remaining_interrupt_grace(prepared.interrupt_grace, deadline),
-                    )
-                    .await;
-                    abort_stderr_task(&mut stderr_task).await;
-                    redacting_sink.finish();
-                    return decoder.boundary_loss(LossCause::CancellationRequested);
-                }
-            } else {
-            let cleanup_grace = remaining_interrupt_grace(prepared.interrupt_grace, deadline);
-            interrupt_then_kill(&mut child, cleanup_grace).await;
-            abort_stderr_task(&mut stderr_task).await;
-            // Cancellation does not launder an incomplete request upload: a
-            // nominal completion still demotes to boundary loss exactly as on
-            // the normal exit path below, because the adapter cannot prove the
-            // full authorized frontier reached the CLI.
-            let evidence = if let Some(error) = input_error {
-                decoder.boundary_loss_unless_provider_failure(
-                    incomplete_upload_cause(&error),
-                    &redacting_sink,
+            // Probe first: an already-exited leader's status is definitive and
+            // outranks a cancellation even after a terminal marker or while a
+            // descendant holds stderr open — a nonzero exit must classify as a
+            // provider error rather than let cancellation launder a failed
+            // invocation into the recorded completion.
+            if let Some((status, detail)) =
+                reap_exited_leader(&mut child, &mut stderr_task).await
+            {
+                reaped_status = Some(status);
+                detail
+            } else if !terminal_observed {
+                interrupt_then_kill(
+                    &mut child,
+                    remaining_interrupt_grace(prepared.interrupt_grace, deadline),
                 )
+                .await;
+                abort_stderr_task(&mut stderr_task).await;
+                redacting_sink.finish();
+                return decoder.boundary_loss(LossCause::CancellationRequested);
             } else {
-                decoder.finish(&mut redacting_sink)
-            };
-            redacting_sink.finish();
-            return evidence;
+                let cleanup_grace = remaining_interrupt_grace(prepared.interrupt_grace, deadline);
+                interrupt_then_kill(&mut child, cleanup_grace).await;
+                abort_stderr_task(&mut stderr_task).await;
+                // Cancellation does not launder an incomplete request upload: a
+                // nominal completion still demotes to boundary loss exactly as
+                // on the normal exit path below, because the adapter cannot
+                // prove the full authorized frontier reached the CLI.
+                let evidence = if let Some(error) = input_error {
+                    decoder.boundary_loss_unless_provider_failure(
+                        incomplete_upload_cause(&error),
+                        &redacting_sink,
+                    )
+                } else {
+                    decoder.finish(&mut redacting_sink)
+                };
+                redacting_sink.finish();
+                return evidence;
             }
         },
         () = tokio::time::sleep_until(deadline) => {

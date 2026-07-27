@@ -28,6 +28,7 @@ pub(crate) enum Command {
     Create {
         selection: ModelSelection,
         command_id: Option<CommandId>,
+        system_prompt_file: Option<PathBuf>,
     },
     Continue {
         imported_conversation_id: CanonicalUuid,
@@ -49,6 +50,7 @@ pub(crate) enum Command {
         command_id: Option<CommandId>,
         defaults_version: Option<CanonicalU64>,
         dangerous_tool_auto_approval: Option<DangerousToolAutoApprovalArgument>,
+        system_prompt: SystemPromptArgument,
     },
     Transcript {
         session_id: CanonicalUuid,
@@ -379,6 +381,9 @@ struct CreateArguments {
     /// Select a configured model alias.
     #[arg(long, value_name = "UUID", value_parser = canonical_uuid)]
     alias: Option<CanonicalUuid>,
+    /// Read the exact optional session system prompt from one file.
+    #[arg(long, value_name = "PATH")]
+    system_prompt_file: Option<PathBuf>,
     /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
@@ -472,6 +477,12 @@ struct SendArguments {
         .multiple(false)
         .args(["model", "alias"])
 ))]
+#[command(group(
+    ArgGroup::new("system_prompt")
+        .required(false)
+        .multiple(false)
+        .args(["system_prompt_file", "clear_system_prompt"])
+))]
 struct ModelArguments {
     /// Session whose future turns should use the replacement model.
     #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
@@ -505,6 +516,12 @@ struct ModelArguments {
         requires_all = ["command_id", "defaults_version"]
     )]
     dangerous_tool_auto_approval: Option<DangerousToolAutoApprovalArgument>,
+    /// Read the exact replacement session system prompt from one file.
+    #[arg(long, value_name = "PATH")]
+    system_prompt_file: Option<PathBuf>,
+    /// Install the replacement epoch without a session system prompt.
+    #[arg(long)]
+    clear_system_prompt: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -631,6 +648,17 @@ pub(crate) enum DangerousToolAutoApprovalArgument {
     ApproveAll,
 }
 
+/// The model verb's replacement choice for the session system prompt.
+#[derive(Debug)]
+pub(crate) enum SystemPromptArgument {
+    /// Copy the exact current prompt forward unchanged.
+    Keep,
+    /// Replace the prompt with the exact content of one file.
+    File(PathBuf),
+    /// Install the replacement epoch without a prompt.
+    Clear,
+}
+
 pub(crate) fn parse(
     values: impl IntoIterator<Item = OsString>,
 ) -> Result<ParseOutcome, UsageError> {
@@ -655,6 +683,7 @@ pub(crate) fn parse(
                 }
             },
             command_id: arguments.command_id,
+            system_prompt_file: arguments.system_prompt_file,
         },
         CliCommand::Continue(arguments) => Command::Continue {
             imported_conversation_id: arguments.imported_conversation_id,
@@ -748,6 +777,17 @@ pub(crate) fn parse(
             command_id: arguments.command_id,
             defaults_version: arguments.defaults_version,
             dangerous_tool_auto_approval: arguments.dangerous_tool_auto_approval,
+            system_prompt: match (arguments.system_prompt_file, arguments.clear_system_prompt) {
+                (Some(path), false) => SystemPromptArgument::File(path),
+                (None, true) => SystemPromptArgument::Clear,
+                (None, false) => SystemPromptArgument::Keep,
+                (Some(_), true) => {
+                    return Err(UsageError(Cli::command().error(
+                        ErrorKind::ArgumentConflict,
+                        "model admits at most one of --system-prompt-file or --clear-system-prompt",
+                    )));
+                }
+            },
         },
         CliCommand::Transcript(arguments) => Command::Transcript {
             session_id: arguments.session_id,
