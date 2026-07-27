@@ -21,15 +21,15 @@ use signalbox_domain::{
     RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
     RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerId,
     RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseLoss,
-    RunnerLeaseNoExecutionProof, RunnerLeaseReconstitutionInput, RunnerLeaseState, RunnerSelector,
-    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
-    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
-    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
-    SessionRunnerPlacementState, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId, ToolDispatchGeneration,
-    ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
-    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
-    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
+    RunnerLeaseReconstitutionInput, RunnerLeaseState, RunnerSelector, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId,
+    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptId, ToolDispatchGeneration, ToolName, ToolPermissionDefault, ToolRequestId,
+    TurnAttemptId, TurnId, ValidatedRunnerRegistration,
+    ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceCapability,
+    WorkspaceRepositoryKey, WorkspaceRequirement,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -701,16 +701,20 @@ impl RunnerProtocolStore {
                 RunnerDomainError::InvalidState,
             ));
         }
-        self.store_lease_with_proof(lease, None).await
+        self.store_lease_without_proof(lease).await
     }
 
-    /// Atomically stores a sealed lease loss and its independent no-execution proof.
+    /// Stores one sealed lease loss that does not claim independent no-execution proof.
     pub async fn store_lease_loss(
         &self,
         loss: &RunnerLeaseLoss,
     ) -> Result<(), RunnerProtocolStoreError> {
-        self.store_lease_with_proof(loss.lost(), loss.no_execution_proof())
-            .await
+        if loss.no_execution_proof().is_some() {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        self.store_lease_without_proof(loss.lost()).await
     }
 
     /// Durably reserves one retryable claimed loss for an exact replacement attempt.
@@ -823,12 +827,11 @@ impl RunnerProtocolStore {
         .transpose()
     }
 
-    async fn store_lease_with_proof(
+    async fn store_lease_without_proof(
         &self,
         lease: &RunnerLease,
-        no_execution: Option<&RunnerLeaseNoExecutionProof>,
     ) -> Result<(), RunnerProtocolStoreError> {
-        if (lease.state() == RunnerLeaseState::LostUnclaimed) != no_execution.is_some() {
+        if lease.state() == RunnerLeaseState::LostUnclaimed {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
             ));
@@ -881,34 +884,6 @@ impl RunnerProtocolStore {
         .bind(Decimal::from(event_ordinal))
         .execute(&mut *transaction)
         .await?;
-        if let Some(no_execution) = no_execution {
-            let proof = no_execution.correlation();
-            if proof != &correlation {
-                return Err(RunnerProtocolStoreError::Domain(
-                    RunnerDomainError::CorrelationMismatch,
-                ));
-            }
-            sqlx::query(
-                "INSERT INTO runner_lease_no_execution_proof
-                    (lease_id, generation, attempt_id, session_id,
-                     runner_id, tool_name, turn_id,
-                     issuing_turn_attempt_id, request_id,
-                     dispatch_generation)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-            )
-            .bind(proof.lease.into_uuid())
-            .bind(Decimal::from(proof.generation.get()))
-            .bind(proof.dispatch.attempt().into_uuid())
-            .bind(proof.dispatch.session().into_uuid())
-            .bind(proof.runner.into_uuid())
-            .bind(proof.tool.as_str())
-            .bind(proof.dispatch.turn().into_uuid())
-            .bind(proof.dispatch.issuing_attempt().into_uuid())
-            .bind(proof.dispatch.request().into_uuid())
-            .bind(Decimal::from(proof.dispatch.generation().as_u64()))
-            .execute(&mut *transaction)
-            .await?;
-        }
         commit_mutation(transaction).await
     }
 

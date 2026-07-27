@@ -171,17 +171,19 @@ underlying attempt exists only after the automatic or owner decision authorizes
 that exact attempt, and neither authority nor the resulting lease is cloneable.
 Every checked `ToolBatch` carries a durable per-attempt inventory of runner
 authority already issued. Its in-memory clones share the exact atomic guard for
-each physical attempt, and complete reconstitution restores every consumed guard
-from that inventory. Atomic runner authorization marks that exact attempt issued
-in the batch; a later clone or reconstitution from the updated facts cannot mint
-a second runner lease capability. Current active enrollment, pinned placement,
-its exact validated registration, and any selected active credential grant
-jointly authorize every offer after the first. The initial offer instead creates
-that pinned placement, any selected grant, and generation-one lease in one
-checked transition from `Unpinned`; it does not require those products to exist
-beforehand. The request, attempt, session, and two-way crash class must match
-the selected tool, placement, and declaration-derived effect class (`Pure` to
-`EffectFree`; `Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked
+each physical attempt. The persistence loader derives the active batch's
+consumed inventory from exact current physical attempts already bound by durable
+runner lease generations, and complete reconstitution restores every consumed
+guard from that inventory. Atomic runner authorization marks that exact attempt
+issued in the batch; a later clone or reconstitution from the updated facts
+cannot mint a second runner lease capability. Current active enrollment, pinned
+placement, its exact validated registration, and any selected active credential
+grant jointly authorize every offer after the first. The initial offer instead
+creates that pinned placement, any selected grant, and generation-one lease in
+one checked transition from `Unpinned`; it does not require those products to
+exist beforehand. The request, attempt, session, and two-way crash class must
+match the selected tool, placement, and declaration-derived effect class (`Pure`
+to `EffectFree`; `Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked
 enrollment, lost placement, or a mismatched runner, request, tool, attempt,
 effect, profile, or grant cannot create a lease.
 
@@ -205,22 +207,26 @@ proof exposes no public raw-parts constructor, so an offered lease and its
 public correlation cannot mint this authority. The persistence adapter may
 reconstitute it only by comparing the complete stored proof correlation with the
 independently loaded lease correlation through the checked reconstitution input.
-It does not mean merely absence of a claim frame after an offer was sent. A
-future transport must supply the independently authoritative producer, durably
-commit the exact claim, and acknowledge it before the runner may execute.
-Channel loss after delivery but before that acknowledgement cannot be
-interpreted as proof either way by transport alone. The Postgres representation
-commits the proof atomically with the lost-unclaimed event and requires it
-before a successor generation can consume that retry path. Claimed retry instead
-requires a durable record binding the complete lost lease correlation to the
-exact fresh physical-attempt dispatch. That record is an idempotent reservation:
-if a process exits before the replacement attempt is stored, recovery loads the
-exact reserved dispatch and may replay only that replacement. The loss becomes
-durably consumed once the exact replacement attempt or successor lease
-generation exists; a different replacement cannot overwrite the reservation.
-Without the proof, losing even an `Offered` lease conservatively follows the
-execution-possible law: pure or idempotent work requires a fresh physical
-attempt, while side-effecting work requires crash classification.
+The current adapter refuses to originate `LostUnclaimed` or persist a proof from
+caller-reconstituted domain facts; the authoritative transport producer remains
+an open edge and must commit the proof with the loss before reload can confer
+retry authority. It does not mean merely absence of a claim frame after an offer
+was sent. A future transport must supply the independently authoritative
+producer, durably commit the exact claim, and acknowledge it before the runner
+may execute. Channel loss after delivery but before that acknowledgement cannot
+be interpreted as proof either way by transport alone. The Postgres
+representation commits the proof atomically with the lost-unclaimed event and
+requires it before a successor generation can consume that retry path. Claimed
+retry instead requires a durable record binding the complete lost lease
+correlation to the exact fresh physical-attempt dispatch. That record is an
+idempotent reservation: if a process exits before the replacement attempt is
+stored, recovery loads the exact reserved dispatch and may replay only that
+replacement. The loss becomes durably consumed once the exact replacement
+attempt or successor lease generation exists; a different replacement cannot
+overwrite the reservation. Without the proof, losing even an `Offered` lease
+conservatively follows the execution-possible law: pure or idempotent work
+requires a fresh physical attempt, while side-effecting work requires crash
+classification.
 
 With that proof, loss before claim permits every effect class to be re-leased at
 the checked successor lease-lineage generation. Loss after claim follows the

@@ -3725,6 +3725,48 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s31_inv043_adapter_rejects_caller_reconstituted_no_execution_proof()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let correlation = pin.lease.correlation();
+    let credential_authorization = pin.lease.credential_authorization().cloned();
+    let reconstructed = RunnerLease::reconstitute(
+        RunnerLeaseReconstitutionInput {
+            lease: correlation.lease,
+            dispatch: correlation.dispatch,
+            runner: correlation.runner,
+            tool: correlation.tool.clone(),
+            effect: pin.lease.effect(),
+            credential_authorization: credential_authorization.clone(),
+            generation: correlation.generation,
+            state: signalbox_domain::RunnerLeaseState::LostUnclaimed,
+            recorded_correlation: correlation.clone(),
+            recorded_session: correlation.dispatch.session(),
+            recorded_effect: pin.lease.effect(),
+            recorded_credential_authorization: credential_authorization,
+            recorded_state: signalbox_domain::RunnerLeaseState::LostUnclaimed,
+            retry_prepared: false,
+            recorded_retry_prepared: false,
+        },
+        registration.registration(),
+    )
+    .expect("the caller-controlled loss facts are internally correlated");
+    let forged = reconstructed
+        .into_reconstituted_loss(Some(correlation), false)
+        .expect("the copied correlation fabricates process-local proof");
+    let rejected = store
+        .store_lease_loss(&forged)
+        .await
+        .expect_err("caller-reconstituted facts cannot originate durable no-execution proof");
+
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s31_inv043_unclaimed_retry_authority_survives_reconstitution() -> Result<(), Box<dyn Error>>
 {
     let (_container, pool) = migrated_postgres().await?;

@@ -1068,6 +1068,8 @@ pub(crate) async fn load_active_batch_from_connection(
     let requests = load_requests(connection, producing_call, session, turn).await?;
     let approvals = load_approvals(connection, producing_call).await?;
     let attempts = load_attempts(connection, producing_call).await?;
+    let runner_authorized_attempts =
+        load_runner_authorized_attempts(connection, producing_call).await?;
     let phase_kind: String = required(&lifecycle, "active_phase_kind")?;
     let phase = match phase_kind.as_str() {
         "awaiting_tool_approval" => ToolBatchPhaseReconstitutionInput::AwaitingApproval {
@@ -1100,6 +1102,7 @@ pub(crate) async fn load_active_batch_from_connection(
         attempts,
         phase,
     )
+    .with_runner_authorized_attempts(runner_authorized_attempts)
     .reconstitute()
     .map(Some)
     .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
@@ -1746,6 +1749,29 @@ async fn load_attempts(
     .fetch_all(&mut *connection)
     .await?;
     rows.into_iter().map(decode_attempt).collect()
+}
+
+async fn load_runner_authorized_attempts(
+    connection: &mut PgConnection,
+    producing_call: signalbox_domain::ModelCallId,
+) -> Result<Vec<ToolAttemptId>, ToolLoopRepositoryError> {
+    let attempts = sqlx::query_scalar::<_, Uuid>(
+        "SELECT DISTINCT generation.attempt_id
+           FROM runner_lease_generation AS generation
+           JOIN runner_current_tool_attempt AS attempt
+             ON attempt.attempt_id = generation.attempt_id
+           JOIN tool_request AS request
+             ON request.request_id = attempt.request_id
+          WHERE request.producing_model_call_id = $1
+          ORDER BY generation.attempt_id",
+    )
+    .bind(producing_call.into_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
+    Ok(attempts
+        .into_iter()
+        .map(tool_attempt_id_from_uuid)
+        .collect())
 }
 
 pub(crate) fn decode_attempt(

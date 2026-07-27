@@ -52,10 +52,11 @@ use signalbox_domain::{
     StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
     SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd,
-    ToolAttemptId, ToolAttemptObservation, ToolCallProposal, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorKind, ToolName, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
-    ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry,
-    TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
+    ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal,
+    ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestId,
+    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
+    TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -1814,6 +1815,80 @@ async fn s10_inv012_decision_receipt_rejects_cross_round_earliest_request()
     );
     transaction.rollback().await?;
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S31 / INV-043: durable runner lease binding keeps restart reconstitution from
+/// issuing a second runner capability for the same physical attempt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s31_inv043_active_batch_reload_restores_consumed_runner_issuance()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x73f0;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let turn_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0));
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || turn_attempt,
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the approved request prepares its physical attempt");
+    repository
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    sqlx::query("ALTER TABLE runner_lease_generation DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_generation
+            (lease_id, generation, attempt_id, session_id, runner_id,
+             tool_name, effect_class, placement_event_ordinal,
+             registration_enrollment_id, registration_revision,
+             predecessor_generation)
+         VALUES ($1, 1, $2, $3, $4, $5, 'pure', 1, $6, 1, NULL)",
+    )
+    .bind(Uuid::from_u128(seed + 0xe2))
+    .bind(attempt.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(seed + 0xe3))
+    .bind("current_time")
+    .bind(Uuid::from_u128(seed + 0xe4))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_lease_generation ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let reloaded = repository
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("the active batch reloads with its durable lease binding");
+    let duplicate = reloaded
+        .resume_runner_attempt(attempt)
+        .expect_err("durably issued runner authority cannot be minted again after restart");
+
+    assert_eq!(
+        duplicate.failure(),
+        ToolBatchExecutionFailure::AttemptStageMismatch
+    );
     pool.close().await;
     drop(container);
     Ok(())
