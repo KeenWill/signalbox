@@ -72,7 +72,61 @@ pub(crate) fn redact_text(text: &str) -> String {
     sanitized_decoded
 }
 
+/// Substrings whose case-insensitive presence is necessary for any redaction
+/// pass to change the text: every marker, credential name, and token prefix
+/// begins with or contains one of these. A leaf lacking all of them is
+/// credential-clean and can bypass the allocating passes. A JSON structural
+/// character is included because a bare credential member can appear without a
+/// separator keyword once inside an object.
+const CREDENTIAL_INDICATORS: &[&str] = &[
+    "authorization",
+    "cookie",
+    "api_key",
+    "api-key",
+    "apikey",
+    "auth_token",
+    "auth-token",
+    "authtoken",
+    "bearer",
+    "bearertoken",
+    "access_token",
+    "accesstoken",
+    "refresh_token",
+    "refreshtoken",
+    "id_token",
+    "idtoken",
+    "session_token",
+    "sessiontoken",
+    "private_key",
+    "private-key",
+    "privatekey",
+    "password",
+    "secret",
+    "credential",
+    "sk-",
+    "eyJ",
+];
+
+fn text_might_contain_credential(text: &str) -> bool {
+    // A quote can begin a bare credential member the JSON-value scanner reads
+    // without an enclosing object; an escape can hide any indicator.
+    if text.contains('"') || text.contains("\\u") {
+        return true;
+    }
+    CREDENTIAL_INDICATORS
+        .iter()
+        .any(|indicator| find_ascii_case_insensitive(text, indicator).is_some())
+}
+
 fn redact_text_literal(text: &str) -> String {
+    // No-match fast path: a leaf that contains none of the credential
+    // indicators cannot be changed by any pass below, so it skips the six
+    // full-string allocations those passes would each make. Bounded provider
+    // input (a large array of short clean strings) therefore has bounded
+    // practical work while decoding one event.
+    if !text_might_contain_credential(text) {
+        return text.to_string();
+    }
     let mut sanitized = redact_json_credential_values(text);
     for marker in LINE_CREDENTIAL_MARKERS {
         sanitized = redact_line_value(&sanitized, marker);
@@ -117,6 +171,17 @@ const VALUE_CREDENTIAL_NAMES: &[&str] = &[
     "session_token",
     "private_key",
     "private-key",
+    // Concatenated spellings also match their camel-case forms
+    // case-insensitively (`apiKey`, `privateKey`), covering plaintext
+    // assignments the separator-bearing names miss.
+    "apikey",
+    "authtoken",
+    "bearertoken",
+    "accesstoken",
+    "refreshtoken",
+    "idtoken",
+    "sessiontoken",
+    "privatekey",
 ];
 
 /// Redacts a `name` credential whose separator (`=` or `:`) carries optional
@@ -603,22 +668,49 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     /// exactly as the streamed fragments they continue are; otherwise the
     /// stateless JSON-aware redaction applies and clean arguments stay
     /// byte-verbatim.
-    pub(crate) fn redact_tool_arguments(&self, arguments: &str) -> String {
+    /// True if `value`, read as a continuation of the held lookbehind followed
+    /// by `preceding` provider text (the same-envelope final text emitted
+    /// before this field), would be redacted — a credential shape spanning the
+    /// held state, the final text, and the field itself.
+    fn extends_held_credential(&self, preceding: &str, value: &str) -> bool {
+        if self.suppressing {
+            return true;
+        }
+        let held = self
+            .pending
+            .as_ref()
+            .map_or("", |pending| pending.text.as_str());
+        if held.is_empty() && preceding.is_empty() {
+            return false;
+        }
+        let mut joined = String::with_capacity(held.len() + preceding.len() + value.len());
+        joined.push_str(held);
+        joined.push_str(preceding);
+        joined.push_str(value);
+        redact_text(&joined) != joined
+    }
+
+    pub(crate) fn redact_tool_arguments(&self, preceding: &str, arguments: &str) -> String {
         // Suppression yields a valid JSON object, not the bare `[redacted]`
         // sentinel, so the `arguments_json` raw-JSON contract holds and
         // `decode_tool_arguments` never reports a syntax error for a call the
-        // provider actually supplied validly.
-        if self.suppressing {
+        // provider actually supplied validly. The final text emitted before
+        // this field is joined in, so an argument continuing a marker at the
+        // end of that text is suppressed too.
+        if self.extends_held_credential(preceding, arguments) {
             return REDACTED_JSON_OBJECT.to_string();
         }
-        if let Some(pending) = &self.pending {
-            let mut joined = pending.text.clone();
-            joined.push_str(arguments);
-            if redact_text(&joined) != joined {
-                return REDACTED_JSON_OBJECT.to_string();
-            }
-        }
         redact_json(arguments)
+    }
+
+    /// Sanitizes a provider-controlled identifier or name against the held
+    /// state plus the same-envelope preceding text: an id continuing a
+    /// credential marker in the final text is suppressed, not left verbatim.
+    pub(crate) fn redact_provider_id(&self, preceding: &str, value: &str) -> String {
+        if self.extends_held_credential(preceding, value) {
+            return REDACTED.to_string();
+        }
+        redact_text(value)
     }
 
     fn flush_boundary(&mut self) {
@@ -1503,11 +1595,14 @@ mod tests {
         let member = format!(r#"{{"private_key":"{QUOTED_CREDENTIAL_VALUE}"}}"#);
         let camel = format!(r#"{{"privateKey":"{JSON_CREDENTIAL_VALUE}"}}"#);
         let plaintext = redact_text("private_key = opaque-private-key-value tail");
+        let camel_plaintext = redact_text("privateKey = opaque-camel-key-value tail");
 
         assert_eq!(redact_json(&member), r#"{"private_key":"[redacted]"}"#);
         assert_eq!(redact_json(&camel), r#"{"privateKey":"[redacted]"}"#);
         assert!(!plaintext.contains("opaque-private-key-value"));
         assert!(plaintext.contains("[redacted]"));
+        assert!(!camel_plaintext.contains("opaque-camel-key-value"));
+        assert!(camel_plaintext.contains("[redacted]"));
     }
 
     /// INV-035: plaintext `auth_token` / `bearer_token` assignments are
@@ -1887,7 +1982,7 @@ safe-line"
         });
 
         let redacted =
-            sink.redact_tool_arguments(&format!(r#"{{"city":" {AUTHORIZATION_VALUE}"}}"#));
+            sink.redact_tool_arguments("", &format!(r#"{{"city":" {AUTHORIZATION_VALUE}"}}"#));
 
         assert_eq!(redacted, REDACTED_JSON_OBJECT);
         assert!(!redacted.contains(AUTHORIZATION_VALUE));
@@ -1898,6 +1993,22 @@ safe-line"
         );
     }
 
+    /// INV-035: a tool argument continuing a marker at the end of the
+    /// same-envelope final text is suppressed, not left verbatim.
+    #[test]
+    fn inv_035_tool_arguments_consult_same_envelope_final_text() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let sink = RedactingSink::new(&mut observed);
+
+        let redacted = sink.redact_tool_arguments(
+            "Authorization:",
+            &format!(r#"{{"value":" {AUTHORIZATION_VALUE}"}}"#),
+        );
+
+        assert_eq!(redacted, REDACTED_JSON_OBJECT);
+        assert!(!redacted.contains(AUTHORIZATION_VALUE));
+    }
+
     /// Harmless tool arguments stay byte-exact with no held redaction state.
     #[test]
     fn tool_arguments_without_held_state_stay_byte_exact() {
@@ -1905,7 +2016,7 @@ safe-line"
         let sink = RedactingSink::new(&mut observed);
         let arguments = r#"{ "city" : "Oslo", "limit": 3 }"#;
 
-        assert_eq!(sink.redact_tool_arguments(arguments), arguments);
+        assert_eq!(sink.redact_tool_arguments("", arguments), arguments);
     }
 
     /// A failure message with no held redaction state keeps its stateless
