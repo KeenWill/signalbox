@@ -1182,6 +1182,15 @@ pub enum InputDelivery {
     },
 }
 
+fn deserialize_present_input_delivery<'de, DeserializerT>(
+    deserializer: DeserializerT,
+) -> Result<Option<InputDelivery>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+{
+    InputDelivery::deserialize(deserializer).map(Some)
+}
+
 impl MetadataLastWriter {
     /// Constructs one exact last-writer stamp.
     pub const fn new(updated_at_unix_micros: CanonicalU64, actor: MetadataActor) -> Self {
@@ -1229,7 +1238,11 @@ pub enum ClientRequest {
         expected_defaults_version: Option<CanonicalU64>,
         /// Version-thirteen delivery treatment. Absence is the retained
         /// start-when-idle default.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_input_delivery",
+            skip_serializing_if = "Option::is_none"
+        )]
         delivery: Option<InputDelivery>,
     },
     /// Read one durable transcript snapshot.
@@ -5650,6 +5663,18 @@ mod tests {
             tool_frame
         );
         Ok(())
+    }
+
+    /// INV-033: an explicit null is not a member of the closed delivery
+    /// vocabulary in either a retained or current protocol version.
+    #[test]
+    fn inv033_submit_delivery_rejects_explicit_null_in_retained_and_current_versions() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"1","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","content":"content","expected_defaults_version":"1","delivery":null}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":13,"request_id":"2","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000003","session_id":"00000000-0000-0000-0000-000000000004","content":"content","expected_defaults_version":"1","delivery":null}}"#,
+        );
     }
 
     /// INV-033: version thirteen adds steering without widening a retained
