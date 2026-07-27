@@ -198,6 +198,48 @@ impl fmt::Display for RejectionDisplay {
                 formatter,
                 "turn_not_awaiting_reconciliation session={session_id} turn={turn_id}"
             ),
+            RejectionDetail::InterruptAlreadyApplied {
+                session_id,
+                active_turn_id,
+                existing_command_id,
+            } => write!(
+                formatter,
+                "interrupt_already_applied session={session_id} active_turn={active_turn_id} \
+                 existing_command={existing_command_id}"
+            ),
+            RejectionDetail::InterruptUnavailableWhileAwaitingApproval {
+                session_id,
+                active_turn_id,
+            } => write!(
+                formatter,
+                "interrupt_unavailable_while_awaiting_approval session={session_id} \
+                 active_turn={active_turn_id}; deny the pending tool request first"
+            ),
+            RejectionDetail::ToolRequestNotFound { tool_request_id } => {
+                write!(
+                    formatter,
+                    "tool_request_not_found request={tool_request_id}"
+                )
+            }
+            RejectionDetail::ToolRequestAlreadyResolved { tool_request_id } => write!(
+                formatter,
+                "tool_request_already_resolved request={tool_request_id}"
+            ),
+            RejectionDetail::ToolRequestNotEarliestUndecided {
+                tool_request_id,
+                earliest_tool_request_id,
+            } => write!(
+                formatter,
+                "tool_request_not_earliest_undecided request={tool_request_id} \
+                 earliest={earliest_tool_request_id}"
+            ),
+            RejectionDetail::ToolRequestNotInSession {
+                session_id,
+                tool_request_id,
+            } => write!(
+                formatter,
+                "tool_request_not_in_session session={session_id} request={tool_request_id}"
+            ),
             RejectionDetail::DefaultsVersionMismatch {
                 session_id,
                 expected,

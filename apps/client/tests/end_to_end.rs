@@ -8,7 +8,7 @@ use std::{
     env,
     error::Error,
     ffi::OsString,
-    fs,
+    fmt, fs,
     io::{self, ErrorKind},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -17,37 +17,52 @@ use std::{
 };
 
 use signalbox_application::{
+    ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
-    ModelCallCredentialReference, SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService,
-    UuidV7StartEligibleTurnIdGenerator,
+    ModelCallCredentialReference, OperatorFailureClass, SchedulerLoop, SchedulerLoopExit,
+    StartEligibleTurnService, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
+    ToolExecutorEvidence, ToolInputSchema, UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
-    DirectModelSelection, ModelTargetCatalog, ModelTargetDefinition, ProviderModelIdentity,
-    ResolvedProviderTarget,
+    DirectModelSelection, ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    ProviderModelIdentity, ResolvedProviderTarget, ToolEffectClass, ToolExecutionErrorDetail,
+    ToolName, ToolPermissionDefault,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
 };
 use signalbox_model_runtime::{
     AssistantPart, CompletionEvidence, CompletionFinish, CredentialReference, ExchangeFacts,
-    ProviderReportedModel, Script, ScriptedModel, TerminalEvidence, TokenUsage,
+    ProviderReportedModel, Script, ScriptedModel, TerminalEvidence, TokenUsage, ToolCallId,
+    ToolCallProposal as RuntimeToolCallProposal, ToolName as RuntimeToolName,
 };
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
     local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
     scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
 };
+use signalbox_process_protocol::{
+    CanonicalUuid, ClientFrame, ClientRequest, CommandId, ProtocolVersion, RequestId,
+    ServerMessage, SessionMetadata, decode_server_line, encode_client_line,
+};
 use signalboxd::{
     ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSupervisor,
     FileCredentialAccess, HubModelConfiguration, LocalProcessListener,
-    PostgresProviderModelExecution, ProcessRuntime,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
-use tokio::{io::AsyncWriteExt, process::Command, sync::watch, time::timeout};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
+    process::Command,
+    sync::watch,
+    task::JoinHandle,
+    time::timeout,
+};
 use uuid::Uuid;
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
@@ -154,6 +169,119 @@ async fn run_client(
     Ok(child.wait_with_output().await?)
 }
 
+/// The direct model selection every metadata-search fixture session carries:
+/// the first selection `IMPORT_MODEL_CONFIGURATION` defines, since the search
+/// verb reads metadata and never depends on which model a session selected.
+const SEARCH_FIXTURE_SELECTION: &str = "00000000-0000-0000-0000-000000000001";
+
+/// The process server the metadata-search tests drive. They start no turn, so
+/// the fixture runs the process boundary without a scheduler or provider.
+struct MetadataSearchRuntime {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    socket_directory: SocketDirectory,
+    shutdown: watch::Sender<bool>,
+    process_task: JoinHandle<Result<(), ProcessRuntimeError>>,
+    _work_source: InProcessEligibilityWorkSource<PostgresEligibilitySweep>,
+}
+
+impl MetadataSearchRuntime {
+    async fn start() -> Result<Self, Box<dyn Error>> {
+        let (container, pool) = postgres().await?;
+        let socket_directory = SocketDirectory::create()?;
+        let sweep = PostgresEligibilitySweep::new(pool.clone());
+        let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+        let listener = LocalProcessListener::bind(socket_directory.socket())?;
+        let process_runtime = ProcessRuntime::new(
+            listener,
+            pool.clone(),
+            eligibility_nudge,
+            InProcessToolDispatchGate::default(),
+            HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+        );
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
+        Ok(Self {
+            container,
+            pool,
+            socket_directory,
+            shutdown,
+            process_task,
+            _work_source: work_source,
+        })
+    }
+
+    fn socket(&self) -> PathBuf {
+        self.socket_directory.socket().to_owned()
+    }
+
+    async fn stop(self) -> Result<(), Box<dyn Error>> {
+        self.shutdown.send(true)?;
+        timeout(Duration::from_secs(10), self.process_task).await???;
+        self.pool.close().await;
+        self.socket_directory.cleanup()?;
+        drop(self.container);
+        Ok(())
+    }
+}
+
+/// Creates one fixture session through the shipped terminal verb and returns
+/// its canonical identity text.
+async fn create_fixture_session(socket: PathBuf) -> Result<String, Box<dyn Error>> {
+    let created = run_client(
+        socket,
+        vec![
+            String::from("create"),
+            String::from("--model"),
+            String::from(SEARCH_FIXTURE_SELECTION),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        created.status.success(),
+        "create failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let session_id = String::from_utf8(created.stdout)?.trim().to_owned();
+    Uuid::parse_str(&session_id)?;
+    Ok(session_id)
+}
+
+/// Installs one complete metadata snapshot through the version-four process
+/// request, which no terminal verb exposes.
+async fn replace_fixture_metadata(
+    socket: &Path,
+    session_id: &str,
+    metadata: SessionMetadata,
+) -> Result<(), Box<dyn Error>> {
+    let stream = UnixStream::connect(socket).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let frame = ClientFrame::try_new_for_version(
+        ProtocolVersion::Four,
+        RequestId::try_new(1)?,
+        ClientRequest::ReplaceSessionMetadata {
+            command_id: CommandId::try_from_uuid(Uuid::now_v7())?,
+            session_id: CanonicalUuid::from_uuid(Uuid::parse_str(session_id)?),
+            metadata,
+        },
+    )?;
+    writer.write_all(&encode_client_line(&frame)?).await?;
+    let mut line = Vec::new();
+    reader.read_until(b'\n', &mut line).await?;
+    let response = decode_server_line(&line)?;
+    assert!(
+        matches!(
+            response.message(),
+            ServerMessage::SessionMetadataReplaced { .. }
+        ),
+        "the metadata fixture must commit: {:?}",
+        response.message()
+    );
+    Ok(())
+}
+
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     while !*shutdown.borrow_and_update() {
         if shutdown.changed().await.is_err() {
@@ -170,6 +298,228 @@ fn required_environment(name: &'static str) -> Result<OsString, Box<dyn Error>> 
         )
         .into()
     })
+}
+
+/// S25: the terminal search verb lists only the sessions that satisfy every
+/// named filter, excluding one that fails the title query and one that fails
+/// the required tag.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s25_terminal_client_search_lists_only_sessions_matching_every_filter()
+-> Result<(), Box<dyn Error>> {
+    let runtime = MetadataSearchRuntime::start().await?;
+    let matching_session = create_fixture_session(runtime.socket()).await?;
+    let other_title_session = create_fixture_session(runtime.socket()).await?;
+    let other_tag_session = create_fixture_session(runtime.socket()).await?;
+    replace_fixture_metadata(
+        &runtime.socket(),
+        &matching_session,
+        SessionMetadata::try_new(
+            Some(String::from("Active plan")),
+            vec![String::from("daily"), String::from("plan")],
+            Vec::new(),
+            false,
+        )?,
+    )
+    .await?;
+    replace_fixture_metadata(
+        &runtime.socket(),
+        &other_title_session,
+        SessionMetadata::try_new(
+            Some(String::from("Retired plan")),
+            vec![String::from("daily")],
+            Vec::new(),
+            false,
+        )?,
+    )
+    .await?;
+    replace_fixture_metadata(
+        &runtime.socket(),
+        &other_tag_session,
+        SessionMetadata::try_new(
+            Some(String::from("Active plan")),
+            vec![String::from("weekly")],
+            Vec::new(),
+            false,
+        )?,
+    )
+    .await?;
+
+    let searched = run_client(
+        runtime.socket(),
+        vec![
+            String::from("search"),
+            String::from("--title"),
+            String::from("Active"),
+            String::from("--tag"),
+            String::from("daily"),
+        ],
+        None,
+    )
+    .await?;
+
+    assert!(
+        searched.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&searched.stderr)
+    );
+    assert!(searched.stderr.is_empty());
+    let listed = String::from_utf8(searched.stdout)?;
+    assert_eq!(listed.lines().count(), 1);
+    assert!(listed.contains(&format!(
+        "{matching_session} archived=false defaults_version=1 \
+         model={SEARCH_FIXTURE_SELECTION} dangerous_tool_auto_approval=disabled \
+         last_writer=owner updated_at_unix_micros="
+    )));
+    assert!(listed.contains(" tags=daily,plan title=Active plan\n"));
+    assert!(!listed.contains(&other_title_session));
+    assert!(!listed.contains(&other_tag_session));
+
+    runtime.stop().await
+}
+
+/// S25: archiving removes a session from the default search view, and the
+/// explicit switch restores it while naming its archive state.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s25_terminal_client_search_lists_an_archived_session_only_when_requested()
+-> Result<(), Box<dyn Error>> {
+    let runtime = MetadataSearchRuntime::start().await?;
+    let active_session = create_fixture_session(runtime.socket()).await?;
+    let archived_session = create_fixture_session(runtime.socket()).await?;
+    replace_fixture_metadata(
+        &runtime.socket(),
+        &active_session,
+        SessionMetadata::try_new(
+            Some(String::from("Active plan")),
+            vec![String::from("daily")],
+            Vec::new(),
+            false,
+        )?,
+    )
+    .await?;
+    replace_fixture_metadata(
+        &runtime.socket(),
+        &archived_session,
+        SessionMetadata::try_new(
+            Some(String::from("Archived plan")),
+            vec![String::from("daily")],
+            Vec::new(),
+            true,
+        )?,
+    )
+    .await?;
+
+    let default_view = run_client(
+        runtime.socket(),
+        vec![
+            String::from("search"),
+            String::from("--tag"),
+            String::from("daily"),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        default_view.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&default_view.stderr)
+    );
+    assert!(default_view.stderr.is_empty());
+    let default_listed = String::from_utf8(default_view.stdout)?;
+    assert_eq!(default_listed.lines().count(), 1);
+    assert!(default_listed.contains(&active_session));
+    assert!(!default_listed.contains(&archived_session));
+
+    let archived_view = run_client(
+        runtime.socket(),
+        vec![
+            String::from("search"),
+            String::from("--tag"),
+            String::from("daily"),
+            String::from("--include-archived"),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        archived_view.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&archived_view.stderr)
+    );
+    assert!(archived_view.stderr.is_empty());
+    let archived_listed = String::from_utf8(archived_view.stdout)?;
+    assert_eq!(archived_listed.lines().count(), 2);
+    assert!(archived_listed.contains(&active_session));
+    assert!(archived_listed.contains(&format!("{archived_session} archived=true")));
+
+    runtime.stop().await
+}
+
+/// A bounded page never truncates silently: a page that reached its limit
+/// prints the exact cursor that continues it, and the next page carries none.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn terminal_client_search_prints_the_cursor_that_continues_a_full_page()
+-> Result<(), Box<dyn Error>> {
+    let runtime = MetadataSearchRuntime::start().await?;
+    let first_created = create_fixture_session(runtime.socket()).await?;
+    let second_created = create_fixture_session(runtime.socket()).await?;
+
+    let first_page = run_client(
+        runtime.socket(),
+        vec![
+            String::from("search"),
+            String::from("--limit"),
+            String::from("1"),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        first_page.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&first_page.stderr)
+    );
+    let first_listed = String::from_utf8(first_page.stdout)?;
+    assert_eq!(first_listed.lines().count(), 1);
+    let first_page_session = first_listed
+        .split(' ')
+        .next()
+        .expect("each row begins with its session identity")
+        .to_owned();
+    assert_eq!(
+        String::from_utf8(first_page.stderr)?,
+        format!("next_after_session_id={first_page_session}\n")
+    );
+
+    let second_page = run_client(
+        runtime.socket(),
+        vec![
+            String::from("search"),
+            String::from("--limit"),
+            String::from("1"),
+            String::from("--after"),
+            first_page_session.clone(),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        second_page.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&second_page.stderr)
+    );
+    assert!(second_page.stderr.is_empty());
+    let second_listed = String::from_utf8(second_page.stdout)?;
+    assert_eq!(second_listed.lines().count(), 1);
+    assert!(!second_listed.contains(&first_page_session));
+
+    let both_pages = format!("{first_listed}{second_listed}");
+    assert!(both_pages.contains(&first_created));
+    assert!(both_pages.contains(&second_created));
+
+    runtime.stop().await
 }
 
 /// S28 / INV-038: the shipped terminal verb reads one named file and exposes
@@ -481,6 +831,284 @@ max_output_tokens = 64
     let transcript = String::from_utf8(transcript.stdout)?;
     assert!(transcript.contains("offline user request"));
     assert!(transcript.contains("offline assistant reply"));
+    assert!(transcript.contains("turn_completed"));
+
+    shutdown.send(true)?;
+    assert_eq!(
+        timeout(Duration::from_secs(10), scheduler_task).await??,
+        SchedulerLoopExit::Shutdown
+    );
+    timeout(Duration::from_secs(10), process_task).await???;
+    pool.close().await;
+    socket_directory.cleanup()?;
+    drop(container);
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CompletingFixtureExecutor;
+
+#[derive(Debug)]
+struct FixtureExecutorError;
+
+impl fmt::Display for FixtureExecutorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("the completing fixture executor cannot fail")
+    }
+}
+
+impl Error for FixtureExecutorError {}
+
+impl ClassifyOperatorFailure for FixtureExecutorError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        }
+    }
+}
+
+impl ToolExecutor for CompletingFixtureExecutor {
+    type Error = FixtureExecutorError;
+
+    async fn execute(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+        let name = invocation.request().name().as_str().to_owned();
+        Ok(invocation.bind(ToolExecutorEvidence::CompletedText(format!(
+            "completed:{name}"
+        ))))
+    }
+}
+
+/// Runs `transcript` until the session's turn parks on its approval wait, then
+/// returns the pending request identity printed for the approver.
+async fn wait_for_pending_approval(
+    socket: &Path,
+    session_id: &str,
+) -> Result<String, Box<dyn Error>> {
+    timeout(Duration::from_secs(20), async {
+        loop {
+            let transcript = run_client(
+                socket.to_owned(),
+                vec![String::from("transcript"), session_id.to_owned()],
+                None,
+            )
+            .await?;
+            if transcript.status.success() {
+                let rendered = String::from_utf8(transcript.stdout)?;
+                if let Some(request) = rendered.lines().find_map(|line| {
+                    line.split_once("state=active_awaiting_tool_approval request=")
+                        .map(|(_, request)| request.trim().to_owned())
+                }) {
+                    if !rendered.contains("assistant_tool_use") {
+                        return Err::<String, Box<dyn Error>>(
+                            io::Error::other(
+                                "the awaiting transcript must render the proposing tool use",
+                            )
+                            .into(),
+                        );
+                    }
+                    return Ok(request);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| io::Error::other("the fixture turn never parked on its approval wait"))?
+}
+
+/// S10 / INV-032: while one client's `send` keeps waiting on the approval
+/// wait, a second client reads the pending request from the transcript and
+/// approves it; the tool executes, the continuation round completes, and the
+/// waiting `send` prints the final scripted reply.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn terminal_client_approval_from_a_second_client_completes_a_waiting_send()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = postgres().await?;
+    let socket_directory = SocketDirectory::create()?;
+    let selection_uuid = Uuid::from_u128(0x9301);
+    let target_uuid = Uuid::from_u128(0x9302);
+    let selection = DirectModelSelection::from_uuid(selection_uuid);
+    let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(target_uuid));
+    let model_configuration = HubModelConfiguration::parse(&format!(
+        r#"
+version = 1
+
+[[models]]
+selection_id = "{selection_uuid}"
+target_id = "{target_uuid}"
+provider = "anthropic"
+provider_model = "scripted-approval"
+max_output_tokens = 64
+"#
+    ))?;
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("the fixture target definition is unique");
+    let runtime_models =
+        RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
+            target,
+            String::from("scripted-approval"),
+            64,
+        )
+        .expect("the fixture runtime definition is valid")])
+        .expect("the fixture runtime target is unique");
+    let runtime = ScriptedModel::following([
+        Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("scripted-approval")),
+            finish: CompletionFinish::ToolUse,
+            content: vec![AssistantPart::ToolCall(RuntimeToolCallProposal {
+                id: ToolCallId::new(String::from("fixture-call-0")),
+                name: RuntimeToolName::new("confirmed_probe"),
+                arguments_json: String::from("{}"),
+            })],
+            usage: TokenUsage::unreported(),
+        })),
+        Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("scripted-approval")),
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::Text(String::from("approved tool reply"))],
+            usage: TokenUsage::unreported(),
+        })),
+    ]);
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+    let tool_catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+        ToolDefinition::new(
+            ToolName::try_new(String::from("confirmed_probe"))
+                .expect("the fixture tool name is valid"),
+            String::from("Runs the confirm-classified fixture probe."),
+            ToolInputSchema::try_new(String::from(
+                r#"{"additionalProperties":true,"type":"object"}"#,
+            ))
+            .expect("the fixture schema is valid"),
+            ToolPermissionDefault::Confirm,
+            ToolEffectClass::EffectFree,
+        ),
+        |_arguments: &NormalizedToolArguments| Ok::<(), ToolExecutionErrorDetail>(()),
+    )])
+    .expect("the fixture tool declaration is unique");
+
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let tool_dispatch_gate = InProcessToolDispatchGate::default();
+    let listener = LocalProcessListener::bind(socket_directory.socket())?;
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        tool_dispatch_gate.clone(),
+        model_configuration,
+    );
+    let (execution, fatal_execution) = FatalExecutionSupervisor::new(
+        PostgresProviderModelExecution::new(
+            PostgresModelCallRepository::new(
+                pool.clone(),
+                targets,
+                ModelCallCredentialReference::new("scripted-approval"),
+            ),
+            InProcessAttemptDispatchGate::default(),
+            provider,
+        )
+        .with_tool_loop(tool_dispatch_gate, tool_catalog, CompletingFixtureExecutor),
+    );
+    let pass = ActivatedTurnPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(pool.clone()),
+        ),
+        execution,
+    );
+    let mut scheduler = SchedulerLoop::new(work_source, pass);
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let process_task = tokio::spawn(process_runtime.run(shutdown_receiver.clone()));
+    let scheduler_task = tokio::spawn(async move {
+        scheduler
+            .run_until(wait_for_shutdown(shutdown_receiver))
+            .await
+    });
+
+    let create = timeout(
+        Duration::from_secs(20),
+        run_client(
+            socket_directory.socket().to_owned(),
+            vec![
+                String::from("create"),
+                String::from("--model"),
+                selection.into_uuid().hyphenated().to_string(),
+            ],
+            None,
+        ),
+    )
+    .await??;
+    assert!(create.status.success());
+    let session_id = String::from_utf8(create.stdout)?.trim().to_owned();
+
+    let send_socket = socket_directory.socket().to_owned();
+    let send_session = session_id.clone();
+    let waiting_send = tokio::spawn(async move {
+        run_client(
+            send_socket,
+            vec![String::from("send"), send_session],
+            Some(String::from("use the confirmed probe")),
+        )
+        .await
+        .map_err(|error| io::Error::other(error.to_string()))
+    });
+
+    let pending_request = wait_for_pending_approval(socket_directory.socket(), &session_id).await?;
+    Uuid::parse_str(&pending_request)?;
+
+    let approve = timeout(
+        Duration::from_secs(20),
+        run_client(
+            socket_directory.socket().to_owned(),
+            vec![
+                String::from("approve"),
+                session_id.clone(),
+                pending_request.clone(),
+            ],
+            None,
+        ),
+    )
+    .await??;
+    assert!(
+        approve.status.success(),
+        "approve failed: {}",
+        String::from_utf8_lossy(&approve.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(approve.stdout)?,
+        format!("tool_request={pending_request} decision=approve\n")
+    );
+    assert!(String::from_utf8(approve.stderr)?.starts_with("command_id="));
+
+    let send = timeout(Duration::from_secs(30), waiting_send).await???;
+    assert!(
+        send.status.success(),
+        "send failed: {}",
+        String::from_utf8_lossy(&send.stderr)
+    );
+    assert_eq!(String::from_utf8(send.stdout)?, "approved tool reply\n");
+    assert!(!fatal_execution.is_triggered());
+
+    let transcript = run_client(
+        socket_directory.socket().to_owned(),
+        vec![String::from("transcript"), session_id],
+        None,
+    )
+    .await?;
+    assert!(transcript.status.success());
+    let transcript = String::from_utf8(transcript.stdout)?;
+    assert!(transcript.contains("name=confirmed_probe"));
+    assert!(transcript.contains("content=completed:confirmed_probe"));
+    assert!(transcript.contains("approved tool reply"));
     assert!(transcript.contains("turn_completed"));
 
     shutdown.send(true)?;
