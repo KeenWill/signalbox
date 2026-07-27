@@ -251,16 +251,16 @@ are recorded in the
 A `replace_session_defaults` below version nine cannot represent a prompt, so on
 a session whose current defaults epoch carries a present one it would install a
 complete successor that silently cleared a fact its version cannot state. The
-daemon therefore reads the current epoch and returns `unsupported_version`
-naming version nine before any command is recorded. That precondition is skipped
-exactly where the durable boundary owns the answer: a command identity that
-already names durable intent replays its recorded result unconditionally
-(INV-012), and an absent session is left to the transaction's recorded
-`session_not_found`. A racing replacement that installs a prompt after the
-gate's read still cannot be clobbered, because the expected-version
-compare-and-set observes the moved epoch and records the ordinary mismatch. A
-version-six replacement on a promptless current epoch remains admitted and
-installs a promptless successor.
+atomic replacement transaction therefore refuses an unstated-member replacement
+whose expected current epoch carries a prompt: the check runs after the
+expected-version compare-and-set, under that row lock and against the immutable
+expected epoch, so no concurrent replacement can interleave, and the refusal
+rolls the whole transaction back — nothing, not even the command identity, is
+recorded — and returns `unsupported_version` naming version nine. A command
+identity that already names durable intent replays its recorded result
+unconditionally (INV-012), and an absent session is the transaction's recorded
+`session_not_found`. A below-nine replacement on a promptless current epoch
+remains admitted and installs a promptless successor.
 
 A metadata object has exactly `title` (string or null), `tags` (string array),
 `attributes` (an object whose values are strings), and `archived` (boolean).

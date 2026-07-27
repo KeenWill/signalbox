@@ -14,11 +14,12 @@ use signalbox_application::{
     DecideToolRequestService, EligibilityNudge, ImportConversationError, ImportConversationOutcome,
     ImportConversationService, ImportedConversationConverter, InProcessEligibilityNudge,
     InProcessToolDispatchGate, ListSessionMetadataService, LoadSessionMetadataService,
-    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
-    ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
-    SessionMetadataListItem, SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, SubmitInputTransaction, UuidV7ImportedConversationIdGenerator,
-    UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
+    PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
+    ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
+    ReplaceSessionMetadataService, SessionMetadataListItem, SessionMetadataListQuery,
+    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, SubmitInputTransaction,
+    UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
+    UuidV7ToolLoopIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
@@ -1519,11 +1520,20 @@ where
         system_prompt,
     );
     let durable_command_id = DurableCommandId::from_uuid(command_id);
+    // A member the frame could not state must not silently clear a prompt
+    // the current epoch carries; the transaction refuses that atomically
+    // under the compare-and-set lock, recording nothing.
+    let prompt_member = if prompt_member_is_absent {
+        PromptMemberStatement::Unstated
+    } else {
+        PromptMemberStatement::Stated
+    };
     let request = ReplaceSessionDefaultsRequest::try_new(
         durable_command_id,
         SessionId::from_uuid(session_id.into_uuid()),
         expected_version,
         replacement,
+        prompt_member,
     );
     let Ok(request) = request else {
         return write_error(
@@ -1567,42 +1577,6 @@ where
             ProtocolError::without_detail(ErrorCode::InvalidRequest),
         )
         .await;
-    }
-    // A replacement below version nine cannot carry the prompt member, so on
-    // a session whose current epoch has a present prompt it would silently
-    // clear a fact its version cannot represent. Gate it before any command
-    // is recorded; a claimed identity replays its recorded result
-    // unconditionally, and an absent session is left to the transaction's
-    // recorded session_not_found.
-    if !command_is_claimed
-        && prompt_member_is_absent
-        && version.as_u64() < SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
-    {
-        let read = ProcessReadRepository::new(pool.clone());
-        match read
-            .read_session_defaults(SessionId::from_uuid(session_id.into_uuid()), None)
-            .await
-        {
-            Ok(ProcessSessionDefaultsRead::Read(current))
-                if current.defaults().system_prompt().is_some() =>
-            {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::unsupported_version(SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION),
-                )
-                .await;
-            }
-            Ok(
-                ProcessSessionDefaultsRead::Read(_)
-                | ProcessSessionDefaultsRead::SessionNotFound
-                | ProcessSessionDefaultsRead::VersionNotFound,
-            ) => {}
-            Err(error) => {
-                return write_process_read_error(writer, version, request_id, error).await;
-            }
-        }
     }
     let mut service = ReplaceSessionDefaultsService::new(repository);
     match service.execute(request).await {
@@ -1659,6 +1633,15 @@ where
                 }
             };
             write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
+        }
+        Ok(ReplaceSessionDefaultsOutcome::PromptRequiresStatedMember) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::unsupported_version(SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION),
+            )
+            .await
         }
         Ok(ReplaceSessionDefaultsOutcome::ConflictingReuse { .. }) => {
             write_error(

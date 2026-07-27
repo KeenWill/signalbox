@@ -961,6 +961,7 @@ impl ProcessReadRepository {
             "SELECT
                 session_row.session_id,
                 current_defaults.current_version,
+                current_epoch.version AS current_epoch_version,
                 selected_defaults.version AS selected_version,
                 selected_defaults.model_selection_kind,
                 selected_defaults.direct_model_selection_id,
@@ -970,6 +971,9 @@ impl ProcessReadRepository {
                FROM session AS session_row
                LEFT JOIN session_current_defaults AS current_defaults
                  ON current_defaults.session_id = session_row.session_id
+               LEFT JOIN session_defaults_version AS current_epoch
+                 ON current_epoch.session_id = session_row.session_id
+                AND current_epoch.version = current_defaults.current_version
                LEFT JOIN session_defaults_version AS selected_defaults
                  ON selected_defaults.session_id = session_row.session_id
                 AND selected_defaults.version =
@@ -983,12 +987,17 @@ impl ProcessReadRepository {
         let Some(row) = row else {
             return Ok(ProcessSessionDefaultsRead::SessionNotFound);
         };
-        // An existing session must carry a current pointer even when a named
-        // historical epoch is selected: a missing pointer is corruption, not
-        // a servable read (INV-008).
+        // An existing session must carry a current pointer that resolves to
+        // an installed epoch even when a named historical epoch is selected:
+        // a missing pointer or a dangling pointer is corruption, not a
+        // servable read (INV-008).
         let current_version: Option<Decimal> = row.try_get("current_version")?;
         if current_version.is_none() {
             return Err(ProcessReadCorruption::Missing("current defaults pointer").into());
+        }
+        let current_epoch_version: Option<Decimal> = row.try_get("current_epoch_version")?;
+        if current_epoch_version.is_none() {
+            return Err(ProcessReadCorruption::Missing("current defaults epoch").into());
         }
         let selected_version: Option<Decimal> = row.try_get("selected_version")?;
         let Some(selected_version) = selected_version else {

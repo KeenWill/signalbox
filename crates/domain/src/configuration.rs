@@ -14,6 +14,8 @@
 //! only the epoch version and calls read the prompt through it
 //! (`docs/spec/sessions-and-transcript.md`).
 
+use core::fmt;
+
 use crate::DangerousToolAutoApproval;
 
 crate::define_identity!(
@@ -240,8 +242,19 @@ impl SessionConfigurationDefaultsVersion {
 /// case-folded, or otherwise rewritten; equality is the exact ordered
 /// scalar sequence. Absence of a prompt is `Option::None` on the owning
 /// defaults value, never an empty prompt.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub struct SessionSystemPrompt(String);
+
+impl fmt::Debug for SessionSystemPrompt {
+    /// Renders only the content length: prompt text never reaches logs or
+    /// panic output through `{:?}` (mirroring `ImportedText`).
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionSystemPrompt")
+            .field("utf8_len", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
 
 impl SessionSystemPrompt {
     /// The admission bound in UTF-8 bytes, mirroring the accepted-input
@@ -291,10 +304,22 @@ pub enum SessionSystemPromptFailure {
 }
 
 /// Failed system-prompt construction retaining the rejected value.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SessionSystemPromptError {
     value: String,
     failure: SessionSystemPromptFailure,
+}
+
+impl fmt::Debug for SessionSystemPromptError {
+    /// Renders the failure and only the rejected content's length, so `{:?}`
+    /// never leaks the withheld text `Display` also omits.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionSystemPromptError")
+            .field("utf8_len", &self.value.len())
+            .field("failure", &self.failure)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SessionSystemPromptError {

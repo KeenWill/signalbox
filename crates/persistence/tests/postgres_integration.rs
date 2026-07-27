@@ -25,8 +25,8 @@ use signalbox_application::{
     EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
     ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionError,
     ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelConversationMessage, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
-    ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
+    ModelConversationMessage, PromptMemberStatement, ReplaceSessionDefaultsOutcome,
+    ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
     RetainedModelCallObservationStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
     SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
@@ -78,9 +78,9 @@ use signalbox_persistence::{
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
-        ProcessModelCallRecoveryPrecondition, ProcessModelSelection, ProcessReadRepository,
-        ProcessReconciliationOperation, ProcessSessionDefaultsRead, ProcessTranscriptEntry,
-        ProcessTurnState,
+        ProcessModelCallRecoveryPrecondition, ProcessModelSelection, ProcessReadCorruption,
+        ProcessReadError, ProcessReadRepository, ProcessReconciliationOperation,
+        ProcessSessionDefaultsRead, ProcessTranscriptEntry, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -884,6 +884,7 @@ fn replacement_request(
         SessionConfigurationDefaultsVersion::try_from_u64(expected)
             .expect("test versions are positive"),
         SessionConfigurationDefaults::new(selection),
+        PromptMemberStatement::Stated,
     )
     .expect("ordinary test command identities are admitted")
 }
@@ -8740,6 +8741,7 @@ async fn s33_inv008_inv015_inv046_mid_session_model_switch_is_forward_only()
             session,
             SessionConfigurationDefaultsVersion::first(),
             SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(second_selection)),
+            PromptMemberStatement::Stated,
         )?)
         .await?;
 
@@ -17909,6 +17911,30 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     let promptless_defaults =
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection));
     let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
+
+    // A caller whose protocol cannot state the prompt member is refused
+    // atomically under the compare-and-set lock while the current epoch
+    // carries a prompt, and nothing — not even the command identity — is
+    // recorded.
+    let unstated = ReplaceSessionDefaults::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xa59)),
+        session,
+        SessionConfigurationDefaultsVersion::try_from_u64(1).expect("positive version"),
+        promptless_defaults.clone(),
+    );
+    assert_eq!(
+        defaults_repository
+            .handle_where_prompt_member(unstated, PromptMemberStatement::Unstated)
+            .await?,
+        ReplaceSessionDefaultsHandlingOutcome::PromptRequiresStatedMember
+    );
+    let unstated_claimed: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM durable_command WHERE command_id = $1)")
+            .bind(Uuid::from_u128(0xa59))
+            .fetch_one(&pool)
+            .await?;
+    assert!(!unstated_claimed);
+
     let replacement = ReplaceSessionDefaults::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xa51)),
         session,
@@ -18109,11 +18135,41 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
         )
         .await
         .expect_err("a named read must fail closed without a current pointer");
-    assert!(
+    let ProcessReadError::Corruption(ProcessReadCorruption::Missing(missing_field)) =
         missing_pointer
-            .to_string()
-            .contains("current defaults pointer")
-    );
+    else {
+        panic!("the pointerless named read must be typed corruption");
+    };
+    assert_eq!(missing_field, "current defaults pointer");
+
+    // A surviving pointer that names a missing epoch is equally corruption
+    // for a named read of a different, existing epoch.
+    sqlx::query(
+        "ALTER TABLE session_current_defaults
+         DROP CONSTRAINT session_current_defaults_version_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_current_defaults (session_id, current_version)
+         VALUES ($1, 77)",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+    let dangling_pointer = read
+        .read_session_defaults(
+            session,
+            SessionConfigurationDefaultsVersion::try_from_u64(1),
+        )
+        .await
+        .expect_err("a named read must fail closed on a dangling current pointer");
+    let ProcessReadError::Corruption(ProcessReadCorruption::Missing(dangling_field)) =
+        dangling_pointer
+    else {
+        panic!("the dangling-pointer named read must be typed corruption");
+    };
+    assert_eq!(dangling_field, "current defaults epoch");
 
     pool.close().await;
     drop(container);

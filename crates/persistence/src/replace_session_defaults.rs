@@ -3,14 +3,16 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
-use signalbox_application::{ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsTransaction};
+use signalbox_application::{
+    PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsTransaction,
+};
 use signalbox_domain::{
     DirectModelSelection, DurableCommandId, ModelAlias, ModelSelectionRequest,
     PreparedReplaceSessionDefaults, ReconstitutedReplaceSessionDefaults, ReplaceSessionDefaults,
     ReplaceSessionDefaultsAppliedResult, ReplaceSessionDefaultsReconstitutionFailure,
     ReplaceSessionDefaultsReconstitutionInput, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion,
+    SessionConfigurationDefaultsVersion, SessionId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -47,6 +49,10 @@ pub enum ReplaceSessionDefaultsHandlingOutcome {
         /// The owner-global identifier whose existing meaning is retained.
         command_id: DurableCommandId,
     },
+    /// An unstated prompt member met a prompted current epoch under the CAS
+    /// lock; the whole transaction rolled back and nothing — not even the
+    /// command identity — was recorded.
+    PromptRequiresStatedMember,
 }
 
 /// A durable shape that cannot reconstruct one recorded replacement.
@@ -209,6 +215,23 @@ impl ReplaceSessionDefaultsRepository {
         &self,
         command: ReplaceSessionDefaults,
     ) -> Result<ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRepositoryError> {
+        self.handle_where_prompt_member(command, PromptMemberStatement::Stated)
+            .await
+    }
+
+    /// Handles one replacement whose caller may be unable to state the
+    /// system-prompt member.
+    ///
+    /// For an `Unstated` member the prompted-current-epoch check runs after
+    /// the pointer compare-and-set, under that row lock and against the
+    /// immutable expected epoch, so no concurrent replacement can interleave;
+    /// refusal rolls back the complete transaction including the command
+    /// claim (docs/spec/process-protocol.md).
+    pub async fn handle_where_prompt_member(
+        &self,
+        command: ReplaceSessionDefaults,
+        prompt_member: PromptMemberStatement,
+    ) -> Result<ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRepositoryError> {
         let command_id = command.command_id();
         let mut transaction = self.pool.begin().await?;
 
@@ -299,6 +322,19 @@ impl ReplaceSessionDefaultsRepository {
                 .rows_affected();
 
                 if updated == 1 {
+                    if prompt_member == PromptMemberStatement::Unstated
+                        && expected_epoch_carries_prompt(
+                            &mut transaction,
+                            command.session(),
+                            command.expected_current_version(),
+                        )
+                        .await?
+                    {
+                        transaction.rollback().await?;
+                        return Ok(
+                            ReplaceSessionDefaultsHandlingOutcome::PromptRequiresStatedMember,
+                        );
+                    }
                     insert_defaults_version(&mut transaction, applied).await?;
                     prepared.clone()
                 } else if updated == 0 {
@@ -361,8 +397,14 @@ impl ReplaceSessionDefaultsTransaction for ReplaceSessionDefaultsRepository {
     async fn handle(
         &mut self,
         command: ReplaceSessionDefaults,
+        prompt_member: PromptMemberStatement,
     ) -> Result<ReplaceSessionDefaultsOutcome, Self::Error> {
-        let outcome = ReplaceSessionDefaultsRepository::handle(self, command).await?;
+        let outcome = ReplaceSessionDefaultsRepository::handle_where_prompt_member(
+            self,
+            command,
+            prompt_member,
+        )
+        .await?;
 
         Ok(match outcome {
             ReplaceSessionDefaultsHandlingOutcome::Applied(result) => {
@@ -378,8 +420,36 @@ impl ReplaceSessionDefaultsTransaction for ReplaceSessionDefaultsRepository {
             ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id } => {
                 ReplaceSessionDefaultsOutcome::ConflictingReuse { command_id }
             }
+            ReplaceSessionDefaultsHandlingOutcome::PromptRequiresStatedMember => {
+                ReplaceSessionDefaultsOutcome::PromptRequiresStatedMember
+            }
         })
     }
+}
+
+/// Reads whether the immutable expected epoch carries a prompt.
+///
+/// Runs after the pointer compare-and-set in the same transaction, so the
+/// pointer row lock serializes this read against concurrent replacements.
+async fn expected_epoch_carries_prompt(
+    connection: &mut PgConnection,
+    session: SessionId,
+    expected: SessionConfigurationDefaultsVersion,
+) -> Result<bool, ReplaceSessionDefaultsRepositoryError> {
+    let carried: Option<bool> = sqlx::query_scalar(
+        "SELECT system_prompt IS NOT NULL
+           FROM session_defaults_version
+          WHERE session_id = $1
+            AND version = $2",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(defaults_version_to_numeric(expected))
+    .fetch_optional(&mut *connection)
+    .await?;
+    carried.ok_or_else(|| {
+        ReplaceSessionDefaultsCorruption::Inconsistent("expected epoch disappeared under lock")
+            .into()
+    })
 }
 
 async fn prepare_against_current(

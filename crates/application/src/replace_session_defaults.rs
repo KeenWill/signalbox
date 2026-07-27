@@ -30,6 +30,7 @@ pub struct ReplaceSessionDefaultsRequest {
     session: SessionId,
     expected_current_version: SessionConfigurationDefaultsVersion,
     replacement: SessionConfigurationDefaults,
+    prompt_member: PromptMemberStatement,
 }
 
 impl ReplaceSessionDefaultsRequest {
@@ -39,6 +40,7 @@ impl ReplaceSessionDefaultsRequest {
         session: SessionId,
         expected_current_version: SessionConfigurationDefaultsVersion,
         replacement: SessionConfigurationDefaults,
+        prompt_member: PromptMemberStatement,
     ) -> Result<Self, InvalidDurableCommandId> {
         if command_id.as_uuid().is_nil() {
             return Err(InvalidDurableCommandId::Nil);
@@ -52,6 +54,7 @@ impl ReplaceSessionDefaultsRequest {
             session,
             expected_current_version,
             replacement,
+            prompt_member,
         })
     }
 
@@ -74,6 +77,27 @@ impl ReplaceSessionDefaultsRequest {
     pub const fn replacement(&self) -> &SessionConfigurationDefaults {
         &self.replacement
     }
+
+    /// Returns whether the caller's boundary could state the prompt member.
+    pub const fn prompt_member(&self) -> PromptMemberStatement {
+        self.prompt_member
+    }
+}
+
+/// Whether the requesting boundary could state the system-prompt member.
+///
+/// A caller whose protocol version admits the member (stating a prompt,
+/// copying one, or explicitly clearing one) is `Stated`. A caller whose
+/// protocol cannot represent the member is `Unstated`: its replacement must
+/// not silently clear a prompt the current epoch carries, and the atomic
+/// transaction refuses it against a prompted current epoch
+/// (docs/spec/process-protocol.md).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptMemberStatement {
+    /// The boundary stated the member (present or explicit null).
+    Stated,
+    /// The boundary cannot represent the member.
+    Unstated,
 }
 
 /// The closed application result of one atomic replacement handling.
@@ -89,6 +113,9 @@ pub enum ReplaceSessionDefaultsOutcome {
         /// The identity whose existing meaning remains intact.
         command_id: DurableCommandId,
     },
+    /// An unstated prompt member met a prompted current epoch; nothing was
+    /// recorded, and the caller needs a member-stating protocol version.
+    PromptRequiresStatedMember,
 }
 
 /// Atomic command-handling boundary for session-defaults replacement.
@@ -104,9 +131,13 @@ pub trait ReplaceSessionDefaultsTransaction {
     type Error;
 
     /// Handles one canonical command through the atomic persistence boundary.
+    ///
+    /// An `Unstated` prompt member must be refused atomically against a
+    /// prompted current epoch, recording nothing.
     fn handle(
         &mut self,
         command: DomainReplaceSessionDefaults,
+        prompt_member: PromptMemberStatement,
     ) -> impl Future<Output = Result<ReplaceSessionDefaultsOutcome, Self::Error>> + Send;
 }
 
@@ -147,7 +178,9 @@ where
             request.expected_current_version,
             request.replacement,
         );
-        self.transaction.handle(command).await
+        self.transaction
+            .handle(command, request.prompt_member)
+            .await
     }
 }
 
@@ -286,6 +319,7 @@ mod tests {
         fn handle(
             &mut self,
             command: DomainReplaceSessionDefaults,
+            _prompt_member: super::PromptMemberStatement,
         ) -> impl Future<Output = Result<ReplaceSessionDefaultsOutcome, Self::Error>> + Send
         {
             self.observed.push(command);
@@ -309,6 +343,7 @@ mod tests {
                 target,
                 version(1),
                 defaults(2),
+                super::PromptMemberStatement::Stated,
             ),
             Err(InvalidDurableCommandId::Nil)
         );
@@ -318,6 +353,7 @@ mod tests {
                 target,
                 version(1),
                 defaults(2),
+                super::PromptMemberStatement::Stated,
             ),
             Err(InvalidDurableCommandId::Max)
         );
@@ -335,6 +371,7 @@ mod tests {
             session_id(2),
             version(3),
             defaults(4),
+            super::PromptMemberStatement::Stated,
         )
         .expect("ordinary command identity is admitted");
         let recorded = recorded_applied(DomainReplaceSessionDefaults::new(
@@ -381,6 +418,7 @@ mod tests {
             command.session(),
             command.expected_current_version(),
             command.replacement().clone(),
+            super::PromptMemberStatement::Stated,
         )
         .expect("ordinary command identity is admitted");
         let expected = ReplaceSessionDefaultsOutcome::Recorded(applied);
@@ -416,6 +454,7 @@ mod tests {
             command.session(),
             command.expected_current_version(),
             command.replacement().clone(),
+            super::PromptMemberStatement::Stated,
         )
         .expect("ordinary command identity is admitted");
         let expected = ReplaceSessionDefaultsOutcome::Recorded(rejected);
@@ -438,6 +477,7 @@ mod tests {
             session_id(2),
             version(1),
             defaults(3),
+            super::PromptMemberStatement::Stated,
         )
         .expect("ordinary command identity is admitted");
         let expected = ReplaceSessionDefaultsOutcome::ConflictingReuse {
@@ -461,6 +501,7 @@ mod tests {
             session_id(2),
             version(1),
             defaults(3),
+            super::PromptMemberStatement::Stated,
         )
         .expect("ordinary command identity is admitted");
         let mut service = ReplaceSessionDefaultsService::new(FakeTransaction::returning([Err(

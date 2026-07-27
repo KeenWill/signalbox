@@ -4608,13 +4608,21 @@ impl ReplaceSessionDefaultsRequest {
         session: SessionId,
         expected_current_version: SessionConfigurationDefaultsVersion,
         replacement: SessionConfigurationDefaults,
+        prompt_member: PromptMemberStatement,
     ) -> Result<Self, InvalidDurableCommandId>;
-    // accessors: command_id(), session(), expected_current_version(), replacement()
+    // accessors: command_id(), session(), expected_current_version(), replacement(),
+    // prompt_member()
+}
+
+pub enum PromptMemberStatement {
+    Stated,
+    Unstated,
 }
 
 pub enum ReplaceSessionDefaultsOutcome {
     Recorded(ReplaceSessionDefaultsResult),
     ConflictingReuse { command_id: DurableCommandId },
+    PromptRequiresStatedMember,
 }
 
 pub trait ReplaceSessionDefaultsTransaction {
@@ -4623,6 +4631,7 @@ pub trait ReplaceSessionDefaultsTransaction {
     fn handle(
         &mut self,
         command: ReplaceSessionDefaults,
+        prompt_member: PromptMemberStatement,
     ) -> impl Future<Output = Result<ReplaceSessionDefaultsOutcome, Self::Error>> + Send;
 }
 
@@ -6056,7 +6065,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: model_execution                       | 30 (incl. 7 traits)  |
 | application: tool_loop                             | 23 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
-| application: replace_session_defaults              | 4 (incl. 1 trait)    |
+| application: replace_session_defaults              | 5 (incl. 1 trait)    |
 | application: session_metadata                      | 12 (incl. 4 traits)  |
 | application: scheduler                             | 12 (incl. 4 traits)  |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)   |
@@ -6064,4 +6073,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **136**              |
+| **signalbox-application total**                    | **137**              |
