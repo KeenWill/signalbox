@@ -31,11 +31,12 @@ authentication-reference identity, and owner-allowed capability classes. The
 authentication reference identifies daemon-resident enrollment policy; it is not
 an authentication secret. Enrollment is either active or revoked. Revocation is
 terminal and makes later registration invalid. Complete reconstitution rejects
-mismatched enrollment, runner, authentication, allowed class inventory, or
-lifecycle state rather than repairing it. Revocation also makes an existing
-validated registration unable to authorize a later lease. A lease offer rechecks
-the active enrollment and its exact enrollment, runner, and
-authentication-reference correlations; a lease already offered is unaffected.
+mismatched enrollment, runner, authentication, allowed class inventory, optional
+last issued registration revision, or lifecycle state rather than repairing it.
+Revocation also makes an existing validated registration unable to authorize a
+later lease. A lease offer rechecks the active enrollment and its exact
+enrollment, runner, and authentication-reference correlations; a lease already
+offered is unaffected.
 
 A registration carries availability claims only:
 
@@ -50,12 +51,15 @@ both the enrollment's allowed capability classes and the daemon-side catalog. An
 unknown or disallowed claim rejects the complete registration. A valid
 registration retains the exact advertised subset, attaches the
 daemon-authoritative declarations, and advances the enrollment-owned current
-registration revision. Retained copies of every prior registration become stale
-and cannot authorize a later lease. Omitting a formerly advertised capability
-removes its availability from the new registration, but never changes its
-daemon-side policy. A pinned session never inherits additions from
-re-registration. If a new registration omits a runner-required capability in
-that session's pinned snapshot, no later lease is authorized; an explicit
+registration revision. Complete enrollment reconstitution restores the optional
+last issued revision from independently matching stored facts; the next
+successful registration advances it instead of reusing a prior revision.
+Retained copies of every prior registration become stale and cannot authorize a
+later lease or grant-bearing placement transition. Omitting a formerly
+advertised capability removes its availability from the new registration, but
+never changes its daemon-side policy. A pinned session never inherits additions
+from re-registration. If a new registration omits a runner-required capability
+in that session's pinned snapshot, no later lease is authorized; an explicit
 registration-reconciliation transition marks the placement `RunnerLost` without
 rewriting its snapshot. Omitting a combined-locus tool disables runner dispatch
 for that tool but retains placement so daemon fallback remains admissible. Why:
@@ -340,23 +344,26 @@ and profile, a tool present in the snapshot, and consumption of the exact
 that tool. The grant records the exact tool/profile posture without issuing a
 reusable standalone dispatch token.
 
-Grant replacement is forward-only. It checks the current revision and installs
-one complete later snapshot, returning a `CredentialProfileChange` with the
-before-and-after profile and tool inventories for later frontier injection.
-Runner replacement consumes the exact last-grant runner and revision carried by
-the pinned placement and creates a checked successor revision. A profileless
-replacement carries both that placement evidence and the lineage forward as a
-new terminal tombstone; omitting the tombstone is therefore structurally
-rejected, and restoring a previously selected profile cannot recreate revision
-one. Every prior revoked revision remains terminal. Revocation is also
-forward-only and gates later lease creation. A lease already offered is already
-dispatched and completes or crash-classifies normally; revocation neither
-rewrites nor cancels it. A revoked grant revision cannot become active again.
-Complete reconstitution accepts a complete public raw-facts input, checks an
-independently authoritative expected session and rejects foreign runner facts, a
-profile absent from the validated registration, or a tool set wider than the
-advertisement. Durable revision history and atomic store dispatch gating remain
-persistence work (INV-045).
+Grant replacement is forward-only. It requires the supplied validated
+registration to remain the enrollment-owned current revision, checks the current
+grant revision, and installs one complete later snapshot. A retained stale
+registration cannot mint a successor grant after later policy has been attached.
+The result carries a `CredentialProfileChange` with the before-and-after profile
+and tool inventories for later frontier injection. Runner replacement applies
+the same current-registration gate, consumes the exact last-grant runner and
+revision carried by the pinned placement, and creates a checked successor
+revision. A profileless replacement carries both that placement evidence and the
+lineage forward as a new terminal tombstone; omitting the tombstone is therefore
+structurally rejected, and restoring a previously selected profile cannot
+recreate revision one. Every prior revoked revision remains terminal. Revocation
+is also forward-only and gates later lease creation. A lease already offered is
+already dispatched and completes or crash-classifies normally; revocation
+neither rewrites nor cancels it. A revoked grant revision cannot become active
+again. Complete reconstitution accepts a complete public raw-facts input, checks
+an independently authoritative expected session and rejects foreign runner
+facts, a profile absent from the validated registration, or a tool set wider
+than the advertisement. Durable revision history and atomic store dispatch
+gating remain persistence work (INV-045).
 
 ## Workspace provisioning
 

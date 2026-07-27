@@ -591,17 +591,19 @@ impl RunnerEnrollment {
             || input.runner != input.recorded_runner
             || input.authentication != input.recorded_authentication
             || input.allowed_classes != input.recorded_allowed_classes
+            || input.registration_revision != input.recorded_registration_revision
             || input.state != input.recorded_state
         {
             return Err(RunnerDomainError::CorruptStoredFacts);
         }
+        let registration_revision = input.registration_revision.map_or(0, RunnerGeneration::get);
         Ok(Self {
             enrollment: input.enrollment,
             runner: input.runner,
             authentication: input.authentication,
             allowed_classes: input.allowed_classes,
             state: input.state,
-            registration_revision: Arc::new(AtomicU64::new(0)),
+            registration_revision: Arc::new(AtomicU64::new(registration_revision)),
         })
     }
 }
@@ -617,6 +619,8 @@ pub struct RunnerEnrollmentReconstitutionInput {
     pub recorded_authentication: RunnerAuthenticationId,
     pub allowed_classes: BTreeSet<RunnerCapabilityClass>,
     pub recorded_allowed_classes: BTreeSet<RunnerCapabilityClass>,
+    pub registration_revision: Option<RunnerGeneration>,
+    pub recorded_registration_revision: Option<RunnerGeneration>,
     pub state: RunnerEnrollmentState,
     pub recorded_state: RunnerEnrollmentState,
 }
@@ -1521,6 +1525,9 @@ impl SessionRunnerPlacement {
         let SessionRunnerPlacementState::RunnerLost(before) = self.state else {
             return Err(RunnerDomainError::InvalidState);
         };
+        if !registration.is_current() {
+            return Err(RunnerDomainError::RegistrationChanged);
+        }
         let revision = self
             .revision
             .checked_next()
@@ -1565,6 +1572,9 @@ impl SessionRunnerPlacement {
         let SessionRunnerPlacementState::Pinned(before) = self.state else {
             return Err(RunnerDomainError::InvalidState);
         };
+        if !registration.is_current() {
+            return Err(RunnerDomainError::RegistrationChanged);
+        }
         let Some(current_profile) = &before.credential_profile else {
             return Err(RunnerDomainError::CredentialProfileUnavailable);
         };
@@ -2695,6 +2705,8 @@ mod tests {
             recorded_authentication: runner_authentication_id(AUTHENTICATION),
             allowed_classes: BTreeSet::from([class()]),
             recorded_allowed_classes: BTreeSet::from([class()]),
+            registration_revision: None,
+            recorded_registration_revision: None,
             state: RunnerEnrollmentState::Active,
             recorded_state: RunnerEnrollmentState::Active,
         }
@@ -3115,6 +3127,38 @@ mod tests {
     fn s30_inv042_enrollment_reconstitution_rejects_cross_wired_state() {
         let mut input = enrollment_reconstitution_input();
         input.recorded_state = RunnerEnrollmentState::Revoked;
+
+        assert_eq!(
+            RunnerEnrollment::reconstitute(input),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
+    fn s30_inv042_enrollment_reconstitution_restores_registration_revision() {
+        let mut input = enrollment_reconstitution_input();
+        let restored_revision = RunnerGeneration::try_from_u64(2).expect("two is positive");
+        input.registration_revision = Some(restored_revision);
+        input.recorded_registration_revision = Some(restored_revision);
+        let enrollment = RunnerEnrollment::reconstitute(input)
+            .expect("the complete enrollment facts restore the registration counter");
+
+        let registration = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the next registration advances the restored counter");
+
+        assert_eq!(
+            registration.revision(),
+            RunnerGeneration::try_from_u64(3).expect("three is positive")
+        );
+    }
+
+    #[test]
+    fn s30_inv042_enrollment_reconstitution_rejects_cross_wired_registration_revision() {
+        let mut input = enrollment_reconstitution_input();
+        input.registration_revision = Some(RunnerGeneration::one());
+        input.recorded_registration_revision =
+            Some(RunnerGeneration::try_from_u64(2).expect("two is positive"));
 
         assert_eq!(
             RunnerEnrollment::reconstitute(input),
@@ -4395,6 +4439,27 @@ mod tests {
             replaced.placement_change.after.credential_profile,
             Some(profile("admin"))
         );
+    }
+
+    #[test]
+    fn s32_inv042_inv045_profile_replacement_rejects_stale_registration() {
+        let (registration, mut pin) = pinned("readonly");
+        let retained = registration.clone();
+        let current = enrollment_for_registration(&registration)
+            .register(advertisement(), &catalog())
+            .expect("the later registration retires the retained snapshot");
+        let grant = pin.grant.take().expect("profile selection creates a grant");
+
+        assert_eq!(
+            pin.placement.replace_credential_profile(
+                grant,
+                &retained,
+                profile("admin"),
+                BTreeSet::from([tool("deploy")]),
+            ),
+            Err(RunnerDomainError::RegistrationChanged)
+        );
+        assert_ne!(retained.revision(), current.revision());
     }
 
     #[test]

@@ -5393,7 +5393,7 @@ impl RunnerEnrollment {
     // accessors: enrollment(), runner(), authentication(), state()
 }
 pub struct RunnerEnrollmentReconstitutionInput {
-    /* public complete typed facts */
+    /* public complete typed facts, including independently recorded optional last registration revision */
 }
 pub struct ValidatedRunnerRegistration { /* private */ }
 impl ValidatedRunnerRegistration {
