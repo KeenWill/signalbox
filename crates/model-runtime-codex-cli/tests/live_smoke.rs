@@ -198,6 +198,30 @@ fn spawn_error_is_retryable(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(26)
 }
 
+/// Awaits the probe under a timeout; a hung executable fails the gate promptly
+/// and dropping the timed-out future drops the (kill-on-drop) child. Factored
+/// so a short bound can be injected in tests.
+async fn probe_output_bounded(
+    child: tokio::process::Child,
+    executable: &std::path::Path,
+    bound: Duration,
+) -> std::process::Output {
+    tokio::time::timeout(bound, child.wait_with_output())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "`{} --version` did not exit within {bound:?}",
+                executable.display()
+            )
+        })
+        .unwrap_or_else(|error| {
+            panic!(
+                "`{} --version` could not be awaited: {error}",
+                executable.display()
+            )
+        })
+}
+
 /// Fails closed: an unreadable, unparsable, or mismatched version is a smoke
 /// failure, never a skip. A skip here would quietly retire the only check that
 /// binds this evidence to a specific executable.
@@ -225,20 +249,7 @@ async fn assert_pinned_version(executable: &std::path::Path) {
         // it, so an unbounded probe cannot linger.
         .kill_on_drop(true);
     let child = spawn_probe(&mut command, executable).await;
-    let output = tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output())
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "`{} --version` did not exit within {PROBE_TIMEOUT:?}",
-                executable.display()
-            )
-        })
-        .unwrap_or_else(|error| {
-            panic!(
-                "`{} --version` could not be awaited: {error}",
-                executable.display()
-            )
-        });
+    let output = probe_output_bounded(child, executable, PROBE_TIMEOUT).await;
     assert!(
         output.status.success(),
         "`{} --version` exited with {}",
@@ -314,6 +325,45 @@ fn busy_then_success(failures: usize) -> impl FnMut() -> std::io::Result<tokio::
             Err(std::io::Error::from_raw_os_error(26))
         }
     }
+}
+
+/// The scripted retry fixture returns exactly the requested run of `ETXTBSY`
+/// failures before succeeding.
+#[tokio::test]
+async fn busy_then_success_fails_the_requested_count_then_spawns() {
+    let mut spawn = busy_then_success(2);
+
+    assert_eq!(spawn().unwrap_err().raw_os_error(), Some(26));
+    assert_eq!(spawn().unwrap_err().raw_os_error(), Some(26));
+    let child = spawn().expect("the third attempt spawns");
+    let status = child
+        .wait_with_output()
+        .await
+        .expect("the spawned child is awaited");
+    assert!(status.status.success());
+}
+
+/// A hung executable trips the probe timeout and fails the gate promptly; the
+/// kill-on-drop child is terminated when the timed-out future is dropped.
+#[cfg(unix)]
+#[tokio::test]
+#[should_panic(expected = "did not exit within")]
+async fn version_probe_times_out_on_a_hanging_child() {
+    let child = tokio::process::Command::new("sleep")
+        .arg("60")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("the hanging child spawns");
+
+    let _ = probe_output_bounded(
+        child,
+        std::path::Path::new("hanging-probe"),
+        Duration::from_millis(50),
+    )
+    .await;
 }
 
 /// The retry loop keeps trying through transient `ETXTBSY` and returns the
