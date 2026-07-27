@@ -10,27 +10,30 @@ use std::{
 };
 
 use signalbox_application::{
-    CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
-    ImportConversationError, ImportConversationOutcome, ImportConversationService,
-    ImportedConversationConverter, InProcessEligibilityNudge, InProcessToolDispatchGate,
-    ListSessionMetadataService, LoadSessionMetadataService, ReplaceSessionDefaultsOutcome,
-    ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome,
-    ReplaceSessionMetadataRequest, ReplaceSessionMetadataService, SessionMetadataListItem,
-    SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
-    SubmitInputTransaction, UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator,
-    UuidV7SubmitInputIdGenerator,
+    CreateSessionError, CreateSessionFromImportedFrontierOutcome,
+    CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
+    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, ImportConversationError,
+    ImportConversationOutcome, ImportConversationService, ImportedConversationConverter,
+    InProcessEligibilityNudge, InProcessToolDispatchGate, ListSessionMetadataService,
+    LoadSessionMetadataService, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
+    ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
+    ReplaceSessionMetadataService, SessionMetadataListItem, SessionMetadataListQuery,
+    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, SubmitInputTransaction,
+    UuidV7CreateSessionFromImportedFrontierIdGenerator, UuidV7ImportedConversationIdGenerator,
+    UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
 use signalbox_domain::{
     AcceptedInputId, Actor, CancelledModelCallTurnIdentities, DangerousToolAutoApproval,
-    DeliveryRequest, DirectModelSelection, DurableCommandId, ModelAlias, ModelSelectionOverride,
-    ModelSelectionRequest, PerInputConfigurationChoices, ReplaceSessionDefaultsRejectedResult,
-    ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
-    ReplaceSessionMetadataResult, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
-    SessionMetadataLastWriter, SessionMetadataSnapshot, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputRejectedResult, SubmitInputResult, TurnId, UserContent,
+    DeliveryRequest, DirectModelSelection, DurableCommandId, ImportedConversationId,
+    ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedTranscriptPosition,
+    ModelAlias, ModelSelectionOverride, ModelSelectionRequest, PerInputConfigurationChoices,
+    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
+    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    SessionMetadataContent, SessionMetadataLastWriter, SessionMetadataSnapshot, SubmitInput,
+    SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult, TurnId, UserContent,
 };
 use signalbox_persistence::{
     conversation_import::{
@@ -38,6 +41,9 @@ use signalbox_persistence::{
         ImportedConversationRepositoryError,
     },
     create_session::{CreateSessionRepository, CreateSessionRepositoryError},
+    create_session_from_imported_frontier::{
+        ImportedSessionRepository, ImportedSessionRepositoryError,
+    },
     outbox::{
         DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
         DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedToolBatchState,
@@ -60,7 +66,8 @@ use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, ConversationImportFormat, CurrentModelCall,
     CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallDisposition,
     FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError,
-    IMPORTED_TRANSCRIPT_PROTOCOL_VERSION, ImportedContentKind, ImportedSourceSpeaker,
+    IMPORTED_TRANSCRIPT_PROTOCOL_VERSION, ImportedContentKind,
+    ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, InputContent, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter,
     ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection, ProtocolVersion,
     RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
@@ -453,6 +460,28 @@ where
             )
             .await
         }
+        ClientRequest::CreateSessionFromImportedFrontier {
+            command_id,
+            imported_conversation_id,
+            through_position,
+            relationship,
+            initial_model_selection,
+        } => {
+            handle_create_session_from_imported_frontier(
+                writer,
+                version,
+                request_id,
+                WireImportedContinuationRequest {
+                    command_uuid: command_id.into_uuid(),
+                    conversation: imported_conversation_id,
+                    through_position,
+                    relationship,
+                    initial_model_selection,
+                },
+                &services.pool,
+            )
+            .await
+        }
         ClientRequest::ListSessions {} => {
             let Some(snapshot_permit) = acquire_snapshot_reader_permit(
                 Arc::clone(&services.snapshot_reader_budget),
@@ -757,6 +786,257 @@ where
     })
     .await
     .map_err(|_| OperationalImportError::Internal)?
+}
+
+fn domain_imported_relationship(
+    relationship: WireImportedSessionRelationship,
+) -> DomainImportedSessionRelationship {
+    match relationship {
+        WireImportedSessionRelationship::Resume => DomainImportedSessionRelationship::Resume,
+        WireImportedSessionRelationship::Fork => DomainImportedSessionRelationship::Fork,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WireImportedContinuationRequest {
+    command_uuid: uuid::Uuid,
+    conversation: CanonicalUuid,
+    through_position: CanonicalU64,
+    relationship: WireImportedSessionRelationship,
+    initial_model_selection: WireModelSelection,
+}
+
+async fn handle_create_session_from_imported_frontier<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    wire_request: WireImportedContinuationRequest,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let command_id = DurableCommandId::from_uuid(wire_request.command_uuid);
+    let conversation_id = ImportedConversationId::from_uuid(wire_request.conversation.into_uuid());
+    let relationship = domain_imported_relationship(wire_request.relationship);
+    let defaults = SessionConfigurationDefaults::new(domain_model_selection(
+        wire_request.initial_model_selection,
+    ));
+    let through_position = wire_request.through_position;
+    let repository = ImportedSessionRepository::new(pool.clone());
+
+    match repository.load(command_id).await {
+        Ok(Some(recorded)) => {
+            let command = recorded.command();
+            if command.imported_conversation() == conversation_id
+                && command.imported_frontier().through_position().as_u64()
+                    == through_position.value()
+                && command.relationship() == relationship
+                && command.initial_configuration_defaults() == defaults
+            {
+                return write_message(
+                    writer,
+                    version,
+                    request_id,
+                    ServerMessage::SessionCreated {
+                        session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
+                    },
+                )
+                .await;
+            }
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(ImportedSessionRepositoryError::DifferentCommandKind { .. }) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Err(ImportedSessionRepositoryError::Database(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await;
+        }
+        Err(ImportedSessionRepositoryError::CommitAmbiguous(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await;
+        }
+        Err(
+            ImportedSessionRepositoryError::Preparation(_)
+            | ImportedSessionRepositoryError::IdentityCollision(_)
+            | ImportedSessionRepositoryError::Corruption(_),
+        ) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await;
+        }
+    }
+
+    let Some(position) = ImportedTranscriptPosition::try_from_u64(through_position.value()) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let conversation = match ImportedConversationRepository::new(pool.clone())
+        .load(conversation_id)
+        .await
+    {
+        Ok(Some(conversation)) => conversation,
+        Ok(None) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::NotFound),
+            )
+            .await;
+        }
+        Err(ImportedConversationRepositoryError::Database(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await;
+        }
+        Err(
+            ImportedConversationRepositoryError::IdentityCollision(_)
+            | ImportedConversationRepositoryError::Corruption(_),
+        ) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await;
+        }
+    };
+    let Some(frontier) = conversation
+        .frontiers()
+        .find(|frontier| frontier.through_position() == position)
+    else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::NotFound),
+        )
+        .await;
+    };
+    let request = CreateSessionFromImportedFrontierRequest::try_new(
+        command_id,
+        frontier,
+        relationship,
+        defaults,
+    );
+    let Ok(request) = request else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let mut service = CreateSessionFromImportedFrontierService::new(
+        UuidV7CreateSessionFromImportedFrontierIdGenerator,
+        repository,
+    );
+    match service.execute(request).await {
+        Ok(CreateSessionFromImportedFrontierOutcome::Applied(result)) => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionCreated {
+                    session_id: wire_uuid(result.session().into_uuid()),
+                },
+            )
+            .await
+        }
+        Ok(
+            CreateSessionFromImportedFrontierOutcome::ImportedConversationNotFound { .. }
+            | CreateSessionFromImportedFrontierOutcome::ImportedFrontierNotFound { .. },
+        ) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::NotFound),
+            )
+            .await
+        }
+        Ok(CreateSessionFromImportedFrontierOutcome::ConflictingReuse { .. }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Err(ImportedSessionRepositoryError::Database(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await
+        }
+        Err(ImportedSessionRepositoryError::CommitAmbiguous(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await
+        }
+        Err(
+            ImportedSessionRepositoryError::DifferentCommandKind { .. }
+            | ImportedSessionRepositoryError::Preparation(_)
+            | ImportedSessionRepositoryError::IdentityCollision(_)
+            | ImportedSessionRepositoryError::Corruption(_),
+        ) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await
+        }
+    }
 }
 
 async fn handle_create_session<Writer>(

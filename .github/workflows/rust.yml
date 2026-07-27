@@ -100,7 +100,7 @@ jobs:
             command: >-
               cargo test -p signalbox-client
               --test end_to_end
-              terminal_client_completes_an_offline_scripted_conversation
+              terminal_client_completes_an_offline
               -- --ignored --test-threads=4
     steps:
       - name: Check out repository

@@ -4,7 +4,8 @@ use clap::{
     ArgGroup, Args as ClapArgs, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind,
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, CommandId, ConversationImportFormat, ModelSelection,
+    CanonicalU64, CanonicalUuid, CommandId, ConversationImportFormat, ImportedSessionRelationship,
+    ModelSelection,
 };
 use uuid::Uuid;
 
@@ -18,6 +19,13 @@ pub(crate) struct Arguments {
 #[derive(Debug)]
 pub(crate) enum Command {
     Create {
+        selection: ModelSelection,
+        command_id: Option<CommandId>,
+    },
+    Continue {
+        imported_conversation_id: CanonicalUuid,
+        through_position: CanonicalU64,
+        relationship: ImportedSessionRelationship,
         selection: ModelSelection,
         command_id: Option<CommandId>,
     },
@@ -97,6 +105,8 @@ struct Cli {
 enum CliCommand {
     /// Create a session.
     Create(CreateArguments),
+    /// Create a live session from an imported conversation boundary.
+    Continue(ContinueArguments),
     /// List current sessions.
     List,
     /// Submit standard input and print the reply after completion.
@@ -131,6 +141,40 @@ struct CreateArguments {
     /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+#[command(group(
+    ArgGroup::new("selection")
+        .required(true)
+        .multiple(false)
+        .args(["model", "alias"])
+))]
+struct ContinueArguments {
+    /// Imported conversation to continue from.
+    #[arg(value_name = "IMPORTED_CONVERSATION", value_parser = canonical_uuid)]
+    imported_conversation_id: CanonicalUuid,
+    /// Inclusive positive imported entry position.
+    #[arg(long, value_name = "DECIMAL", value_parser = positive_canonical_u64)]
+    through_position: CanonicalU64,
+    /// Record whether this session resumes or forks the imported boundary.
+    #[arg(long, value_enum)]
+    relationship: ImportedRelationshipArgument,
+    /// Select a model configuration directly.
+    #[arg(long, value_name = "UUID", value_parser = canonical_uuid)]
+    model: Option<CanonicalUuid>,
+    /// Select a configured model alias.
+    #[arg(long, value_name = "UUID", value_parser = canonical_uuid)]
+    alias: Option<CanonicalUuid>,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ImportedRelationshipArgument {
+    Resume,
+    Fork,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -287,6 +331,25 @@ pub(crate) fn parse(
             },
             command_id: arguments.command_id,
         },
+        CliCommand::Continue(arguments) => Command::Continue {
+            imported_conversation_id: arguments.imported_conversation_id,
+            through_position: arguments.through_position,
+            relationship: match arguments.relationship {
+                ImportedRelationshipArgument::Resume => ImportedSessionRelationship::Resume,
+                ImportedRelationshipArgument::Fork => ImportedSessionRelationship::Fork,
+            },
+            selection: match (arguments.model, arguments.alias) {
+                (Some(selection_id), None) => ModelSelection::Direct { selection_id },
+                (None, Some(alias_id)) => ModelSelection::Alias { alias_id },
+                (None, None) | (Some(_), Some(_)) => {
+                    return Err(UsageError(Cli::command().error(
+                        ErrorKind::ArgumentConflict,
+                        "continue requires exactly one of --model or --alias",
+                    )));
+                }
+            },
+            command_id: arguments.command_id,
+        },
         CliCommand::List => Command::List,
         CliCommand::Send(arguments) => Command::Send {
             session_id: arguments.session_id,
@@ -373,15 +436,23 @@ fn canonical_u64(value: &str) -> Result<CanonicalU64, String> {
     Ok(CanonicalU64::new(parsed))
 }
 
+fn positive_canonical_u64(value: &str) -> Result<CanonicalU64, String> {
+    let parsed = canonical_u64(value)?;
+    if parsed.value() == 0 {
+        return Err("decimal value must be positive".to_owned());
+    }
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{ffi::OsString, path::Path};
 
-    use signalbox_process_protocol::ConversationImportFormat;
+    use signalbox_process_protocol::{ConversationImportFormat, ImportedSessionRelationship};
 
     use super::{
         Arguments, Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome,
-        parse,
+        UsageError, parse,
     };
 
     #[test]
@@ -533,6 +604,67 @@ mod tests {
     }
 
     #[test]
+    fn continue_maps_an_explicit_imported_frontier_and_relationship() {
+        let parsed = parse(
+            [
+                "continue",
+                "00000000-0000-0000-0000-000000000001",
+                "--through-position",
+                "2",
+                "--relationship",
+                "resume",
+                "--model",
+                "00000000-0000-0000-0000-000000000002",
+            ]
+            .map(Into::into),
+        );
+
+        assert_continue_parse(parsed, 2);
+    }
+
+    #[test]
+    fn continue_rejects_zero_position() {
+        let conversation = "00000000-0000-0000-0000-000000000001";
+        let model = "00000000-0000-0000-0000-000000000002";
+        assert!(
+            parse(
+                [
+                    "continue",
+                    conversation,
+                    "--through-position",
+                    "0",
+                    "--relationship",
+                    "resume",
+                    "--model",
+                    model,
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn continue_requires_explicit_relationship() {
+        let conversation = "00000000-0000-0000-0000-000000000001";
+        let model = "00000000-0000-0000-0000-000000000002";
+        assert!(
+            parse(
+                [
+                    "continue",
+                    conversation,
+                    "--through-position",
+                    "1",
+                    "--model",
+                    model,
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn import_maps_one_explicit_supported_format_and_file() {
         let parsed = parse(["import", "--format", "codex", "rollout.jsonl"].map(Into::into))
             .expect("the explicit supported format and one path parse");
@@ -586,6 +718,23 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[track_caller]
+    fn assert_continue_parse(parsed: Result<ParseOutcome, UsageError>, expected_position: u64) {
+        let Ok(ParseOutcome::Run(arguments)) = parsed else {
+            panic!("the successful continue parse runs the client");
+        };
+        let Command::Continue {
+            through_position,
+            relationship,
+            ..
+        } = arguments.command
+        else {
+            panic!("the successful continue parse selects continue");
+        };
+        assert_eq!(through_position.value(), expected_position);
+        assert_eq!(relationship, ImportedSessionRelationship::Resume);
     }
 
     #[track_caller]
