@@ -7,8 +7,10 @@ use std::{
 use signalbox_process_protocol::{
     CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ImportedContentKind,
     ImportedSourceSpeaker, ImportedSpeaker, MetadataActor, MetadataLastWriter,
-    ModelCallDisposition, ModelCallState, SessionEvent, ToolBatchState, ToolDecision,
-    TranscriptEntry, TranscriptTextEntry, TurnState,
+    ModelCallDisposition, ModelCallState, ReviewDiffSide, ReviewFindingSnapshot,
+    ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle, ReviewRunLifecycle,
+    ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject, ReviewWorkflow,
+    SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
 };
 
 use crate::{
@@ -201,6 +203,125 @@ impl<'a> Output<'a> {
             self.stdout,
             "{session_id} defaults_version={defaults_version} {selection}"
         )
+    }
+
+    pub(crate) fn review_acknowledgement(&mut self, line: &str) -> io::Result<()> {
+        self.stdout.write_all(self.render(line).as_bytes())?;
+        self.stdout.write_all(b"\n")
+    }
+
+    pub(crate) fn review_target(&mut self, target: &ReviewTargetSnapshot) -> io::Result<()> {
+        let subject = match target.subject {
+            ReviewTargetSubject::ChangeRequest { number } => {
+                format!("change_request:{}", number.value())
+            }
+            ReviewTargetSubject::Commit {} => String::from("commit"),
+        };
+        writeln!(
+            self.stdout,
+            "target={} subject={} parent={}",
+            target.target_id,
+            subject,
+            target
+                .stack_parent_target_id
+                .map_or_else(|| String::from("-"), |id| id.to_string()),
+        )?;
+        self.review_text_field("provider", &target.provider)?;
+        self.review_text_field("repository", &target.repository)?;
+        self.review_text_field("head_revision", &target.head_revision)?;
+        match target.base_revision.as_deref() {
+            Some(base_revision) => {
+                writeln!(self.stdout, "base_revision_present=true")?;
+                self.review_text_field("base_revision", base_revision)
+            }
+            None => writeln!(self.stdout, "base_revision_present=false"),
+        }
+    }
+
+    pub(crate) fn review_run(
+        &mut self,
+        run: &ReviewRunSnapshot,
+        pass: Option<&signalbox_process_protocol::ReviewPassSnapshot>,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "run={} target={} workflow={} policy_version={} minimum_judge_confidence={} \
+             minimum_publication_confidence={} state={} pass={}",
+            run.run_id,
+            run.target_id,
+            review_workflow_label(run.workflow),
+            run.policy_version.value(),
+            run.minimum_judge_confidence.value(),
+            run.minimum_publication_confidence.value(),
+            review_run_state_label(run.state),
+            run.pass_id
+                .map_or_else(|| String::from("-"), |id| id.to_string()),
+        )?;
+        if let Some(pass) = pass {
+            writeln!(
+                self.stdout,
+                "pass={} kind={} state={} session={} input={} origin_turn={} turn={} frontier={}",
+                pass.pass_id,
+                review_pass_kind_label(pass.kind),
+                review_pass_state_label(pass.state),
+                pass.session_id,
+                pass.accepted_input_id,
+                pass.origin_turn_id,
+                pass.turn_id
+                    .map_or_else(|| String::from("-"), |id| id.to_string()),
+                pass.output_frontier_id
+                    .map_or_else(|| String::from("-"), |id| id.to_string()),
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn review_finding(&mut self, finding: &ReviewFindingSnapshot) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "finding={} target={} run={} pass={} status={} events={} line_start={} line_end={} \
+             diff_side={} severity={} confidence={}",
+            finding.finding.finding_id,
+            finding.target_id,
+            finding.run_id,
+            finding.producing_pass_id,
+            review_finding_status_label(finding.status),
+            finding.event_count.value(),
+            finding
+                .finding
+                .line_start
+                .map_or_else(|| String::from("none"), |line| line.value().to_string()),
+            finding
+                .finding
+                .line_end
+                .map_or_else(|| String::from("none"), |line| line.value().to_string()),
+            finding
+                .finding
+                .diff_side
+                .map_or("none", review_diff_side_label),
+            review_severity_label(finding.finding.severity),
+            finding.finding.confidence.value(),
+        )?;
+        self.review_text_field("file_path", &finding.finding.file_path)?;
+        self.review_text_field("title", &finding.finding.title)?;
+        self.review_text_field("body", &finding.finding.body)?;
+        self.review_text_field("category", &finding.finding.category)?;
+        match finding.finding.recommended_fix.as_deref() {
+            Some(recommended_fix) => {
+                writeln!(self.stdout, "recommended_fix_present=true")?;
+                self.review_text_field("recommended_fix", recommended_fix)
+            }
+            None => writeln!(self.stdout, "recommended_fix_present=false"),
+        }
+    }
+
+    fn review_text_field(&mut self, name: &str, value: &str) -> io::Result<()> {
+        write!(self.stdout, "{name}=")?;
+        self.stdout.write_all(
+            self.render_field(value, TextField::TrailingOnLine)
+                .as_bytes(),
+        )?;
+        self.stdout.write_all(b"\n")
     }
 
     pub(crate) fn tool_request_decided(
@@ -1098,6 +1219,83 @@ const fn failed_model_call_disposition(disposition: FailedModelCallDisposition) 
     }
 }
 
+const fn review_workflow_label(workflow: ReviewWorkflow) -> &'static str {
+    match workflow {
+        ReviewWorkflow::ImportExternalContext => "import_external_context",
+        ReviewWorkflow::ReadOnlyReview => "read_only_review",
+        ReviewWorkflow::JudgeFindings => "judge_findings",
+        ReviewWorkflow::DedupeFindings => "dedupe_findings",
+        ReviewWorkflow::PublishReview => "publish_review",
+        ReviewWorkflow::FixFindings => "fix_findings",
+        ReviewWorkflow::PropagateStack => "propagate_stack",
+    }
+}
+
+const fn review_run_state_label(state: ReviewRunLifecycle) -> &'static str {
+    match state {
+        ReviewRunLifecycle::Queued => "queued",
+        ReviewRunLifecycle::Running => "running",
+        ReviewRunLifecycle::Succeeded => "succeeded",
+        ReviewRunLifecycle::Failed => "failed",
+        ReviewRunLifecycle::Blocked => "blocked",
+        ReviewRunLifecycle::Cancelled => "cancelled",
+    }
+}
+
+const fn review_pass_kind_label(kind: ReviewPassKind) -> &'static str {
+    match kind {
+        ReviewPassKind::ImportExternalContext => "import_external_context",
+        ReviewPassKind::ReadOnlyReview => "read_only_review",
+        ReviewPassKind::Judge => "judge",
+        ReviewPassKind::Dedupe => "dedupe",
+        ReviewPassKind::Publish => "publish",
+        ReviewPassKind::Fix => "fix",
+        ReviewPassKind::PropagateStack => "propagate_stack",
+    }
+}
+
+const fn review_pass_state_label(state: ReviewPassLifecycle) -> &'static str {
+    match state {
+        ReviewPassLifecycle::Queued => "queued",
+        ReviewPassLifecycle::Running => "running",
+        ReviewPassLifecycle::Succeeded => "succeeded",
+        ReviewPassLifecycle::Failed => "failed",
+        ReviewPassLifecycle::Blocked => "blocked",
+        ReviewPassLifecycle::Cancelled => "cancelled",
+    }
+}
+
+const fn review_diff_side_label(side: ReviewDiffSide) -> &'static str {
+    match side {
+        ReviewDiffSide::Left => "left",
+        ReviewDiffSide::Right => "right",
+    }
+}
+
+const fn review_severity_label(severity: ReviewSeverity) -> &'static str {
+    match severity {
+        ReviewSeverity::Info => "info",
+        ReviewSeverity::Low => "low",
+        ReviewSeverity::Medium => "medium",
+        ReviewSeverity::High => "high",
+        ReviewSeverity::Critical => "critical",
+    }
+}
+
+const fn review_finding_status_label(status: ReviewFindingStatus) -> &'static str {
+    match status {
+        ReviewFindingStatus::Open => "open",
+        ReviewFindingStatus::Accepted => "accepted",
+        ReviewFindingStatus::Rejected => "rejected",
+        ReviewFindingStatus::Duplicate => "duplicate",
+        ReviewFindingStatus::Superseded => "superseded",
+        ReviewFindingStatus::Stale => "stale",
+        ReviewFindingStatus::Posted => "posted",
+        ReviewFindingStatus::Fixed => "fixed",
+        ReviewFindingStatus::BlockedWithReason => "blocked_with_reason",
+    }
+}
+
 const fn dangerous_tool_auto_approval_label(dangerous_tool_auto_approval: bool) -> &'static str {
     if dangerous_tool_auto_approval {
         "approve-all"
@@ -1154,8 +1352,10 @@ mod tests {
         CanonicalU64, CanonicalUuid, ContentFragment, CurrentModelCall, CurrentModelCallState,
         ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
         ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent, MetadataActor,
-        MetadataLastWriter, ModelCallState, ServerMessage, SessionEvent, TranscriptEntry,
-        TranscriptTextEntry, TurnState,
+        MetadataLastWriter, ModelCallState, ReviewDiffSide, ReviewFindingInput,
+        ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity, ReviewTargetSnapshot,
+        ReviewTargetSubject, ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry,
+        TurnState,
     };
     use uuid::Uuid;
 
@@ -1164,6 +1364,69 @@ mod tests {
         error::ClientError,
         transcript::{SnapshotIdentitySet, TranscriptSnapshot},
     };
+
+    #[test]
+    fn review_target_names_an_absent_base_revision() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .review_target(&review_target_snapshot(None))
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            target=00000000-0000-0000-0000-000000000001 subject=commit parent=-
+            provider=example-host
+            repository=owner/repository
+            head_revision=head
+            base_revision_present=false
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn review_target_preserves_a_literal_dash_base_revision() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .review_target(&review_target_snapshot(Some(String::from("-"))))
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            target=00000000-0000-0000-0000-000000000001 subject=commit parent=-
+            provider=example-host
+            repository=owner/repository
+            head_revision=head
+            base_revision_present=true
+            base_revision=-
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn review_finding_renders_its_complete_snapshot() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .review_finding(&review_finding_snapshot())
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            finding=00000000-0000-0000-0000-000000000004 target=00000000-0000-0000-0000-000000000001 run=00000000-0000-0000-0000-000000000002 pass=00000000-0000-0000-0000-000000000003 status=open events=2 line_start=7 line_end=9 diff_side=right severity=high confidence=9000
+            file_path=src/lib.rs
+            title=Retain evidence
+            body=First line\u{a}Second line
+            category=correctness
+            recommended_fix_present=true
+            recommended_fix=Bind the exact\u{a}pass.
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
 
     #[test]
     fn terminal_safe_text_preserves_line_feed_and_escapes_c0_del_and_c1() {
@@ -1923,5 +2186,39 @@ mod tests {
 
     fn wire_uuid(value: u128) -> CanonicalUuid {
         CanonicalUuid::from_uuid(Uuid::from_u128(value))
+    }
+    fn review_target_snapshot(base_revision: Option<String>) -> ReviewTargetSnapshot {
+        ReviewTargetSnapshot {
+            target_id: wire_uuid(1),
+            provider: String::from("example-host"),
+            repository: String::from("owner/repository"),
+            subject: ReviewTargetSubject::Commit {},
+            head_revision: String::from("head"),
+            base_revision,
+            stack_parent_target_id: None,
+        }
+    }
+
+    fn review_finding_snapshot() -> ReviewFindingSnapshot {
+        ReviewFindingSnapshot {
+            target_id: wire_uuid(1),
+            run_id: wire_uuid(2),
+            producing_pass_id: wire_uuid(3),
+            finding: ReviewFindingInput {
+                finding_id: wire_uuid(4),
+                file_path: String::from("src/lib.rs"),
+                line_start: Some(CanonicalU64::new(7)),
+                line_end: Some(CanonicalU64::new(9)),
+                diff_side: Some(ReviewDiffSide::Right),
+                title: String::from("Retain evidence"),
+                body: String::from("First line\nSecond line"),
+                severity: ReviewSeverity::High,
+                confidence: CanonicalU64::new(9_000),
+                category: String::from("correctness"),
+                recommended_fix: Some(String::from("Bind the exact\npass.")),
+            },
+            status: ReviewFindingStatus::Open,
+            event_count: CanonicalU64::new(2),
+        }
     }
 }
