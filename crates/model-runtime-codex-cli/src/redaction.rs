@@ -4,6 +4,10 @@ use serde_json::Value;
 use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink};
 
 const REDACTED: &str = "[redacted]";
+/// A valid-JSON stand-in for suppressed tool arguments and objects whose raw
+/// form still carries a credential shape after structural redaction, so the
+/// `arguments_json` raw-JSON contract is never broken by a bare sentinel.
+const REDACTED_JSON_OBJECT: &str = r#"{"redacted":"[redacted]"}"#;
 const MAX_PENDING_STREAM_BYTES: usize = 64 * 1024;
 const LINE_CREDENTIAL_MARKERS: &[&str] =
     &["authorization=", "authorization:", "cookie=", "cookie:"];
@@ -91,7 +95,15 @@ fn redact_text_literal(text: &str) -> String {
 /// Credential names whose spaced `name = value` / `name : value` form the
 /// exact markers cannot catch; the separator may carry surrounding spaces or
 /// tabs, as ordinary configuration and error output often print.
-const LINE_CREDENTIAL_NAMES: &[&str] = &["authorization", "cookie"];
+const LINE_CREDENTIAL_NAMES: &[&str] = &[
+    "authorization",
+    "cookie",
+    // Free-form secrets whose unquoted value can carry spaces (a passphrase,
+    // a PEM body) must consume the whole line, not stop at the first space.
+    "password",
+    "secret",
+    "credential",
+];
 const VALUE_CREDENTIAL_NAMES: &[&str] = &[
     "api_key",
     "api-key",
@@ -103,9 +115,6 @@ const VALUE_CREDENTIAL_NAMES: &[&str] = &[
     "refresh_token",
     "id_token",
     "session_token",
-    "password",
-    "secret",
-    "credential",
 ];
 
 /// Redacts a `name` credential whose separator (`=` or `:`) carries optional
@@ -282,15 +291,24 @@ pub(crate) fn redact_json(raw: &str) -> String {
         // A duplicate object member is invisible in the parsed tree — only
         // its last occurrence survives parsing — so a shadowed credential
         // value cannot be judged clean by the tree alone. Raw bytes are
-        // returned only when they are themselves credential-shape clean;
-        // otherwise the parsed tree is re-serialized, which drops shadowed
-        // members while arbitrary-precision numbers keep their lexemes.
+        // returned only when they are themselves credential-shape clean.
         if redact_text(raw) == raw {
             return raw.to_string();
         }
-        return serde_json::to_string(&value).unwrap_or_else(|_| REDACTED.to_string());
+        // Re-serializing drops a shadowed duplicate member while keeping
+        // arbitrary-precision numeric lexemes. If the re-serialized form is
+        // itself credential-shape clean the duplicate was the only shape;
+        // otherwise a credential survives structurally — for example a
+        // token-shaped object key the field-name traversal cannot reach — so
+        // the whole object is conservatively suppressed to a valid sentinel.
+        let reserialized =
+            serde_json::to_string(&value).unwrap_or_else(|_| REDACTED_JSON_OBJECT.to_string());
+        if redact_text(&reserialized) == reserialized {
+            return reserialized;
+        }
+        return REDACTED_JSON_OBJECT.to_string();
     }
-    serde_json::to_string(&value).unwrap_or_else(|_| REDACTED.to_string())
+    serde_json::to_string(&value).unwrap_or_else(|_| REDACTED_JSON_OBJECT.to_string())
 }
 
 fn redact_value(value: &mut Value) -> bool {
@@ -587,14 +605,18 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     /// stateless JSON-aware redaction applies and clean arguments stay
     /// byte-verbatim.
     pub(crate) fn redact_tool_arguments(&self, arguments: &str) -> String {
+        // Suppression yields a valid JSON object, not the bare `[redacted]`
+        // sentinel, so the `arguments_json` raw-JSON contract holds and
+        // `decode_tool_arguments` never reports a syntax error for a call the
+        // provider actually supplied validly.
         if self.suppressing {
-            return REDACTED.to_string();
+            return REDACTED_JSON_OBJECT.to_string();
         }
         if let Some(pending) = &self.pending {
             let mut joined = pending.text.clone();
             joined.push_str(arguments);
             if redact_text(&joined) != joined {
-                return REDACTED.to_string();
+                return REDACTED_JSON_OBJECT.to_string();
             }
         }
         redact_json(arguments)
@@ -1151,8 +1173,9 @@ mod tests {
     use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink};
 
     use super::{
-        MAX_PENDING_STREAM_BYTES, REDACTED, RedactingSink, decode_unicode_escapes, redact_json,
-        redact_text, stream_candidate_starts_at_zero, unsafe_stream_suffix_start,
+        MAX_PENDING_STREAM_BYTES, REDACTED, REDACTED_JSON_OBJECT, RedactingSink,
+        decode_unicode_escapes, redact_json, redact_text, stream_candidate_starts_at_zero,
+        unsafe_stream_suffix_start,
     };
 
     const CREDENTIAL_SHAPED_VALUE: &str = "sk-sensitive-value";
@@ -1488,6 +1511,39 @@ mod tests {
         assert!(bearer.contains("[redacted]"));
     }
 
+    /// INV-035: a token-shaped JSON object key that the field-name traversal
+    /// cannot reach is suppressed to a valid redacted object, not reserialized
+    /// verbatim.
+    #[test]
+    fn inv_035_redacts_token_shaped_json_object_keys() {
+        let fixture = r#"{"sk-opaque-token-key":"safe"}"#;
+        let output = redact_json(fixture);
+
+        assert!(!output.contains("sk-opaque-token-key"));
+        assert_eq!(output, REDACTED_JSON_OBJECT);
+        assert!(serde_json::from_str::<serde_json::Value>(&output).is_ok());
+    }
+
+    /// INV-035: a multiword unquoted secret consumes its whole line, not just
+    /// the first word.
+    #[test]
+    fn inv_035_redacts_multiword_unquoted_secrets() {
+        let password = redact_text(
+            "password: correct horse battery staple
+safe-line",
+        );
+        let secret = redact_text("secret: multi word secret value");
+
+        assert!(!password.contains("horse battery staple"));
+        assert_eq!(
+            password,
+            "password: [redacted]
+safe-line"
+        );
+        assert!(!secret.contains("word secret value"));
+        assert_eq!(secret, "secret: [redacted]");
+    }
+
     /// A non-secret usage field that merely contains "token" is not matched.
     #[test]
     fn input_tokens_usage_field_is_not_redacted() {
@@ -1804,9 +1860,15 @@ mod tests {
             },
         });
 
-        assert_eq!(
-            sink.redact_tool_arguments(&format!(r#"{{"city":" {AUTHORIZATION_VALUE}"}}"#)),
-            REDACTED
+        let redacted =
+            sink.redact_tool_arguments(&format!(r#"{{"city":" {AUTHORIZATION_VALUE}"}}"#));
+
+        assert_eq!(redacted, REDACTED_JSON_OBJECT);
+        assert!(!redacted.contains(AUTHORIZATION_VALUE));
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&redacted)
+                .expect("suppressed tool arguments are valid JSON")
+                .is_object()
         );
     }
 
