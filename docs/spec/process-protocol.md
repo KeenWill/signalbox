@@ -27,9 +27,10 @@ vocabularies unchanged, verified through PR #291 (`agent/turn-control-verbs`).
 The implementation in this stack speaks versions one through eight, and its
 terminal client selects version eight. Its `search` verb over version four's
 metadata list was verified through PR #283 (`agent/session-search-cli`; terminal
-client surface only). This page is the normative boundary between a local client
-process and `signalboxd`; domain values, PostgreSQL records, and wire messages
-remain distinct representations.
+client surface only). This page's version-four last-writer member spelling was
+verified through PR #288 (`agent/audit-fix-docs-coherence`). This page is the
+normative boundary between a local client process and `signalboxd`; domain
+values, PostgreSQL records, and wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -863,7 +864,8 @@ client accepts a global `--socket <path>` override or reads
 - `model <session-uuid> (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid> --defaults-version <decimal> --dangerous-tool-auto-approval <disabled|approve-all>]`;
 - `transcript <session-uuid>`;
 - `follow <session-uuid>`;
-- `import --format <claude-code|codex> <file>`;
+- conversation import operations described by the
+  [conversation-import operational surface](conversation-import.md#operational-surface);
 - `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `stop <session-uuid> [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
 - `approve <session-uuid> <tool-request-uuid> [--command-id <uuid>]`;
@@ -921,12 +923,6 @@ conversation.
 `assistant_tool_use` entry names its tool and arguments. Each verb validates
 that the receipt echoes the exact request and decision it sent and prints one
 `tool_request=<uuid> decision=<approve|deny>` line.
-
-`import` reads one bounded file snapshot before socket I/O, sends its exact
-bytes rather than its path, and prints either `inserted` or `already_imported`
-with the durable imported-conversation identity. Its complete behavior is owned
-by the
-[conversation-import operational surface](conversation-import.md#operational-surface).
 
 When `--command-id` is absent, the client generates a fresh UUIDv7 identity and
 prints it to standard error before any socket I/O. `send` and `stop` first read

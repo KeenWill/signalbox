@@ -9,10 +9,12 @@ against the implementing stack through PR #183
 composition root, its telemetry, and the production `FileCredentialAccess` were
 verified through PR #258 (`agent/signalboxd-rename`); the Anthropic adapter's
 server-side `fallback`-block recognition was verified through PR #280
-(`agent/provider-identity-normalization`). It covers the provider-neutral
-operation, observation, and evidence vocabulary; SSE framing; structured-output
-and tool decode; `ScriptedModel`; the three provider adapters; and their
-credential boundaries. Layer-2 authorization and evidence classification
+(`agent/provider-identity-normalization`). The five persistence-repository
+families in the operator-failure inventory were verified through PR #288
+(`agent/audit-fix-docs-coherence`). It covers the provider-neutral operation,
+observation, and evidence vocabulary; SSE framing; structured-output and tool
+decode; `ScriptedModel`; the three provider adapters; and their credential
+boundaries. Layer-2 authorization and evidence classification
 ([model-call-execution](model-call-execution.md)), credential channels,
 delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
@@ -563,12 +565,12 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
 
 `crates/application/src/operator_failure.rs` defines the one closed
 operator-facing failure classification shared by application services, the
-persistence adapters, and signalboxd telemetry: the scheduling and model-call
-error families (startup scan, turn activation, eligibility sweep, model-call
-repository) map into `OperatorFailureClass` through the
-`ClassifyOperatorFailure` trait, exposing a user-content-free classification to
-shared telemetry while the underlying error keeps its diagnostic detail
-internally. The four classes:
+persistence adapters, and signalboxd telemetry: five scheduling, model-call, and
+tool-loop error families (startup scan, turn activation, eligibility sweep,
+model-call repository, and tool-loop repository) map into `OperatorFailureClass`
+through the `ClassifyOperatorFailure` trait, exposing a user-content-free
+classification to shared telemetry while the underlying error keeps its
+diagnostic detail internally. The four classes:
 
 - **`Infrastructure { commit_ambiguous }`** — the operation could not complete;
   the flag marks failures whose transaction fate is unknown (commit-ambiguity
