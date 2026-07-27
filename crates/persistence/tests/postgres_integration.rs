@@ -2858,6 +2858,433 @@ async fn s02_s07_s10_inv006_inv037_interrupted_continuation_call_reloads_and_act
     Ok(())
 }
 
+/// Drives one checkpoint-confirmed tool round through approval, execution,
+/// and the steering-free continuation transaction, then authorizes the
+/// prepared continuation call for send, leaving it durably in flight.
+async fn authorize_continuation_after_completed_round(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        ModelCallId,
+        AuthorizedModelCall,
+    ),
+    Box<dyn Error>,
+> {
+    let (fixture, model_repository, _, request) =
+        checkpoint_confirmed_tool_round(pool, seed, "current_time", "{}").await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22));
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || continuation_attempt,
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized_attempt = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    tool_repository
+        .commit_observation(
+            authorized_attempt
+                .correlation()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(String::from("2026-07-26T12:00:00Z"))
+                            .expect("bounded result"),
+                    ),
+                }),
+        )
+        .await?;
+    let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one continuation target forms a catalog");
+    let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
+    let continuation = PostgresToolLoopRepository::with_model_calls(
+        pool.clone(),
+        targets,
+        model_credential_reference(),
+    )
+    .prepare_continuation(
+        fixture.session,
+        fixture.turn,
+        fixture.call,
+        signalbox_application::ToolContinuationIdentities::new(
+            vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                seed + 0x26,
+            ))],
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27)),
+            continuation_call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+        ),
+        |_| panic!("the fixture has no pending steering"),
+    )
+    .await?;
+    assert_eq!(
+        continuation,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(continuation_call)
+    );
+    let AuthorizeModelCallOutcome::Authorized(authorized) = model_repository
+        .authorize_send(fixture.session, continuation_call)
+        .await?
+    else {
+        panic!("the checkpointed continuation call authorizes for send")
+    };
+    Ok((fixture, model_repository, continuation_call, *authorized))
+}
+
+/// S02 / S10 / INV-006: a provider refusal on the continuation model call of
+/// a completed tool round terminalizes the turn naming that call, and the
+/// committed refused terminal shape reloads through the scheduling
+/// projection — the startup scan completes and the next submit is accepted
+/// instead of the session becoming permanently unloadable.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s02_s10_inv006_refused_continuation_call_reloads_and_scans() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x8300;
+    let (fixture, model_repository, continuation_call, authorized) =
+        authorize_continuation_after_completed_round(&pool, seed).await?;
+    let refused_observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Refused);
+    let refused_outcome = model_repository
+        .apply_terminal_observation(
+            fixture.session,
+            refused_observation,
+            ModelCallTerminalIdentities::Refused(RefusedModelCallTurnIdentities::new(
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x36)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert!(
+        matches!(refused_outcome, ModelCallTerminalOutcome::Refused(_)),
+        "the provider refusal terminalizes the continuation call's turn"
+    );
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct RefusedContinuationShape {
+        turn_disposition: String,
+        terminal_model_call_id: Option<Uuid>,
+        call_disposition: String,
+    }
+    let refused_shape: RefusedContinuationShape = sqlx::query_as(
+        "SELECT lifecycle.terminal_disposition_kind AS turn_disposition,
+                lifecycle.terminal_model_call_id,
+                continuation.terminal_disposition_kind AS call_disposition
+           FROM turn_lifecycle AS lifecycle
+           JOIN model_call AS continuation
+             ON continuation.session_id = lifecycle.session_id
+            AND continuation.model_call_id = lifecycle.terminal_model_call_id
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        refused_shape,
+        RefusedContinuationShape {
+            turn_disposition: String::from("refused"),
+            terminal_model_call_id: Some(continuation_call.into_uuid()),
+            call_disposition: String::from("refused"),
+        },
+        "the refusal names the round's own continuation call"
+    );
+
+    let mut recovery_ids = FixedStartupScanIds::new([], []);
+    let scan = PostgresStartupScanRepository::new(pool.clone())
+        .recover(
+            fixture.session,
+            signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x31)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x32)),
+            ),
+            &mut recovery_ids,
+        )
+        .await?;
+    assert_eq!(
+        scan,
+        StartupScanSessionOutcome::NoActiveTurn,
+        "writer-produced refused continuation history must reconstitute at startup"
+    );
+
+    let post_refusal = SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x33,
+                seed + 1,
+                "work after refused continuation",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x34)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x35))),
+        )
+        .await?;
+    assert!(
+        matches!(
+            post_refusal,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the refused terminal continuation shape must reconstitute before the next submit"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S04 / INV-006 / INV-025: a daemon restart with the continuation model call
+/// of a completed tool round in flight classifies the call as ambiguous and
+/// parks the turn awaiting an owner recovery decision — the committed
+/// recovery wait reloads through the scheduling projection, the reconcile
+/// verb's precondition still names the parked turn, and the reconciling
+/// interrupt terminalizes the turn naming that call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_inv006_inv025_in_flight_continuation_call_restart_parks_recovery()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x8500;
+    let (fixture, _, continuation_call, _) =
+        authorize_continuation_after_completed_round(&pool, seed).await?;
+
+    let mut recovery_ids = FixedStartupScanIds::new([], []);
+    let scan = PostgresStartupScanRepository::new(pool.clone())
+        .recover(
+            fixture.session,
+            signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x31)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x32)),
+            ),
+            &mut recovery_ids,
+        )
+        .await?;
+    let StartupScanSessionOutcome::RecoveredModelCall(recovered) = scan else {
+        panic!("the startup scan classifies the in-flight continuation call instead of aborting");
+    };
+    assert!(
+        matches!(*recovered, ModelCallTerminalOutcome::AwaitingRecovery(_)),
+        "the lost in-flight continuation call parks awaiting an owner decision"
+    );
+
+    let mut second_scan_ids = FixedStartupScanIds::new([], []);
+    let second_scan = PostgresStartupScanRepository::new(pool.clone())
+        .recover(
+            fixture.session,
+            signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x33)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x34)),
+            ),
+            &mut second_scan_ids,
+        )
+        .await?;
+    assert_eq!(
+        second_scan,
+        StartupScanSessionOutcome::AwaitingRecoveryDecision { turn: fixture.turn },
+        "the committed continuation recovery wait must reconstitute at the next startup"
+    );
+
+    assert_eq!(
+        ProcessReadRepository::new(pool.clone())
+            .model_call_recovery_precondition(fixture.session)
+            .await?,
+        ProcessModelCallRecoveryPrecondition::Parked { turn: fixture.turn },
+        "the reconcile verb's precondition names the parked continuation turn"
+    );
+
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x40));
+    let reconcile_outcome = SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                seed + 0x41,
+                seed + 1,
+                "reconcile the parked continuation call",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x42)),
+            Some(successor),
+        )
+        .await?;
+    assert!(
+        matches!(
+            reconcile_outcome,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+        ),
+        "the reconcile verb's interrupt applies against the parked continuation turn"
+    );
+    let reconciled_shape: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT terminal_disposition_kind, terminal_model_call_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        reconciled_shape,
+        (
+            String::from("reconciliation_required"),
+            Some(continuation_call.into_uuid()),
+        ),
+        "reconciliation retains the exact ambiguous continuation call"
+    );
+
+    let mut third_scan_ids = FixedStartupScanIds::new([], []);
+    let third_scan = PostgresStartupScanRepository::new(pool.clone())
+        .recover(
+            fixture.session,
+            signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x43)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x44)),
+            ),
+            &mut third_scan_ids,
+        )
+        .await?;
+    assert_eq!(
+        third_scan,
+        StartupScanSessionOutcome::NoActiveTurn,
+        "the reconciliation-required continuation terminal must reconstitute at startup"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S04 / S07 / INV-006 / INV-037: a daemon restart with a stop-requested
+/// continuation call classifies it as ambiguous under its applied interrupt
+/// and terminalizes the turn as reconciliation-required naming that call —
+/// the committed terminal shape reloads through the scheduling projection
+/// instead of leaving the session permanently unloadable.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_s07_inv006_inv037_stop_requested_continuation_call_restart_reconciles()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x8700;
+    let (fixture, _, continuation_call, _) =
+        authorize_continuation_after_completed_round(&pool, seed).await?;
+
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x30));
+    let interrupt_outcome = SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                seed + 0x24,
+                seed + 1,
+                "stop the in-flight continuation",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x25)),
+            Some(successor),
+        )
+        .await?;
+    assert!(
+        matches!(
+            interrupt_outcome,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+        ),
+        "the interrupt records a stop request against the in-flight continuation call"
+    );
+
+    let mut recovery_ids = FixedStartupScanIds::new([], []);
+    let scan = PostgresStartupScanRepository::new(pool.clone())
+        .recover(
+            fixture.session,
+            signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x31)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x32)),
+            ),
+            &mut recovery_ids,
+        )
+        .await?;
+    let StartupScanSessionOutcome::RecoveredModelCall(recovered) = scan else {
+        panic!("the startup scan classifies the stop-requested continuation call");
+    };
+    assert!(
+        matches!(
+            *recovered,
+            ModelCallTerminalOutcome::ReconciliationRequired(_)
+        ),
+        "the lost stop-requested continuation call requires reconciliation"
+    );
+    let reconciled_shape: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT terminal_disposition_kind, terminal_model_call_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        reconciled_shape,
+        (
+            String::from("reconciliation_required"),
+            Some(continuation_call.into_uuid()),
+        ),
+        "restart reconciliation names the stop-requested continuation call"
+    );
+
+    let mut second_scan_ids = FixedStartupScanIds::new([], []);
+    let second_scan = PostgresStartupScanRepository::new(pool.clone())
+        .recover(
+            fixture.session,
+            signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x33)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x34)),
+            ),
+            &mut second_scan_ids,
+        )
+        .await?;
+    assert_eq!(
+        second_scan,
+        StartupScanSessionOutcome::NoActiveTurn,
+        "the reconciliation-required continuation terminal must reconstitute at startup"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-006 / INV-011 / INV-037: an immediate interrupt after an approved
 /// attempt checkpoint classifies the unsent attempt, closes its logical
 /// request, and terminalizes through the applied interrupt atomically.
