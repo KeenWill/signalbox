@@ -840,22 +840,7 @@ impl PostgresModelCallRepository {
                     "retained observation session changed",
                 ));
             }
-            let stored = sqlx::query_as::<
-                _,
-                (
-                    Uuid,
-                    Uuid,
-                    Uuid,
-                    Uuid,
-                    Uuid,
-                    String,
-                    Option<String>,
-                    Option<Decimal>,
-                    Option<Decimal>,
-                    Option<Decimal>,
-                    Option<Decimal>,
-                ),
-            >(
+            let stored_row = sqlx::query(
                 "SELECT session_id, turn_id, turn_attempt_id,
                         resolved_provider_model_identity_id, context_frontier_id,
                         state_kind, terminal_disposition_kind,
@@ -871,36 +856,18 @@ impl PostgresModelCallRepository {
             .ok_or(ModelCallCorruption::Missing(
                 "retained observation model call",
             ))?;
-            let (
-                stored_session,
-                turn,
-                attempt,
-                target,
-                frontier,
-                state,
-                disposition,
-                usage_input_tokens,
-                usage_output_tokens,
-                usage_cache_creation_input_tokens,
-                usage_cache_read_input_tokens,
-            ) = stored;
-            let stored_usage = (
-                usage_input_tokens,
-                usage_output_tokens,
-                usage_cache_creation_input_tokens,
-                usage_cache_read_input_tokens,
-            );
-            if stored_session != session_id_to_uuid(correlation.session())
-                || turn != turn_id_to_uuid(correlation.turn())
-                || attempt != correlation.attempt().into_uuid()
-                || target != correlation.target().identity().into_uuid()
-                || frontier != correlation.frontier().into_uuid()
+            let stored = decode_stored_model_call_observation(&stored_row)?;
+            if stored.session != session_id_to_uuid(correlation.session())
+                || stored.turn != turn_id_to_uuid(correlation.turn())
+                || stored.attempt != correlation.attempt().into_uuid()
+                || stored.target != correlation.target().identity().into_uuid()
+                || stored.frontier != correlation.frontier().into_uuid()
             {
                 return Err(ModelCallRepositoryError::InvalidTransition(
                     "retained observation correlation changed",
                 ));
             }
-            match (state.as_str(), disposition.as_deref()) {
+            match (stored.state.as_str(), stored.disposition.as_deref()) {
                 ("in_flight", None) => {
                     let execution = require_exact_call(
                         require_live_execution(&mut transaction, session, &self.targets).await?,
@@ -943,7 +910,7 @@ impl PostgresModelCallRepository {
                         )",
                     )
                     .bind(session_id_to_uuid(session))
-                    .bind(turn)
+                    .bind(stored.turn)
                     .bind(observation.call().into_uuid())
                     .fetch_one(&mut *transaction)
                     .await?;
@@ -957,7 +924,7 @@ impl PostgresModelCallRepository {
                 ("terminal", Some(stored_disposition))
                     if stored_disposition
                         == encode_disposition(observation.observation().disposition())
-                        && stored_usage == encode_token_usage(observation.usage()) =>
+                        && stored.usage == encode_token_usage(observation.usage()) =>
                 {
                     if !terminal_observation_closure_matches(&mut transaction, session, observation)
                         .await?
@@ -4400,6 +4367,46 @@ async fn persist_ambiguous(
     Ok(())
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EncodedTokenUsage {
+    input_tokens: Option<Decimal>,
+    output_tokens: Option<Decimal>,
+    cache_creation_input_tokens: Option<Decimal>,
+    cache_read_input_tokens: Option<Decimal>,
+}
+
+#[derive(Debug)]
+struct StoredModelCallObservation {
+    session: Uuid,
+    turn: Uuid,
+    attempt: Uuid,
+    target: Uuid,
+    frontier: Uuid,
+    state: String,
+    disposition: Option<String>,
+    usage: EncodedTokenUsage,
+}
+
+fn decode_stored_model_call_observation(
+    row: &PgRow,
+) -> Result<StoredModelCallObservation, sqlx::Error> {
+    Ok(StoredModelCallObservation {
+        session: row.try_get("session_id")?,
+        turn: row.try_get("turn_id")?,
+        attempt: row.try_get("turn_attempt_id")?,
+        target: row.try_get("resolved_provider_model_identity_id")?,
+        frontier: row.try_get("context_frontier_id")?,
+        state: row.try_get("state_kind")?,
+        disposition: row.try_get("terminal_disposition_kind")?,
+        usage: EncodedTokenUsage {
+            input_tokens: row.try_get("usage_input_tokens")?,
+            output_tokens: row.try_get("usage_output_tokens")?,
+            cache_creation_input_tokens: row.try_get("usage_cache_creation_input_tokens")?,
+            cache_read_input_tokens: row.try_get("usage_cache_read_input_tokens")?,
+        },
+    })
+}
+
 async fn persist_ended_call(
     connection: &mut PgConnection,
     session: SessionId,
@@ -4407,8 +4414,7 @@ async fn persist_ended_call(
     call: &signalbox_domain::EndedModelCall,
     usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
-    let (input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens) =
-        encode_token_usage(usage);
+    let usage = encode_token_usage(usage);
     let rows = sqlx::query(
         "UPDATE model_call
             SET state_kind = 'terminal',
@@ -4425,10 +4431,10 @@ async fn persist_ended_call(
             AND terminal_disposition_kind IS NULL",
     )
     .bind(encode_disposition(call.disposition()))
-    .bind(input_tokens)
-    .bind(output_tokens)
-    .bind(cache_creation_input_tokens)
-    .bind(cache_read_input_tokens)
+    .bind(usage.input_tokens)
+    .bind(usage.output_tokens)
+    .bind(usage.cache_creation_input_tokens)
+    .bind(usage.cache_read_input_tokens)
     .bind(call.id().into_uuid())
     .bind(turn_id_to_uuid(turn))
     .bind(session_id_to_uuid(session))
@@ -4439,20 +4445,13 @@ async fn persist_ended_call(
     require_single(rows, "terminal model call")
 }
 
-fn encode_token_usage(
-    usage: ProviderReportedTokenUsage,
-) -> (
-    Option<Decimal>,
-    Option<Decimal>,
-    Option<Decimal>,
-    Option<Decimal>,
-) {
-    (
-        usage.input_tokens().map(Decimal::from),
-        usage.output_tokens().map(Decimal::from),
-        usage.cache_creation_input_tokens().map(Decimal::from),
-        usage.cache_read_input_tokens().map(Decimal::from),
-    )
+fn encode_token_usage(usage: ProviderReportedTokenUsage) -> EncodedTokenUsage {
+    EncodedTokenUsage {
+        input_tokens: usage.input_tokens().map(Decimal::from),
+        output_tokens: usage.output_tokens().map(Decimal::from),
+        cache_creation_input_tokens: usage.cache_creation_input_tokens().map(Decimal::from),
+        cache_read_input_tokens: usage.cache_read_input_tokens().map(Decimal::from),
+    }
 }
 
 async fn persist_ended_attempt(

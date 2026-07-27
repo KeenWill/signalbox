@@ -71,7 +71,10 @@ transition, any rewrite of a terminal row, any unsent-terminal disposition other
 than `KnownFailed`/`Cancelled`, and any delete; `model_call_pinned_target_fk`
 forces every call row's resolved target to equal the turn's pinned target. Why:
 the schema backstops the aggregate against any buggy or racing writer, not just
-the audited one.
+the audited one. Migration `202607290001_model_call_token_usage.sql` adds the
+terminal-only usage-field constraints and rejects reported usage on every direct
+`Prepared -> Terminal` transition, because that transition proves no send was
+authorized.
 
 The provider target is pinned as a turn-level fact before any call exists: the
 turn's frozen selection resolves through an immutable configured

@@ -893,6 +893,10 @@ impl ProcessTranscriptReader {
                 );
             }
             self.model_calls_complete = true;
+        }
+
+        if self.entry_count.is_none() {
+            let session = self.session;
             let latest_frontier = self.latest_frontier;
             self.entry_count = Some(match latest_frontier {
                 Some(frontier) => {
@@ -1303,12 +1307,34 @@ impl ProcessReadRepository {
     /// Opens one repeatable-read transcript cursor, or `None` only when the
     /// session is absent from that transaction snapshot.
     ///
-    /// The cursor yields at most one decoded turn or entry at a time. This is
-    /// the production boundary for spooling snapshots without transcript-sized
-    /// process memory.
+    /// The cursor yields at most one decoded turn, model-call usage record, or
+    /// entry at a time. This is the production boundary for spooling snapshots
+    /// without transcript-sized process memory.
     pub async fn open_transcript(
         &self,
         requested_session: SessionId,
+    ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
+        self.open_transcript_with_model_call_usage(requested_session, true)
+            .await
+    }
+
+    /// Opens one repeatable-read transcript cursor without loading terminal
+    /// model-call usage.
+    ///
+    /// This keeps protocol versions whose closed vocabulary cannot carry usage
+    /// from traversing evidence that they must omit.
+    pub async fn open_transcript_without_model_call_usage(
+        &self,
+        requested_session: SessionId,
+    ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
+        self.open_transcript_with_model_call_usage(requested_session, false)
+            .await
+    }
+
+    async fn open_transcript_with_model_call_usage(
+        &self,
+        requested_session: SessionId,
+        includes_model_call_usage: bool,
     ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(REPEATABLE_READ_ONLY)
@@ -1342,8 +1368,11 @@ impl ProcessReadRepository {
             load_checked_imported_seed_frontier(&mut transaction, requested_session).await?;
         let expected_turn_count =
             load_transcript_turn_count(&mut transaction, requested_session).await?;
-        let expected_model_call_count =
-            load_terminal_model_call_count(&mut transaction, requested_session).await?;
+        let expected_model_call_count = if includes_model_call_usage {
+            load_terminal_model_call_count(&mut transaction, requested_session).await?
+        } else {
+            0
+        };
         Ok(Some(ProcessTranscriptReader {
             transaction: Some(transaction),
             session: requested_session,
@@ -1361,7 +1390,7 @@ impl ProcessReadRepository {
             expected_model_call_count,
             model_call_count: 0,
             next_model_call_after: None,
-            model_calls_complete: false,
+            model_calls_complete: !includes_model_call_usage,
             entry_count: None,
             next_entry_index: 0,
             summary: None,

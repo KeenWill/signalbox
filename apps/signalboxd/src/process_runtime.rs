@@ -4939,11 +4939,15 @@ async fn spool_transcript(
     version: ProtocolVersion,
     request_id: RequestId,
 ) -> Result<Option<TranscriptSpool>, TranscriptSpoolError> {
-    let Some(mut reader) = repository
-        .open_transcript(session)
-        .await
-        .map_err(TranscriptSpoolError::Read)?
-    else {
+    let carries_model_call_usage = version.as_u64() >= MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION;
+    let reader = if carries_model_call_usage {
+        repository.open_transcript(session).await
+    } else {
+        repository
+            .open_transcript_without_model_call_usage(session)
+            .await
+    };
+    let Some(mut reader) = reader.map_err(TranscriptSpoolError::Read)? else {
         return Ok(None);
     };
     let standard_file = tempfile::tempfile()
@@ -4960,7 +4964,6 @@ async fn spool_transcript(
     )
     .await
     .map_err(TranscriptSpoolError::Spool)?;
-    let carries_model_call_usage = version.as_u64() >= MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION;
     let mut model_calls_ended = false;
     let mut model_call_count = 0_u64;
     while let Some(item) = reader

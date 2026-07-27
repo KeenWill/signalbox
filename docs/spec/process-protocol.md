@@ -733,10 +733,10 @@ One logical snapshot is a bounded message sequence sharing the request identity:
 4. the entry messages below in frontier-member order; and
 5. `transcript_snapshot_end { session_id, cursor, turn_count, entry_count }`.
 
-Versions one through eight, ten, and eleven omit the complete model-call usage
-section, preserving their closed snapshot vocabularies and original sequence.
-Version fourteen orders usage rows first by the owning turn's acceptance
-position and then by model-call UUID. Each row carries contiguous zero-based
+Versions one through eleven omit the complete model-call usage section,
+preserving their closed snapshot vocabularies and original sequence. Version
+fourteen orders usage rows first by the owning turn's acceptance position and
+then by model-call UUID. Each row carries contiguous zero-based
 `model_call_index`, `turn_id`, `model_call_id`, and a required `usage` object
 with required-nullable `input_tokens`, `output_tokens`,
 `cache_creation_input_tokens`, and `cache_read_input_tokens`. A null field means

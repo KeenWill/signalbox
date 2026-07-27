@@ -41,7 +41,41 @@ ALTER TABLE model_call
             )
         );
 
+-- Prepared-to-terminal transitions are provably unsent, so no provider usage
+-- can exist even when the terminal disposition itself is valid. Keep this as a
+-- separate additive trigger rather than rewriting an applied migration.
+CREATE FUNCTION reject_model_call_unsent_usage()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF OLD.state_kind = 'prepared'
+       AND NEW.state_kind = 'terminal'
+       AND (
+           NEW.usage_input_tokens IS NOT NULL
+           OR NEW.usage_output_tokens IS NOT NULL
+           OR NEW.usage_cache_creation_input_tokens IS NOT NULL
+           OR NEW.usage_cache_read_input_tokens IS NOT NULL
+       )
+    THEN
+        RAISE EXCEPTION 'an unsent call cannot carry provider-reported token usage'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT = 'model_call_unsent_usage_unreported';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER model_call_unsent_usage_is_unreported
+BEFORE UPDATE ON model_call
+FOR EACH ROW
+EXECUTE FUNCTION reject_model_call_unsent_usage();
+
 -- The existing model_call_changes_are_guarded trigger makes every terminal row
 -- immutable. Together with the terminal-only shape above, the four fields can
 -- therefore be installed only by the same update that records the terminal
--- disposition and can never be corrected or cleared later.
+-- disposition and can never be corrected or cleared later. The additive
+-- model_call_unsent_usage_is_unreported trigger also rejects evidence on a
+-- Prepared-to-terminal transition, for which no provider send occurred.
