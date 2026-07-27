@@ -20,8 +20,8 @@ use signalbox_application::{
     CreateSessionFromImportedFrontierService, ImportConversationOutcome, ImportConversationService,
     ImportedConversationIdGenerator, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
     InProcessToolDispatchGate, ModelCallCredentialReference, ModelCallExecutionOutcome,
-    ModelCallExecutionService, ScriptedModelCallProvider, ScriptedModelCallStep,
-    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
+    ModelCallExecutionService, SchedulerLoop, SchedulerLoopExit, ScriptedModelCallProvider,
+    ScriptedModelCallStep, StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
     UuidV7ModelCallExecutionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
     UuidV7StartupScanIdGenerator,
 };
@@ -35,6 +35,11 @@ use signalbox_domain::{
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionId, ToolCallProposal, ToolName,
     ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
     ToolUsingAssistantResponse, TurnId,
+};
+use signalbox_model_provider_runtime::RuntimeModelCallProvider;
+use signalbox_model_runtime::{
+    AssistantPart, CompletionEvidence, CompletionFinish, DeliveryMode, ExchangeFacts,
+    ObservationFact, ProviderReportedModel, Script, ScriptedModel, TerminalEvidence, TokenUsage,
 };
 use signalbox_persistence::{
     conversation_import::ImportedConversationRepository,
@@ -54,7 +59,9 @@ use signalbox_process_protocol::{
     TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
-    HubModelConfiguration, LocalProcessListener, ProcessRuntime, ProcessRuntimeError,
+    ActivatedTurnPass, FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
+    PostgresProviderModelExecution, ProcessProviderTextDeltaSink, ProcessRuntime,
+    ProcessRuntimeError,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -79,6 +86,8 @@ const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const OVERSIZED_SUBMITTED_INPUT_BYTES: usize = MAX_SUBMITTED_INPUT_BYTES + 1;
+const STREAMING_DELTA_COUNT: usize = 192;
+const STREAMING_DELTA_BYTES: usize = 8 * 1024;
 const MODEL_CONFIGURATION: &str = r#"
 version = 1
 
@@ -329,7 +338,8 @@ struct RunningRuntime {
     socket_directory: SocketDirectory,
     shutdown: watch::Sender<bool>,
     runtime_task: JoinHandle<Result<(), ProcessRuntimeError>>,
-    _work_source: InProcessEligibilityWorkSource<PostgresEligibilitySweep>,
+    work_source: Option<InProcessEligibilityWorkSource<PostgresEligibilitySweep>>,
+    provider_text_deltas: ProcessProviderTextDeltaSink,
 }
 
 impl RunningRuntime {
@@ -347,6 +357,7 @@ impl RunningRuntime {
             InProcessToolDispatchGate::default(),
             model_configuration,
         );
+        let provider_text_deltas = runtime.provider_text_delta_sink();
         let (shutdown, shutdown_receiver) = watch::channel(false);
         let runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
         Ok(Self {
@@ -355,12 +366,23 @@ impl RunningRuntime {
             socket_directory,
             shutdown,
             runtime_task,
-            _work_source: work_source,
+            work_source: Some(work_source),
+            provider_text_deltas,
         })
     }
 
     fn socket(&self) -> &Path {
         self.socket_directory.socket()
+    }
+
+    fn take_work_source(&mut self) -> InProcessEligibilityWorkSource<PostgresEligibilitySweep> {
+        self.work_source
+            .take()
+            .expect("the streaming fixture takes the work source once")
+    }
+
+    fn provider_text_delta_sink(&self) -> ProcessProviderTextDeltaSink {
+        self.provider_text_deltas.clone()
     }
 
     async fn stop(self) -> Result<(), Box<dyn Error>> {
@@ -453,6 +475,247 @@ async fn accepted_successor_turn(
 
 async fn response_within(connection: &mut Connection) -> Result<ServerFrame, Box<dyn Error>> {
     timeout(Duration::from_secs(5), connection.response()).await?
+}
+
+async fn attach_empty_follower(
+    socket: &Path,
+    version: ProtocolVersion,
+    request_id: u64,
+    session_id: CanonicalUuid,
+) -> Result<Connection, Box<dyn Error>> {
+    let mut follow = Connection::connect(socket).await?;
+    follow
+        .request_version(
+            version,
+            request_id,
+            ClientRequest::FollowSession { session_id },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut follow).await?.message(),
+        ServerMessage::TranscriptSnapshotStart {
+            session_id: snapshot_session,
+            ..
+        } if *snapshot_session == session_id
+    ));
+    assert!(matches!(
+        response_within(&mut follow).await?.message(),
+        ServerMessage::TranscriptSnapshotEnd {
+            session_id: snapshot_session,
+            turn_count,
+            entry_count,
+            ..
+        } if *snapshot_session == session_id
+            && turn_count.value() == 0
+            && entry_count.value() == 0
+    ));
+    Ok(follow)
+}
+
+struct StreamedFollowOutcome {
+    delta_count: usize,
+    text: String,
+}
+
+async fn follow_streamed_turn_to_completion(
+    mut follow: Connection,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+) -> Result<StreamedFollowOutcome, Box<dyn Error>> {
+    let mut delta_count = 0usize;
+    let mut text = String::new();
+    loop {
+        match response_within(&mut follow).await?.message() {
+            ServerMessage::ProviderTextDelta {
+                session_id: delta_session,
+                turn_id: delta_turn,
+                content,
+                ..
+            } if *delta_session == session_id && *delta_turn == turn_id => {
+                delta_count += 1;
+                text.push_str(content.as_str());
+            }
+            ServerMessage::SessionEvent {
+                session_id: event_session,
+                event:
+                    SessionEvent::TurnCompleted {
+                        turn_id: completed, ..
+                    },
+                ..
+            } if *event_session == session_id && *completed == turn_id => {
+                return Ok(StreamedFollowOutcome { delta_count, text });
+            }
+            ServerMessage::Error {
+                code: ErrorCode::ResyncRequired,
+                ..
+            } => {
+                return Err(io::Error::other("a draining follower unexpectedly lagged").into());
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn receive_resync(mut follow: Connection) -> Result<usize, Box<dyn Error>> {
+    let mut delta_count = 0usize;
+    loop {
+        match response_within(&mut follow).await?.message() {
+            ServerMessage::ProviderTextDelta { .. } => delta_count += 1,
+            ServerMessage::Error {
+                code: ErrorCode::ResyncRequired,
+                ..
+            } => return Ok(delta_count),
+            _ => {}
+        }
+    }
+}
+
+async fn read_completed_assistant(
+    socket: &Path,
+    request_id: u64,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+) -> Result<String, Box<dyn Error>> {
+    let mut connection = Connection::connect(socket).await?;
+    connection
+        .request_version(
+            ProtocolVersion::Twelve,
+            request_id,
+            ClientRequest::ReadTranscript { session_id },
+        )
+        .await?;
+    let mut assistant_index = None;
+    let mut assistant = String::new();
+    let mut completion_seen = false;
+    loop {
+        match response_within(&mut connection).await?.message() {
+            ServerMessage::TranscriptTextEntry {
+                entry_index,
+                entry:
+                    TranscriptTextEntry::Assistant {
+                        turn_id: assistant_turn,
+                        ..
+                    },
+                ..
+            } if *assistant_turn == turn_id => assistant_index = Some(entry_index.value()),
+            ServerMessage::TranscriptContent {
+                entry_index,
+                content_fragment,
+                ..
+            } if assistant_index == Some(entry_index.value()) => {
+                assistant.push_str(content_fragment.as_str());
+            }
+            ServerMessage::TranscriptEntry {
+                entry:
+                    TranscriptEntry::TurnCompleted {
+                        turn_id: completed_turn,
+                    },
+                ..
+            } if *completed_turn == turn_id => completion_seen = true,
+            ServerMessage::TranscriptSnapshotEnd {
+                session_id: snapshot_session,
+                ..
+            } if *snapshot_session == session_id => {
+                assert!(completion_seen);
+                return Ok(assistant);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn streamed_script(delta_count: usize, delta: String) -> (Script, String) {
+    let assistant = delta.repeat(delta_count);
+    let script = std::iter::repeat_n(
+        ObservationFact::TextDelta {
+            index: 0,
+            text: delta,
+        },
+        delta_count,
+    )
+    .fold(
+        Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("fixture-model")),
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::Text(assistant.clone())],
+            usage: TokenUsage::unreported(),
+        }))
+        .observing(ObservationFact::SendCommenced),
+        Script::observing,
+    );
+    (script, assistant)
+}
+
+async fn wait_for_terminal(pool: &PgPool, session: SessionId, turn: TurnId) {
+    loop {
+        let terminal: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM turn_lifecycle
+                 WHERE session_id = $1
+                   AND turn_id = $2
+                   AND state_kind = 'terminal'
+            )",
+        )
+        .bind(session.into_uuid())
+        .bind(turn.into_uuid())
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+        if terminal {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn execute_streamed_turn(
+    runtime: &mut RunningRuntime,
+    scripted: ScriptedModel<ModelCallId>,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+) -> Result<ScriptedModel<ModelCallId>, Box<dyn Error>> {
+    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let probe = scripted.clone();
+    let provider =
+        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
+            .with_text_delta_sink(runtime.provider_text_delta_sink());
+    let (execution, fatal_execution) =
+        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+            PostgresModelCallRepository::new(
+                runtime.pool.clone(),
+                model_configuration.target_catalog(),
+                ModelCallCredentialReference::new("streaming-fixture"),
+            ),
+            InProcessAttemptDispatchGate::default(),
+            provider,
+        ));
+    let pass = ActivatedTurnPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(runtime.pool.clone()),
+        ),
+        execution,
+    );
+    let mut scheduler = SchedulerLoop::new(runtime.take_work_source(), pass);
+    let observation_pool = runtime.pool.clone();
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let turn = TurnId::from_uuid(turn_id.into_uuid());
+    let fatal_shutdown = fatal_execution.clone();
+    let shutdown = async move {
+        tokio::select! {
+            () = wait_for_terminal(&observation_pool, session, turn) => {}
+            () = fatal_shutdown.wait() => {}
+        }
+    };
+    assert_eq!(
+        timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await?,
+        SchedulerLoopExit::Shutdown
+    );
+    assert!(!fatal_execution.is_triggered());
+    Ok(probe)
 }
 
 #[track_caller]
@@ -2188,6 +2451,138 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
 
     drop(commands);
     drop(follow);
+    runtime.stop().await
+}
+
+/// S01 / S02 / S24 / INV-032 / INV-035: the provider bridge asks the scripted
+/// runtime for streamed delivery, and two already-attached version-twelve
+/// followers each observe the exact already-redacted deltas before the durable
+/// terminal entries expose the same complete assistant reply.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_durable_truth()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut commands = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut commands).await?;
+    let first_follow =
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Twelve, 10, session_id).await?;
+    let second_follow =
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Twelve, 11, session_id).await?;
+    let expected_delta_count = 2;
+    let (script, assistant) =
+        streamed_script(expected_delta_count, String::from("already [redacted] "));
+    let (_, turn_id) =
+        submit_first_input(&mut commands, session_id, String::from("stream this reply")).await?;
+
+    let probe = execute_streamed_turn(
+        &mut runtime,
+        ScriptedModel::single(script),
+        session_id,
+        turn_id,
+    )
+    .await?;
+    let first = follow_streamed_turn_to_completion(first_follow, session_id, turn_id).await?;
+    let second = follow_streamed_turn_to_completion(second_follow, session_id, turn_id).await?;
+    let first_durable = read_completed_assistant(runtime.socket(), 12, session_id, turn_id).await?;
+    let second_durable =
+        read_completed_assistant(runtime.socket(), 13, session_id, turn_id).await?;
+    let operations = probe.received_operations();
+
+    assert_eq!(first.delta_count, expected_delta_count);
+    assert_eq!(first.text, assistant);
+    assert_eq!(second.delta_count, expected_delta_count);
+    assert_eq!(second.text, assistant);
+    assert_eq!(first_durable, assistant);
+    assert_eq!(second_durable, assistant);
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].delivery, DeliveryMode::Streamed);
+
+    drop(commands);
+    runtime.stop().await
+}
+
+/// S24 / INV-032: a follower that cannot keep up with ephemeral provider
+/// deltas receives the existing resynchronization error, loses some deltas,
+/// and recovers the exact completed assistant reply from durable transcript
+/// truth without any delta persistence or replay.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s24_streaming_lag_resync_loses_deltas_and_reads_complete_transcript()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut commands = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut commands).await?;
+    let lagging_follow =
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Twelve, 20, session_id).await?;
+    let (script, assistant) =
+        streamed_script(STREAMING_DELTA_COUNT, "x".repeat(STREAMING_DELTA_BYTES));
+    let (_, turn_id) = submit_first_input(
+        &mut commands,
+        session_id,
+        String::from("force follower resynchronization"),
+    )
+    .await?;
+
+    let probe = execute_streamed_turn(
+        &mut runtime,
+        ScriptedModel::single(script),
+        session_id,
+        turn_id,
+    )
+    .await?;
+    let observed_delta_count = receive_resync(lagging_follow).await?;
+    let durable = read_completed_assistant(runtime.socket(), 21, session_id, turn_id).await?;
+    let operations = probe.received_operations();
+
+    assert!(observed_delta_count < STREAMING_DELTA_COUNT);
+    assert_eq!(durable, assistant);
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].delivery, DeliveryMode::Streamed);
+
+    drop(commands);
+    runtime.stop().await
+}
+
+/// S24 / INV-032 / INV-033: version-eleven followers remain on the durable-only
+/// fan-out, so version-twelve delta volume neither leaks a newer message shape
+/// nor causes legacy clients to lag behind their retained durable vocabulary.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s24_inv032_inv033_streaming_volume_does_not_perturb_version_eleven_followers()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut commands = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut commands).await?;
+    let legacy_follow =
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Eleven, 30, session_id).await?;
+    let (script, assistant) =
+        streamed_script(STREAMING_DELTA_COUNT, "y".repeat(STREAMING_DELTA_BYTES));
+    let (_, turn_id) = submit_first_input(
+        &mut commands,
+        session_id,
+        String::from("retain the legacy durable stream"),
+    )
+    .await?;
+
+    let probe = execute_streamed_turn(
+        &mut runtime,
+        ScriptedModel::single(script),
+        session_id,
+        turn_id,
+    )
+    .await?;
+    let followed = follow_streamed_turn_to_completion(legacy_follow, session_id, turn_id).await?;
+    let durable = read_completed_assistant(runtime.socket(), 31, session_id, turn_id).await?;
+    let operations = probe.received_operations();
+
+    assert_eq!(followed.delta_count, 0);
+    assert!(followed.text.is_empty());
+    assert_eq!(durable, assistant);
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].delivery, DeliveryMode::Streamed);
+
+    drop(commands);
     runtime.stop().await
 }
 
