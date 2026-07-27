@@ -12,22 +12,23 @@ use std::{
 use sha2::{Digest, Sha256};
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
-    ImportConversationError, ImportConversationOutcome, ImportConversationService,
-    ImportedConversationConverter, InProcessEligibilityNudge, InProcessToolDispatchGate,
-    ListSessionMetadataService, LoadSessionMetadataService, ReplaceSessionDefaultsOutcome,
-    ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome,
-    ReplaceSessionMetadataRequest, ReplaceSessionMetadataService, ReviewWorkflowCommand,
-    ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult, ReviewWorkflowCommandService,
-    ReviewWorkflowOperation, ReviewWorkflowOperationKind, SessionMetadataListItem,
-    SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
-    SubmitInputTransaction, UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator,
-    UuidV7SubmitInputIdGenerator,
+    DecideToolRequestService, EligibilityNudge, ImportConversationError, ImportConversationOutcome,
+    ImportConversationService, ImportedConversationConverter, InProcessEligibilityNudge,
+    InProcessToolDispatchGate, ListSessionMetadataService, LoadSessionMetadataService,
+    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
+    ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
+    ReviewWorkflowCommand, ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult,
+    ReviewWorkflowCommandService, ReviewWorkflowOperation, ReviewWorkflowOperationKind,
+    SessionMetadataListItem, SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest,
+    SubmitInputService, SubmitInputTransaction, UuidV7ImportedConversationIdGenerator,
+    UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
 use signalbox_domain::{
     AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextFrontierId,
-    DangerousToolAutoApproval, DeliveryRequest, DirectModelSelection, DurableCommandId, ModelAlias,
+    DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestRejectedResult,
+    DecideToolRequestResult, DeliveryRequest, DirectModelSelection, DurableCommandId, ModelAlias,
     ModelSelectionOverride, ModelSelectionRequest, PerInputConfigurationChoices,
     ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
     ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult, ReviewChangeRequestNumber,
@@ -44,7 +45,8 @@ use signalbox_domain::{
     ReviewText, ReviewWorkflowKind, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
     SessionMetadataLastWriter, SessionMetadataSnapshot, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputRejectedResult, SubmitInputResult, TurnId, UserContent,
+    SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision, ToolDenialReason,
+    ToolRequestId, TurnId, UserContent,
 };
 use signalbox_persistence::{
     conversation_import::{
@@ -70,6 +72,7 @@ use signalbox_persistence::{
     review_workflow::{ReviewWorkflowStore, ReviewWorkflowStoreError},
     session_metadata::{SessionMetadataRepository, SessionMetadataRepositoryError},
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
+    tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, ConversationImportFormat, CurrentModelCall,
@@ -86,9 +89,9 @@ use signalbox_process_protocol::{
     ReviewSeverity as WireReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
     ServerFrame, ServerMessage, SessionEvent, SessionMetadata as WireSessionMetadata,
-    ToolBatchState, TranscriptEntry, TranscriptTextEntry, TurnState, content_fragments,
-    decode_client_line, encode_server_line, recover_bounded_client_protocol_version,
-    recover_bounded_client_request_id,
+    ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
+    content_fragments, decode_client_line, encode_server_line,
+    recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
 use sqlx::{PgPool, Row};
 use tokio::{
@@ -840,6 +843,48 @@ where
         }
         ClientRequest::ListReviewFindings { run_id } => {
             handle_list_review_findings(writer, version, request_id, run_id, &services.pool).await
+        }
+        ClientRequest::StopTurn {
+            command_id,
+            session_id,
+            expected_active_turn_id,
+            content,
+            expected_defaults_version,
+        } => {
+            handle_stop_turn(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                expected_active_turn_id,
+                content,
+                expected_defaults_version,
+                &services.pool,
+                &services.eligibility_nudge,
+                &services.tool_dispatch_gate,
+                services.model_configuration.as_ref(),
+            )
+            .await
+        }
+        ClientRequest::DecideToolRequest {
+            command_id,
+            session_id,
+            tool_request_id,
+            decision,
+        } => {
+            handle_decide_tool_request(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                tool_request_id,
+                decision,
+                &services.pool,
+                &services.eligibility_nudge,
+            )
+            .await
         }
     }
 }
@@ -3555,6 +3600,97 @@ where
     .await
 }
 
+/// Stops the exact active turn through the accepted interrupt treatment.
+///
+/// The delivery is the `Interrupt` treatment the turn lifecycle already
+/// defines: cancellation authority exists only as an applied interrupt bound
+/// to an immediate successor (INV-029), so the stop carries the successor
+/// content and no standalone cancellation command is introduced. The
+/// authoritative transaction validates the expected active turn under the
+/// session lock and records every typed refusal, so no precondition read runs
+/// here.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the closed stop request is kept explicit at this wire-to-application adapter"
+)]
+async fn handle_stop_turn<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: uuid::Uuid,
+    session_id: CanonicalUuid,
+    expected_active_turn_id: CanonicalUuid,
+    content: InputContent,
+    expected_defaults_version: CanonicalU64,
+    pool: &PgPool,
+    eligibility_nudge: &InProcessEligibilityNudge,
+    tool_dispatch_gate: &InProcessToolDispatchGate,
+    model_configuration: &HubModelConfiguration,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let expected_active_turn = TurnId::from_uuid(expected_active_turn_id.into_uuid());
+    let command_id = DurableCommandId::from_uuid(command_id);
+    let repository = SubmitInputRepository::new(pool.clone());
+    // Version eight admits every representation the selected-session gate
+    // guards, so no session-history version check runs for this request.
+    let Some(expected_version) =
+        SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
+    else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let Ok(content) = admitted_user_content(content) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let request = SubmitInputRequest::try_new(
+        command_id,
+        session,
+        content,
+        DeliveryRequest::Interrupt {
+            expected_active_turn,
+            configuration: PerInputConfigurationChoices::new(
+                expected_version,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    let Ok(request) = request else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    run_submit_input(
+        writer,
+        version,
+        request_id,
+        session_id,
+        request,
+        repository,
+        eligibility_nudge,
+        tool_dispatch_gate,
+        model_configuration,
+    )
+    .await
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the shared submit-input execution keeps its wire and application collaborators explicit"
@@ -3654,6 +3790,201 @@ where
         SubmitInputRepositoryError::DifferentCommandKind { .. }
         | SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. }
         | SubmitInputRepositoryError::Corruption(_) => {
+            ProtocolError::without_detail(ErrorCode::Internal)
+        }
+    };
+    write_error(writer, version, request_id, protocol_error).await
+}
+
+/// Records one owner tool decision through the canonical decision command.
+///
+/// A claimed command identity reaches the durable replay boundary
+/// unconditionally (INV-012). Otherwise a narrow read refuses, before any
+/// command is recorded, a decision whose named session does not own the named
+/// request; an absent request is left to the transaction's recorded
+/// `request_not_found`, and every other outcome is the recorded result of the
+/// canonical command.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the closed decision request is kept explicit at this wire-to-application adapter"
+)]
+async fn handle_decide_tool_request<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: uuid::Uuid,
+    session_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    decision: ToolDecision,
+    pool: &PgPool,
+    eligibility_nudge: &InProcessEligibilityNudge,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let request = ToolRequestId::from_uuid(tool_request_id.into_uuid());
+    let command_id = DurableCommandId::from_uuid(command_id);
+    let domain_decision = match decision {
+        ToolDecision::Approve {} => ToolApprovalDecision::Approve,
+        ToolDecision::Deny { reason } => match ToolDenialReason::try_new(reason) {
+            Ok(reason) => ToolApprovalDecision::Deny {
+                reason: Some(reason),
+            },
+            Err(_) => {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
+        },
+    };
+    let Ok(command) = DecideToolRequest::try_new(command_id, request, domain_decision) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let command_is_claimed = match repository.load_recorded_decision(command_id).await {
+        Ok(Some(_)) | Err(ToolLoopRepositoryError::DifferentCommandKind) => true,
+        Ok(None) => false,
+        Err(error) => {
+            return write_tool_loop_error(writer, version, request_id, error).await;
+        }
+    };
+    if !command_is_claimed {
+        match ProcessReadRepository::new(pool.clone())
+            .tool_request_session(request)
+            .await
+        {
+            // An absent request is left to the authoritative transaction,
+            // whose recorded `request_not_found` rejection the version-eight
+            // contract promises.
+            Ok(None) => {}
+            Ok(Some(owning_session)) if owning_session == session => {}
+            Ok(Some(_)) => {
+                // The claim probe and this read are separate statements, so an
+                // equal-identity request that overlapped ours can have
+                // recorded the decision in between. Rechecking the claim
+                // before refusing keeps the loser of that race on the replay
+                // boundary instead of answering a committed decision with a
+                // refusal (INV-012).
+                match repository.load_recorded_decision(command_id).await {
+                    Ok(Some(_)) | Err(ToolLoopRepositoryError::DifferentCommandKind) => {}
+                    Ok(None) => {
+                        return write_error(
+                            writer,
+                            version,
+                            request_id,
+                            ProtocolError::rejected(RejectionDetail::ToolRequestNotInSession {
+                                session_id,
+                                tool_request_id,
+                            }),
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        return write_tool_loop_error(writer, version, request_id, error).await;
+                    }
+                }
+            }
+            Err(error) => {
+                return write_process_read_error(writer, version, request_id, error).await;
+            }
+        }
+    }
+    let mut service = DecideToolRequestService::new(UuidV7ToolLoopIdGenerator, repository);
+    match service.execute(command).await {
+        Ok(prepared) => match prepared.result() {
+            DecideToolRequestResult::Applied(applied) => {
+                // An applied decision can open the executing phase; the nudge
+                // lets the scheduler resume the tool round promptly, and the
+                // durable sweep remains the backstop.
+                let _ = eligibility_nudge.nudge(session);
+                write_message(
+                    writer,
+                    version,
+                    request_id,
+                    ServerMessage::ToolRequestDecided {
+                        tool_request_id,
+                        decision: wire_tool_decision(applied.resolution().decision())?,
+                    },
+                )
+                .await
+            }
+            DecideToolRequestResult::Rejected(rejected) => {
+                let detail = match *rejected {
+                    DecideToolRequestRejectedResult::RequestNotFound { request } => {
+                        RejectionDetail::ToolRequestNotFound {
+                            tool_request_id: wire_uuid(request.into_uuid()),
+                        }
+                    }
+                    DecideToolRequestRejectedResult::AlreadyResolved { request } => {
+                        RejectionDetail::ToolRequestAlreadyResolved {
+                            tool_request_id: wire_uuid(request.into_uuid()),
+                        }
+                    }
+                    DecideToolRequestRejectedResult::NotEarliestUndecided { request, earliest } => {
+                        RejectionDetail::ToolRequestNotEarliestUndecided {
+                            tool_request_id: wire_uuid(request.into_uuid()),
+                            earliest_tool_request_id: wire_uuid(earliest.into_uuid()),
+                        }
+                    }
+                };
+                write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
+            }
+        },
+        Err(error) => write_tool_loop_error(writer, version, request_id, error).await,
+    }
+}
+
+fn wire_tool_decision(
+    decision: &ToolApprovalDecision,
+) -> Result<ToolDecision, ProcessConnectionError> {
+    match decision {
+        ToolApprovalDecision::Approve => Ok(ToolDecision::Approve {}),
+        ToolApprovalDecision::Deny {
+            reason: Some(reason),
+        } => Ok(ToolDecision::Deny {
+            reason: reason.as_str().to_owned(),
+        }),
+        // The version-eight wire surface requires a denial reason, so every
+        // decision it records carries one; a reason-free denial cannot be
+        // projected as this receipt.
+        ToolApprovalDecision::Deny { reason: None } => Err(ProcessConnectionError::EncodeInvariant),
+    }
+}
+
+async fn write_tool_loop_error<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    error: ToolLoopRepositoryError,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let protocol_error = match error {
+        ToolLoopRepositoryError::Database {
+            commit_ambiguous, ..
+        } => ProtocolError::mutation_unavailable(commit_ambiguous),
+        // Any difference under a claimed identity — including a different
+        // command kind — is conflicting reuse, per the identity-and-commands
+        // registry contract.
+        ToolLoopRepositoryError::ConflictingCommandReuse
+        | ToolLoopRepositoryError::DifferentCommandKind => {
+            ProtocolError::without_detail(ErrorCode::ConflictingReuse)
+        }
+        ToolLoopRepositoryError::IdentityCollision
+        | ToolLoopRepositoryError::Corruption(_)
+        | ToolLoopRepositoryError::InvalidTransition(_) => {
             ProtocolError::without_detail(ErrorCode::Internal)
         }
     };
@@ -4445,6 +4776,13 @@ fn map_rejection(
                 last: CanonicalU64::new(last.as_u64()),
             }
         }
+        SubmitInputRejectedResult::NoActiveTurn {
+            session,
+            expected_active_turn,
+        } => RejectionDetail::NoActiveTurn {
+            session_id: wire_uuid(session.into_uuid()),
+            expected_active_turn_id: wire_uuid(expected_active_turn.into_uuid()),
+        },
         SubmitInputRejectedResult::ActiveTurnMismatch {
             session,
             expected_active_turn,
@@ -4454,16 +4792,25 @@ fn map_rejection(
             expected_active_turn_id: wire_uuid(expected_active_turn.into_uuid()),
             active_turn_id: wire_uuid(actual_active_turn.into_uuid()),
         },
-        SubmitInputRejectedResult::NoActiveTurn {
+        SubmitInputRejectedResult::InterruptAlreadyApplied {
             session,
-            expected_active_turn,
-        } => RejectionDetail::NoActiveTurn {
+            active_turn,
+            existing_command,
+        } => RejectionDetail::InterruptAlreadyApplied {
             session_id: wire_uuid(session.into_uuid()),
-            expected_active_turn_id: wire_uuid(expected_active_turn.into_uuid()),
+            active_turn_id: wire_uuid(active_turn.into_uuid()),
+            existing_command_id: wire_uuid(*existing_command.as_uuid()),
         },
-        SubmitInputRejectedResult::SafePointUnavailableWhileStopping { .. }
-        | SubmitInputRejectedResult::InterruptAlreadyApplied { .. }
-        | SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval { .. } => {
+        SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+            session,
+            active_turn,
+        } => RejectionDetail::InterruptUnavailableWhileAwaitingApproval {
+            session_id: wire_uuid(session.into_uuid()),
+            active_turn_id: wire_uuid(active_turn.into_uuid()),
+        },
+        // No wire request can carry the next-safe-point treatment, so its
+        // stopping-turn refusal has no version-eight projection.
+        SubmitInputRejectedResult::SafePointUnavailableWhileStopping { .. } => {
             return Err(ProcessConnectionError::EncodeInvariant);
         }
     })
@@ -5368,16 +5715,17 @@ mod tests {
 
     use signalbox_application::ImportedConversationConverter;
     use signalbox_domain::{
-        ContextFrontierId, DirectModelSelection, ImportedConversation, ImportedConversationFormat,
-        ImportedConversationId, ImportedTranscriptEntryId, ModelCallId, ModelSelectionRequest,
-        SemanticTranscriptEntryId, SessionId, SubmitInputRejectedResult, ToolAttemptId,
-        TurnAttemptId, TurnId,
+        ContextFrontierId, DirectModelSelection, DurableCommandId, ImportedConversation,
+        ImportedConversationFormat, ImportedConversationId, ImportedTranscriptEntryId, ModelCallId,
+        ModelSelectionRequest, SemanticTranscriptEntryId, SessionId, SubmitInputRejectedResult,
+        ToolApprovalDecision, ToolAttemptId, TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ErrorCode, FrameEncodeError, ImportedContentKind,
         ImportedSourceSpeaker, ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
         ProtocolVersion, RejectionDetail, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
-        TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
+        ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
+        encode_server_line,
     };
     use sqlx::postgres::PgPoolOptions;
     use tokio::{
@@ -5398,8 +5746,8 @@ mod tests {
         admitted_user_content, execute_import, inspect_connection_completion, map_rejection,
         read_frame_line, replacement_model_is_admitted,
         required_protocol_version_for_selected_session, run_until_shutdown,
-        snapshot_reader_capacity, wire_model_call_state, wire_turn_state, wire_uuid, write_content,
-        write_snapshot_spool_error, write_transcript_entry,
+        snapshot_reader_capacity, wire_model_call_state, wire_tool_decision, wire_turn_state,
+        wire_uuid, write_content, write_snapshot_spool_error, write_transcript_entry,
     };
     use signalbox_persistence::{
         outbox::{
@@ -5419,6 +5767,82 @@ mod tests {
             ServerMessage::Error { code, message, .. } => (*code, message),
             other => panic!("expected server error, observed {other:?}"),
         }
+    }
+
+    /// INV-033: every stop refusal the interrupt treatment records reaches the
+    /// wire as its recorded typed rejection, not as an encode invariant that
+    /// closes the connection; the racing-target projections are covered by the
+    /// reconciliation test below.
+    #[test]
+    fn inv033_stop_rejections_have_wire_projections() -> Result<(), Box<dyn Error>> {
+        let session = SessionId::from_uuid(Uuid::from_u128(1));
+        let actual_active_turn = TurnId::from_uuid(Uuid::from_u128(3));
+        let existing_command = DurableCommandId::from_uuid(Uuid::from_u128(4));
+
+        assert_eq!(
+            map_rejection(SubmitInputRejectedResult::InterruptAlreadyApplied {
+                session,
+                active_turn: actual_active_turn,
+                existing_command,
+            })?,
+            RejectionDetail::InterruptAlreadyApplied {
+                session_id: wire_uuid(session.into_uuid()),
+                active_turn_id: wire_uuid(actual_active_turn.into_uuid()),
+                existing_command_id: wire_uuid(*existing_command.as_uuid()),
+            }
+        );
+        assert_eq!(
+            map_rejection(
+                SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                    session,
+                    active_turn: actual_active_turn,
+                }
+            )?,
+            RejectionDetail::InterruptUnavailableWhileAwaitingApproval {
+                session_id: wire_uuid(session.into_uuid()),
+                active_turn_id: wire_uuid(actual_active_turn.into_uuid()),
+            }
+        );
+        assert!(matches!(
+            map_rejection(
+                SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
+                    session,
+                    active_turn: actual_active_turn,
+                    existing_command,
+                }
+            ),
+            Err(ProcessConnectionError::EncodeInvariant)
+        ));
+        Ok(())
+    }
+
+    /// INV-033: the receipt projection is exact — the version-eight wire
+    /// surface records only reason-bearing denials, so a reason-free denial
+    /// fails closed instead of fabricating an empty reason.
+    #[test]
+    fn inv033_reason_free_denial_has_no_wire_receipt() -> Result<(), Box<dyn Error>> {
+        assert_eq!(
+            wire_tool_decision(&ToolApprovalDecision::Approve)?,
+            ToolDecision::Approve {}
+        );
+        assert_eq!(
+            wire_tool_decision(&ToolApprovalDecision::Deny {
+                reason: Some(
+                    signalbox_domain::ToolDenialReason::try_new(String::from(
+                        "writes outside the workspace"
+                    ))
+                    .map_err(|error| io::Error::other(format!("{error:?}")))?
+                ),
+            })?,
+            ToolDecision::Deny {
+                reason: String::from("writes outside the workspace"),
+            }
+        );
+        assert!(matches!(
+            wire_tool_decision(&ToolApprovalDecision::Deny { reason: None }),
+            Err(ProcessConnectionError::EncodeInvariant)
+        ));
+        Ok(())
     }
 
     #[test]

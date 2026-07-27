@@ -3089,6 +3089,7 @@ fn map_tool_loop_error(
         crate::tool_loop::ToolLoopRepositoryError::IdentityCollision
         | crate::tool_loop::ToolLoopRepositoryError::Corruption(_)
         | crate::tool_loop::ToolLoopRepositoryError::DifferentCommandKind
+        | crate::tool_loop::ToolLoopRepositoryError::ConflictingCommandReuse
         | crate::tool_loop::ToolLoopRepositoryError::InvalidTransition(_) => {
             SubmitInputCorruption::Inconsistent("active tool batch").into()
         }

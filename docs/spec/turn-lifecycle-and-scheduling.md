@@ -17,10 +17,12 @@ code-host credential path is verified through PR #270
 (`agent/tool-batch-tier1`); and the owner reconciliation decision that releases
 an ambiguity wait, together with the startup scan's separate report of sessions
 holding their slot for that decision, were verified through PR #281
-(`agent/turn-reconciliation-recovery`). [docs/invariants.md](../invariants.md)
-remains the law catalog; INV tags below reference its rows without restating
-them. Designed lifecycle behavior that has no committed code path appears only
-under [Open edges](#open-edges). Sibling pages named in scope deferrals below
+(`agent/turn-reconciliation-recovery`). The finite startup scan and removal of
+the superseded steering blocker were verified through PR #291
+(`agent/turn-control-verbs`). [docs/invariants.md](../invariants.md) remains the
+law catalog; INV tags below reference its rows without restating them. Designed
+lifecycle behavior that has no committed code path appears only under
+[Open edges](#open-edges). Sibling pages named in scope deferrals below
 (identity-and-commands, sessions-and-transcript, persistence-protocol,
 model-call-execution, configuration-and-credentials, runtime-substrate) are
 companion pages of this spec set; each deferral names the owning page rather
@@ -29,9 +31,12 @@ than restating its material.
 ## Turns, states, and the single active slot
 
 A turn is one durable logical request for one conversational outcome from one
-accepted-input origin under one frozen effective configuration (configuration
-freeze is [identity-and-commands](identity-and-commands.md) scope). The
-implemented slice stores three lifecycle states per turn
+accepted-input origin under one frozen effective configuration. Model-selection
+freeze is
+[configuration-and-credentials](configuration-and-credentials.md#model-selection-validation)
+scope; defaults-epoch binding is
+[sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
+scope. The implemented slice stores three lifecycle states per turn
 (`turn_lifecycle.state_kind`): `queued`, `active`, and `terminal`, with the
 terminal disposition kind closed to `failed`, `completed`, `refused`,
 `cancelled`, and `reconciliation_required` (migrations `202607220001` and
@@ -390,10 +395,13 @@ delivery outcomes implemented here are:
   until eligibility.
 - `Interrupt` targeting the active turn atomically accepts a configured
   immediate-successor origin, constructs the exact `AppliedInterruptProof`, and
-  applies the predecessor transition (INV-029, INV-037). Before any terminal
-  transition releases the slot, the same transaction reclassifies every pending
-  steering input against the interrupted turn as an ordered queued successor
-  origin. Call, attempt, and turn terminalization follow
+  applies the predecessor transition (INV-029, INV-037). The version-eight
+  `stop_turn` request in [process-protocol](process-protocol.md#client-requests)
+  is the client surface that submits this delivery; it adds no authority beyond
+  the treatment specified here. Before any terminal transition releases the
+  slot, the same transaction reclassifies every pending steering input against
+  the interrupted turn as an ordered queued successor origin. Call, attempt, and
+  turn terminalization follow
   [model-call-execution](model-call-execution.md#terminal-outcomes). A matching
   interrupt against `AwaitingRecoveryDecision` preserves the already terminal
   ambiguous call and ended attempt, records the new proof on the turn's

@@ -97,6 +97,8 @@ pub enum ToolLoopRepositoryError {
     Corruption(ToolLoopCorruption),
     /// The command identity belongs to another durable command kind.
     DifferentCommandKind,
+    /// The command identity is recorded with a different decision payload.
+    ConflictingCommandReuse,
     /// Caller supplied a transition the current batch does not authorize.
     InvalidTransition(&'static str),
 }
@@ -114,6 +116,9 @@ impl fmt::Display for ToolLoopRepositoryError {
             Self::DifferentCommandKind => {
                 formatter.write_str("command identity already belongs to another kind")
             }
+            Self::ConflictingCommandReuse => {
+                formatter.write_str("command replay payload differs from the durable command")
+            }
             Self::InvalidTransition(value) => {
                 write!(formatter, "tool-loop transition rejected: {value}")
             }
@@ -126,9 +131,10 @@ impl Error for ToolLoopRepositoryError {
         match self {
             Self::Database { source, .. } => Some(source),
             Self::Corruption(error) => Some(error),
-            Self::IdentityCollision | Self::DifferentCommandKind | Self::InvalidTransition(_) => {
-                None
-            }
+            Self::IdentityCollision
+            | Self::DifferentCommandKind
+            | Self::ConflictingCommandReuse
+            | Self::InvalidTransition(_) => None,
         }
     }
 }
@@ -173,9 +179,9 @@ impl ClassifyOperatorFailure for ToolLoopRepositoryError {
             },
             Self::IdentityCollision => OperatorFailureClass::IdentityCollision,
             Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
-            Self::DifferentCommandKind | Self::InvalidTransition(_) => {
-                OperatorFailureClass::CallerOrHubBug
-            }
+            Self::DifferentCommandKind
+            | Self::ConflictingCommandReuse
+            | Self::InvalidTransition(_) => OperatorFailureClass::CallerOrHubBug,
         }
     }
 }
@@ -247,6 +253,32 @@ impl PostgresToolLoopRepository {
         Ok(turn.map(turn_id_from_uuid))
     }
 
+    /// Loads one recorded decision handling, or `None` only for an unseen
+    /// identifier.
+    pub async fn load_recorded_decision(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+    ) -> Result<Option<PreparedDecideToolRequest>, ToolLoopRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        match inspect_registry(&mut connection, command_id).await? {
+            None => Ok(None),
+            Some(CommandKind::DecideToolRequest) => {
+                let receipt = load_decision_receipt(&mut connection, command_id)
+                    .await?
+                    .ok_or(ToolLoopCorruption::Missing("decision command receipt"))?;
+                Ok(Some(receipt))
+            }
+            Some(
+                CommandKind::CreateSession
+                | CommandKind::CreateSessionFromImportedFrontier
+                | CommandKind::ReplaceSessionDefaults
+                | CommandKind::ReplaceSessionMetadata
+                | CommandKind::SubmitInput
+                | CommandKind::ReviewWorkflow,
+            ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
+        }
+    }
+
     /// Atomically records one replay-idempotent owner decision and successor
     /// phase. A fresh continuation attempt is supplied only for the final
     /// undecided request.
@@ -268,9 +300,7 @@ impl PostgresToolLoopRepository {
                     .await?
                     .ok_or(ToolLoopCorruption::Missing("decision command receipt"))?;
                 if receipt.command() != &command {
-                    return Err(ToolLoopRepositoryError::InvalidTransition(
-                        "command replay payload differs from the durable command",
-                    ));
+                    return Err(ToolLoopRepositoryError::ConflictingCommandReuse);
                 }
                 return Ok(receipt);
             }
@@ -298,9 +328,7 @@ impl PostgresToolLoopRepository {
                     .await?
                     .ok_or(ToolLoopCorruption::Missing("winner decision receipt"))?;
                 if receipt.command() != &command {
-                    return Err(ToolLoopRepositoryError::InvalidTransition(
-                        "command replay payload differs from the durable command",
-                    ));
+                    return Err(ToolLoopRepositoryError::ConflictingCommandReuse);
                 }
                 return Ok(receipt);
             }
