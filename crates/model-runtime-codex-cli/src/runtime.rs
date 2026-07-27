@@ -499,13 +499,23 @@ async fn execute_process<C: Clone + Send + Sync>(
         InputStep::Written(Ok(())) => None,
         InputStep::Written(Err(error)) => Some(error),
         InputStep::Cancelled => {
-            interrupt_then_kill(
-                &mut child,
-                remaining_interrupt_grace(prepared.interrupt_grace, deadline),
-            )
-            .await;
-            abort_stderr_task(&mut stderr_task).await;
-            return pre_exchange_boundary_loss(LossCause::CancellationRequested);
+            // Work-first: if the leader already exited on its own while a
+            // descendant kept the upload blocked, its definitive status
+            // outranks upload cancellation. Continue through stdout and exit
+            // classification, treating the interrupted upload as incomplete.
+            if leader_exited_without_reaping(child.id()) {
+                Some(std::io::Error::other(
+                    "request upload cancelled after the Codex CLI leader had exited",
+                ))
+            } else {
+                interrupt_then_kill(
+                    &mut child,
+                    remaining_interrupt_grace(prepared.interrupt_grace, deadline),
+                )
+                .await;
+                abort_stderr_task(&mut stderr_task).await;
+                return pre_exchange_boundary_loss(LossCause::CancellationRequested);
+            }
         }
         InputStep::TimedOut => {
             force_kill(&mut child).await;
@@ -677,15 +687,24 @@ async fn execute_process<C: Clone + Send + Sync>(
         result = &mut stderr_task => stderr_result(result),
         () = &mut *cancellation => {
             if !terminal_observed {
-                interrupt_then_kill(
-                    &mut child,
-                    remaining_interrupt_grace(prepared.interrupt_grace, deadline),
-                )
-                .await;
-                abort_stderr_task(&mut stderr_task).await;
-                redacting_sink.finish();
-                return decoder.boundary_loss(LossCause::CancellationRequested);
-            }
+                // Work-first: an already-exited leader's status outranks a
+                // cancellation even when a descendant still holds stderr open.
+                if let Some((status, detail)) =
+                    reap_exited_leader(&mut child, &mut stderr_task).await
+                {
+                    reaped_status = Some(status);
+                    detail
+                } else {
+                    interrupt_then_kill(
+                        &mut child,
+                        remaining_interrupt_grace(prepared.interrupt_grace, deadline),
+                    )
+                    .await;
+                    abort_stderr_task(&mut stderr_task).await;
+                    redacting_sink.finish();
+                    return decoder.boundary_loss(LossCause::CancellationRequested);
+                }
+            } else {
             let cleanup_grace = remaining_interrupt_grace(prepared.interrupt_grace, deadline);
             interrupt_then_kill(&mut child, cleanup_grace).await;
             abort_stderr_task(&mut stderr_task).await;
@@ -703,6 +722,7 @@ async fn execute_process<C: Clone + Send + Sync>(
             };
             redacting_sink.finish();
             return evidence;
+            }
         },
         () = tokio::time::sleep_until(deadline) => {
             let process_group_id = child.id();
@@ -1006,10 +1026,16 @@ fn remaining_interrupt_grace(grace: Duration, deadline: tokio::time::Instant) ->
     grace.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
 }
 
+/// After a group kill the leader is normally waitable at once; bound the reap
+/// so a leader stuck in uninterruptible kernel I/O cannot hang the exchange
+/// past its deadline. On timeout the child is left for its drop guard, which
+/// re-signals the group, rather than blocking indefinitely.
+const POST_KILL_REAP_BOUND: Duration = Duration::from_secs(5);
+
 async fn force_kill(child: &mut SupervisedChild) {
     kill_process_group(child.id());
     let _ = child.start_kill();
-    if child.wait().await.is_ok() {
+    if let Ok(Ok(_)) = tokio::time::timeout(POST_KILL_REAP_BOUND, child.wait()).await {
         child.disarm();
     }
 }
