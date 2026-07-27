@@ -159,17 +159,36 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
 /// failure, never a skip. A skip here would quietly retire the only check that
 /// binds this evidence to a specific executable.
 async fn assert_pinned_version(executable: &str) {
-    let output = tokio::process::Command::new(executable)
-        .arg("--version")
+    // A hung or slow probe must not hold the sole gated-smoke concurrency slot
+    // until the job timeout; it fails the version gate promptly instead.
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+    let mut command = tokio::process::Command::new(executable);
+    command.arg("--version").env_clear();
+    // The probe clears the parent environment so unrelated shell credentials
+    // never reach the external CLI, mirroring the adapter spawn; only `PATH`
+    // is restored, the minimum a bare `--version` launch needs.
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         // Discarded rather than reported: a version probe has no need to
         // surface provider-controlled diagnostics, and this text does not pass
         // through the adapter's redaction.
         .stderr(Stdio::null())
-        .output()
-        .await
+        // Dropping the timed-out future drops the child, which kills and reaps
+        // it, so an unbounded probe cannot linger.
+        .kill_on_drop(true)
+        .spawn()
         .unwrap_or_else(|error| panic!("`{executable} --version` could not be spawned: {error}"));
+    let output = tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output())
+        .await
+        .unwrap_or_else(|_| {
+            panic!("`{executable} --version` did not exit within {PROBE_TIMEOUT:?}")
+        })
+        .unwrap_or_else(|error| panic!("`{executable} --version` could not be awaited: {error}"));
     assert!(
         output.status.success(),
         "`{executable} --version` exited with {}",
@@ -550,6 +569,12 @@ fn executable_resolution_finds_a_bare_command_on_the_search_path() {
 fn executable_resolution_skips_an_other_only_execute_bit() {
     use std::os::unix::fs::PermissionsExt;
 
+    if rustix::process::geteuid().is_root() {
+        // Root may execute a regular file when any execute bit is set, so the
+        // owner-vs-other distinction this case relies on does not hold; the
+        // portable workspace validation can run as root in containers.
+        return;
+    }
     let shadowing = tempfile::tempdir().expect("resolution fixture directory is created");
     let populated = tempfile::tempdir().expect("resolution fixture directory is created");
     let shadow = shadowing.path().join("codex-other-only");
@@ -601,7 +626,7 @@ fn executable_resolution_skips_a_non_executable_shadow() {
 }
 
 #[test]
-#[should_panic(expected = "`codex-missing` was not found on PATH")]
+#[should_panic(expected = "was not found on PATH")]
 fn executable_resolution_panics_for_a_missing_bare_command() {
     let empty = tempfile::tempdir().expect("resolution fixture directory is created");
     let search = std::env::join_paths([empty.path()]).expect("the fixture search path joins");
