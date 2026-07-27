@@ -292,11 +292,12 @@ RUST_TEST_DECLARATION = re.compile(
     rf"fn[ \t]+(?P<name>{RUST_IDENTIFIER_PATTERN})",
     re.MULTILINE,
 )
+# Rust resolves an attribute path case-sensitively, so a distinct macro
+# named `Test` is not the built-in attribute.
 RUST_TEST_ATTRIBUTE = re.compile(
     rf"{RUST_ATTRIBUTE_OPEN}[ \t\r\n]*(?:::)?"
     r"(?:(?:r#)?[A-Za-z_][A-Za-z0-9_]*::)*"
-    r"(?:r#)?test(?=[ \t\r\n(\]])[^\]]*\]",
-    re.IGNORECASE,
+    r"(?:r#)?test(?=[ \t\r\n(\]])[^\]]*\]"
 )
 RUST_ATTRIBUTE = re.compile(
     rf"{RUST_ATTRIBUTE_OPEN}(?P<meta>[^\]]*)\]", re.DOTALL
@@ -314,8 +315,7 @@ RUST_CFG_PREDICATE = re.compile(
 )
 RUST_TEST_META = re.compile(
     r"^(?:::)?(?:(?:r#)?[A-Za-z_][A-Za-z0-9_]*::)*"
-    r"(?:r#)?test(?=[ \t\r\n(]|$)",
-    re.IGNORECASE,
+    r"(?:r#)?test(?=[ \t\r\n(]|$)"
 )
 RUST_META_NAME = re.compile(
     rf"{RUST_IDENTIFIER_PATTERN}(?=[ \t\r\n(]|$)"
@@ -324,13 +324,17 @@ RUST_META_ITEM = re.compile(
     rf"(?:::)?(?:{RUST_IDENTIFIER_PATTERN}[ \t\r\n]*::[ \t\r\n]*)*"
     rf"{RUST_IDENTIFIER_PATTERN}"
 )
-RUST_USE_ITEM = re.compile(r"\buse\b(?P<body>[^;]*);", re.DOTALL)
-RUST_TEST_ALIAS = re.compile(
-    rf"\btest[ \t\r\n]+as[ \t\r\n]+(?P<alias>{RUST_IDENTIFIER_PATTERN})",
-    re.IGNORECASE,
+RUST_USE_ITEM = re.compile(
+    r"(?P<visibility>\bpub(?:\([^)]*\))?[ \t\r\n]+)?"
+    r"\buse\b(?P<body>[^;]*);",
+    re.DOTALL,
 )
-RUST_USE_RENAME = re.compile(
-    rf"\bas[ \t\r\n]+(?P<alias>{RUST_IDENTIFIER_PATTERN})"
+RUST_TEST_ALIAS = re.compile(
+    rf"\btest[ \t\r\n]+as[ \t\r\n]+(?P<alias>{RUST_IDENTIFIER_PATTERN})"
+)
+RUST_CRATE_IMPORT = re.compile(
+    rf"\bcrate[ \t\r\n]*::[ \t\r\n]*(?P<name>{RUST_IDENTIFIER_PATTERN})"
+    r"(?![ \t\r\n]*(?:::|as\b))"
 )
 RUST_RAW_STRING_OPEN = re.compile(r'(?:br|rb|cr|r)(?P<hashes>#{0,255})"')
 RUST_INLINE_MODULE = re.compile(
@@ -343,9 +347,8 @@ RUST_OUT_OF_LINE_MODULE = re.compile(
     rf"\b(?:pub(?:\([^)]*\))?[ \t\r\n]+)?"
     rf"mod[ \t\r\n]+(?P<name>{RUST_IDENTIFIER_PATTERN})[ \t\r\n]*;"
 )
-RUST_PATH_ATTRIBUTE = re.compile(
-    rf"{RUST_ATTRIBUTE_OPEN}[ \t\r\n]*path[ \t\r\n]*=[ \t\r\n]*"
-    r"\"(?P<path>[^\"\n]*)\"[ \t\r\n]*\]"
+RUST_PATH_META = re.compile(
+    r"^path[ \t\r\n]*=[ \t\r\n]*\"(?P<path>[^\"\n]*)\"$"
 )
 RUST_CRATE_ROOT_NAMES = ("mod.rs", "lib.rs", "main.rs")
 RUST_MACRO_RULES = re.compile(
@@ -419,6 +422,7 @@ class RustSource:
     delimiters: dict[int, int]
     invocations: dict[str, list[int]]
     aliases: list[ScopedTestAlias]
+    module_prefixes: tuple[tuple[str, ...], ...]
 
 
 @dataclass(frozen=True)
@@ -612,39 +616,33 @@ def rust_cfg_truth(meta: str) -> bool | None:
     return None
 
 
-def rust_renamed_test_aliases(code: str) -> frozenset[str]:
-    """Return the local names this file renames a `test` attribute to."""
+def rust_exported_test_aliases(code: str) -> frozenset[str]:
+    """Return the names this file re-exports a `test` attribute under.
+
+    Only a `pub use` rename is reachable as `crate::<name>` from another
+    module of the same crate, which is the one import shape resolved here.
+    """
     return frozenset(
         alias.group("alias")
         for item in RUST_USE_ITEM.finditer(code)
+        if item.group("visibility") is not None
         for alias in RUST_TEST_ALIAS.finditer(item.group("body"))
     )
 
 
-def rust_imported_alias_pattern(names: frozenset[str]) -> re.Pattern[str] | None:
-    """Return a pattern matching a `use` of one repository test alias.
-
-    A name is read as imported only where it terminates a path, so
-    ``use crate::async_test;`` counts while a module qualifier of the same
-    spelling does not.
-    """
-    if not names:
-        return None
-    alternation = "|".join(re.escape(name) for name in sorted(names))
-    return re.compile(rf"\b(?:{alternation})\b(?![ \t\r\n]*::)")
-
-
 def rust_test_attribute_aliases(
-    code: str, imported: re.Pattern[str] | None = None
+    code: str, exported: frozenset[str] = frozenset()
 ) -> list[ScopedTestAlias]:
     """Return each local name a `use` item gives an imported `test` attribute.
 
     ``use tokio::test as async_test;`` registers tests under `#[async_test]`.
     An alias reaches only the block its `use` item sits in, and everything
     nested inside it, so a sibling module may bind the same local name to
-    something else without being read as a test. A `use` item that imports a
-    name some file in the repository renames a `test` attribute to carries
-    that reading into this file, which is how a re-exported alias arrives.
+    something else without being read as a test. A `use crate::<name>;` whose
+    name this file's own crate root re-exports as a `test` attribute carries
+    that reading in, which is how a re-exported alias arrives; any longer or
+    renamed path is left alone, since its target is not this resolution's to
+    decide.
     """
     delimiters = rust_matching_delimiters(code)
     blocks = sorted(
@@ -667,18 +665,11 @@ def rust_test_attribute_aliases(
             alias.group("alias")
             for alias in RUST_TEST_ALIAS.finditer(body)
         }
-        if imported is not None:
-            # A name this item binds by rename means whatever it renames, so
-            # only a name imported as itself carries a repository reading in.
-            renamed = {
-                rename.group("alias")
-                for rename in RUST_USE_RENAME.finditer(body)
-            }
-            names.update(
-                match.group(0)
-                for match in imported.finditer(body)
-                if match.group(0) not in renamed
-            )
+        names.update(
+            match.group("name")
+            for match in RUST_CRATE_IMPORT.finditer(body)
+            if match.group("name") in exported
+        )
         for name in sorted(names):
             aliases.append(ScopedTestAlias(opening, closing, name))
     return aliases
@@ -760,6 +751,39 @@ def rust_attributes_apply_test(
         if rust_meta_applies_test(attribute.group("meta"), aliases):
             return True
     return False
+
+
+def rust_meta_module_path(meta: str) -> str | None:
+    """Return the module file one meta names, directly or under `cfg_attr`.
+
+    The subject of this check is the test build, so a `cfg_attr` whose
+    condition is not build-independently false is read as applied — the same
+    reading `cfg_attr(test, test)` already gets.
+    """
+    meta = meta.strip()
+    direct = RUST_PATH_META.fullmatch(meta)
+    if direct is not None:
+        return direct.group("path")
+    cfg_attr = RUST_CFG_ATTR_META.fullmatch(meta)
+    if cfg_attr is None:
+        return None
+    items = split_rust_meta_items(cfg_attr.group("body"))
+    if not items or rust_cfg_truth(items[0]) is False:
+        return None
+    for item in items[1:]:
+        found = rust_meta_module_path(item)
+        if found is not None:
+            return found
+    return None
+
+
+def rust_module_path_attribute(attributes: str) -> str | None:
+    """Return the module file one attached attribute run names, if any."""
+    for attribute in RUST_ATTRIBUTE.finditer(attributes):
+        found = rust_meta_module_path(attribute.group("meta"))
+        if found is not None:
+            return found
+    return None
 
 
 def rust_meta_disables_item(meta: str) -> bool:
@@ -1700,6 +1724,38 @@ def extract_reference_links(
     return links
 
 
+def mask_markdown_link_constructs(text: str) -> str:
+    """Blank every link construct, leaving the prose that separates them.
+
+    A tagged claim is made by the prose or by one link's own label, so the
+    prose scan must not read a neighbouring label as if it were prose.
+    Offsets are preserved so link positions stay comparable.
+    """
+    buffer = list(text)
+    index = 0
+    while index < len(text):
+        if text[index] != "[" or is_escaped(text, index):
+            index += 1
+            continue
+        inline = parse_inline_link_at(text, index)
+        if inline is not None:
+            mask_range(buffer, index, inline[1] + 1)
+            index = inline[1] + 1
+            continue
+        label_end = find_closing_bracket(text, index)
+        if label_end is None:
+            index += 1
+            continue
+        end = label_end + 1
+        if end < len(text) and text[end] == "[":
+            reference_end = find_closing_bracket(text, end)
+            if reference_end is not None:
+                end = reference_end + 1
+        mask_range(buffer, index, end)
+        index = end
+    return "".join(buffer)
+
+
 def extract_resolved_links(
     text: str, definitions: dict[str, MarkdownLink]
 ) -> list[MarkdownLink]:
@@ -2100,9 +2156,9 @@ def rust_module_child(
     else:
         directories = [declaring.parent / declaring.stem, declaring.parent]
     directories = [directory.joinpath(*inline) for directory in directories]
-    explicit = RUST_PATH_ATTRIBUTE.search(attributes)
+    explicit = rust_module_path_attribute(attributes)
     if explicit is not None:
-        relatives = [explicit.group("path")]
+        relatives = [explicit]
     else:
         relatives = [f"{name}.rs", f"{name}/mod.rs"]
     for directory in directories:
@@ -2115,10 +2171,10 @@ def rust_module_child(
     return None
 
 
-def rust_module_prefixes(
+def rust_module_graph(
     sources: list[RustSource],
-) -> dict[Path, tuple[tuple[str, ...], ...]]:
-    """Return the out-of-line module paths that prefix each file's test names.
+) -> tuple[dict[Path, tuple[tuple[str, ...], ...]], dict[Path, set[Path]]]:
+    """Return each file's out-of-line module paths and the roots reaching it.
 
     A file several active declarations reach keeps every one of those paths,
     since the harness registers its tests once under each. Paths are visited
@@ -2156,13 +2212,15 @@ def rust_module_prefixes(
             declared.add(child)
 
     prefixes: dict[Path, list[tuple[str, ...]]] = {}
-    pending: list[tuple[Path, tuple[str, ...], frozenset[Path]]] = [
-        (source.path, (), frozenset({source.path}))
+    roots: dict[Path, set[Path]] = {}
+    pending: list[tuple[Path, tuple[str, ...], frozenset[Path], Path]] = [
+        (source.path, (), frozenset({source.path}), source.path)
         for source in sources
         if source.path not in declared
     ]
     while pending:
-        path, prefix, walked = pending.pop(0)
+        path, prefix, walked, root = pending.pop(0)
+        roots.setdefault(path, set()).add(root)
         recorded = prefixes.setdefault(path, [])
         if prefix in recorded:
             continue
@@ -2170,15 +2228,21 @@ def rust_module_prefixes(
         for names, child in children.get(path, []):
             if child in walked:
                 continue
-            pending.append((child, (*prefix, *names), walked | {child}))
-    return {path: tuple(paths) for path, paths in prefixes.items()}
+            pending.append(
+                (child, (*prefix, *names), walked | {child}, root)
+            )
+    return (
+        {path: tuple(paths) for path, paths in prefixes.items()},
+        roots,
+    )
 
 
 def rust_sources(root: Path) -> list[RustSource]:
     """Read and lexically prepare every repository Rust file exactly once.
 
-    Test-attribute aliases are resolved in a second pass, because a rename in
-    one file names an attribute another file imports.
+    Module paths and test-attribute aliases are resolved in a second pass,
+    because a `pub use` rename in a crate root names an attribute the modules
+    beneath it import.
     """
     paths = [
         path
@@ -2186,7 +2250,6 @@ def rust_sources(root: Path) -> list[RustSource]:
         if ".git" not in path.parts and "target" not in path.parts
     ]
     prepared: list[RustSource] = []
-    renamed: set[str] = set()
     for path in paths:
         text = path.read_text(encoding="utf-8", errors="replace")
         code = mask_rust_non_code(text)
@@ -2195,7 +2258,6 @@ def rust_sources(root: Path) -> list[RustSource]:
             invocations.setdefault(invocation.group("name"), []).append(
                 invocation.start("opening")
             )
-        renamed.update(rust_renamed_test_aliases(code))
         prepared.append(
             RustSource(
                 path=path,
@@ -2205,11 +2267,22 @@ def rust_sources(root: Path) -> list[RustSource]:
                 delimiters=rust_matching_delimiters(code),
                 invocations=invocations,
                 aliases=[],
+                module_prefixes=((),),
             )
         )
-    imported = rust_imported_alias_pattern(frozenset(renamed))
+    prefixes, roots = rust_module_graph(prepared)
+    exported = {
+        source.path: rust_exported_test_aliases(source.code)
+        for source in prepared
+    }
     for source in prepared:
-        source.aliases = rust_test_attribute_aliases(source.code, imported)
+        source.module_prefixes = prefixes.get(source.path, ((),))
+        visible: set[str] = set()
+        for reachable_root in roots.get(source.path, {source.path}):
+            visible.update(exported.get(reachable_root, frozenset()))
+        source.aliases = rust_test_attribute_aliases(
+            source.code, frozenset(visible)
+        )
     return prepared
 
 
@@ -2217,12 +2290,11 @@ def rust_invariant_test_files(
     sources: list[RustSource],
 ) -> dict[tuple[str, str], int]:
     """Discover every repository Rust test file carrying an INV tag."""
-    prefixes = rust_module_prefixes(sources)
     found: dict[tuple[str, str], int] = {}
     for source in sources:
         tags = rust_test_invariant_tags(
             source.text,
-            prefixes.get(source.path, ((),)),
+            source.module_prefixes,
             source.aliases,
         )
         for invariant, line in tags:
@@ -2233,6 +2305,11 @@ def rust_invariant_test_files(
 def check_rust_test_generation(sources: list[RustSource]) -> list[Violation]:
     """Reject macros whose expanded tests cannot be registered from source."""
     violations: list[Violation] = []
+    definition_counts: dict[str, int] = {}
+    for source in sources:
+        for macro in RUST_MACRO_RULES.finditer(source.code):
+            name = macro.group("name")
+            definition_counts[name] = definition_counts.get(name, 0) + 1
     for source in sources:
         code = source.code
         for macro in RUST_MACRO_RULES.finditer(code):
@@ -2261,7 +2338,14 @@ def check_rust_test_generation(sources: list[RustSource]) -> list[Violation]:
                     macro.group("name"),
                     macro.start(),
                     opening,
-                    sources,
+                    # One definition of a name owns every invocation of it in
+                    # the repository. Where a name is defined more than once,
+                    # which definition a call site reaches is a visibility
+                    # question this check does not answer, so only the
+                    # definition's own file is read.
+                    sources
+                    if definition_counts[macro.group("name")] == 1
+                    else [source],
                 )
             ):
                 continue
@@ -2320,11 +2404,12 @@ def check_invariant_citations(
             extract_resolved_links(citation_enforcement, definitions),
             key=lambda link: link.offset,
         )
+        citation_prose = mask_markdown_link_constructs(citation_enforcement)
         tagged_destinations: set[str] = set()
         tagged_active = False
         preceding_offset = 0
         for link in resolved_links:
-            intervening = citation_enforcement[preceding_offset : link.offset]
+            intervening = citation_prose[preceding_offset : link.offset]
             last_marker = max(
                 (match.start() for match in tagged_marker.finditer(intervening)),
                 default=-1,
@@ -2338,11 +2423,12 @@ def check_invariant_citations(
             )
             if last_marker >= 0 or last_boundary >= 0:
                 tagged_active = last_marker > last_boundary
+            # A marker inside one link label claims that link alone, so it
+            # never carries into the prose or the links that follow.
             label_has_marker = tagged_marker.search(
                 mask_inline_code(link.label)
             ) is not None
-            tagged_active = tagged_active or label_has_marker
-            if tagged_active:
+            if tagged_active or label_has_marker:
                 tagged_destinations.add(link.destination)
             preceding_offset = link.offset + 1
 

@@ -1114,10 +1114,12 @@ class DocsConsistencyTests(unittest.TestCase):
         )
 
     def test_reexported_test_alias_reaches_the_importing_file(self) -> None:
-        (self.root / "src/exporter.rs").write_text(
-            "pub use tokio::test as async_test;\n", encoding="utf-8"
+        (self.root / "src/uncited_root.rs").write_text(
+            "pub use tokio::test as async_test;\nmod cases;\n",
+            encoding="utf-8",
         )
-        (self.root / "src/uncited.rs").write_text(
+        (self.root / "src/uncited_root").mkdir()
+        (self.root / "src/uncited_root/cases.rs").write_text(
             "use crate::async_test;\n\n"
             "#[async_test]\n"
             "async fn s01_inv_001_reexported_attribute() {}\n",
@@ -1130,17 +1132,102 @@ class DocsConsistencyTests(unittest.TestCase):
             failure_categories(failures),
             ["invariant-registration"],
         )
-        self.assertIn("src/uncited.rs", failures[0].message)
+        self.assertIn("src/uncited_root/cases.rs", failures[0].message)
 
     def test_renaming_to_an_alias_name_declares_no_test(self) -> None:
         (self.root / "src/exporter.rs").write_text(
-            "pub use tokio::test as async_test;\n", encoding="utf-8"
+            "pub use tokio::test as async_test;\nmod cases;\n",
+            encoding="utf-8",
         )
-        (self.root / "src/context.rs").write_text(
+        (self.root / "src/exporter").mkdir()
+        (self.root / "src/exporter/cases.rs").write_text(
             "use crate::support::marker as async_test;\n\n"
             "#[async_test]\n"
             "fn s01_inv_001_not_a_test() {}\n",
             encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_alias_spelling_alone_does_not_import_a_test(self) -> None:
+        (self.root / "src/exporter.rs").write_text(
+            "pub use tokio::test as shared;\nmod cases;\n", encoding="utf-8"
+        )
+        (self.root / "src/exporter").mkdir()
+        (self.root / "src/exporter/cases.rs").write_text(
+            "use crate::helpers::shared;\n\n"
+            "#[shared]\n"
+            "fn s01_inv_001_not_a_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_duplicate_macro_names_keep_their_own_call_sites(self) -> None:
+        (self.root / "src/forwarding.rs").write_text(
+            "macro_rules! wrapper {\n"
+            "    ($attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        struct Item;\n"
+            "    };\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/naming.rs").write_text(
+            "macro_rules! wrapper {\n"
+            "    ($name:ident) => {\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "wrapper!(test);\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_conditional_path_attribute_selects_the_test_module(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            '#[cfg_attr(test, path = "generic.rs")]\nmod inv_001;\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/uncited_root").mkdir()
+        (self.root / "src/uncited_root/inv_001.rs").write_text(
+            "pub fn ordinary() {}\n", encoding="utf-8"
+        )
+        (self.root / "src/uncited_root/generic.rs").write_text(
+            "#[test]\nfn generic() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited_root/generic.rs", failures[0].message)
+
+    def test_capitalized_attribute_declares_no_test(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[Test]\nfn s01_inv_001_not_a_test() {}\n", encoding="utf-8"
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_tagged_label_claims_only_its_own_link(self) -> None:
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "[INV-001-tagged test](../src/tests.rs) and its "
+            "[helper](../src/helper.rs). |\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/tests.rs").write_text(
+            "#[test]\nfn s01_inv_001_named_test() {}\n", encoding="utf-8"
+        )
+        (self.root / "src/helper.rs").write_text(
+            "pub fn helper() {}\n", encoding="utf-8"
         )
 
         self.assertEqual(run_checks(self.root), [])
