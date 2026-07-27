@@ -195,42 +195,13 @@ records keep each command's comparison payload and result reviewable and
 constraint-checked instead of delegating meaning to a serializer; there is no
 universal JSONB or byte-blob payload anywhere.
 
-For `SubmitInput`, two deferred constraint triggers partition effect correlation
-at every transaction boundary. The original
-`submit_input_command_requires_correlated_effect` trigger was introduced in
-migration `202607180003`, revised for occupied-slot pending steering in
-`202607180005`, and rewired in `202607220005` to the renamed
-`require_submit_input_legacy_effect_correlation` function. It covers every row
-except an applied interrupt and the three interrupt-path rejections. An
-`applied` ordinary turn-origin row must agree field-by-field with exactly one
-committed `accepted_input` plus `queued_input_origin` effect, including the
-frozen model configuration; an applied `next_safe_point` row instead initially
-correlates with exactly one `pending_steering` accepted input naming the
-expected active turn, with no `queued_input_origin` effect permitted. Other
-rejected rows have no accepted-input effect, and an `unknown_model_alias`
-rejection must match real alias evidence in `session_defaults_version`.
-
-Migration `202607220005` adds `submit_input_command_requires_interrupt_effect`.
-Its guarded trigger exclusively checks applied interrupts plus
-`safe_point_unavailable_while_stopping` and `interrupt_already_applied`
-rejections, and migration `202607280001` extends that trigger to
-`interrupt_unavailable_while_awaiting_approval`. An applied interrupt normally
-correlates its accepted input and immediate successor with the stopped
-predecessor attempt. The reconciliation path instead admits an ended
-`without_stop` predecessor with an `ambiguous` or `lost` disposition and no
-interrupt proof only when its terminal lifecycle is `reconciliation_required`
-and names that exact attempt. A stopping or already-applied rejection must
-instead correlate with exactly one already-applied interrupt for the actual
-active turn and create no accepted-input effect of its own. The parked-approval
-rejection must create no accepted-input effect and must name a turn whose
-durable lifecycle is active in the `awaiting_tool_approval` phase; it does not
-name an earlier interrupt. The next-safe-point receipt remains immutable when
-its accepted input later becomes consumed steering or a reclassified origin.
-Equal replay returns its original `Applied(PendingSteering)` result only after
-the accepted input's current lifecycle passes the correlation checks owned by
-[persistence-protocol](persistence-protocol.md). Why: replay returns recorded
-results as truth, so an applied record without its exact committed effect must
-be unable to commit.
+For `SubmitInput`, each terminal command result must correlate with exactly its
+committed domain effects. Equal replay returns the recorded result only after
+the current durable state still proves that correlation; otherwise the adapter
+fails closed rather than treating an effectless receipt as truth. The exact
+relational representation, deferred triggers, migration evolution, and
+lifecycle-transition checks are owned by
+[persistence-protocol](persistence-protocol.md#relational-representation).
 
 All registry and typed-record tables are append-only, enforced by
 `reject_immutable_record_change` triggers. Why: a claimed identifier's recorded
