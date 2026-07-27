@@ -10,6 +10,39 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Address imported continuation by position
+
+**Context.** The application and PostgreSQL layers already create a session from
+a sealed `ImportedTranscriptFrontier`, but the process protocol could not invoke
+that command. Import receipts expose the immutable conversation identity, while
+entry position is the stable human-addressable boundary already carried by every
+frontier; the sealed frontier constructor deliberately remains a domain-owned
+mapping.
+
+**Decision.** Protocol version ten adds `create_session_from_imported_frontier`,
+carrying command and conversation identities, a positive inclusive imported
+position, explicit `resume` or `fork` intent, and the initial model selection.
+Eight was taken while seven was reserved by then-open PR #281; #281 merged
+before this branch began. PR #291 subsequently merged version eight. Nine
+remains taken by then-open PR #286. The daemon checks a claimed command for
+replay or conflict first; for an unseen command it loads the immutable
+conversation, resolves the position to its canonical sealed frontier, and
+invokes the existing application service. The terminal verb is `continue`, and
+it requires position, relationship, and model selection rather than guessing any
+of them.
+
+**Rejected alternatives.** Sending an imported entry identity or a complete
+frontier would expose identifiers the import receipt does not provide and would
+duplicate the sealed domain mapping. Adding a public frontier constructor would
+weaken that boundary. Implicitly selecting the last entry or defaulting to
+`Resume` would hide session ancestry intent. Rebuilding the command or adding a
+persistence path would duplicate the already-tested application transaction.
+
+**Affects.** Process-protocol versioning and request mapping, the daemon
+adapter, the terminal client and its synthetic end-to-end continuation test, and
+the process-protocol and sessions specifications. The domain spine, persistence
+schema, and migrations are unchanged.
+
 ## 2026-07-26 — Retire the superseded startup steering blocker
 
 **Context.** The 2026-07-22 pending-steering boundary commissioned a temporary
