@@ -251,7 +251,7 @@ fn render_part(part: &MessagePart) -> Result<PromptPart<'_>, TranslationError> {
         MessagePart::ToolCall(call) => Ok(PromptPart::ToolCall {
             id: call.id.as_str(),
             name: call.name.as_str(),
-            arguments: parse_replayed_tool_json(&call.arguments_json)?,
+            arguments: parse_replayed_tool_json(call.id.as_str(), &call.arguments_json)?,
         }),
         MessagePart::ToolResult(result) => Ok(PromptPart::ToolResult {
             tool_call_id: result.tool_call_id.as_str(),
@@ -263,12 +263,26 @@ fn render_part(part: &MessagePart) -> Result<PromptPart<'_>, TranslationError> {
     }
 }
 
-fn parse_replayed_tool_json(raw: &str) -> Result<Box<RawValue>, TranslationError> {
-    RawValue::from_string(raw.to_string()).map_err(|error| {
+fn parse_replayed_tool_json(id: &str, raw: &str) -> Result<Box<RawValue>, TranslationError> {
+    let value = RawValue::from_string(raw.to_string()).map_err(|error| {
         TranslationError::Failure(PreparationFailure::UnsupportedOperation {
             detail: format!("replayed tool-call arguments are not valid JSON: {error}"),
         })
-    })
+    })?;
+    // The declared tool interface (`ToolDefinition::input_schema`) describes
+    // an arguments object, so scalar or array replay history could never have
+    // satisfied it; mirror the sibling adapters and fail preparation instead
+    // of rendering an impossible call into the prompt.
+    if value.get().bytes().find(|byte| !byte.is_ascii_whitespace()) != Some(b'{') {
+        return Err(TranslationError::Failure(
+            PreparationFailure::UnsupportedOperation {
+                detail: format!(
+                    "replayed tool call {id} carries arguments that are not a JSON object"
+                ),
+            },
+        ));
+    }
+    Ok(value)
 }
 
 fn parse_object_schema<'a>(
@@ -379,6 +393,50 @@ mod tests {
         });
 
         assert!(translate(&operation).is_err());
+    }
+
+    /// Builds an assistant message replaying one tool call with the given
+    /// raw arguments and asserts preparation rejects it for not being a JSON
+    /// object, keeping each named case a straight-line invocation.
+    #[track_caller]
+    fn assert_replayed_arguments_rejected(arguments: &str) {
+        let operation = operation_with_message(ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call_shape"),
+                name: ToolName::new("lookup"),
+                arguments_json: arguments.to_string(),
+            })],
+        });
+
+        assert!(
+            translate(&operation).is_err(),
+            "`{arguments}` must fail preparation: the declared tool interface \
+             describes an arguments object"
+        );
+    }
+
+    /// Replayed tool-call arguments must be a JSON object — scalar or array
+    /// history could never have satisfied `ToolDefinition::input_schema`, and
+    /// the sibling adapters reject the same shapes during preparation.
+    #[test]
+    fn replayed_array_tool_arguments_are_rejected() {
+        assert_replayed_arguments_rejected("[1, 2]");
+    }
+
+    #[test]
+    fn replayed_number_tool_arguments_are_rejected() {
+        assert_replayed_arguments_rejected("3");
+    }
+
+    #[test]
+    fn replayed_string_tool_arguments_are_rejected() {
+        assert_replayed_arguments_rejected(r#""Oslo""#);
+    }
+
+    #[test]
+    fn replayed_null_tool_arguments_are_rejected() {
+        assert_replayed_arguments_rejected("null");
     }
 
     #[test]

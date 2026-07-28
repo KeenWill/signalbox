@@ -1329,52 +1329,85 @@ mod tests {
         assert_eq!(value, std::ffi::OsString::from("relative:paths"));
     }
 
-    /// INV-035: a proxy URL embedding userinfo is refused by name — with or
-    /// without a scheme, with or without a password — before anything can
-    /// pass it to the child.
-    #[test]
-    fn credential_bearing_proxy_urls_are_rejected() {
-        for (name, value) in [
-            (
-                "HTTP_PROXY",
-                "http://alice:opaque-proxy-value@proxy.internal:8080",
-            ),
-            ("HTTPS_PROXY", "https://alice@proxy.internal"),
-            ("ALL_PROXY", "alice:opaque-proxy-value@proxy.internal:8080"),
-            (
-                "http_proxy",
-                "socks5://alice:opaque-proxy-value@proxy.internal",
-            ),
-        ] {
-            let result = allowlisted_environment(|queried| {
-                (queried == name).then(|| std::ffi::OsString::from(value))
-            });
+    /// Assembles the environment with exactly `name=value` set and asserts
+    /// the assembly refuses it by name, keeping each named case a
+    /// straight-line invocation.
+    #[track_caller]
+    fn assert_environment_rejects(name: &'static str, value: &str) {
+        let result = allowlisted_environment(|queried| {
+            (queried == name).then(|| std::ffi::OsString::from(value))
+        });
 
-            assert_eq!(result, Err(name), "`{name}={value}` must be rejected");
-        }
+        assert_eq!(result, Err(name), "`{name}={value}` must be rejected");
     }
 
-    /// A credential-free proxy URL, a `NO_PROXY` host list containing `@`,
-    /// and an `@` confined to the URL path all pass through: the rejection
-    /// targets authority userinfo, not the byte.
-    #[test]
-    fn credential_free_environment_passes_through() {
-        for (name, value) in [
-            ("HTTP_PROXY", "http://proxy.internal:8080"),
-            ("HTTPS_PROXY", "https://proxy.internal/path/we@ird"),
-            ("NO_PROXY", "internal,@odd-but-not-a-url"),
-            ("TERM", "user:secret@not-a-proxy-variable"),
-        ] {
-            let result = allowlisted_environment(|queried| {
-                (queried == name).then(|| std::ffi::OsString::from(value))
-            });
+    /// Assembles the environment with exactly `name=value` set and asserts
+    /// it passes through unchanged.
+    #[track_caller]
+    fn assert_environment_passes(name: &'static str, value: &str) {
+        let result = allowlisted_environment(|queried| {
+            (queried == name).then(|| std::ffi::OsString::from(value))
+        });
 
-            assert_eq!(
-                result,
-                Ok(vec![(name, std::ffi::OsString::from(value))]),
-                "`{name}={value}` must pass through"
-            );
-        }
+        assert_eq!(
+            result,
+            Ok(vec![(name, std::ffi::OsString::from(value))]),
+            "`{name}={value}` must pass through"
+        );
+    }
+
+    /// INV-035: a proxy URL embedding authority userinfo is refused by name.
+    #[test]
+    fn credential_bearing_proxy_url_is_rejected() {
+        assert_environment_rejects(
+            "HTTP_PROXY",
+            "http://alice:opaque-proxy-value@proxy.internal:8080",
+        );
+    }
+
+    /// INV-035: username-only userinfo is still an inherited secret shape.
+    #[test]
+    fn password_less_proxy_userinfo_is_rejected() {
+        assert_environment_rejects("HTTPS_PROXY", "https://alice@proxy.internal");
+    }
+
+    /// INV-035: a schemeless proxy value with userinfo is refused too.
+    #[test]
+    fn schemeless_proxy_userinfo_is_rejected() {
+        assert_environment_rejects("ALL_PROXY", "alice:opaque-proxy-value@proxy.internal:8080");
+    }
+
+    /// INV-035: the lowercase variable spellings share the refusal.
+    #[test]
+    fn lowercase_proxy_userinfo_is_rejected() {
+        assert_environment_rejects(
+            "http_proxy",
+            "socks5://alice:opaque-proxy-value@proxy.internal",
+        );
+    }
+
+    /// A credential-free proxy URL passes through unchanged.
+    #[test]
+    fn credential_free_proxy_url_passes_through() {
+        assert_environment_passes("HTTP_PROXY", "http://proxy.internal:8080");
+    }
+
+    /// An `@` confined to the URL path is not authority userinfo.
+    #[test]
+    fn path_confined_at_sign_passes_through() {
+        assert_environment_passes("HTTPS_PROXY", "https://proxy.internal/path/we@ird");
+    }
+
+    /// `NO_PROXY` is a host list, never a URL with an authority.
+    #[test]
+    fn no_proxy_host_list_passes_through() {
+        assert_environment_passes("NO_PROXY", "internal,@odd-but-not-a-url");
+    }
+
+    /// Non-proxy allowlisted variables are not URL-checked.
+    #[test]
+    fn non_proxy_variables_are_not_url_checked() {
+        assert_environment_passes("TERM", "user:secret@not-a-proxy-variable");
     }
 
     /// A proxy value that is not UTF-8 cannot be verified credential-free
