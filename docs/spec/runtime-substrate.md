@@ -4,10 +4,11 @@ This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime`, `crates/model-runtime-anthropic`,
 `crates/model-runtime-openai`, and `crates/model-runtime-codex-cli`, verified
 against the implementing stack through PR #183
-(`agent/provider-call-security-parser`) plus the Codex CLI adapter stack (PR
-#264, `agent/codex-cli-wrap`, and PR #268, `agent/codex-cli-pin-smoke`). The
-`signalboxd` names this page states for the composition root, its telemetry, and
-the production `FileCredentialAccess` were verified through PR #258
+(`agent/provider-call-security-parser`). The Codex CLI adapter stack comprises
+PR #264 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
+escalation closeout is PR #317 (`agent/escalation-closeout`). The `signalboxd`
+names this page states for the composition root, its telemetry, and the
+production `FileCredentialAccess` were verified through PR #258
 (`agent/signalboxd-rename`); the Anthropic adapter's server-side
 `fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The five persistence-repository
@@ -425,38 +426,45 @@ member scan still requires each schema to declare an object root. Execution
 consumes the capability as exactly one `codex exec --json --ephemeral` spawn on
 Unix, passes the full rendered frontier on stdin, requires absolute configured
 executable and working-root paths, selects the exact resolved model, ignores
-user configuration and rule files, disables the shell, unified-exec, and
-skill-search features — the last so ambient `SKILL.md` discovery cannot add
-instructions the caller never rendered — sets the project-instruction byte
-budget to zero, and uses the read-only CLI sandbox. Strict configuration turns
-an unavailable control into a closed failure instead of silently relaxing this
-invocation boundary. Before spawn it clears the parent environment, then copies
-only its explicit home/Codex-home, executable and temporary path, XDG,
-locale/terminal, certificate, and proxy allowlist; unrelated service variables
-do not reach the CLI. A proxy variable whose URL authority embeds userinfo
-(`scheme://user:secret@host`) is refused before `SendCommenced` as
-`ProvenUnsent(ConnectFailed)` naming only the variable — the CLI could reflect
-its proxy configuration in output the adapter can only shape-redact, so an
-inherited proxy credential never reaches the child; a proxy value that is not
-UTF-8 cannot be verified credential-free and is refused the same way. A `HOME`
-or `CODEX_HOME` the parent cannot resolve to an absolute directory — empty, or
-relative with no resolvable current directory to resolve it against — is refused
-the same way, because the child would otherwise read its login store from
-beneath its own configured working root and select an unintended ambient login;
-a resolvable one is absolutized against the parent's directory before spawn. It
-neither resumes nor persists a Codex thread. Why: a fresh ephemeral invocation
-keeps provider session state out of memory, and the caller supplies the complete
-conversation frontier instead of an in-memory resume pointer. The read-only
-sandbox and working root are the adapter's filesystem boundary; Unix
-process-group supervision bounds descendant lifetime, so construction rejects
-hosts where that supervision is unavailable. Stronger host isolation is later
-composition work, not an adapter claim.
+user configuration and rule files, and explicitly disables every feature in the
+pinned CLI inventory that can add a model-visible tool, external interaction,
+instruction source, or delegated execution surface outside the declared tools.
+It independently disables configured agents, ambient skill-instruction
+injection, MCP servers, and web search, sets the project-instruction byte budget
+to zero, and uses the read-only CLI sandbox; prompt text is never a capability
+boundary. Strict configuration turns an unavailable control into a closed
+failure instead of silently relaxing this invocation boundary. Before spawn it
+clears the parent environment, then copies only its explicit home/Codex-home,
+executable and temporary path, XDG, locale/terminal, certificate, and proxy
+allowlist; unrelated service variables do not reach the CLI. A proxy variable
+whose URL authority embeds userinfo (`scheme://user:secret@host`) is refused
+before `SendCommenced` as `ProvenUnsent(ConnectFailed)` naming only the variable
+— the CLI could reflect its proxy configuration in output the adapter can only
+shape-redact, so an inherited proxy credential never reaches the child; a proxy
+value that is not UTF-8 cannot be verified credential-free and is refused the
+same way. A `HOME` or `CODEX_HOME` the parent cannot resolve to an absolute
+directory — empty, or relative with no resolvable current directory to resolve
+it against — is refused the same way, because the child would otherwise read its
+login store from beneath its own configured working root and select an
+unintended ambient login; a resolvable one is absolutized against the parent's
+directory before spawn. It neither resumes nor persists a Codex thread. Why: a
+fresh ephemeral invocation keeps provider session state out of memory, and the
+caller supplies the complete conversation frontier instead of an in-memory
+resume pointer. The read-only sandbox and working root are the adapter's
+filesystem boundary. Unix supervision contains the process group the adapter
+creates, so construction rejects hosts where process-group control is
+unavailable; a descendant that deliberately leaves that group is outside the
+adapter's boundary. Host isolation owns containment beyond the created group —
+specifically the runner sandbox in build-out — and is not an adapter claim.
 
 `SendCommenced` immediately precedes spawn. Spawn failure is
 `ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.
 The first `thread.started` establishes the exchange and its thread id becomes
 the provider request id. Unknown top-level events and unsupported item kinds are
-additively tolerated within the byte and JSON-depth bounds. Known item lifecycle
+additively tolerated within the byte and JSON-depth bounds. Repeated object
+members are ambiguous by construction, never additive: the adapter rejects them
+in both the outer JSONL event and its escaped response envelope before JSON
+projection as `BoundaryLoss(StreamProtocolViolation)`. Known item lifecycle
 events must carry a nonempty item identity and type even when the adapter does
 not otherwise interpret them. Known events with invalid shapes, non-UTF-8 or
 undecodable JSONL, nonzero or signal process exits, and `turn.failed` fail
@@ -576,10 +584,17 @@ model the smoke credential can address, run through this adapter with the real
 pinned executable. Which models a credential may address is account-scoped, so
 the model is a configured value with the cheapest advertised model as default.
 Before spending anything it asserts that the executable's reported version
-equals the supported version, and an unreadable, unparsable, or mismatched
-version fails the smoke rather than skipping it. Why: evidence recorded against
-a version that never ran is worse than no evidence. The smoke then asserts only
-the protocol surfaces a version bump moves — the thread identifier reaching the
+equals the supported version, then compares the CLI's complete feature list —
+including stage and default — with an exact inventory that classifies every
+entry as a hard-disabled capability or as non-capability behavior. A new,
+removed, or changed entry fails the smoke until the version bump classifies it.
+An isolated synthetic ambient skill must appear in the pinned CLI's ordinary
+model-visible prompt input and disappear when the production
+`skills.include_instructions=false` control is applied; an unreadable,
+unparsable, or mismatched version likewise fails rather than skipping. Why:
+evidence recorded against a version that never ran, or whose capability gap
+nobody reviewed, is worse than no evidence. The smoke then asserts only the
+protocol surfaces a version bump moves — the thread identifier reaching the
 exchange facts, the terminal usage counters, and the response envelope decoding
 as a completed or refused terminal outcome — and nothing about answer quality.
 It never runs on a pull-request event, so no fork can reach its credentials; it
