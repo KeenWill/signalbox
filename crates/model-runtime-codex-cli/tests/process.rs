@@ -1122,6 +1122,130 @@ async fn named_tool_choice_rejects_an_extra_declared_tool_proposal() {
     );
 }
 
+/// INV-035: an additively tolerated sibling field on a *known* completed item
+/// is discarded by serde, so its credential marker seeds nothing unless the
+/// decoder folds it; the envelope text the same item carries then completes the
+/// marker and would reach observations and terminal evidence verbatim.
+#[tokio::test]
+async fn inv_035_agent_message_additive_field_marker_suppresses_the_continuation() {
+    let result = execute_scenario(
+        "agent_message_additive_field_marker",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: the same hole on `turn.failed` — an additive field holds the
+/// marker its interpreted failure message completes, and the message is the
+/// text that leaves the adapter as provider-error evidence.
+#[tokio::test]
+async fn inv_035_turn_failed_additive_field_marker_suppresses_the_message() {
+    let result = execute_scenario(
+        "turn_failed_additive_field_marker",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a superseded agent message ending in a live marker (`api_`) beside
+/// a clean id is folded id-first, in wire order, so the id cannot resolve the
+/// marker away and release the value the replacing envelope text completes.
+#[tokio::test]
+async fn inv_035_superseded_message_marker_survives_a_clean_id() {
+    let result = execute_scenario(
+        "superseded_message_marker_before_clean_id",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: an object nested inside an array keeps its fields as independent
+/// dropped units; flattening them into the array's wire-adjacent run lets a
+/// benign sibling erase the marker the other field holds.
+#[tokio::test]
+async fn inv_035_object_inside_an_array_keeps_its_fields_independent() {
+    let result = execute_scenario(
+        "unsupported_item_object_inside_an_array",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: an unknown event's own metadata is dropped provider content — the
+/// adapter matched its `type` against no known event and never reads its `id` —
+/// so a credential marker either field holds still governs the final text that
+/// completes it.
+#[tokio::test]
+async fn inv_035_unknown_event_metadata_marker_suppresses_the_continuation() {
+    let result = execute_scenario(
+        "unknown_event_metadata_marker",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// A textless explicit refusal is refusal evidence in streamed delivery, as it
+/// already is in buffered delivery: the outcome is definitive on its own, so
+/// the empty-material rule that guards ordinary completions does not
+/// reclassify it as boundary loss by delivery mode.
+#[tokio::test]
+async fn streamed_textless_refusal_is_refusal_evidence() {
+    let result = execute_scenario(
+        "textless_refusal",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(refused(&result.evidence).content, Vec::new());
+}
+
+/// The same textless refusal in buffered delivery, which the streamed arm must
+/// agree with.
+#[tokio::test]
+async fn buffered_textless_refusal_is_refusal_evidence() {
+    let result = execute_scenario(
+        "textless_refusal",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(refused(&result.evidence).content, Vec::new());
+}
+
 #[tokio::test]
 async fn explicit_refusal_is_refusal_evidence() {
     let result = execute_scenario(

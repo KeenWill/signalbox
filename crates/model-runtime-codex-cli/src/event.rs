@@ -103,7 +103,7 @@ impl<C: Clone> EventDecoder<C> {
                 ));
             }
             let stream_error = stream_error.clone();
-            let event: TurnFailed = decode(value)?;
+            let event: TurnFailed = decode(value.clone())?;
             // Only the echo closes the turn: a trailer carrying a different
             // failure contradicts the recorded terminal and fails closed
             // rather than silently keeping either message.
@@ -112,6 +112,7 @@ impl<C: Clone> EventDecoder<C> {
                     "Codex contradicted its stream error with a different turn.failed failure",
                 ));
             }
+            fold_uninterpreted(sink, &value, &["type"], Some(("error", &["message"])));
             self.terminal = Some(CliTerminal::Failed(stream_error));
             return Ok(());
         }
@@ -128,16 +129,7 @@ impl<C: Clone> EventDecoder<C> {
                 // into the lookbehind (the `thread_id` itself is separately
                 // sanitized and seeded below), as for turn.started, lifecycle,
                 // and unknown events.
-                if let Value::Object(fields) = &value {
-                    let mut units = Vec::new();
-                    for (key, field) in fields {
-                        if matches!(key.as_str(), "type" | "thread_id") {
-                            continue;
-                        }
-                        collect_units(field, false, &mut units);
-                    }
-                    fold_dropped_units(sink, units.iter().map(String::as_str));
-                }
+                fold_uninterpreted(sink, &value, &["type", "thread_id"], None);
                 // Sanitized against the held lookbehind before the
                 // ExchangeEstablished observation (which flushes it), so a
                 // thread id that extends a credential marker held from a
@@ -162,18 +154,17 @@ impl<C: Clone> EventDecoder<C> {
                 // provider-controlled string fields; fold their uninterpreted
                 // content so a credential marker they hold governs the
                 // following text, as for lifecycle and unknown events.
-                fold_dropped_value(sink, &value, true);
+                fold_uninterpreted(sink, &value, &["type"], None);
             }
             "item.started" | "item.updated" => {
                 let identity: ItemLifecycleEvent = decode(value.clone())?;
                 validate_item_identity(&identity.item)?;
                 // The adapter interprets only the identity of a lifecycle
                 // event, but an additively-tolerated one may carry
-                // provider-controlled string fields whose credential marker
-                // would otherwise seed nothing; fold them into the lookbehind.
-                if let Some(item) = value.get("item") {
-                    fold_dropped_value(sink, item, true);
-                }
+                // provider-controlled string fields — beside the item or inside
+                // it — whose credential marker would otherwise seed nothing;
+                // fold them into the lookbehind.
+                fold_uninterpreted(sink, &value, &["type"], Some(("item", &["id", "type"])));
             }
             "item.completed" => {
                 let identity: ItemLifecycleEvent = decode(value.clone())?;
@@ -189,6 +180,19 @@ impl<C: Clone> EventDecoder<C> {
                         // across them. Fold any displaced text (and id) into the
                         // lookbehind before replacing.
                         self.fold_retained_agent_message(sink);
+                        // A known item can also carry additively tolerated
+                        // sibling fields serde accepts and discards; fold them
+                        // before the interpreted id and text are retained, so a
+                        // marker one of them ends in still governs the text that
+                        // follows. Only `id` and `text` are interpreted here:
+                        // both are retained and separately sanitized in
+                        // `completed`.
+                        fold_uninterpreted(
+                            sink,
+                            &value,
+                            &["type"],
+                            Some(("item", &["id", "type", "text"])),
+                        );
                         // The id is retained raw and sanitized against the
                         // held stream state in `completed`, so a value that
                         // extends a credential marker from earlier reasoning
@@ -197,6 +201,15 @@ impl<C: Clone> EventDecoder<C> {
                         self.agent_message = Some(text);
                     }
                     ItemDetails::Reasoning { text } => {
+                        // Additive siblings serde accepted and discarded are
+                        // dropped content; fold them before the modeled text is
+                        // emitted or held.
+                        fold_uninterpreted(
+                            sink,
+                            &value,
+                            &["type"],
+                            Some(("item", &["id", "type", "text"])),
+                        );
                         if self.delivery == DeliveryMode::Streamed {
                             let index = self.take_part_index()?;
                             sink.observe(Observation {
@@ -220,7 +233,14 @@ impl<C: Clone> EventDecoder<C> {
                         // still marks the value that follows (in streamed
                         // deltas or the buffered final text) as a secret;
                         // feed the dropped bytes into the match-only
-                        // lookbehind exactly as buffered reasoning is.
+                        // lookbehind exactly as buffered reasoning is. Additive
+                        // siblings are dropped content and fold first.
+                        fold_uninterpreted(
+                            sink,
+                            &value,
+                            &["type"],
+                            Some(("item", &["id", "type", "message"])),
+                        );
                         sink.extend_dropped_context(&message);
                     }
                     ItemDetails::Other => {
@@ -228,11 +248,14 @@ impl<C: Clone> EventDecoder<C> {
                         // any credential-bearing text it carries still marks
                         // following output as a secret. Its shape is unmodeled —
                         // provider text can live in any field or nested within
-                        // one — so fold its independent credential units into
+                        // one — so its independent credential units fold into
                         // the lookbehind.
-                        if let Some(item) = value.get("item") {
-                            fold_dropped_value(sink, item, true);
-                        }
+                        fold_uninterpreted(
+                            sink,
+                            &value,
+                            &["type"],
+                            Some(("item", &["id", "type"])),
+                        );
                     }
                 }
             }
@@ -246,21 +269,30 @@ impl<C: Clone> EventDecoder<C> {
                         "turn.completed arrived before thread.started established the exchange",
                     ));
                 }
-                let event: TurnCompleted = decode(value)?;
+                let event: TurnCompleted = decode(value.clone())?;
+                // Only the usage counters are interpreted; an additive sibling
+                // is dropped uninterpreted and folds before the completion the
+                // terminal marker unlocks emits the final text.
+                fold_uninterpreted(sink, &value, &["type"], None);
                 self.usage = usage(event.usage)?;
                 self.terminal = Some(CliTerminal::Completed);
             }
             "turn.failed" => {
-                let event: TurnFailed = decode(value)?;
+                let event: TurnFailed = decode(value.clone())?;
                 // The retained agent message is no longer completion material;
                 // fold it so a marker it ends in still governs the failure
                 // message that supersedes it, as agent-message supersession does.
                 self.fold_retained_agent_message(sink);
+                // Additive failure fields are dropped uninterpreted; fold them
+                // before the interpreted message is retained, so a marker one of
+                // them ends in still governs that message.
+                fold_uninterpreted(sink, &value, &["type"], Some(("error", &["message"])));
                 self.terminal = Some(CliTerminal::Failed(event.error.message));
             }
             "error" => {
-                let event: ThreadError = decode(value)?;
+                let event: ThreadError = decode(value.clone())?;
                 self.fold_retained_agent_message(sink);
+                fold_uninterpreted(sink, &value, &["type", "message"], None);
                 self.terminal = Some(CliTerminal::Unrecoverable(event.message));
             }
             _ => {
@@ -268,8 +300,10 @@ impl<C: Clone> EventDecoder<C> {
                 // but a credential marker in its provider-controlled strings
                 // still marks the following final text as a secret; fold its
                 // uninterpreted content into the lookbehind, as for an
-                // unsupported item.
-                fold_dropped_value(sink, &value, true);
+                // unsupported item. Nothing here is interpreted — the `type`
+                // discriminator matched no known event, so its value is
+                // provider-chosen text like every other field.
+                fold_uninterpreted(sink, &value, &[], None);
             }
         }
         Ok(())
@@ -344,17 +378,18 @@ impl<C: Clone> EventDecoder<C> {
     /// Folds a retained agent message (and its id) into the dropped lookbehind
     /// when it is displaced — by a later agent message or a failure terminal —
     /// so a credential marker ending it still governs the text that follows.
-    /// The message text and its id are a single chronological span, so they are
-    /// seeded by *precise* chaining (a benign message the streaming lookbehind
-    /// holds but no value completes flows unchanged) rather than the
-    /// fail-closed multi-unit path used for an unmodeled item's independent
-    /// object fields.
+    /// The two are chained *in wire order*, id before text: the message text is
+    /// the last of the pair the provider wrote, so it is what the following
+    /// output continues, and a clean id can no longer resolve away the live
+    /// marker (`api_`) that the text ends in. Chaining stays precise rather
+    /// than taking the fail-closed multi-unit path — a benign message the
+    /// streaming lookbehind holds but no value completes still flows unchanged.
     fn fold_retained_agent_message(&mut self, sink: &mut RedactingSink<'_, C>) {
         if let Some(superseded) = self.agent_message.take() {
-            sink.extend_dropped_context(&superseded);
-            if let Some(previous_id) = &self.message_id {
-                sink.extend_dropped_context(previous_id);
+            if let Some(previous_id) = self.message_id.clone() {
+                sink.extend_dropped_context(&previous_id);
             }
+            sink.extend_dropped_context(&superseded);
         }
     }
 
@@ -468,7 +503,15 @@ impl<C: Clone> EventDecoder<C> {
                     content[index] = AssistantPart::Text(captured);
                 }
             }
-            if content.is_empty() && self.output_contract_name.is_none() {
+            // An explicit `refused` outcome is definitive evidence on its own,
+            // so a textless refusal stays a refusal here exactly as buffered
+            // delivery already returns it; only an ordinary completion needs
+            // material to be intelligible, and only it fails closed when the
+            // capture leaves none.
+            if content.is_empty()
+                && self.output_contract_name.is_none()
+                && envelope.outcome != EnvelopeOutcome::Refused
+            {
                 return boundary_loss(
                     self.exchange,
                     self.usage,
@@ -701,58 +744,108 @@ fn validate_item_identity(item: &ItemIdentity) -> Result<(), DecodeFailure> {
 
 /// Collects the independent credential *units* of provider-controlled content
 /// the adapter drops without interpreting. An object's field values are
-/// separate units (they are not one continuous text, and serde's `BTreeMap`
-/// iteration is key-sorted rather than wire order, so a benign sibling must not
-/// erase another's marker); an array's elements are wire-adjacent, so their
-/// string leaves are joined into a single unit (an array `["api", "_key="]`
-/// forms `api_key=`). At `is_root`, the `id`/`type` metadata keys are skipped.
-fn collect_units(value: &Value, is_root: bool, out: &mut Vec<String>) {
+/// separate units at every nesting depth — they are not one continuous text,
+/// and serde's `BTreeMap` iteration is key-sorted rather than wire order, so a
+/// benign sibling must not erase another's marker. An array's elements are
+/// wire-adjacent, so the string leaves running between nested objects join into
+/// a single unit (an array `["api", "_key="]` forms `api_key=`).
+fn collect_units(value: &Value, out: &mut Vec<String>) {
     match value {
         Value::String(text) => out.push(text.clone()),
-        Value::Array(_) => {
-            let mut leaves = Vec::new();
-            collect_string_leaves(value, &mut leaves);
-            if !leaves.is_empty() {
-                out.push(leaves.concat());
-            }
-        }
-        Value::Object(fields) => {
-            for (key, field) in fields {
-                if is_root && matches!(key.as_str(), "id" | "type") {
-                    continue;
-                }
-                collect_units(field, false, out);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
-}
-
-/// Every string leaf of `value` in order, for joining wire-adjacent array
-/// content into one unit.
-fn collect_string_leaves<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
-    match value {
-        Value::String(text) => out.push(text),
         Value::Array(items) => {
+            let mut adjacent = String::new();
             for item in items {
-                collect_string_leaves(item, out);
+                collect_array_element(item, &mut adjacent, out);
             }
+            push_unit(adjacent, out);
         }
         Value::Object(fields) => {
             for field in fields.values() {
-                collect_string_leaves(field, out);
+                collect_units(field, out);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
-/// Folds dropped provider content (an unsupported completed item, an ignored
-/// lifecycle or unknown event, an additive field on a known event) into the
-/// redaction lookbehind.
-fn fold_dropped_value<C: Clone>(sink: &mut RedactingSink<'_, C>, value: &Value, is_root: bool) {
+/// Collects one array element into the enclosing array's wire-adjacent run.
+/// String and nested-array leaves extend the run; a nested object's fields stay
+/// independent units of their own, so the object ends the run rather than being
+/// flattened into it merely because an ancestor is an array.
+fn collect_array_element(value: &Value, adjacent: &mut String, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) => adjacent.push_str(text),
+        Value::Array(items) => {
+            for item in items {
+                collect_array_element(item, adjacent, out);
+            }
+        }
+        Value::Object(fields) => {
+            push_unit(std::mem::take(adjacent), out);
+            for field in fields.values() {
+                collect_units(field, out);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn push_unit(unit: String, out: &mut Vec<String>) {
+    if !unit.is_empty() {
+        out.push(unit);
+    }
+}
+
+/// Appends the independent dropped units of `object`'s fields other than the
+/// `interpreted` ones. A field counts as interpreted only when the adapter
+/// matched it against a known constant (the `type` discriminator that selected
+/// a known arm, whose value is therefore the adapter's own literal) or
+/// separately sanitizes and emits it (`thread.started`'s thread id, an agent
+/// message's retained id and text). Every other field — including the metadata
+/// the adapter merely validates and then drops — is provider-controlled content
+/// whose credential candidate must still govern the output that follows.
+fn collect_uninterpreted_units(
+    object: Option<&Value>,
+    interpreted: &[&str],
+    out: &mut Vec<String>,
+) {
+    match object {
+        Some(Value::Object(fields)) => {
+            for (key, field) in fields {
+                if !interpreted.contains(&key.as_str()) {
+                    collect_units(field, out);
+                }
+            }
+        }
+        // A non-object member models no interpreted field, so all of it is
+        // dropped content.
+        Some(value) => collect_units(value, out),
+        None => {}
+    }
+}
+
+/// Folds the fields of a decoded event that the adapter did not interpret —
+/// and, when `member` names one, those of a nested member object such as
+/// `item` or `error` — into the redaction lookbehind. Both levels are decided
+/// together in one call, so the event's and the member's independent units are
+/// weighed against each other rather than seeded one chain after the other.
+/// The member itself is excluded at the event level and governed by its own
+/// interpreted list instead.
+fn fold_uninterpreted<C: Clone>(
+    sink: &mut RedactingSink<'_, C>,
+    value: &Value,
+    interpreted: &[&str],
+    member: Option<(&str, &[&str])>,
+) {
     let mut units = Vec::new();
-    collect_units(value, is_root, &mut units);
+    let mut event_interpreted = interpreted.to_vec();
+    if let Some((name, _)) = member {
+        event_interpreted.push(name);
+    }
+    collect_uninterpreted_units(Some(value), &event_interpreted, &mut units);
+    if let Some((name, member_interpreted)) = member {
+        collect_uninterpreted_units(value.get(name), member_interpreted, &mut units);
+    }
     fold_dropped_units(sink, units.iter().map(String::as_str));
 }
 
