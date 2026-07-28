@@ -104,6 +104,60 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testImportedConversationTitlesRetainTheirSourceDerivationConstraints() {
+    XCTAssertTrue(
+      signalboxImportedConversationTitleIsAdmissible(
+        ProcessConversationTitleFixture.valid
+      )
+    )
+    XCTAssertTrue(signalboxImportedConversationTitleIsAdmissible(nil))
+    XCTAssertFalse(
+      signalboxImportedConversationTitleIsAdmissible(
+        ProcessConversationTitleFixture.empty
+      )
+    )
+    XCTAssertFalse(
+      signalboxImportedConversationTitleIsAdmissible(
+        ProcessConversationTitleFixture.leadingSpace
+      )
+    )
+    XCTAssertFalse(
+      signalboxImportedConversationTitleIsAdmissible(
+        ProcessConversationTitleFixture.trailingSpace
+      )
+    )
+    XCTAssertFalse(
+      signalboxImportedConversationTitleIsAdmissible(
+        ProcessConversationTitleFixture.leadingTab
+      )
+    )
+    XCTAssertFalse(
+      signalboxImportedConversationTitleIsAdmissible(
+        ProcessConversationTitleFixture.trailingTab
+      )
+    )
+    XCTAssertFalse(
+      signalboxImportedConversationTitleIsAdmissible(
+        ProcessConversationTitleFixture.lineFeed
+      )
+    )
+    XCTAssertFalse(
+      signalboxImportedConversationTitleIsAdmissible(
+        ProcessConversationTitleFixture.carriageReturn
+      )
+    )
+    XCTAssertFalse(
+      signalboxImportedConversationTitleIsAdmissible(
+        ProcessConversationTitleFixture.nul
+      )
+    )
+    XCTAssertFalse(
+      signalboxImportedConversationTitleIsAdmissible(
+        ProcessConversationTitleFixture.tooManyScalars
+      )
+    )
+  }
+
   @MainActor
   func testFailedSubmissionPreservesComposer() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
@@ -470,6 +524,38 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let submittedCommandIDs = await service.submittedCommandIDs
 
     XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
+  }
+
+  @MainActor
+  func testAmbiguousToolDecisionRetryReusesPreparedCommandIdentity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      service
+    }
+    await viewModel.connect()
+    let invocationID = SignalboxToolInvocationID(
+      rawValue: MockSignalboxFixtures.invocationID
+    )
+
+    await viewModel.decideToolRequest(invocationID, decision: .approve)
+    await viewModel.decideToolRequest(invocationID, decision: .approve)
+    let submittedCommandIDs = await service.submittedCommandIDs
+
+    XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
+  }
+
+  @MainActor
+  func testProviderTextCapacityFailureDropsOverlayAndRequestsRecovery() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    ProcessStreamedTextFixture.applyCapacityFailure(to: viewModel)
+
+    XCTAssertNil(viewModel.streamedText)
+    XCTAssertEqual(viewModel.errorMessage, ProcessStreamedTextFixture.capacityError)
   }
 
   func testAmbiguousCreationRetryReusesPreparedCommandIdentity() throws {
@@ -1584,6 +1670,54 @@ private enum ProcessPresentationFixture {
   )
 }
 
+private enum ProcessConversationTitleFixture {
+  static let valid = "Imported planning"
+  static let empty = ""
+  static let leadingSpace = " Imported planning"
+  static let trailingSpace = "Imported planning "
+  static let leadingTab = "\tImported planning"
+  static let trailingTab = "Imported planning\t"
+  static let lineFeed = "Imported\nplanning"
+  static let carriageReturn = "Imported\rplanning"
+  static let nul = "Imported\0planning"
+  static let tooManyScalars = String(
+    repeating: "x",
+    count: SignalboxProcessProtocol.maximumImportedConversationTitleScalars + 1
+  )
+}
+
+private enum ProcessStreamedTextFixture {
+  static let capacityError =
+    "The live provider-text overlay exceeded its retained UTF-8 byte limit."
+  private static let fragment = String(
+    repeating: "x",
+    count: SignalboxProcessProtocol.maximumContentFragmentUTF8Bytes
+  )
+
+  @MainActor
+  static func applyCapacityFailure(to viewModel: ProcessSessionDetailViewModel) {
+    for _ in 0..<9 {
+      viewModel.apply(.providerTextDelta(delta()))
+    }
+  }
+
+  private static func delta() -> SignalboxProviderTextDelta {
+    SignalboxProviderTextDelta(
+      sessionID: try! SignalboxCanonicalUUID(
+        validating: MockSignalboxFixtures.activeSessionID
+      ),
+      turnID: try! SignalboxCanonicalUUID(
+        validating: ProcessSubmissionFixture.acceptedTurnID
+      ),
+      modelCallID: try! SignalboxCanonicalUUID(
+        validating: "abababab-0000-4000-8000-000000000005"
+      ),
+      partIndex: SignalboxCanonicalUInt64(rawValue: 0),
+      content: fragment
+    )
+  }
+}
+
 private enum ProcessSubmissionFixture {
   static let systemPrompt = "Stay concise."
   static let content = "fixture composer draft"
@@ -2107,6 +2241,77 @@ private actor AmbiguousThenAcceptingProcessService: SignalboxProcessServiceProto
       )
     }
     return try ProcessSubmissionFixture.submittedReceipt(sessionID: submission.sessionID)
+  }
+
+  func makeSynchronization(
+    sessionID: SignalboxCanonicalUUID,
+    updates: @escaping @Sendable (SignalboxSessionSynchronizationDriverUpdate) async -> Void
+  ) async -> any SignalboxSessionSynchronizing {
+    NoopProcessSynchronization()
+  }
+}
+
+private actor AmbiguousThenAcceptingToolDecisionProcessService:
+  SignalboxProcessServiceProtocol
+{
+  private var prepareCallCount = 0
+  private(set) var submittedCommandIDs: [String] = []
+
+  func testConnection() async throws {}
+
+  func listSessions(includeArchived: Bool) async throws -> [SignalboxProcessSession] {
+    []
+  }
+
+  func setArchived(
+    _ archived: Bool,
+    session: SignalboxProcessSession
+  ) async throws -> SignalboxProcessSession {
+    session
+  }
+
+  func prepareInputSubmission(
+    session: SignalboxProcessSession,
+    content: String
+  ) async throws -> SignalboxPreparedInputSubmission {
+    try ProcessSubmissionFixture.preparedSubmission()
+  }
+
+  func submit(
+    _ submission: SignalboxPreparedInputSubmission
+  ) async throws -> SignalboxInputSubmitted {
+    try ProcessSubmissionFixture.submittedReceipt(sessionID: submission.sessionID)
+  }
+
+  func prepareToolRequestDecision(
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID,
+    decision: SignalboxProcessToolDecision
+  ) async throws -> SignalboxPreparedToolRequestDecision {
+    prepareCallCount += 1
+    let commandID =
+      prepareCallCount == 1
+      ? ProcessSubmissionFixture.commandID
+      : ProcessSubmissionFixture.replacementCommandID
+    return SignalboxPreparedToolRequestDecision(
+      commandID: try SignalboxCommandID(validating: commandID),
+      sessionID: sessionID,
+      toolRequestID: toolRequestID,
+      decision: decision
+    )
+  }
+
+  func decideToolRequest(
+    _ prepared: SignalboxPreparedToolRequestDecision
+  ) async throws -> SignalboxToolRequestDecided {
+    submittedCommandIDs.append(prepared.commandID.rawValue.rawValue)
+    guard submittedCommandIDs.count > 1 else {
+      throw ProcessSubmissionFixture.ambiguousMutationError
+    }
+    return SignalboxToolRequestDecided(
+      toolRequestID: prepared.toolRequestID,
+      decision: prepared.decision
+    )
   }
 
   func makeSynchronization(

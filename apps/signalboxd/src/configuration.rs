@@ -18,6 +18,7 @@ use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
     CredentialValue,
 };
+use signalbox_process_protocol::MAX_MODEL_ALIAS_CATALOG_ENTRIES;
 use toml_edit::{DocumentMut, Table};
 use uuid::Uuid;
 
@@ -105,6 +106,7 @@ impl HubModelConfiguration {
             })
             .transpose()?
         {
+            validate_alias_count(alias_tables.len())?;
             for alias in alias_tables {
                 reject_unknown_fields(alias, &["alias_id", "selection_id"])?;
                 let identity = ModelAlias::from_uuid(required_uuid(alias, "alias_id")?);
@@ -160,6 +162,14 @@ impl HubModelConfiguration {
         self.aliases
             .iter()
             .map(|(alias, definition)| (*alias, definition.selected()))
+    }
+}
+
+fn validate_alias_count(count: usize) -> Result<(), HubModelConfigurationError> {
+    if count > MAX_MODEL_ALIAS_CATALOG_ENTRIES {
+        Err(HubModelConfigurationError::TooManyAliases)
+    } else {
+        Ok(())
     }
 }
 
@@ -228,6 +238,8 @@ pub enum HubModelConfigurationError {
     ConflictingTarget,
     /// The aliases field was not an array of tables.
     InvalidAliases,
+    /// The deployment alias catalog exceeded the process-protocol bound.
+    TooManyAliases,
     /// One alias appeared more than once.
     DuplicateAlias,
     /// An alias selected no configured direct model.
@@ -250,6 +262,7 @@ impl fmt::Display for HubModelConfigurationError {
             Self::DuplicateSelection => "model configuration repeats a direct selection",
             Self::ConflictingTarget => "model configuration gives one target conflicting meaning",
             Self::InvalidAliases => "model aliases are not an array of tables",
+            Self::TooManyAliases => "model configuration contains too many aliases",
             Self::DuplicateAlias => "model configuration repeats an alias",
             Self::DanglingAlias => "model configuration contains a dangling alias",
         })
@@ -347,7 +360,7 @@ mod tests {
 
     use super::{
         ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
-        HubModelConfigurationError, credential_bytes,
+        HubModelConfigurationError, credential_bytes, validate_alias_count,
     };
 
     const CONFIGURATION: &str = r#"
@@ -416,6 +429,18 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         assert_eq!(
             HubModelConfiguration::parse(&dangling).err(),
             Some(HubModelConfigurationError::DanglingAlias)
+        );
+    }
+
+    #[test]
+    fn configuration_enforces_the_protocol_alias_catalog_capacity() {
+        assert_eq!(
+            validate_alias_count(signalbox_process_protocol::MAX_MODEL_ALIAS_CATALOG_ENTRIES),
+            Ok(())
+        );
+        assert_eq!(
+            validate_alias_count(signalbox_process_protocol::MAX_MODEL_ALIAS_CATALOG_ENTRIES + 1),
+            Err(HubModelConfigurationError::TooManyAliases)
         );
     }
 

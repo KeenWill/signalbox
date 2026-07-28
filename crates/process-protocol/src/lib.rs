@@ -215,6 +215,9 @@ pub const MAX_SYSTEM_PROMPT_UTF8_BYTES: usize = 1_048_576;
 /// the immutable aggregate remains the authority for everything else.
 pub const MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES: usize = 256;
 
+/// Maximum entries in one deployment model-alias catalog.
+pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
+
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CanonicalUuid(Uuid);

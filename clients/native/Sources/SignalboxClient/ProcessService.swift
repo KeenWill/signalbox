@@ -4,6 +4,21 @@ import Foundation
   import SignalboxModels
 #endif
 
+func signalboxImportedConversationTitleIsAdmissible(_ title: String?) -> Bool {
+  title.map {
+    !$0.isEmpty
+      && !$0.unicodeScalars.contains(where: {
+        $0 == "\0" || $0 == "\n" || $0 == "\r"
+      })
+      && !$0.hasPrefix(" ")
+      && !$0.hasPrefix("\t")
+      && !$0.hasSuffix(" ")
+      && !$0.hasSuffix("\t")
+      && $0.unicodeScalars.count
+        <= SignalboxProcessProtocol.maximumImportedConversationTitleScalars
+  } ?? true
+}
+
 public enum SignalboxProcessServiceError: LocalizedError, Equatable {
   case unexpectedMessage(String)
   case invalidPage(String)
@@ -429,7 +444,9 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         case .modelAliasesStart where !started:
           started = true
         case .modelAliasSummary(let alias) where started:
-          guard aliases.count < 10_000 else {
+          guard
+            aliases.count < SignalboxProcessProtocol.maximumModelAliasCatalogEntries
+          else {
             throw SignalboxProcessServiceError.invalidPage(
               "The model-alias catalog exceeded the native retention cap."
             )
@@ -844,21 +861,22 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
   private func conversationIsAdmissible(
     _ conversation: SignalboxProcessConversation
   ) -> Bool {
-    guard
-      conversation.title.map({
-        !$0.isEmpty
-          && !$0.unicodeScalars.contains("\0")
-          && $0.utf8.count <= SignalboxProcessProtocol.maximumConversationTitleUTF8Bytes
-      }) ?? true
-    else {
-      return false
-    }
     switch conversation.record {
     case .native(let native):
       return native.defaultsVersion.rawValue > 0
+        && metadataTitleIsAdmissible(native.title)
     case .imported(let imported):
       return imported.entryCount.rawValue > 0
+        && signalboxImportedConversationTitleIsAdmissible(imported.title)
     }
+  }
+
+  private func metadataTitleIsAdmissible(_ title: String?) -> Bool {
+    title.map {
+      !$0.isEmpty
+        && !$0.unicodeScalars.contains("\0")
+        && $0.utf8.count <= SignalboxProcessProtocol.maximumConversationTitleUTF8Bytes
+    } ?? true
   }
 
   private func conversationCursor(

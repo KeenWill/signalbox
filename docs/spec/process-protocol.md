@@ -169,7 +169,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1` through `13`, `16`, or `17`;
+- `version`: JSON integer `1` through `13`, `16`, `17`, or `18`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -182,13 +182,13 @@ contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
 spellings decode to the same name. A version other than one through thirteen,
-sixteen, or seventeen produces an `unsupported_version` error naming the
-supported versions, then the server closes the connection. Versions fourteen and
-fifteen are reserved by other stacks and are unsupported here, so the admitted
-set has one gap; that gap is a reservation, not a retired version. Every
-response uses the request's admitted version; when no version can be admitted,
-the server error uses version one as the pre-admission fallback. A client
-speaking a version above one admits that version-one fallback only for
+sixteen, seventeen, or eighteen produces an `unsupported_version` error naming
+the supported versions, then the server closes the connection. Versions fourteen
+and fifteen are reserved by other stacks and are unsupported here, so the
+admitted set has one gap; that gap is a reservation, not a retired version.
+Every response uses the request's admitted version; when no version can be
+admitted, the server error uses version one as the pre-admission fallback. A
+client speaking a version above one admits that version-one fallback only for
 `malformed_frame` or `unsupported_version`, then applies the ordinary
 request-identity check; every other response-version mismatch fails locally. A
 server error uses `request_id = "0"` only when the incoming frame prevents
@@ -649,6 +649,11 @@ not a `session_event`, transcript entry, or terminal-evidence fact. Versions one
 through eleven never receive this message; every admitted version at or above
 twelve inherits it, exactly as they inherit every earlier follow shape.
 
+The native client retains at most 8 MiB of concatenated provider text for one
+active turn and model call. Crossing that presentation-only bound discards the
+ephemeral overlay and requests authoritative synchronization recovery; it does
+not alter durable transcript state.
+
 A replayed metadata receipt remains the exact snapshot installed by its original
 handling even if a later command has replaced the current metadata. A caller
 that needs current state issues `read_session_metadata`.
@@ -715,8 +720,8 @@ and cursor validate.
 Version eighteen's deployment model-alias catalog is one ordered sequence:
 
 1. `model_aliases_start`;
-2. zero or more `model_alias_summary { alias_id, selection_id }` messages in
-   strictly increasing alias-identity order; and
+2. zero through 10,000 `model_alias_summary { alias_id, selection_id }` messages
+   in strictly increasing alias-identity order; and
 3. `model_aliases_end { alias_count }`.
 
 Both identities are canonical UUID strings. The catalog is a current
@@ -726,6 +731,10 @@ that moment. The read exposes no provider credential, provider-native model
 identifier, or mutable configuration operation. Existing sessions and accepted
 inputs retain their previously frozen model-selection semantics when the
 deployment later changes an alias.
+
+The daemon rejects a deployment configuration containing more than 10,000
+aliases, and the native client enforces that same terminal catalog bound before
+presenting it.
 
 `session_metadata` is the successful single-session read and
 `session_metadata_replaced` is the successful write receipt. Both carry

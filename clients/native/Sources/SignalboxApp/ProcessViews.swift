@@ -544,6 +544,17 @@ private struct ProcessConversationDetailScreen: View {
   }
 }
 
+private enum ProcessSessionPresentationError: LocalizedError {
+  case streamedTextCapacityExceeded
+
+  var errorDescription: String? {
+    switch self {
+    case .streamedTextCapacityExceeded:
+      "The live provider-text overlay exceeded its retained UTF-8 byte limit."
+    }
+  }
+}
+
 @MainActor
 final class ProcessSessionDetailViewModel: ObservableObject {
   enum TranscriptRow: Identifiable {
@@ -580,6 +591,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private var synchronizationGeneration: UInt64 = 0
   private var serviceGeneration: UInt64 = 0
   private var unresolvedSubmission: SignalboxPreparedInputSubmission?
+  private var unresolvedToolDecision: SignalboxPreparedToolRequestDecision?
   private var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
   private var terminalTurnIDs: Set<SignalboxCanonicalUUID> = []
   private var acceptedInputTimelineOffsets: [SignalboxCanonicalUUID: Int] = [:]
@@ -746,21 +758,53 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         isDecidingTool = false
       }
     }
+    var preparedForAttempt: SignalboxPreparedToolRequestDecision?
+    var reusedUnresolvedDecision = false
     do {
       let requestID = try SignalboxCanonicalUUID(validating: invocationID.rawValue)
-      let prepared = try await service.prepareToolRequestDecision(
-        sessionID: session.id,
-        toolRequestID: requestID,
-        decision: decision
-      )
+      let prepared: SignalboxPreparedToolRequestDecision
+      if let unresolvedToolDecision,
+        unresolvedToolDecision.sessionID == session.id,
+        unresolvedToolDecision.toolRequestID == requestID,
+        unresolvedToolDecision.decision == decision
+      {
+        prepared = unresolvedToolDecision
+        reusedUnresolvedDecision = true
+      } else {
+        unresolvedToolDecision = nil
+        prepared = try await service.prepareToolRequestDecision(
+          sessionID: session.id,
+          toolRequestID: requestID,
+          decision: decision
+        )
+      }
+      preparedForAttempt = prepared
+      guard serviceGeneration == generation else {
+        return
+      }
       _ = try await service.decideToolRequest(prepared)
       guard serviceGeneration == generation else {
         return
       }
+      unresolvedToolDecision = nil
       errorMessage = nil
     } catch {
       guard serviceGeneration == generation else {
         return
+      }
+      if error is CancellationError {
+        unresolvedToolDecision = preparedForAttempt
+      } else if let serviceError = error as? SignalboxProcessServiceError,
+        case .mutationRetryExhausted = serviceError
+      {
+        unresolvedToolDecision = preparedForAttempt
+      } else if let openError = error as? SignalboxProcessRequestOpenError,
+        case .definitelyUnsent = openError,
+        reusedUnresolvedDecision
+      {
+        unresolvedToolDecision = preparedForAttempt
+      } else {
+        unresolvedToolDecision = nil
       }
       errorMessage = error.localizedDescription
     }
@@ -908,7 +952,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           current.turnID == delta.turnID,
           current.modelCallID == delta.modelCallID
         {
-          current.append(delta)
+          guard current.append(delta) else {
+            streamedText = nil
+            throw ProcessSessionPresentationError.streamedTextCapacityExceeded
+          }
           streamedText = current
         } else {
           streamedText = SignalboxProcessStreamedText(delta: delta)
@@ -1020,6 +1067,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     isDecidingTool = false
     errorMessage = nil
     unresolvedSubmission = nil
+    unresolvedToolDecision = nil
     streamedText = nil
     materializedAcceptedInputIDs = []
     terminalTurnIDs = []

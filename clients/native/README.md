@@ -52,7 +52,10 @@ export SIGNALBOX_SOCKET_PATH='/absolute/path/to/signalbox.sock'
 
 There is no owner-approved network transport reachable by a remote or mobile
 client. iPhone and iPad builds run against the in-memory v18 harness; real
-remote/mobile connectivity remains an owner design gate tracked in the backlog.
+remote/mobile connectivity remains an owner design gate recorded in
+[Protocols and persistence](../../docs/open-questions.md#protocols-and-persistence);
+the non-authoritative backlog tracks Tailscale as near-local direction and
+iOS/iPad follow-on.
 
 ## Build and test
 

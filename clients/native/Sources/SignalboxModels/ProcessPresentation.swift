@@ -166,8 +166,19 @@ public struct SignalboxProcessStreamedText: Identifiable, Equatable, Sendable {
     "\(turnID.rawValue)-\(modelCallID.rawValue)"
   }
 
-  public mutating func append(_ delta: SignalboxProviderTextDelta) {
+  @discardableResult
+  public mutating func append(_ delta: SignalboxProviderTextDelta) -> Bool {
+    let (retainedBytes, overflowed) = text.utf8.count.addingReportingOverflow(
+      delta.content.utf8.count
+    )
+    guard
+      !overflowed,
+      retainedBytes <= SignalboxProcessProtocol.maximumStreamedTextUTF8Bytes
+    else {
+      return false
+    }
     text += delta.content
+    return true
   }
 }
 

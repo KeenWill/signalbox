@@ -12,6 +12,9 @@ public enum SignalboxProcessProtocol {
   public static let maximumMetadataSummaryUTF8Bytes = maximumMetadataUTF8Bytes
   public static let maximumConversationPageSize: UInt64 = 100
   public static let maximumConversationTitleUTF8Bytes = 262_144
+  public static let maximumImportedConversationTitleScalars = 256
+  public static let maximumModelAliasCatalogEntries = 10_000
+  public static let maximumStreamedTextUTF8Bytes = 8 * 1024 * 1024
 }
 
 public enum SignalboxProcessProtocolVersion: UInt64, Codable, CaseIterable, Sendable {
