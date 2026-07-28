@@ -368,6 +368,59 @@ async fn inv_035_error_item_marker_suppresses_streamed_continuation() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: two independent object fields each ending in a distinct credential
+/// marker fail closed — a following value could complete either, and the
+/// single dropped chain cannot track both.
+#[tokio::test]
+async fn inv_035_two_independent_sibling_markers_fail_closed() {
+    let result = execute_scenario(
+        "two_independent_sibling_markers",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: an additive credential marker on a `thread.started` event governs
+/// the following final text.
+#[tokio::test]
+async fn inv_035_thread_started_additive_field_marker_suppresses_the_value() {
+    let result = execute_scenario(
+        "credential_split_across_thread_started_field",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// A streamed completion whose final text is empty and whose only provisional
+/// content was a held-credential `[redacted]` placeholder — replaced by an
+/// empty capture — fails closed as ResponseUnintelligible, not a contentless
+/// Completed.
+#[tokio::test]
+async fn streamed_empty_completion_with_held_credential_is_unintelligible() {
+    let result = execute_scenario(
+        "streamed_empty_final_text_with_held_credential",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let cause = response_unintelligible(&boundary_loss(&result.evidence).cause);
+    assert!(cause.contains("no completion material"));
+}
+
 /// INV-035: a marker-bearing object field that sorts before a benign sibling
 /// (so a key-sorted concatenation would drop the marker) still governs the
 /// following final text — sibling fields are seeded as independent units.

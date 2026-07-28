@@ -1157,7 +1157,17 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
         }
         let newline = available.iter().position(|byte| *byte == b'\n');
         let take = newline.map_or(available.len(), |index| index + 1);
-        if line.len().saturating_add(take) > limit {
+        // Only the payload counts toward the event limit — the line delimiter
+        // (`\n`, or a `\r\n` pair) is stripped before decoding, so including it
+        // would reject an exactly-`limit`-byte event in ordinary
+        // newline-terminated JSONL while admitting the same event unterminated
+        // at EOF.
+        let payload = match newline {
+            Some(index) if index > 0 && available[index - 1] == b'\r' => index - 1,
+            Some(index) => index,
+            None => available.len(),
+        };
+        if line.len().saturating_add(payload) > limit {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Codex JSONL event exceeded the {limit}-byte limit"),
@@ -1568,6 +1578,48 @@ mod tests {
         let error = read_bounded_line(&mut reader, 4)
             .await
             .expect_err("the fifth byte exceeds the configured event bound");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// A payload of exactly the limit followed by a newline is admitted: the
+    /// delimiter does not count toward the event limit, so an exactly-sized
+    /// event is accepted in ordinary newline-terminated JSONL just as it is at
+    /// EOF without a delimiter.
+    #[tokio::test]
+    async fn bounded_line_admits_an_exactly_sized_payload_with_a_delimiter() {
+        let input = b"1234\n".as_slice();
+        let mut reader = tokio::io::BufReader::new(input);
+
+        let line = read_bounded_line(&mut reader, 4)
+            .await
+            .expect("an exactly-limit payload plus its delimiter is admitted");
+
+        assert_eq!(line.as_deref(), Some(b"1234".as_slice()));
+    }
+
+    /// The `\r` of a `\r\n` delimiter also does not count toward the limit.
+    #[tokio::test]
+    async fn bounded_line_admits_an_exactly_sized_payload_with_crlf() {
+        let input = b"1234\r\n".as_slice();
+        let mut reader = tokio::io::BufReader::new(input);
+
+        let line = read_bounded_line(&mut reader, 4)
+            .await
+            .expect("an exactly-limit payload plus its CRLF delimiter is admitted");
+
+        assert_eq!(line.as_deref(), Some(b"1234".as_slice()));
+    }
+
+    /// A payload one byte over the limit is still rejected.
+    #[tokio::test]
+    async fn bounded_line_rejects_an_oversize_payload_with_a_delimiter() {
+        let input = b"12345\n".as_slice();
+        let mut reader = tokio::io::BufReader::new(input);
+
+        let error = read_bounded_line(&mut reader, 4)
+            .await
+            .expect_err("a payload past the limit is rejected even with a delimiter");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
