@@ -10,6 +10,32 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-28 — Expose the dev-instance client from every shell directory
+
+**Context.** The first hands-on use of
+[the recorded dev-instance choice](#2026-07-26--dev-instance-under-devenvs-native-process-manager)
+still required a developer to derive the managed socket path and spell the
+workspace Cargo invocation. Its credential provisioning examples also wrote
+directly to the live files, so a failed producer or editor could truncate a
+previously usable credential.
+
+**Decision.** The devenv shell exports the daemon's shared socket path as
+`SIGNALBOX_SOCKET_PATH` and provides a `signalbox` script that runs the
+working-tree client through the workspace manifest, independent of the caller's
+current directory. Cargo remains responsible for rebuilding changed sources.
+Credential provisioning stages an owner-only temporary beside each destination
+and replaces the live file only after `gh auth token` or the editor succeeds;
+editing begins from the existing Anthropic file when one is present.
+
+**Rejected alternatives.** Requiring `--socket` and a hand-derived runtime path
+keeps routine client use needlessly checkout-specific. Installing a built
+artifact can silently lag working-tree changes. Direct redirection or editing of
+a live credential exposes a partial or empty file when its producer fails.
+
+**Affects.** `devenv.nix` shell ergonomics and the README's dev-instance
+operational guidance only; daemon, domain, persistence, and protocol behavior do
+not change.
+
 ## 2026-07-28 — Bound Codex stream-redaction work and name its shape limit
 
 **Context.** The Codex adapter retains up to 64 KiB of an incomplete credential

@@ -141,6 +141,10 @@ let
   scrub = builtins.concatStringsSep " " (map (name: "-u ${name}") refusedVariables);
 
   openssl = "${pkgs.openssl}/bin/openssl";
+  # The client helper preserves its caller's directory, where rustup would not
+  # discover the workspace toolchain file.
+  workspaceRustToolchain =
+    (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain.channel;
 in
 
 {
@@ -163,6 +167,38 @@ in
   # .github/workflows/rust.yml.
   packages = [ pkgs.sccache ];
   env.RUSTC_WRAPPER = "sccache";
+
+  # The terminal client and the managed daemon share one socket without the
+  # developer having to derive its path from DEVENV_RUNTIME.
+  env.SIGNALBOX_SOCKET_PATH = daemonSocketPath;
+
+  # Build from the workspace so a caller project's Cargo configuration is not
+  # discovered. The build and resolution run inside a command substitution, an
+  # implicit subshell, so its `cd` never leaks: the exec below still runs from
+  # the caller's original directory, and client arguments containing relative
+  # paths keep their expected base. The executable path comes from Cargo's own
+  # build output rather than an assumed target/debug: a developer with
+  # `build.target` in their Cargo configuration, or `CARGO_BUILD_TARGET` in the
+  # environment, gets the binary under target/<triple>/debug instead, and a
+  # hard-coded target/debug path would then either fail outright or silently
+  # exec a stale binary left over from an earlier build. Resolution and the
+  # matching refusal for a target this host cannot run follow the same
+  # approach as the dev-instance daemon launcher below, factored into
+  # tooling/resolve-cargo-bin.sh so it has its own regression coverage
+  # (tooling/test_resolve_cargo_bin.py).
+  scripts.signalbox = {
+    description = "Run the Signalbox terminal client from the working tree.";
+    exec = ''
+      executable="$(
+        cd "$DEVENV_ROOT" || exit $?
+        env RUSTUP_TOOLCHAIN=${shellArg workspaceRustToolchain} \
+          "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
+            "$DEVENV_ROOT/Cargo.toml" "$DEVENV_ROOT/target" \
+            signalbox-client signalbox
+      )" || exit $?
+      exec "$executable" "$@"
+    '';
+  };
 
   languages.python = {
     enable = true;
