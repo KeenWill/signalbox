@@ -3,7 +3,7 @@
 use serde_json::Value;
 use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink};
 
-const REDACTED: &str = "[redacted]";
+pub(crate) const REDACTED: &str = "[redacted]";
 /// A valid-JSON stand-in for suppressed tool arguments and objects whose raw
 /// form still carries a credential shape after structural redaction, so the
 /// `arguments_json` raw-JSON contract is never broken by a bare sentinel.
@@ -1923,6 +1923,7 @@ fn trailing_marker_prefix(text: &str, marker: &str, ascii_case_insensitive: bool
 
 #[cfg(test)]
 mod tests {
+
     use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink};
 
     use super::{

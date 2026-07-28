@@ -12,7 +12,7 @@ use signalbox_model_runtime::{
     validate_provider_json_nesting,
 };
 
-use crate::redaction::{RedactingSink, redact_text, trailing_credential_context};
+use crate::redaction::{REDACTED, RedactingSink, redact_text, trailing_credential_context};
 use crate::status::classify_error;
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{
@@ -144,8 +144,17 @@ impl<C: Clone> EventDecoder<C> {
             }
             "turn.started" => {}
             "item.started" | "item.updated" => {
-                let event: ItemLifecycleEvent = decode(value)?;
-                validate_item_identity(&event.item)?;
+                let identity: ItemLifecycleEvent = decode(value.clone())?;
+                validate_item_identity(&identity.item)?;
+                // The adapter interprets only the identity of a lifecycle
+                // event, but an additively-tolerated one may carry
+                // provider-controlled string fields whose credential marker
+                // would otherwise seed nothing; fold them into the lookbehind.
+                let mut leaves = Vec::new();
+                if let Some(item) = value.get("item") {
+                    collect_credential_content(item, true, &mut leaves);
+                }
+                fold_dropped_content(sink, &leaves);
             }
             "item.completed" => {
                 let identity: ItemLifecycleEvent = decode(value.clone())?;
@@ -153,6 +162,20 @@ impl<C: Clone> EventDecoder<C> {
                 let event: ItemEvent = decode(value.clone())?;
                 match event.item.details {
                     ItemDetails::AgentMessage { text } => {
+                        // Only the last agent message is decoded as the response
+                        // envelope, but an earlier one being superseded here
+                        // must not silently drop a credential it carries: a
+                        // marker ending a displaced message and its value
+                        // beginning the final one would otherwise reconstruct
+                        // across them. Fold any displaced text (and id) into the
+                        // lookbehind before replacing.
+                        if let Some(superseded) = self.agent_message.take() {
+                            let mut leaves = vec![superseded.as_str()];
+                            if let Some(previous_id) = &self.message_id {
+                                leaves.push(previous_id.as_str());
+                            }
+                            fold_dropped_content(sink, &leaves);
+                        }
                         // The id is retained raw and sanitized against the
                         // held stream state in `completed`, so a value that
                         // extends a credential marker from earlier reasoning
@@ -190,41 +213,17 @@ impl<C: Clone> EventDecoder<C> {
                     ItemDetails::Other => {
                         // An unsupported item is dropped from the output, but
                         // any credential-bearing text it carries still marks
-                        // following output as a secret. The item is unmodeled,
-                        // so provider text can live in any field (`text`,
-                        // `message`, `aggregated_output`, `result`, future
-                        // additive fields) or nested within one; collect *every*
-                        // string leaf — recursively — except the `id`/`type`
-                        // metadata keys, and feed them into the match-only
-                        // lookbehind. The adapter has no ordering semantics for
-                        // an unmodeled item's fields, so a benign field must not
-                        // erase a marker another establishes: benign fields are
-                        // fed first and marker-bearing fields last, and two
-                        // independent markers we cannot chain jointly fail
-                        // closed.
-                        let mut contents = Vec::new();
+                        // following output as a secret. Its shape is unmodeled —
+                        // provider text can live in any field or nested within
+                        // one, and ordered leaves can jointly form a marker no
+                        // single leaf shows — so fail closed on any
+                        // credential-relevant content rather than guessing how
+                        // the leaves concatenate.
+                        let mut leaves = Vec::new();
                         if let Some(item) = value.get("item") {
-                            collect_credential_content(item, true, &mut contents);
+                            collect_credential_content(item, true, &mut leaves);
                         }
-                        let markers = contents
-                            .iter()
-                            .filter(|content| !trailing_credential_context(content).is_empty())
-                            .count();
-                        if markers > 1 {
-                            sink.suppress_remaining();
-                        } else {
-                            for content in contents
-                                .iter()
-                                .filter(|c| trailing_credential_context(c).is_empty())
-                                .chain(
-                                    contents
-                                        .iter()
-                                        .filter(|c| !trailing_credential_context(c).is_empty()),
-                                )
-                            {
-                                sink.extend_dropped_context(content);
-                            }
-                        }
+                        fold_dropped_content(sink, &leaves);
                     }
                 }
             }
@@ -250,7 +249,16 @@ impl<C: Clone> EventDecoder<C> {
                 let event: ThreadError = decode(value)?;
                 self.terminal = Some(CliTerminal::Unrecoverable(event.message));
             }
-            _ => {}
+            _ => {
+                // An additively-tolerated unknown top-level event is dropped,
+                // but a credential marker in its provider-controlled strings
+                // still marks the following final text as a secret; fold its
+                // string leaves into the lookbehind, failing closed on any
+                // credential-relevant content just as an unsupported item does.
+                let mut leaves = Vec::new();
+                collect_credential_content(&value, false, &mut leaves);
+                fold_dropped_content(sink, &leaves);
+            }
         }
         Ok(())
     }
@@ -370,10 +378,21 @@ impl<C: Clone> EventDecoder<C> {
         // itself, is suppressed instead of surfacing as `ProviderMessageId`
         // beside the independently redacted text.
         let message_id_context = trailing_credential_context(&envelope.text);
-        let message_id = self
-            .message_id
-            .take()
-            .map(|id| sink.redact_provider_id(message_id_context, &id));
+        let message_id = self.message_id.take().map(|id| {
+            // The id both continues the final text (redact_provider_id's held
+            // + preceding-text join) and, as the field preceding the content
+            // in terminal evidence, can be continued by it: an id ending
+            // `api_` beside content opening `key=opaque` reconstructs
+            // `api_key=opaque` across the two fields. Redact the id in that
+            // second direction too, breaking the shape before it is emitted.
+            let sanitized = sink.redact_provider_id(message_id_context, &id);
+            let id_precedes_text = [id.as_str(), envelope.text.as_str()].concat();
+            if sanitized == id && redact_text(&id_precedes_text) != id_precedes_text {
+                REDACTED.to_string()
+            } else {
+                sanitized
+            }
+        });
         let reported_finish = match envelope.outcome {
             EnvelopeOutcome::Refused => FinishReason::Refusal,
             EnvelopeOutcome::Completed if envelope.tool_calls.is_empty() => FinishReason::EndTurn,
@@ -629,11 +648,10 @@ fn validate_item_identity(item: &ItemIdentity) -> Result<(), DecodeFailure> {
     Ok(())
 }
 
-/// Collects every string leaf carried by an unmodeled item's JSON in document
-/// order, so credential text in any field — present or future, top-level or
-/// nested — reaches the redaction lookbehind. The `id`/`type` metadata keys of
-/// the item object itself are skipped: they name the item, not its content, and
-/// their bytes could otherwise break a marker the content carries.
+/// Collects every string leaf carried by a JSON value in document order. When
+/// `is_item_root` is set, the `id`/`type` metadata keys of the item object are
+/// skipped: they name the item, not its content, and their bytes could
+/// otherwise break a marker the content carries.
 fn collect_credential_content<'a>(value: &'a Value, is_item_root: bool, out: &mut Vec<&'a str>) {
     match value {
         Value::String(text) => out.push(text),
@@ -652,6 +670,25 @@ fn collect_credential_content<'a>(value: &'a Value, is_item_root: bool, out: &mu
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
+}
+
+/// Folds provider-controlled content the adapter drops without interpreting —
+/// an unsupported completed item, an ignored `item.started`/`item.updated`
+/// lifecycle event, an unknown top-level event, or an agent message superseded
+/// by a later one — into the redaction lookbehind. The string leaves are joined
+/// in document order (so adjacency within an ordered container is preserved: an
+/// array `["api", "_key="]` jointly forms the marker `api_key=` its leaves do
+/// not show individually) and seeded as dropped context, exactly as a dropped
+/// reasoning or error item is. A following value that completes a marker ending
+/// the joined content is then suppressed, while credential-clean content — a
+/// benign prefix the streaming lookbehind holds but no later value completes —
+/// flows unchanged. The pinned CLI emits none of these shapes, so this only
+/// guards a drifted or hostile stream.
+fn fold_dropped_content<C: Clone>(sink: &mut RedactingSink<'_, C>, leaves: &[&str]) {
+    if leaves.is_empty() {
+        return;
+    }
+    sink.extend_dropped_context(&leaves.concat());
 }
 
 /// Requires a string-carried tool-argument payload to hold one JSON object
