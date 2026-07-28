@@ -525,7 +525,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fixtures::BUFFERED_ANSWER
             ));
             completed();
+            // Settle after the terminal marker so the adapter has consumed it
+            // before the readiness file lets the marker-watching cancellation
+            // fire; otherwise a loaded runner can kill the process group before
+            // the terminal line is read, and the exchange races to
+            // StreamEndedWithoutTerminalMarker instead of the completion the
+            // work-first rule guarantees.
+            std::thread::sleep(Duration::from_secs(1));
             std::fs::write("fake-codex-completion-ready", "ready\n")?;
+            std::thread::sleep(Duration::from_secs(60));
         }
         "inherited_stderr" => {
             envelope(&format!(
