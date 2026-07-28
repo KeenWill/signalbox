@@ -39,14 +39,19 @@ adds protocol version thirteen, verified through PR #302
 (`agent/mid-turn-steering`). Versions fourteen and fifteen remain allocated to
 concurrent protocol stacks. The unified conversation-listing surface adds
 version sixteen for the single read-only `list_conversations` request, verified
-through PR #304 (`agent/unified-conversation-listing`). The implementation here
-speaks versions one through thirteen and sixteen, and its terminal client
-selects version sixteen. Its `search` verb over version four's metadata list was
-verified through PR #283 (`agent/session-search-cli`; terminal client surface
-only). This page's version-four last-writer member spelling was verified through
-PR #288 (`agent/audit-fix-docs-coherence`). This page is the normative boundary
-between a local client process and `signalboxd`; domain values, PostgreSQL
-records, and wire messages remain distinct representations.
+through PR #304 (`agent/unified-conversation-listing`). The context-compaction
+stack takes the next genuinely free protocol number, version seventeen, after
+versions fourteen and fifteen were allocated to concurrent stacks and version
+sixteen merged; it adds `compact_session`, its receipt, and the summary
+transcript projection, verified against `agent/context-compaction-protocol`. The
+implementation here speaks versions one through thirteen, sixteen, and
+seventeen, and its terminal client selects version seventeen. Its `search` verb
+over version four's metadata list was verified through PR #283
+(`agent/session-search-cli`; terminal client surface only). This page's
+version-four last-writer member spelling was verified through PR #288
+(`agent/audit-fix-docs-coherence`). This page is the normative boundary between
+a local client process and `signalboxd`; domain values, PostgreSQL records, and
+wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -158,7 +163,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1` through `13`, or `16`;
+- `version`: JSON integer `1` through `13`, `16`, or `17`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -170,18 +175,18 @@ and members with the wrong JSON type fail explicitly (INV-033). A frame may
 contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
-spellings decode to the same name. A version other than one through thirteen or
-sixteen produces an `unsupported_version` error naming the supported versions,
-then the server closes the connection. Every response uses the request's
-admitted version; when no version can be admitted, the server error uses version
-one as the pre-admission fallback. A client speaking a version above one admits
-that version-one fallback only for `malformed_frame` or `unsupported_version`,
-then applies the ordinary request-identity check; every other response-version
-mismatch fails locally. A server error uses `request_id = "0"` only when the
-incoming frame prevents recovery of a valid nonzero identity; zero is never a
-valid client identity or success-response identity. Leading zeroes, a plus sign,
-whitespace, and any spelling other than the shortest ASCII decimal form are
-invalid.
+spellings decode to the same name. A version other than one through thirteen,
+sixteen, or seventeen produces an `unsupported_version` error naming the
+supported versions, then the server closes the connection. Every response uses
+the request's admitted version; when no version can be admitted, the server
+error uses version one as the pre-admission fallback. A client speaking a
+version above one admits that version-one fallback only for `malformed_frame` or
+`unsupported_version`, then applies the ordinary request-identity check; every
+other response-version mismatch fails locally. A server error uses
+`request_id = "0"` only when the incoming frame prevents recovery of a valid
+nonzero identity; zero is never a valid client identity or success-response
+identity. Leading zeroes, a plus sign, whitespace, and any spelling other than
+the shortest ASCII decimal form are invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -199,6 +204,7 @@ that variant.
 | `create_session`                        | 1+              | `command_id` (canonical UUID string), `initial_model_selection` (selection object); version nine and above also require `system_prompt` (string or null)                                                                                                             | Create an owner-initiated session with no ancestry and establish defaults version one.                                                                                                                                                            |
 | `list_sessions`                         | 1+              | none                                                                                                                                                                                                                                                                 | Read all current sessions as legacy summaries, ordered by session identity.                                                                                                                                                                       |
 | `submit_input`                          | 1+; delivery 13 | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string, or null only for version-thirteen steering), and optional version-thirteen `delivery`                                             | Submit exact owner text with the selected closed delivery intent; omitting `delivery` retains `StartWhenNoActiveTurn`.                                                                                                                            |
+| `compact_session`                       | 17              | `command_id` and `session_id` (canonical UUID strings), `through_position` (positive canonical decimal string or null)                                                                                                                                               | Append a dedicated-call summary through the exact requested safe position, or through the latest safe boundary for null, without deleting or rewriting transcript history.                                                                        |
 | `read_transcript`                       | 1+              | `session_id` (canonical UUID string)                                                                                                                                                                                                                                 | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                                                                                                    |
 | `follow_session`                        | 1+              | `session_id` (canonical UUID string)                                                                                                                                                                                                                                 | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session; versions twelve and above additionally receive ephemeral provider-text deltas. |
 | `list_session_metadata`                 | 4               | `required_tags` (string array), `title_contains` (string or null), `include_archived` (boolean), `page_size` (canonical decimal string), `after_session_id` (canonical UUID string or null)                                                                          | Read one filtered metadata-summary page in session-identity order.                                                                                                                                                                                |
@@ -494,17 +500,19 @@ twelve retains every earlier admitted request and adds no request variant.
 Version thirteen retains every earlier admitted request and adds only the
 optional delivery member on `submit_input` plus its steering receipt. Version
 sixteen retains every earlier admitted request and adds only the read-only
-`list_conversations`; versions fourteen and fifteen remain reserved by
-concurrent stacks and unsupported here. A metadata request carried under version
-one, two, or three, an import request carried under version one through four, a
-defaults-replacement request carried under version one through five, a
+`list_conversations`. Version seventeen retains every version-sixteen request
+and adds only `compact_session`; versions fourteen and fifteen remain allocated
+to concurrent stacks and unsupported here. A metadata request carried under
+version one, two, or three, an import request carried under version one through
+four, a defaults-replacement request carried under version one through five, a
 reconciliation request carried under version one through six, a turn-control
 request carried under version one through seven, a defaults read carried under
 version one through eight, an imported-frontier creation request carried under
 any version one through nine, a review request carried under any version one
 through ten, a delivery-bearing submit carried under any version before
-thirteen, or a unified-listing request carried under any version one through
-twelve, is classified as `malformed_frame` because its supported version does
+thirteen, a unified-listing request carried under any version one through
+twelve, or a compaction request carried under any admitted version before
+seventeen, is classified as `malformed_frame` because its supported version does
 not admit that request variant; it never reaches application construction. A
 version-one `submit_input`, `read_transcript`, or `follow_session` request that
 selects imported ancestry returns a version-one `unsupported_version` error
@@ -540,7 +548,12 @@ receive only older-version-compatible transition events; its next authoritative
 snapshot request encounters this same gate. Versions six and above preserve
 every earlier shape and admit the new entry. A session system prompt adds no
 transcript entry and therefore raises no read or follow gate: transcripts of
-prompted sessions remain representable in every admitted version.
+prompted sessions remain representable in every admitted version. A
+version-one-through-sixteen `read_transcript`, `follow_session`, or
+`submit_input` request targeting history that contains a context summary returns
+`unsupported_version` naming version seventeen before snapshot construction or
+mutation; version seventeen admits that entry without hiding any physical
+transcript member.
 
 Submitted `content` is limited to 1 MiB of UTF-8. The daemon applies that
 boundary before application construction or mutation and returns
@@ -569,7 +582,8 @@ Message objects carry a required string `type` and reject fields not admitted by
 that variant. Every accepted non-review mutation request — `create_session`,
 `create_session_from_imported_frontier`, `submit_input`, `reconcile_turn`,
 `stop_turn`, `decide_tool_request`, `replace_session_metadata`,
-`replace_session_defaults`, or `import_conversation` — produces exactly one of:
+`replace_session_defaults`, `compact_session`, or `import_conversation` —
+produces exactly one of:
 
 - `session_created` with `session_id`;
 - `input_submitted` with `session_id`, `accepted_input_id`,
@@ -589,6 +603,11 @@ that variant. Every accepted non-review mutation request — `create_session`,
   `defaults_version`, complete `model_selection`, and
   `dangerous_tool_auto_approval`; at version nine and above it also requires the
   installed `system_prompt` (string or null), a member absent below nine;
+- version-seventeen `session_compacted` with `session_id`,
+  `context_compaction_id`, dedicated `model_call_id`, exact positive
+  `through_position`, appended `summary_entry_id`, and complete
+  `result_frontier_id`; an equal replay returns these original values before
+  resolving configuration needed only for a fresh call;
 - `conversation_import_inserted` with `imported_conversation_id`;
 - `conversation_import_already_imported` with `imported_conversation_id`; or
 - `error` with a stable `code` and a non-sensitive `message`.
@@ -779,7 +798,7 @@ The error-code set in all admitted versions is:
 | `internal`            | Fail-closed corruption or a daemon defect stopped the request.                                                                         |
 
 For `create_session`, `create_session_from_imported_frontier`, `submit_input`,
-`reconcile_turn`, `stop_turn`, `decide_tool_request`,
+`compact_session`, `reconcile_turn`, `stop_turn`, `decide_tool_request`,
 `replace_session_metadata`, `replace_session_defaults`, and every review
 mutation, a lost commit response maps to `commit_ambiguous`; the client retries
 the exact command identity and payload to discover the recorded outcome. A
@@ -891,7 +910,11 @@ admits
 `tool_denied { tool_request_id, content }`, and
 `tool_closed { tool_request_id, content }`. Versions six and above additionally
 admit `model_identity_changed { turn_id, defaults_version, selected_model_id }`,
-naming the first started turn bound to a changed frozen direct selection. A
+naming the first started turn bound to a changed frozen direct selection.
+Version seventeen additionally admits the text-bearing
+`context_summary { model_call_id, first_source_session_id, first_entry_id, through_source_session_id, through_entry_id }`;
+its content follows through the ordinary `transcript_content` sequence, and its
+source-qualified endpoints and call identify the exact recorded provenance. A
 native text member begins with
 `transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
 `entry` is either `user { accepted_input_id, turn_id }` or
@@ -1153,7 +1176,7 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack uses version sixteen; version four's
+The `signalbox` binary in this stack uses version seventeen; version four's
 single-session metadata read and metadata replacement remain core protocol and
 daemon capabilities without terminal-client UX, while its paginated metadata
 list is the `search` verb below. Older clients remain supported for
@@ -1166,6 +1189,7 @@ client accepts a global `--socket <path>` override or reads
 - `list`;
 - `search [--title <substring>] [--tag <tag>]... [--include-archived] [--limit <decimal>] [--after <session-uuid>]`;
 - `conversations [--title <substring>] [--origin <native|imported|all>] [--include-archived] [--limit <decimal>] [--after <native|imported>:<uuid>]`;
+- `compact <session-uuid> [--through-position <positive-decimal>] [--command-id <uuid>]`;
 - `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `send <session-uuid> --queue [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
 - `steer <session-uuid> [--command-id <uuid> --turn <uuid>]`;

@@ -1,7 +1,6 @@
 //! Local process-protocol serving and durable outbox fan-out.
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     fmt,
     future::Future,
@@ -63,9 +62,10 @@ use signalbox_model_provider_runtime::{
 };
 use signalbox_persistence::{
     context_compaction::{
-        AppliedContextCompaction, ContextCompactionRepository, ContextCompactionRepositoryError,
-        FailedContextCompactionDisposition, PrepareContextCompactionOutcome,
-        PrepareContextCompactionRequest, PreparedContextCompaction,
+        AppliedContextCompaction, ContextCompactionCommandLookup, ContextCompactionRepository,
+        ContextCompactionRepositoryError, FailedContextCompactionDisposition,
+        PrepareContextCompactionOutcome, PrepareContextCompactionRequest,
+        PreparedContextCompaction,
     },
     conversation_import::{
         ImportedConversationIdentityCollision, ImportedConversationRepository,
@@ -3218,6 +3218,44 @@ async fn handle_compact_session<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    let command = DurableCommandId::from_uuid(command_id.into_uuid());
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let requested_through_position = through_position.map(CanonicalU64::value);
+    let repository = ContextCompactionRepository::new(services.pool.clone());
+    match repository
+        .lookup_command(command, session, requested_through_position)
+        .await
+    {
+        Ok(ContextCompactionCommandLookup::Unseen) => {}
+        Ok(ContextCompactionCommandLookup::Replayed(applied)) => {
+            return write_context_compaction_receipt(
+                writer, version, request_id, session_id, applied,
+            )
+            .await;
+        }
+        Ok(ContextCompactionCommandLookup::ConflictingReuse) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Ok(ContextCompactionCommandLookup::Pending | ContextCompactionCommandLookup::Failed) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await;
+        }
+        Err(error) => {
+            return write_context_compaction_repository_error(writer, version, request_id, error)
+                .await;
+        }
+    }
     let Some(credential_reference) = services
         .context_compaction_credential_reference
         .as_ref()
@@ -3231,7 +3269,6 @@ where
         )
         .await;
     };
-    let session = SessionId::from_uuid(session_id.into_uuid());
     let defaults = match ProcessReadRepository::new(services.pool.clone())
         .read_session_defaults(session, None)
         .await
@@ -3290,12 +3327,11 @@ where
             .await;
         }
     };
-    let repository = ContextCompactionRepository::new(services.pool.clone());
     let prepared = loop {
         let request = PrepareContextCompactionRequest {
-            command: DurableCommandId::from_uuid(command_id.into_uuid()),
+            command,
             session,
-            requested_through_position: through_position.map(CanonicalU64::value),
+            requested_through_position,
             defaults_version: defaults.version(),
             selection,
             target,
@@ -3588,28 +3624,12 @@ async fn load_context_compaction_range(
     pool: &PgPool,
     prepared: &PreparedContextCompaction,
 ) -> Result<String, ContextCompactionRangeLoadError> {
-    let transcript = ProcessReadRepository::new(pool.clone())
-        .read_transcript(prepared.session())
-        .await?
-        .ok_or(ContextCompactionRangeLoadError::Integrity)?;
-    let entries_by_reference = transcript
-        .entries()
-        .iter()
-        .map(|entry| (transcript_entry_reference(entry), entry))
-        .collect::<BTreeMap<_, _>>();
-    if entries_by_reference.len() != transcript.entries().len() {
-        return Err(ContextCompactionRangeLoadError::Integrity);
-    }
-    let entries = prepared
-        .summarized_entries()
-        .iter()
-        .map(|reference| {
-            entries_by_reference
-                .get(reference)
-                .copied()
-                .ok_or(ContextCompactionRangeLoadError::Integrity)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let entries = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(
+            prepared.summarized_positions(),
+            prepared.summarized_entries(),
+        )
+        .await?;
     let Some(first) = entries.first() else {
         return Err(ContextCompactionRangeLoadError::Integrity);
     };
@@ -3622,7 +3642,7 @@ async fn load_context_compaction_range(
         return Err(ContextCompactionRangeLoadError::Integrity);
     }
     let values = entries
-        .into_iter()
+        .iter()
         .map(context_compaction_entry_value)
         .collect::<Vec<_>>();
     serde_json::to_string(&values).map_err(|_| ContextCompactionRangeLoadError::Integrity)
@@ -3925,16 +3945,20 @@ const fn context_compaction_failure_disposition(
     error: ContextCompactionModelError,
 ) -> FailedContextCompactionDisposition {
     match error {
-        ContextCompactionModelError::CancelledBeforeSend => {
+        ContextCompactionModelError::CancelledBeforeSend
+        | ContextCompactionModelError::CancellationConfirmed => {
             FailedContextCompactionDisposition::Cancelled
         }
-        ContextCompactionModelError::CorrelationMismatch
-        | ContextCompactionModelError::NotCompleted => {
+        ContextCompactionModelError::BoundaryLoss
+        | ContextCompactionModelError::CorrelationMismatch => {
             FailedContextCompactionDisposition::Ambiguous
         }
+        ContextCompactionModelError::Refused => FailedContextCompactionDisposition::Refused,
         ContextCompactionModelError::UnconfiguredTarget
         | ContextCompactionModelError::PreparationFailed
         | ContextCompactionModelError::PreparationDefect
+        | ContextCompactionModelError::ProviderError
+        | ContextCompactionModelError::ProvenUnsent
         | ContextCompactionModelError::ProviderTargetSubstituted
         | ContextCompactionModelError::IncompleteSummary
         | ContextCompactionModelError::NonTextSummary
@@ -7898,14 +7922,16 @@ mod tests {
         acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
         acquire_review_command_permit, acquire_review_command_permit_while_buffered,
         acquire_snapshot_reader_permit, admits_provider_text_deltas, admitted_user_content,
-        canonical_review_request_digest, consume_snapshot_queued_update, execute_import,
-        inspect_connection_completion, map_rejection, read_frame_line,
-        replacement_model_is_admitted, required_protocol_version_for_selected_session,
-        run_until_shutdown, snapshot_reader_capacity, wire_model_call_state, wire_tool_decision,
-        wire_turn_state, wire_uuid, write_content, write_snapshot_spool_error,
-        write_transcript_entry,
+        canonical_review_request_digest, consume_snapshot_queued_update,
+        context_compaction_failure_disposition, execute_import, inspect_connection_completion,
+        map_rejection, read_frame_line, replacement_model_is_admitted,
+        required_protocol_version_for_selected_session, run_until_shutdown,
+        snapshot_reader_capacity, wire_model_call_state, wire_tool_decision, wire_turn_state,
+        wire_uuid, write_content, write_snapshot_spool_error, write_transcript_entry,
     };
+    use signalbox_model_provider_runtime::ContextCompactionModelError;
     use signalbox_persistence::{
+        context_compaction::FailedContextCompactionDisposition,
         outbox::{
             DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEventKind,
             DispatchedReconciliationOperation, DispatchedToolBatchState,
@@ -7919,6 +7945,32 @@ mod tests {
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
 
     struct PendingResponseWriter;
+
+    #[test]
+    fn compaction_terminal_evidence_keeps_its_exact_disposition() {
+        assert_eq!(
+            context_compaction_failure_disposition(ContextCompactionModelError::Refused),
+            FailedContextCompactionDisposition::Refused
+        );
+        assert_eq!(
+            context_compaction_failure_disposition(
+                ContextCompactionModelError::CancellationConfirmed
+            ),
+            FailedContextCompactionDisposition::Cancelled
+        );
+        assert_eq!(
+            context_compaction_failure_disposition(ContextCompactionModelError::ProviderError),
+            FailedContextCompactionDisposition::KnownFailed
+        );
+        assert_eq!(
+            context_compaction_failure_disposition(ContextCompactionModelError::ProvenUnsent),
+            FailedContextCompactionDisposition::KnownFailed
+        );
+        assert_eq!(
+            context_compaction_failure_disposition(ContextCompactionModelError::BoundaryLoss),
+            FailedContextCompactionDisposition::Ambiguous
+        );
+    }
 
     #[test]
     fn snapshot_delta_boundary_consumes_only_the_queued_prefix() {

@@ -56,6 +56,7 @@ pub struct PreparedContextCompaction {
     first: SemanticTranscriptEntryRef,
     through: SemanticTranscriptEntryRef,
     summarized_entries: Box<[SemanticTranscriptEntryRef]>,
+    summarized_positions: Box<[u64]>,
     summary_entry: SemanticTranscriptEntryId,
     result_frontier: ContextFrontierId,
 }
@@ -117,6 +118,10 @@ impl PreparedContextCompaction {
     pub fn summarized_entries(&self) -> &[SemanticTranscriptEntryRef] {
         &self.summarized_entries
     }
+    /// Returns each summarized entry's one-based physical frontier position.
+    pub fn summarized_positions(&self) -> &[u64] {
+        &self.summarized_positions
+    }
     /// Returns the fresh summary-entry identity.
     pub const fn summary_entry(&self) -> SemanticTranscriptEntryId {
         self.summary_entry
@@ -165,11 +170,28 @@ pub enum PrepareContextCompactionOutcome {
     FailedReplay,
 }
 
+/// Read-only disposition of one owner-global compaction command lookup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ContextCompactionCommandLookup {
+    /// No durable command has claimed the supplied identity.
+    Unseen,
+    /// An equal completed command returned its stable receipt.
+    Replayed(AppliedContextCompaction),
+    /// The identity names another command kind or caller payload.
+    ConflictingReuse,
+    /// An equal command is still nonterminal.
+    Pending,
+    /// An equal command already recorded terminal failure.
+    Failed,
+}
+
 /// Terminal disposition recorded for a failed dedicated call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FailedContextCompactionDisposition {
     /// Provider interaction definitively failed.
     KnownFailed,
+    /// The provider returned an explicit refusal.
+    Refused,
     /// Cancellation was confirmed.
     Cancelled,
     /// Provider acceptance or completion remained uncertain.
@@ -180,6 +202,7 @@ impl FailedContextCompactionDisposition {
     const fn as_str(self) -> &'static str {
         match self {
             Self::KnownFailed => "known_failed",
+            Self::Refused => "refused",
             Self::Cancelled => "cancelled",
             Self::Ambiguous => "ambiguous",
         }
@@ -222,6 +245,24 @@ impl ContextCompactionRepository {
                 Err(error)
             }
         }
+    }
+
+    /// Looks up replay state before resolving configuration needed only by a
+    /// fresh command.
+    pub async fn lookup_command(
+        &self,
+        command: DurableCommandId,
+        session: SessionId,
+        requested_through_position: Option<u64>,
+    ) -> Result<ContextCompactionCommandLookup, ContextCompactionRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        lookup_command_on_connection(
+            &mut connection,
+            command,
+            session,
+            requested_through_position,
+        )
+        .await
     }
 
     /// Commits InFlight before any provider interaction begins.
@@ -371,16 +412,14 @@ impl ContextCompactionRepository {
             "UPDATE compact_session_command
                 SET result_kind = 'applied',
                     result_context_compaction_id = $1,
-                    result_model_call_id = $2,
-                    result_through_position = $3,
-                    result_summary_entry_id = $4,
-                    result_frontier_id = $5
-              WHERE command_id = $6
-                AND session_id = $7
+                    result_through_position = $2,
+                    result_summary_entry_id = $3,
+                    result_frontier_id = $4
+              WHERE command_id = $5
+                AND session_id = $6
                 AND result_kind = 'pending'",
         )
         .bind(prepared.compaction.into_uuid())
-        .bind(prepared.call.into_uuid())
         .bind(Decimal::from(prepared.through_position))
         .bind(prepared.summary_entry.into_uuid())
         .bind(prepared.result_frontier.into_uuid())
@@ -454,18 +493,27 @@ async fn prepare_in_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     request: &PrepareContextCompactionRequest,
 ) -> Result<(bool, PrepareContextCompactionOutcome), ContextCompactionRepositoryError> {
-    let existing_kind: Option<String> =
-        sqlx::query_scalar("SELECT command_kind FROM durable_command WHERE command_id = $1")
-            .bind(request.command.into_uuid())
-            .fetch_optional(&mut **transaction)
-            .await?;
-    if let Some(kind) = existing_kind {
-        if kind != "compact_session" {
+    match lookup_command_on_connection(
+        transaction,
+        request.command,
+        request.session,
+        request.requested_through_position,
+    )
+    .await?
+    {
+        ContextCompactionCommandLookup::Unseen => {}
+        ContextCompactionCommandLookup::Replayed(applied) => {
+            return Ok((false, PrepareContextCompactionOutcome::Replayed(applied)));
+        }
+        ContextCompactionCommandLookup::ConflictingReuse => {
             return Ok((false, PrepareContextCompactionOutcome::ConflictingReuse));
         }
-        return load_replay(transaction, request)
-            .await
-            .map(|outcome| (false, outcome));
+        ContextCompactionCommandLookup::Pending => {
+            return Ok((false, PrepareContextCompactionOutcome::Busy));
+        }
+        ContextCompactionCommandLookup::Failed => {
+            return Ok((false, PrepareContextCompactionOutcome::FailedReplay));
+        }
     }
     // Lock inventory: the target session row is the first and only explicit
     // row lock. Guarded updates and inserts provide later serialization.
@@ -573,6 +621,11 @@ async fn prepare_in_transaction(
         .map(|member| member.reference)
         .collect::<Vec<_>>()
         .into_boxed_slice();
+    let summarized_positions = visible[..=through_index]
+        .iter()
+        .map(|member| member.position)
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
@@ -584,12 +637,13 @@ async fn prepare_in_transaction(
     sqlx::query(
         "INSERT INTO compact_session_command
             (command_id, command_kind, storage_version, session_id,
-             requested_through_position, result_kind)
-         VALUES ($1, 'compact_session', 1, $2, $3, 'pending')",
+             requested_through_position, model_call_id, result_kind)
+         VALUES ($1, 'compact_session', 1, $2, $3, $4, 'pending')",
     )
     .bind(request.command.into_uuid())
     .bind(session_id_to_uuid(request.session))
     .bind(request.requested_through_position.map(Decimal::from))
+    .bind(request.call.into_uuid())
     .execute(&mut **transaction)
     .await?;
     let insert_call = sqlx::query(
@@ -634,56 +688,70 @@ async fn prepare_in_transaction(
             first,
             through,
             summarized_entries,
+            summarized_positions,
             summary_entry: request.summary_entry,
             result_frontier: request.result_frontier,
         })),
     ))
 }
 
-async fn load_replay(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    request: &PrepareContextCompactionRequest,
-) -> Result<PrepareContextCompactionOutcome, ContextCompactionRepositoryError> {
+async fn lookup_command_on_connection(
+    connection: &mut sqlx::PgConnection,
+    command: DurableCommandId,
+    session: SessionId,
+    requested_through_position: Option<u64>,
+) -> Result<ContextCompactionCommandLookup, ContextCompactionRepositoryError> {
+    let existing_kind: Option<String> =
+        sqlx::query_scalar("SELECT command_kind FROM durable_command WHERE command_id = $1")
+            .bind(command.into_uuid())
+            .fetch_optional(&mut *connection)
+            .await?;
+    let Some(kind) = existing_kind else {
+        return Ok(ContextCompactionCommandLookup::Unseen);
+    };
+    if kind != "compact_session" {
+        return Ok(ContextCompactionCommandLookup::ConflictingReuse);
+    }
     let row = sqlx::query(
         "SELECT session_id, requested_through_position, result_kind,
-                result_context_compaction_id, result_model_call_id,
+                result_context_compaction_id, model_call_id,
                 result_through_position, result_summary_entry_id, result_frontier_id
            FROM compact_session_command
           WHERE command_id = $1",
     )
-    .bind(request.command.into_uuid())
-    .fetch_optional(&mut **transaction)
+    .bind(command.into_uuid())
+    .fetch_optional(&mut *connection)
     .await?
     .ok_or(ContextCompactionCorruption::Missing(
         "compaction command detail",
     ))?;
-    let session: Uuid = row.try_get("session_id")?;
+    let stored_session: Uuid = row.try_get("session_id")?;
     let requested: Option<Decimal> = row.try_get("requested_through_position")?;
-    if session != session_id_to_uuid(request.session)
+    if stored_session != session_id_to_uuid(session)
         || requested
             .map(|value| decode_u64(value, "requested through position"))
             .transpose()?
-            != request.requested_through_position
+            != requested_through_position
     {
-        return Ok(PrepareContextCompactionOutcome::ConflictingReuse);
+        return Ok(ContextCompactionCommandLookup::ConflictingReuse);
     }
     let kind: String = row.try_get("result_kind")?;
     if kind == "pending" {
-        return Ok(PrepareContextCompactionOutcome::Busy);
+        return Ok(ContextCompactionCommandLookup::Pending);
     }
     if kind == "failed" {
-        return Ok(PrepareContextCompactionOutcome::FailedReplay);
+        return Ok(ContextCompactionCommandLookup::Failed);
     }
     if kind != "applied" {
         return Err(ContextCompactionCorruption::UnsupportedResult(kind).into());
     }
-    Ok(PrepareContextCompactionOutcome::Replayed(
+    Ok(ContextCompactionCommandLookup::Replayed(
         AppliedContextCompaction {
             compaction: ContextCompactionId::from_uuid(required(
                 &row,
                 "result_context_compaction_id",
             )?),
-            call: ModelCallId::from_uuid(required(&row, "result_model_call_id")?),
+            call: ModelCallId::from_uuid(required(&row, "model_call_id")?),
             through_position: decode_u64(
                 required(&row, "result_through_position")?,
                 "result through position",

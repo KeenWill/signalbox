@@ -28,14 +28,15 @@ use signalbox_application::{
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
-    ActiveTurnPhase, AssistantResponsePart, AssistantText, ContextFrontierId, DirectModelSelection,
-    DurableCommandId, FailedModelCallTurnIdentities, ImportedConversationFormat,
-    ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId,
-    InitialToolApproval, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
-    ModelCallTerminalOutcome, ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionId, ToolCallProposal, ToolName,
-    ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
-    ToolUsingAssistantResponse, TurnId,
+    ActiveTurnPhase, AssistantResponsePart, AssistantText, ContextCompactionId, ContextFrontierId,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities,
+    ImportedConversationFormat, ImportedConversationId, ImportedSessionRelationship,
+    ImportedTranscriptEntryId, InitialToolApproval, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionRequest,
+    ModelTargetCatalog, NormalizedToolArguments, ProviderModelIdentity, ResolvedProviderTarget,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionId, ToolCallProposal, ToolName, ToolRequestId, ToolResponsePartIdentity,
+    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId,
 };
 use signalbox_model_provider_runtime::{RuntimeContextCompactionModel, RuntimeModelCallProvider};
 use signalbox_model_runtime::{
@@ -46,6 +47,10 @@ use signalbox_model_runtime::{
     TerminalEvidence, TerminalReport, TokenUsage,
 };
 use signalbox_persistence::{
+    context_compaction::{
+        ContextCompactionRepository, PrepareContextCompactionOutcome,
+        PrepareContextCompactionRequest,
+    },
     conversation_import::ImportedConversationRepository,
     create_session_from_imported_frontier::ImportedSessionRepository,
     local_test_connection_options, migrate,
@@ -4656,13 +4661,13 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     .bind(first_turn.into_uuid())
     .fetch_all(&runtime.pool)
     .await?;
-
+    let compaction_command = command()?;
     connection
         .request_version(
             ProtocolVersion::Seventeen,
             3,
             ClientRequest::CompactSession {
-                command_id: command()?,
+                command_id: compaction_command,
                 session_id,
                 through_position: None,
             },
@@ -4757,11 +4762,33 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     drop(connection);
     assert_eq!(runtime.restart().await?, 0);
     let mut successor = Connection::connect(runtime.socket()).await?;
-    let second_user = String::from("post-restart suffix request");
     successor
         .request_version(
             ProtocolVersion::Seventeen,
             4,
+            ClientRequest::CompactSession {
+                command_id: compaction_command,
+                session_id,
+                through_position: None,
+            },
+        )
+        .await?;
+    assert_eq!(
+        response_within(&mut successor).await?.message(),
+        &ServerMessage::SessionCompacted {
+            session_id,
+            context_compaction_id: *context_compaction_id,
+            model_call_id: *model_call_id,
+            through_position: *through_position,
+            summary_entry_id: *summary_entry_id,
+            result_frontier_id: *result_frontier_id,
+        }
+    );
+    let second_user = String::from("post-restart suffix request");
+    successor
+        .request_version(
+            ProtocolVersion::Seventeen,
+            5,
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
@@ -4812,7 +4839,105 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     .await?;
     assert_eq!(persisted_summary, summary_text);
 
+    let recovery_repository = ContextCompactionRepository::new(runtime.pool.clone());
+    let prepared_call = ModelCallId::from_uuid(Uuid::from_u128(0xcc20));
+    let prepared_outcome = recovery_repository
+        .prepare(PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(Uuid::from_u128(0xcc21)),
+            session: SessionId::from_uuid(session_id.into_uuid()),
+            requested_through_position: None,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection: DirectModelSelection::from_uuid(Uuid::from_u128(1)),
+            target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                Uuid::from_u128(3),
+            )),
+            credential_reference: String::from("synthetic-compaction-credential"),
+            call: prepared_call,
+            compaction: ContextCompactionId::from_uuid(Uuid::from_u128(0xcc22)),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcc23)),
+            result_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(0xcc24)),
+        })
+        .await?;
+    let PrepareContextCompactionOutcome::Prepared(prepared) = prepared_outcome else {
+        panic!("the recovery fixture must leave a Prepared compaction call");
+    };
+    assert_eq!(prepared.call(), prepared_call);
+
     drop(successor);
+    assert_eq!(runtime.restart().await?, 0);
+    let prepared_recovery = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT call.state_kind, call.terminal_disposition_kind, command.result_kind
+           FROM context_compaction_model_call AS call
+           JOIN compact_session_command AS command
+             ON command.session_id = call.session_id
+            AND command.model_call_id = call.model_call_id
+          WHERE call.model_call_id = $1",
+    )
+    .bind(prepared_call.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(
+        prepared_recovery,
+        (
+            String::from("terminal"),
+            String::from("known_failed"),
+            String::from("failed"),
+        )
+    );
+
+    let in_flight_call = ModelCallId::from_uuid(Uuid::from_u128(0xcc25));
+    let in_flight_outcome = recovery_repository
+        .prepare(PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(Uuid::from_u128(0xcc26)),
+            session: SessionId::from_uuid(session_id.into_uuid()),
+            requested_through_position: None,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection: DirectModelSelection::from_uuid(Uuid::from_u128(1)),
+            target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                Uuid::from_u128(3),
+            )),
+            credential_reference: String::from("synthetic-compaction-credential"),
+            call: in_flight_call,
+            compaction: ContextCompactionId::from_uuid(Uuid::from_u128(0xcc27)),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcc28)),
+            result_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(0xcc29)),
+        })
+        .await?;
+    let PrepareContextCompactionOutcome::Prepared(in_flight) = in_flight_outcome else {
+        panic!("the recovery fixture must authorize an InFlight compaction call");
+    };
+    recovery_repository.authorize(&in_flight).await?;
+    assert_eq!(runtime.restart().await?, 0);
+    let in_flight_recovery = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT call.state_kind, call.terminal_disposition_kind, command.result_kind
+           FROM context_compaction_model_call AS call
+           JOIN compact_session_command AS command
+             ON command.session_id = call.session_id
+            AND command.model_call_id = call.model_call_id
+          WHERE call.model_call_id = $1",
+    )
+    .bind(in_flight_call.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(
+        in_flight_recovery,
+        (
+            String::from("terminal"),
+            String::from("ambiguous"),
+            String::from("failed"),
+        )
+    );
+    let physical_summary_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1
+            AND payload_kind = 'context_summary'",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(physical_summary_count, 1);
+
     runtime.stop().await
 }
 

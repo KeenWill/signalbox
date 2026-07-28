@@ -5438,6 +5438,10 @@ pub enum StartupScanSessionOutcome {
     NoActiveTurn,
     Recovered(Box<FailedAcceptedInputTurn>),
     RecoveredModelCall(Box<ModelCallTerminalOutcome>),
+    RecoveredContextCompaction {
+        call: ModelCallId,
+        disposition: ModelCallDisposition,
+    },
     RecoveredToolAttempt(Box<ToolAttemptCrashOutcome>),
     ResumableToolBatch { turn: TurnId },
     AwaitingRecoveryDecision { turn: TurnId },

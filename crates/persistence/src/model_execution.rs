@@ -377,6 +377,39 @@ impl PostgresModelCallRepository {
         })
     }
 
+    /// Checkpoints the exact no-steering initial call in the transaction that
+    /// just committed its counted activation.
+    pub(crate) async fn checkpoint_counted_activation_in_transaction(
+        &self,
+        connection: &mut PgConnection,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> Result<(), ModelCallRepositoryError> {
+        let execution = require_live_execution_with_targets(
+            connection,
+            session,
+            Some(&self.targets),
+            None,
+            None,
+        )
+        .await?;
+        if execution.current_call().is_some()
+            || !execution.active_turn().pending_steering().is_empty()
+        {
+            return Err(ModelCallRepositoryError::InvalidTransition(
+                "counted activation gained uncounted call input",
+            ));
+        }
+        let prepared = execution
+            .prepare_initial_call_consuming_steering(call, Vec::new(), None)
+            .map_err(|_| {
+                ModelCallRepositoryError::InvalidTransition(
+                    "counted activation initial call cannot be prepared",
+                )
+            })?;
+        insert_prepared_call(connection, &prepared, &self.credential_reference).await
+    }
+
     /// Commits Prepared while consuming the complete locked steering inventory.
     pub async fn prepare_initial_call<NextSteeringIdentities>(
         &self,

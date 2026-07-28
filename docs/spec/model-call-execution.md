@@ -214,11 +214,25 @@ proceeds only when the new input fits. A compaction result that still cannot fit
 fails closed rather than looping or guessing a different limit.
 
 Both triggers share the same compaction transaction and provider-call lifecycle.
-Provider interaction remains outside database transactions, and restart treats a
-completed summary boundary as ordinary validated frontier evidence. A
-nonterminal compaction call follows the same no-surviving-task recovery posture
-as an ordinary model call; no summary or result frontier exists unless the
-completed observation and append commit together.
+An explicit command first resolves its owner-global replay state; an equal
+applied command returns its original receipt even when the current deployment no
+longer resolves the original selection or compaction credential. Configuration
+and credential resolution occur only for an unseen command.
+
+Provider interaction remains outside database transactions, and the summary
+range loader selects only the exact source-qualified range fixed by the Prepared
+call rather than materializing the complete physical transcript. Restart treats
+a completed summary boundary as ordinary validated frontier evidence. Startup
+atomically terminalizes a standalone Prepared compaction call as `KnownFailed`
+and an InFlight call as `Ambiguous`, marks its exactly correlated pending
+command failed, and produces no summary or result frontier. Any missing,
+duplicate, or mismatched command/call correlation fails closed.
+
+For the automatic guard, the exact call identity used during provider-native
+counting is retained. Once the count fits, one scheduler-locked transaction
+revalidates the activation, commits it, and creates that exact no-steering
+Prepared call. Steering accepted after that transaction remains pending for a
+later call and cannot enter the already-counted operation.
 
 ## Staged execution
 

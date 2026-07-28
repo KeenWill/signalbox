@@ -9,13 +9,13 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, AttemptEnd,
-    CurrentModelCallState, FailedModelCallTurnIdentities, ModelCallTerminalOutcome,
-    PendingSteeringReclassificationIdentity, PreparedAcceptedInputTurnFailure,
-    ReconstitutedToolAttempt,
+    CurrentModelCallState, FailedModelCallTurnIdentities, ModelCallDisposition, ModelCallId,
+    ModelCallTerminalOutcome, PendingSteeringReclassificationIdentity,
+    PreparedAcceptedInputTurnFailure, ReconstitutedToolAttempt,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload, SessionId,
     ToolAttemptCrashOutcome, TurnDisposition, TurnId, UnstoppedAttemptDisposition,
 };
-use sqlx::{PgConnection, PgPool, types::Uuid};
+use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
 use crate::{
     mapping::{
@@ -224,8 +224,15 @@ impl PostgresStartupScanRepository {
     pub async fn active_sessions(&self) -> Result<Box<[SessionId]>, StartupScanRepositoryError> {
         let rows = sqlx::query_scalar::<_, Uuid>(
             "SELECT session_id
-               FROM turn_lifecycle
-              WHERE state_kind = 'active'
+               FROM (
+                    SELECT session_id
+                      FROM turn_lifecycle
+                     WHERE state_kind = 'active'
+                    UNION
+                    SELECT session_id
+                      FROM context_compaction_model_call
+                     WHERE state_kind <> 'terminal'
+               ) AS recovery_inventory
               ORDER BY session_id",
         )
         .fetch_all(&self.pool)
@@ -318,6 +325,7 @@ where
         identities,
         session_exists,
         scheduler_session,
+        active_turn,
         ids,
     )
     .await
@@ -330,6 +338,7 @@ async fn recover_locked_session<Generator>(
     identities: AcceptedInputTurnFailureIdentities,
     session_exists: bool,
     scheduler_session: Option<Uuid>,
+    active_turn: Option<Uuid>,
     ids: &mut Generator,
 ) -> Result<TransactionDecision, StartupScanRepositoryError>
 where
@@ -342,6 +351,12 @@ where
         return Ok(TransactionDecision::Rollback(
             StartupScanSessionOutcome::NoActiveTurn,
         ));
+    }
+
+    if let Some(recovered) =
+        recover_context_compaction(connection, requested_session, active_turn).await?
+    {
+        return Ok(TransactionDecision::Commit(recovered));
     }
 
     let session = match load_session_from_connection(connection, requested_session).await {
@@ -767,6 +782,95 @@ async fn insert_prepared_failure(
     .await?;
 
     Ok(failed)
+}
+
+async fn recover_context_compaction(
+    connection: &mut PgConnection,
+    session: SessionId,
+    active_turn: Option<Uuid>,
+) -> Result<Option<StartupScanSessionOutcome>, StartupScanRepositoryError> {
+    let rows = sqlx::query(
+        "SELECT call.model_call_id, call.state_kind,
+                command.command_id, command.result_kind
+           FROM context_compaction_model_call AS call
+           FULL OUTER JOIN compact_session_command AS command
+             ON command.session_id = call.session_id
+            AND command.model_call_id = call.model_call_id
+          WHERE COALESCE(call.session_id, command.session_id) = $1
+            AND (
+                call.state_kind <> 'terminal'
+                OR command.result_kind = 'pending'
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_all(&mut *connection)
+    .await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    if rows.len() != 1 || active_turn.is_some() {
+        return Err(StartupScanCorruption::Inconsistent("compaction recovery inventory").into());
+    }
+    let row = &rows[0];
+    let call_id: Option<Uuid> = row.try_get("model_call_id")?;
+    let call_state: Option<String> = row.try_get("state_kind")?;
+    let command_id: Option<Uuid> = row.try_get("command_id")?;
+    let command_state: Option<String> = row.try_get("result_kind")?;
+    let (Some(call_id), Some(call_state), Some(command_id)) = (call_id, call_state, command_id)
+    else {
+        return Err(StartupScanCorruption::Inconsistent("compaction recovery correlation").into());
+    };
+    if command_state.as_deref() != Some("pending") {
+        return Err(
+            StartupScanCorruption::Inconsistent("compaction recovery command state").into(),
+        );
+    }
+    let (stored_disposition, disposition) = match call_state.as_str() {
+        "prepared" => ("known_failed", ModelCallDisposition::KnownFailed),
+        "in_flight" => ("ambiguous", ModelCallDisposition::Ambiguous),
+        _ => {
+            return Err(
+                StartupScanCorruption::Inconsistent("compaction recovery call state").into(),
+            );
+        }
+    };
+    let call_rows = sqlx::query(
+        "UPDATE context_compaction_model_call
+            SET state_kind = 'terminal', terminal_disposition_kind = $1
+          WHERE session_id = $2
+            AND model_call_id = $3
+            AND state_kind = $4",
+    )
+    .bind(stored_disposition)
+    .bind(session_id_to_uuid(session))
+    .bind(call_id)
+    .bind(&call_state)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    let command_rows = sqlx::query(
+        "UPDATE compact_session_command
+            SET result_kind = 'failed'
+          WHERE session_id = $1
+            AND command_id = $2
+            AND model_call_id = $3
+            AND result_kind = 'pending'",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(command_id)
+    .bind(call_id)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    if call_rows != 1 || command_rows != 1 {
+        return Err(StartupScanCorruption::Inconsistent("guarded compaction recovery").into());
+    }
+    Ok(Some(
+        StartupScanSessionOutcome::RecoveredContextCompaction {
+            call: ModelCallId::from_uuid(call_id),
+            disposition,
+        },
+    ))
 }
 
 fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartupScanRepositoryError {

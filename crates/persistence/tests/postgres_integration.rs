@@ -90,8 +90,9 @@ use signalbox_persistence::{
     scheduler::PostgresEligibilitySweep,
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
     start_eligible_turn::{
-        StartEligibleTurnCorruption, StartEligibleTurnIdentityCollision,
-        StartEligibleTurnRepository, StartEligibleTurnRepositoryError,
+        CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
+        StartEligibleTurnIdentityCollision, StartEligibleTurnRepository,
+        StartEligibleTurnRepositoryError,
     },
     startup::PostgresStartupScanRepository,
     submit_input::{
@@ -19427,6 +19428,143 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
         panic!("the dangling-pointer named read must be typed corruption");
     };
     assert_eq!(dangling_field, "current defaults epoch");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / S03 / S08 / INV-009 / INV-014: the operation counted before
+/// activation is the exact no-steering Prepared call committed with that
+/// activation; steering accepted afterward remains pending for a later call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_before_steering()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0xcd01));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0xcd02));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xcd03));
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(
+            0xcd04,
+            0xcd01,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    let origin = AcceptedInputId::from_uuid(Uuid::from_u128(0xcd05));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xcd06));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0xcd07,
+                0xcd01,
+                "counted origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            origin,
+            Some(turn),
+        )
+        .await?;
+
+    let activation = StartEligibleTurnRepository::new(pool.clone());
+    let preview = activation
+        .preview(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcd08)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcd09)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xcd0a)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(0xcd0b)),
+            ),
+        )
+        .await?
+        .expect("the queued origin has one exact activation preview");
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one fixture target forms a catalog");
+    let model_calls =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let counted_call = ModelCallId::from_uuid(Uuid::from_u128(0xcd0c));
+    let counted_operation = model_calls
+        .preview_activation_operation(preview.prepared(), counted_call)
+        .await?
+        .render(Box::new([]))?;
+    let counted_entries = counted_operation
+        .request()
+        .frontier_entries()
+        .map(signalbox_domain::SemanticTranscriptEntry::reference)
+        .collect::<Vec<_>>();
+
+    let committed = activation
+        .commit_counted_preview(preview, counted_call, &model_calls)
+        .await?;
+    let CommitActivationPreviewOutcome::Activated(activated) = committed else {
+        panic!("the unchanged counted activation must commit");
+    };
+    assert_eq!(activated.turn(), turn);
+
+    let steering = input_with_delivery(
+        0xcd0d,
+        0xcd01,
+        "later steering",
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: turn,
+        },
+    );
+    let steering_outcome = SubmitInputRepository::new(pool.clone())
+        .handle(
+            steering,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xcd0e)),
+            None,
+        )
+        .await?;
+    assert!(matches!(
+        steering_outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+
+    let ready = model_calls
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(0xcd0f)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcd10)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xcd11)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xcd12)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcd13)),
+                    TurnId::from_uuid(Uuid::from_u128(0xcd14)),
+                )
+            },
+        )
+        .await?;
+    let PrepareInitialModelCallOutcome::Ready { request, .. } = ready else {
+        panic!("the atomically checkpointed counted call must resume Prepared");
+    };
+    assert_eq!(request.call().id(), counted_call);
+    let prepared_entries = request
+        .frontier_entries()
+        .map(signalbox_domain::SemanticTranscriptEntry::reference)
+        .collect::<Vec<_>>();
+    assert_eq!(prepared_entries, counted_entries);
+    let pending_steering: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM accepted_input
+          WHERE session_id = $1
+            AND disposition_kind = 'pending_steering'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(pending_steering, 1);
 
     pool.close().await;
     drop(container);

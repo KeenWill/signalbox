@@ -7,6 +7,7 @@ use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, CredentialReference,
     DeliveryMode, ModelOperation, ModelRuntime, ModelSettings, Observation, PreparationOutcome,
     ProviderReportedModel, RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage,
+    UnsentCause,
 };
 
 use crate::{ProviderTargetRelation, RuntimeModelCatalog, relate_provider_target};
@@ -151,12 +152,45 @@ where
             }) {
                 require_same_target(&resolved, reported)?;
             }
-            let TerminalEvidence::Completed(completed) = report.evidence else {
-                return Err(ContextCompactionModelError::NotCompleted);
+            let reported_model = match &report.evidence {
+                TerminalEvidence::Completed(evidence) => evidence.reported_model.as_ref(),
+                TerminalEvidence::Refused(evidence) => evidence.reported_model.as_ref(),
+                TerminalEvidence::ProviderError(evidence) => evidence.reported_model.as_ref(),
+                TerminalEvidence::CancellationConfirmed(evidence) => {
+                    evidence.reported_model.as_ref()
+                }
+                TerminalEvidence::BoundaryLoss(evidence) => evidence.reported_model.as_ref(),
+                TerminalEvidence::ProvenUnsent(_) => None,
             };
-            if let Some(reported) = completed.reported_model.as_ref() {
+            if let Some(reported) = reported_model {
                 require_same_target(&resolved, reported)?;
             }
+            let completed = match report.evidence {
+                TerminalEvidence::Completed(completed) => completed,
+                TerminalEvidence::Refused(_) => {
+                    return Err(ContextCompactionModelError::Refused);
+                }
+                TerminalEvidence::ProviderError(_) => {
+                    return Err(ContextCompactionModelError::ProviderError);
+                }
+                TerminalEvidence::CancellationConfirmed(_) => {
+                    return Err(ContextCompactionModelError::CancellationConfirmed);
+                }
+                TerminalEvidence::ProvenUnsent(evidence) => {
+                    return Err(match evidence.cause {
+                        UnsentCause::CancelledBeforeSend => {
+                            ContextCompactionModelError::CancelledBeforeSend
+                        }
+                        UnsentCause::ConnectFailed(_)
+                        | UnsentCause::SendIncompleteProvenUnacceptable(_) => {
+                            ContextCompactionModelError::ProvenUnsent
+                        }
+                    });
+                }
+                TerminalEvidence::BoundaryLoss(_) => {
+                    return Err(ContextCompactionModelError::BoundaryLoss);
+                }
+            };
             if !matches!(
                 completed.finish,
                 CompletionFinish::EndTurn | CompletionFinish::StopSequence { .. }
@@ -210,8 +244,16 @@ pub enum ContextCompactionModelError {
     PreparationDefect,
     /// Runtime correlation differed from the durable call.
     CorrelationMismatch,
-    /// The provider did not return completed evidence.
-    NotCompleted,
+    /// The provider returned an explicit refusal.
+    Refused,
+    /// A complete, correlated provider error response was observed.
+    ProviderError,
+    /// The provider definitively confirmed cancellation.
+    CancellationConfirmed,
+    /// The request provably never reached an acceptance-capable boundary.
+    ProvenUnsent,
+    /// Provider acceptance or completion remained uncertain.
+    BoundaryLoss,
     /// The provider reported a different model lineage.
     ProviderTargetSubstituted,
     /// The completion stopped before a complete summary.

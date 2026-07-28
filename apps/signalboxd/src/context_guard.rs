@@ -14,7 +14,7 @@ use signalbox_model_provider_runtime::{ContextCompactionModel, RuntimeModelCatal
 use signalbox_persistence::{
     model_execution::{ModelCallRepositoryError, PostgresModelCallRepository},
     start_eligible_turn::{
-        CommitActivationPreviewOutcome, StartEligibleTurnRepository,
+        CommitActivationPreviewError, CommitActivationPreviewOutcome, StartEligibleTurnRepository,
         StartEligibleTurnRepositoryError,
     },
 };
@@ -191,11 +191,9 @@ where
                     Err(StartEligibleTurnRepositoryError::IdentityCollision(_)) => continue,
                     Err(error) => return Err(ContextGuardedTurnPassError::Activation(error)),
                 };
+                let call = ModelCallId::from_uuid(uuid::Uuid::now_v7());
                 let prospective = match model_calls
-                    .preview_activation_operation(
-                        preview.prepared(),
-                        ModelCallId::from_uuid(uuid::Uuid::now_v7()),
-                    )
+                    .preview_activation_operation(preview.prepared(), call)
                     .await
                 {
                     Ok(prospective) => prospective,
@@ -238,11 +236,18 @@ where
                     compacted = true;
                     continue;
                 }
-                match activation
-                    .commit_preview(preview)
+                let committed = activation
+                    .commit_counted_preview(preview, call, &model_calls)
                     .await
-                    .map_err(ContextGuardedTurnPassError::Activation)?
-                {
+                    .map_err(|error| match error {
+                        CommitActivationPreviewError::Activation(error) => {
+                            ContextGuardedTurnPassError::Activation(error)
+                        }
+                        CommitActivationPreviewError::ModelCall(error) => {
+                            ContextGuardedTurnPassError::Operation(error)
+                        }
+                    })?;
+                match committed {
                     CommitActivationPreviewOutcome::Stale => continue,
                     CommitActivationPreviewOutcome::Activated(activated) => {
                         if activated.session() != session {

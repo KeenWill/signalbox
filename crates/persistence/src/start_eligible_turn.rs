@@ -9,7 +9,7 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputEligibilityFailure, AcceptedInputStartingLineage,
-    AcceptedInputTurnActivationIdentities, ActiveTurnPhase, CurrentTurnAttemptState,
+    AcceptedInputTurnActivationIdentities, ActiveTurnPhase, CurrentTurnAttemptState, ModelCallId,
     PreparedAcceptedInputTurnActivation,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload, SessionId,
 };
@@ -176,6 +176,42 @@ impl StartEligibleTurnRepositoryError {
     }
 }
 
+/// Failure while atomically binding a counted activation to its Prepared call.
+#[derive(Debug)]
+pub enum CommitActivationPreviewError {
+    /// Activation revalidation, persistence, or commit failed.
+    Activation(StartEligibleTurnRepositoryError),
+    /// The exact initial model-call checkpoint could not be persisted.
+    ModelCall(crate::model_execution::ModelCallRepositoryError),
+}
+
+impl fmt::Display for CommitActivationPreviewError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Activation(error) => error.fmt(formatter),
+            Self::ModelCall(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for CommitActivationPreviewError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Activation(error) => Some(error),
+            Self::ModelCall(error) => Some(error),
+        }
+    }
+}
+
+impl ClassifyOperatorFailure for CommitActivationPreviewError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::Activation(error) => error.operator_failure_class(),
+            Self::ModelCall(error) => error.operator_failure_class(),
+        }
+    }
+}
+
 /// Read-only exact activation candidate retained for guarded commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedActivationPreview {
@@ -261,6 +297,74 @@ impl StartEligibleTurnRepository {
         transaction.commit().await.map_err(|error| {
             let commit_ambiguous = commit_failure_is_ambiguous(&error);
             StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous)
+        })?;
+        Ok(CommitActivationPreviewOutcome::Activated(Box::new(
+            activated,
+        )))
+    }
+
+    /// Revalidates one counted preview and atomically commits both its
+    /// activation and exact no-steering Prepared initial call.
+    pub async fn commit_counted_preview(
+        &self,
+        preview: PreparedActivationPreview,
+        call: ModelCallId,
+        model_calls: &crate::model_execution::PostgresModelCallRepository,
+    ) -> Result<CommitActivationPreviewOutcome, CommitActivationPreviewError> {
+        let session = preview.prepared.turn().session();
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(StartEligibleTurnRepositoryError::from)
+            .map_err(CommitActivationPreviewError::Activation)?;
+        let session_uuid = session_id_to_uuid(session);
+        let (session_exists, scheduler_session) =
+            sqlx::query_as::<_, (bool, Option<Uuid>)>(crate::lock_inventory::START_ELIGIBLE_TURN)
+                .bind(session_uuid)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+        if !session_exists || scheduler_session.is_none() {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitActivationPreviewOutcome::Stale);
+        }
+        let current = prepare_preview(&mut transaction, session, preview.identities)
+            .await
+            .map_err(CommitActivationPreviewError::Activation)?;
+        let Some(current) = current else {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitActivationPreviewOutcome::Stale);
+        };
+        if current != preview.prepared {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitActivationPreviewOutcome::Stale);
+        }
+        let activated = insert_prepared_activation(&mut transaction, current)
+            .await
+            .map_err(CommitActivationPreviewError::Activation)?;
+        model_calls
+            .checkpoint_counted_activation_in_transaction(&mut transaction, session, call)
+            .await
+            .map_err(CommitActivationPreviewError::ModelCall)?;
+        transaction.commit().await.map_err(|error| {
+            let commit_ambiguous = commit_failure_is_ambiguous(&error);
+            CommitActivationPreviewError::Activation(
+                StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous),
+            )
         })?;
         Ok(CommitActivationPreviewOutcome::Activated(Box::new(
             activated,

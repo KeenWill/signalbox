@@ -10,8 +10,8 @@ use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, DirectModelSelection, ImportedConversationId,
     ImportedSourceAttestation, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias,
-    ModelCallId, SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId,
-    TurnId,
+    ModelCallId, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolAttemptId,
+    ToolRequestId, TurnAttemptId, TurnId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -1258,6 +1258,147 @@ impl ProcessReadRepository {
                 turn: TurnId::from_uuid(turn),
             },
         })
+    }
+
+    /// Reads only the exact source-qualified semantic entries selected for a
+    /// compaction range, preserving their one-based physical positions.
+    pub async fn read_selected_transcript_entries(
+        &self,
+        positions: &[u64],
+        references: &[SemanticTranscriptEntryRef],
+    ) -> Result<Box<[ProcessTranscriptEntry]>, ProcessReadError> {
+        if positions.is_empty() || positions.len() != references.len() {
+            return Err(
+                ProcessReadCorruption::Inconsistent("selected transcript range shape").into(),
+            );
+        }
+        let stored_positions = positions
+            .iter()
+            .copied()
+            .map(Decimal::from)
+            .collect::<Vec<_>>();
+        let source_sessions = references
+            .iter()
+            .map(|reference| session_id_to_uuid(reference.source_session()))
+            .collect::<Vec<_>>();
+        let entry_ids = references
+            .iter()
+            .map(|reference| reference.entry().into_uuid())
+            .collect::<Vec<_>>();
+        let rows = sqlx::query(
+            "SELECT
+                selected.member_position,
+                selected.source_session_id,
+                selected.semantic_entry_id,
+                entry.payload_kind,
+                entry.origin_accepted_input_id,
+                entry.steering_source_turn_id,
+                entry.failed_turn_id,
+                entry.assistant_text_value,
+                entry.producing_model_call_id,
+                entry.assistant_tool_request_id,
+                entry.tool_result_request_id,
+                entry.tool_result_attempt_id,
+                entry.completed_turn_id,
+                entry.cancelled_turn_id,
+                entry.imported_conversation_id,
+                entry.imported_transcript_entry_id,
+                entry.model_identity_turn_id,
+                entry.model_identity_defaults_version,
+                entry.model_identity_direct_selection_id,
+                entry.context_summary_value,
+                entry.context_summary_producing_call_id,
+                entry.context_summary_first_source_session_id,
+                entry.context_summary_first_entry_id,
+                entry.context_summary_through_source_session_id,
+                entry.context_summary_through_entry_id,
+                imported.source_speaker_kind AS imported_source_speaker_kind,
+                imported.content_encoding AS imported_content_encoding,
+                accepted.content_text AS origin_content,
+                accepted.origin_turn_id,
+                call.turn_id AS assistant_turn_id,
+                result_attempt.request_id AS result_attempt_request_id,
+                transcript_request.tool_name AS transcript_tool_name,
+                transcript_request.arguments_text AS transcript_tool_arguments,
+                result_attempt.terminal_disposition_kind AS result_disposition,
+                result_attempt.result_text AS result_text,
+                result_attempt.error_kind AS result_error_kind,
+                result_attempt.error_detail AS result_error_detail,
+                transcript_approval.decision_kind AS transcript_decision_kind,
+                transcript_approval.denial_reason AS transcript_denial_reason
+               FROM UNNEST($1::numeric[], $2::uuid[], $3::uuid[])
+                    WITH ORDINALITY AS selected(
+                        member_position,
+                        source_session_id,
+                        semantic_entry_id,
+                        selected_ordinal
+                    )
+               JOIN semantic_transcript_entry AS entry
+                 ON entry.source_session_id = selected.source_session_id
+                AND entry.semantic_entry_id = selected.semantic_entry_id
+               LEFT JOIN accepted_input AS accepted
+                 ON accepted.session_id = entry.source_session_id
+                AND accepted.accepted_input_id = entry.origin_accepted_input_id
+               LEFT JOIN model_call AS call
+                 ON call.session_id = entry.source_session_id
+                AND call.model_call_id = entry.producing_model_call_id
+               LEFT JOIN tool_attempt AS result_attempt
+                 ON result_attempt.session_id = entry.source_session_id
+                AND result_attempt.attempt_id = entry.tool_result_attempt_id
+               LEFT JOIN tool_request AS transcript_request
+                 ON transcript_request.session_id = entry.source_session_id
+                AND transcript_request.request_id = COALESCE(
+                    entry.assistant_tool_request_id,
+                    entry.tool_result_request_id,
+                    result_attempt.request_id
+                )
+               LEFT JOIN tool_approval_decision AS transcript_approval
+                 ON transcript_approval.request_id = transcript_request.request_id
+               LEFT JOIN imported_transcript_entry AS imported
+                 ON imported.imported_conversation_id =
+                        entry.imported_conversation_id
+                AND imported.imported_transcript_entry_id =
+                        entry.imported_transcript_entry_id
+              ORDER BY selected.selected_ordinal",
+        )
+        .bind(&stored_positions)
+        .bind(&source_sessions)
+        .bind(&entry_ids)
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.len() != references.len() {
+            return Err(ProcessReadCorruption::Inconsistent(
+                "selected transcript range membership",
+            )
+            .into());
+        }
+        let mut entries = Vec::with_capacity(rows.len());
+        for ((row, expected_position), expected_reference) in
+            rows.iter().zip(positions).zip(references)
+        {
+            let stored_position = decode_positive(
+                required(row, "member_position")?,
+                "selected transcript member position",
+            )?;
+            let source_session = session_id_from_uuid(required(row, "source_session_id")?);
+            let entry = SemanticTranscriptEntryId::from_uuid(required(row, "semantic_entry_id")?);
+            if stored_position != *expected_position
+                || SemanticTranscriptEntryRef::from_source(source_session, entry)
+                    != *expected_reference
+            {
+                return Err(
+                    ProcessReadCorruption::Inconsistent("selected transcript entry order").into(),
+                );
+            }
+            let entry_index =
+                stored_position
+                    .checked_sub(1)
+                    .ok_or(ProcessReadCorruption::InvalidOrdinal(
+                        "selected transcript member position",
+                    ))?;
+            entries.push(decode_transcript_entry(row, entry_index)?);
+        }
+        Ok(entries.into_boxed_slice())
     }
 
     /// Reads one complete transcript snapshot, or `None` only when the session

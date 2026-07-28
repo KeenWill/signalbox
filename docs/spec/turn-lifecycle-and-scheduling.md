@@ -486,10 +486,12 @@ snapshot, exact summarized range, and predecessor link. Every compaction record
 requires its terminal `Completed` call and an exact source-plus-summary result;
 the predecessor chain must be single-rooted, linear, and prefix-preserving. A
 standalone `Completed` call or any standalone summary fails closed. A standalone
-`Prepared` or `InFlight` call remains recoverable and blocks ordinary
-activation; a terminal non-completed call remains historical recovery evidence
-without a summary or result. Unreferenced snapshots and compaction records fail
-closed.
+`Prepared` or `InFlight` call blocks ordinary activation until the finite
+startup scan recovers its exactly correlated pending command: Prepared
+terminalizes `KnownFailed`, InFlight terminalizes `Ambiguous`, the command
+becomes failed, and neither branch creates a summary or result frontier. A
+terminal non-completed call remains historical recovery evidence without a
+summary or result. Unreferenced snapshots and compaction records fail closed.
 
 The exact historical start law remains closed. Its prefix is either the
 immediate predecessor's terminal snapshot (or the imported seed for the first

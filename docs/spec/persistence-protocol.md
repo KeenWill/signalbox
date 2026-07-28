@@ -352,8 +352,10 @@ Locks per transaction, in acquisition order:
   `FOR UPDATE` mode before reading defaults, turn, frontier, and existing
   compaction state. It is the transaction's only explicit row lock; guarded
   updates and inserts serialize the call, command, summary, and result-frontier
-  records. An equal replay resolves from the command registry and receipt
-  without taking the session lock.
+  records. The pending typed command stores its immutable dedicated
+  `model_call_id` from creation, so recovery never infers correlation from a
+  result-only field. An equal replay resolves from the command registry and
+  receipt without taking the session lock or resolving current configuration.
 - **SubmitInput** (`prepare_against_locked_state`): session row
   `FOR NO KEY UPDATE`, then `session_scheduler` row `FOR UPDATE`, then
   `session_current_defaults` row `FOR UPDATE`; only then does it read the
@@ -486,9 +488,14 @@ reconstruct through their exact applied interrupt, end the abandoned attempt
 `after_cancellation/lost`, and terminalize proof-bearing reconciliation for the
 ambiguous call without erasing stop intent. The schema guard
 (`turn_lifecycle_pending_steering_closed`) independently requires every pending
-row to be consumed or reclassified before terminalization. Why: a pending
-steering row is an accepted delivery obligation, so every recovery branch must
-account for it rather than block startup or strand it.
+row to be consumed or reclassified before terminalization. The same finite
+startup inventory includes every nonterminal dedicated compaction call. Under
+the session scheduler lock it requires exactly one matching pending command,
+terminalizes Prepared as `known_failed` or InFlight as `ambiguous`, and marks
+the command failed in the same transaction; disagreement fails closed and no
+summary or result frontier is synthesized. Why: a pending steering row is an
+accepted delivery obligation, so every recovery branch must account for it
+rather than block startup or strand it.
 
 An interrupt accepted against an unstopped `awaiting_model_call_recovery` row
 does not rewrite its terminal ambiguous call. In the accepting transaction, the

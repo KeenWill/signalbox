@@ -50,7 +50,7 @@ CREATE TABLE compact_session_command (
     requested_through_position numeric(20, 0),
     result_kind text NOT NULL,
     result_context_compaction_id uuid,
-    result_model_call_id uuid,
+    model_call_id uuid NOT NULL,
     result_through_position numeric(20, 0),
     result_summary_entry_id uuid,
     result_frontier_id uuid,
@@ -82,7 +82,6 @@ CREATE TABLE compact_session_command (
             (
                 result_kind IN ('pending', 'failed')
                 AND result_context_compaction_id IS NULL
-                AND result_model_call_id IS NULL
                 AND result_through_position IS NULL
                 AND result_summary_entry_id IS NULL
                 AND result_frontier_id IS NULL
@@ -90,7 +89,6 @@ CREATE TABLE compact_session_command (
             OR (
                 result_kind = 'applied'
                 AND result_context_compaction_id IS NOT NULL
-                AND result_model_call_id IS NOT NULL
                 AND result_through_position IS NOT NULL
                 AND result_summary_entry_id IS NOT NULL
                 AND result_frontier_id IS NOT NULL
@@ -114,7 +112,7 @@ CREATE TABLE compact_session_command (
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT compact_session_command_call_fk
-        FOREIGN KEY (result_model_call_id, session_id)
+        FOREIGN KEY (model_call_id, session_id)
         REFERENCES context_compaction_model_call (model_call_id, session_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
@@ -156,13 +154,15 @@ BEGIN
         OLD.command_kind,
         OLD.storage_version,
         OLD.session_id,
-        OLD.requested_through_position
+        OLD.requested_through_position,
+        OLD.model_call_id
     ) IS DISTINCT FROM ROW(
         NEW.command_id,
         NEW.command_kind,
         NEW.storage_version,
         NEW.session_id,
-        NEW.requested_through_position
+        NEW.requested_through_position,
+        NEW.model_call_id
     ) THEN
         RAISE EXCEPTION 'compaction command request is immutable'
             USING ERRCODE = '23514';
