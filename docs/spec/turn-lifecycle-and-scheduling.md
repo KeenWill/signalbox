@@ -26,11 +26,13 @@ the superseded steering blocker were verified through PR #291
 (`agent/turn-control-verbs`). [docs/invariants.md](../invariants.md) remains the
 law catalog; INV tags below reference its rows without restating them. Designed
 lifecycle behavior that has no committed code path appears only under
-[Open edges](#open-edges). Sibling pages named in scope deferrals below
-(identity-and-commands, sessions-and-transcript, persistence-protocol,
-model-call-execution, configuration-and-credentials, runtime-substrate) are
-companion pages of this spec set; each deferral names the owning page rather
-than restating its material.
+[Open edges](#open-edges). The runner-loss recovery paragraphs are the
+foundation proposal at the bottom of their implementing stack and become
+verified only with those child pull requests. Sibling pages named in scope
+deferrals below (identity-and-commands, sessions-and-transcript,
+persistence-protocol, model-call-execution, configuration-and-credentials,
+runtime-substrate) are companion pages of this spec set; each deferral names the
+owning page rather than restating its material.
 
 ## Turns, states, and the single active slot
 
@@ -46,21 +48,27 @@ terminal disposition kind closed to `failed`, `completed`, `refused`,
 `cancelled`, and `reconciliation_required` (migrations `202607220001` and
 `202607220005`). The domain `TurnDisposition` algebra carries all five accepted
 variants — `Completed`, `Refused`, `Failed`, `Cancelled { cause }`,
-`ReconciliationRequired { marker }` — but `Cancelled` is constructible only from
-an `AppliedInterruptProof` and `ReconciliationRequired` only from a sealed
+`ReconciliationRequired { marker }` — but ordinary `Cancelled` is constructible
+only from an `AppliedInterruptProof`; the sole cause-specific exception is a
+sealed `RunnerAbandonmentProof` for the exact current lost placement.
+`ReconciliationRequired` remains constructible only from a sealed
 `ReconciliationMarker`. Committed transitions produce every variant: interrupted
-physical ambiguity produces proof-bearing `ReconciliationRequired`, while
-confirmed interrupted cancellation produces proof-bearing `Cancelled`.
+physical ambiguity produces proof-bearing `ReconciliationRequired`, confirmed
+interrupted cancellation produces proof-bearing `Cancelled`, and explicit owner
+runner abandonment produces proof-bearing terminal cancellation without a
+successor origin.
 
 The domain `ActiveTurnPhase` algebra is `Running { current_attempt }`,
-`AwaitingApproval { request }`, and
-`AwaitingRecoveryDecision { ambiguous_operations }`. Every active phase retains
-the session's progressing slot (`retains_progressing_slot()` is unconditionally
-true; INV-009). Storage and reconstitution admit `running`,
-`awaiting_tool_approval`, `awaiting_model_call_recovery`, and
-`awaiting_tool_recovery`; the domain `AwaitingApproval` phase maps to the exact
-stored `awaiting_tool_approval` discriminator. `AwaitingRecoveryDecision` is
-reconstituted from either an `ambiguous` terminal model call or an ambiguous
+`AwaitingApproval { request }`,
+`AwaitingRecoveryDecision { ambiguous_operations }`, and
+`AwaitingRunnerRecovery { runner, placement_revision, optional_tool_attempt }`.
+Every active phase retains the session's progressing slot
+(`retains_progressing_slot()` is unconditionally true; INV-009). Storage and
+reconstitution admit `running`, `awaiting_tool_approval`,
+`awaiting_model_call_recovery`, `awaiting_tool_recovery`, and
+`awaiting_runner_recovery`; the domain `AwaitingApproval` phase maps to the
+exact stored `awaiting_tool_approval` discriminator. `AwaitingRecoveryDecision`
+is reconstituted from either an `ambiguous` terminal model call or an ambiguous
 external-effect tool attempt correlated with its exact ended attempt
 (`ambiguous` from a live loss, `lost` from startup recovery). `StopRequested` is
 a stored current-attempt state inside the `running` active phase and
@@ -433,6 +441,41 @@ delivery outcomes implemented here are:
   ([tool-loop](tool-loop.md#approval-policy-and-decision-sources) owns the
   deny-first caller protocol).
 
+## Runner-loss session recovery
+
+The heartbeat-loss transaction durably advances the exact connection loss epoch
+and fences new offers before bounded per-session propagation. Each restartable
+session transaction then marks its placement `RunnerLost`, preserves exact
+tool-attempt ambiguity, moves an active affected turn to
+`AwaitingRunnerRecovery`, and appends one durable runner state event. A queued
+turn remains queued but cannot activate while its placement is lost. A stale
+connection epoch cannot write after the first commit. Locking, page bounds, and
+crash recovery are owned by [persistence-protocol](persistence-protocol.md).
+
+Only two owner commands consume that state. `ReplaceLostRunner` requires the
+expected current placement revision and either a different live exact runner or
+the one pending replacement enrollment it atomically activates. Its transaction
+installs the checked successor placement and grant lineage, provisions a new
+revisioned workspace, appends the reference-only `RunnerPlacementChanged`
+semantic entry, extends the next context frontier, and returns the turn to the
+phase justified by its retained work. Safe retry proof may be consumed only
+inside this command. `AbandonLostRunner` requires the same exact lost revision,
+installs terminal `RunnerAbandoned` placement state, and constructs
+`RunnerAbandonmentProof`. If a turn is active, existing cancellation and
+ambiguity rules terminalize it, reclassify its pending steering without
+accepting successor content, and release the slot. With no active turn,
+including an idle session with queued turns, no turn or frontier is fabricated;
+queued work remains queued and later runs with the daemon-only catalog because
+the terminal placement can issue no runner lease. The receipt records an
+optional terminal turn and frontier. No case turns ambiguous effect evidence
+into known failure.
+
+Equal command replay returns the recorded receipt. Another revision, a live or
+unpinned placement, the same runner, a stale connection, or an already replaced
+or abandoned session fails closed. These commands are administrative recovery,
+not input delivery: they neither widen `Interrupt` nor create a standalone
+ordinary cancellation path (INV-026, INV-029, INV-037, INV-044).
+
 ## Context frontier snapshots
 
 A context frontier is `{ owning_session, snapshot: ContextFrontierId }`;
@@ -624,8 +667,8 @@ clones over the shared pool; no shared locked service instance exists.
 
 - Direct fatal terminalization has sealed domain derivation values
   (`fatal_mismatch` module) but no aggregate transition or commit path.
-- Dispatch fencing covers model calls and tool attempts; runner transport and
-  remote result envelopes remain deferred.
+- Dispatch fencing covers model calls, daemon tools, and local runner leases;
+  remote runner transport and result envelopes remain deferred.
 - The eligible terminal-failure path (queued turn fixes its start and fails
   without an attempt for a structurally unexecutable configuration) is
   unimplemented; activation is the only eligibility outcome.

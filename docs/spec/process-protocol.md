@@ -42,18 +42,24 @@ the then-open steering and token-usage stacks, and fifteen by the then-open
 imported-conversation inspection stack. The unified conversation-listing surface
 therefore takes version sixteen for the single read-only `list_conversations`
 request, verified through PR #304 (`agent/unified-conversation-listing`). The
-implementation in this stack speaks versions one through twelve and sixteen
-while thirteen, fourteen, and fifteen remain unsupported, and its terminal
-client selects version sixteen. Its `search` verb over version four's metadata
-list was verified through PR #283 (`agent/session-search-cli`; terminal client
-surface only). This page's version-four last-writer member spelling was verified
-through PR #288 (`agent/audit-fix-docs-coherence`). This page is the normative
-boundary between a local client process and `signalboxd`; domain values,
-PostgreSQL records, and wire messages remain distinct representations.
+runner executable stack adds protocol version seventeen for runner-backed
+session placement, visible sandbox/loss state, and owner replace/abandon verbs;
+earlier versions retain their closed request and message vocabularies. The
+implementation proposed by this stack speaks versions one through twelve,
+sixteen, and seventeen while thirteen, fourteen, and fifteen remain unsupported,
+and its terminal client selects version seventeen. Its `search` verb over
+version four's metadata list was verified through PR #283
+(`agent/session-search-cli`; terminal client surface only). This page's
+version-four last-writer member spelling was verified through PR #288
+(`agent/audit-fix-docs-coherence`). This page is the normative boundary between
+a local client process and `signalboxd`; domain values, PostgreSQL records, and
+wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
-[persistence-protocol](persistence-protocol.md).
+[persistence-protocol](persistence-protocol.md). Version seventeen is the
+foundation proposal at the bottom of its runner implementation stack and becomes
+verified only with those child pull requests.
 
 ## Transport and trust boundary
 
@@ -173,18 +179,18 @@ and members with the wrong JSON type fail explicitly (INV-033). A frame may
 contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
-spellings decode to the same name. A version other than one through twelve or
-sixteen produces an `unsupported_version` error naming the supported versions,
-then the server closes the connection. Every response uses the request's
-admitted version; when no version can be admitted, the server error uses version
-one as the pre-admission fallback. A client speaking a version above one admits
-that version-one fallback only for `malformed_frame` or `unsupported_version`,
-then applies the ordinary request-identity check; every other response-version
-mismatch fails locally. A server error uses `request_id = "0"` only when the
-incoming frame prevents recovery of a valid nonzero identity; zero is never a
-valid client identity or success-response identity. Leading zeroes, a plus sign,
-whitespace, and any spelling other than the shortest ASCII decimal form are
-invalid.
+spellings decode to the same name. A version other than one through twelve,
+sixteen, or seventeen produces an `unsupported_version` error naming the
+supported versions, then the server closes the connection. Every response uses
+the request's admitted version; when no version can be admitted, the server
+error uses version one as the pre-admission fallback. A client speaking a
+version above one admits that version-one fallback only for `malformed_frame` or
+`unsupported_version`, then applies the ordinary request-identity check; every
+other response-version mismatch fails locally. A server error uses
+`request_id = "0"` only when the incoming frame prevents recovery of a valid
+nonzero identity; zero is never a valid client identity or success-response
+identity. Leading zeroes, a plus sign, whitespace, and any spelling other than
+the shortest ASCII decimal form are invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -197,24 +203,27 @@ errors self-describing without connection-global negotiation state.
 Request objects carry a required string `type` and reject fields not admitted by
 that variant.
 
-| Type                                    | Version | Additional required members                                                                                                                                                                                                                                          | Meaning                                                                                                                                                                                                                                           |
-| --------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `create_session`                        | 1+      | `command_id` (canonical UUID string), `initial_model_selection` (selection object); version nine and above also require `system_prompt` (string or null)                                                                                                             | Create an owner-initiated session with no ancestry and establish defaults version one.                                                                                                                                                            |
-| `list_sessions`                         | 1+      | none                                                                                                                                                                                                                                                                 | Read all current sessions as legacy summaries, ordered by session identity.                                                                                                                                                                       |
-| `submit_input`                          | 1+      | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                                                                                                   | Submit exact owner text as `StartWhenNoActiveTurn`, using the caller-observed defaults version and no per-input model override.                                                                                                                   |
-| `read_transcript`                       | 1+      | `session_id` (canonical UUID string)                                                                                                                                                                                                                                 | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                                                                                                    |
-| `follow_session`                        | 1+      | `session_id` (canonical UUID string)                                                                                                                                                                                                                                 | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session; versions twelve and above additionally receive ephemeral provider-text deltas. |
-| `list_session_metadata`                 | 4       | `required_tags` (string array), `title_contains` (string or null), `include_archived` (boolean), `page_size` (canonical decimal string), `after_session_id` (canonical UUID string or null)                                                                          | Read one filtered metadata-summary page in session-identity order.                                                                                                                                                                                |
-| `read_session_metadata`                 | 4       | `session_id` (canonical UUID string)                                                                                                                                                                                                                                 | Read one complete current metadata snapshot.                                                                                                                                                                                                      |
-| `replace_session_metadata`              | 4       | `command_id` and `session_id` (canonical UUID strings), `metadata` (the complete metadata object below)                                                                                                                                                              | Durably replace one complete metadata snapshot as the owner actor.                                                                                                                                                                                |
-| `import_conversation`                   | 5       | `format` (`claude_code_session_jsonl_v2` or `codex_rollout_jsonl_v1`), `source` (canonical padded base64 string)                                                                                                                                                     | Convert and idempotently resolve or insert one complete external conversation snapshot.                                                                                                                                                           |
-| `create_session_from_imported_frontier` | 10      | `command_id` and `imported_conversation_id` (canonical UUID strings), `through_position` (positive canonical decimal string), `relationship` (`resume` or `fork`), `initial_model_selection` (selection object)                                                      | Create an independent live session seeded through the selected inclusive imported position.                                                                                                                                                       |
-| `replace_session_defaults`              | 6       | `command_id` and `session_id` (canonical UUID strings), `expected_defaults_version` (canonical decimal string), `model_selection` (selection object), `dangerous_tool_auto_approval` (boolean); version nine and above also require `system_prompt` (string or null) | Install one complete immutable defaults epoch as the owner actor, conditional on the exact current epoch.                                                                                                                                         |
-| `reconcile_turn`                        | 7       | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                                                                       | Supply the owner reconciliation decision for the named turn parked on an ambiguous model call, accepting `content` as its immediate successor origin.                                                                                             |
-| `stop_turn`                             | 8       | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                                                                       | Apply the accepted interrupt treatment to the named active turn, accepting `content` as its immediate-successor origin.                                                                                                                           |
-| `decide_tool_request`                   | 8       | `command_id`, `session_id`, and `tool_request_id` (canonical UUID strings), `decision` (a decision object below)                                                                                                                                                     | Supply the owner decision for one pending tool request through the canonical decision command.                                                                                                                                                    |
-| `read_session_defaults`                 | 9       | `session_id` (canonical UUID string), `defaults_version` (canonical decimal string or null)                                                                                                                                                                          | Read one complete immutable defaults epoch: the current one for null, otherwise exactly the named one.                                                                                                                                            |
-| `list_conversations`                    | 16      | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                  | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                    |
+| Type                                    | Version | Additional required members                                                                                                                                                                                                                                                                    | Meaning                                                                                                                                                                                                                                           |
+| --------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `create_session`                        | 1+      | `command_id` (canonical UUID string), `initial_model_selection` (selection object); version nine and above also require `system_prompt` (string or null); version seventeen also requires `runner_placement` (placement object or null)                                                        | Create an owner-initiated session with no ancestry and establish defaults version one plus optional runner placement.                                                                                                                             |
+| `list_sessions`                         | 1+      | none                                                                                                                                                                                                                                                                                           | Read all current sessions as legacy summaries, ordered by session identity.                                                                                                                                                                       |
+| `submit_input`                          | 1+      | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                                                                                                                             | Submit exact owner text as `StartWhenNoActiveTurn`, using the caller-observed defaults version and no per-input model override.                                                                                                                   |
+| `read_transcript`                       | 1+      | `session_id` (canonical UUID string)                                                                                                                                                                                                                                                           | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                                                                                                    |
+| `follow_session`                        | 1+      | `session_id` (canonical UUID string)                                                                                                                                                                                                                                                           | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session; versions twelve and above additionally receive ephemeral provider-text deltas. |
+| `list_session_metadata`                 | 4       | `required_tags` (string array), `title_contains` (string or null), `include_archived` (boolean), `page_size` (canonical decimal string), `after_session_id` (canonical UUID string or null)                                                                                                    | Read one filtered metadata-summary page in session-identity order.                                                                                                                                                                                |
+| `read_session_metadata`                 | 4       | `session_id` (canonical UUID string)                                                                                                                                                                                                                                                           | Read one complete current metadata snapshot.                                                                                                                                                                                                      |
+| `replace_session_metadata`              | 4       | `command_id` and `session_id` (canonical UUID strings), `metadata` (the complete metadata object below)                                                                                                                                                                                        | Durably replace one complete metadata snapshot as the owner actor.                                                                                                                                                                                |
+| `import_conversation`                   | 5       | `format` (`claude_code_session_jsonl_v2` or `codex_rollout_jsonl_v1`), `source` (canonical padded base64 string)                                                                                                                                                                               | Convert and idempotently resolve or insert one complete external conversation snapshot.                                                                                                                                                           |
+| `create_session_from_imported_frontier` | 10      | `command_id` and `imported_conversation_id` (canonical UUID strings), `through_position` (positive canonical decimal string), `relationship` (`resume` or `fork`), `initial_model_selection` (selection object); version seventeen also requires `runner_placement` (placement object or null) | Create an independent live session seeded through the selected inclusive imported position, with optional runner placement.                                                                                                                       |
+| `replace_session_defaults`              | 6       | `command_id` and `session_id` (canonical UUID strings), `expected_defaults_version` (canonical decimal string), `model_selection` (selection object), `dangerous_tool_auto_approval` (boolean); version nine and above also require `system_prompt` (string or null)                           | Install one complete immutable defaults epoch as the owner actor, conditional on the exact current epoch.                                                                                                                                         |
+| `reconcile_turn`                        | 7       | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                                                                                                 | Supply the owner reconciliation decision for the named turn parked on an ambiguous model call, accepting `content` as its immediate successor origin.                                                                                             |
+| `stop_turn`                             | 8       | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                                                                                                 | Apply the accepted interrupt treatment to the named active turn, accepting `content` as its immediate-successor origin.                                                                                                                           |
+| `decide_tool_request`                   | 8       | `command_id`, `session_id`, and `tool_request_id` (canonical UUID strings), `decision` (a decision object below)                                                                                                                                                                               | Supply the owner decision for one pending tool request through the canonical decision command.                                                                                                                                                    |
+| `read_session_defaults`                 | 9       | `session_id` (canonical UUID string), `defaults_version` (canonical decimal string or null)                                                                                                                                                                                                    | Read one complete immutable defaults epoch: the current one for null, otherwise exactly the named one.                                                                                                                                            |
+| `list_conversations`                    | 16      | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                                            | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                    |
+| `read_runner_status`                    | 17      | none                                                                                                                                                                                                                                                                                           | Read the singleton runner registration, connection/loss state, advertised availability, and startup workspace-leak report.                                                                                                                        |
+| `replace_lost_runner`                   | 17      | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string), and `replacement` (target object)                                                                                                                                   | Replace the exact current lost placement with a different live runner or atomically activate one pending replacement enrollment, preserving owner policy and provisioning a new revisioned workspace.                                             |
+| `abandon_lost_runner`                   | 17      | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string)                                                                                                                                                                      | Terminalize the exact lost placement and any active turn through cause-specific abandonment proof; idle and queued-only sessions fabricate no turn.                                                                                               |
 
 Version eleven adds these review-workflow requests. Every `*_id` is a canonical
 UUID string, ordinal and count values are canonical decimal strings, and every
@@ -245,6 +254,36 @@ A selection object is exactly one of:
 
 - `{"kind":"direct","selection_id":"<canonical UUID>"}`;
 - `{"kind":"alias","alias_id":"<canonical UUID>"}`.
+
+A version-seventeen runner-placement object has exactly:
+
+- `selector`, either `{"type":"runner","runner_id":"<canonical UUID>"}` or
+  `{"type":"capability_class","name":"<checked name>"}`;
+- `working_directory`, a bounded string or JSON null for runner default;
+- `credential_profile`, a checked name or JSON null;
+- `workspace`, either `{"type":"none"}` or
+  `{"type":"repository_worktree","repository":"<checked key>"}`;
+- `sandbox_profile`, exactly `workspace-restricted` or `ambient`; and
+- `tool_permission_overrides`, an object from at most 64 exact checked tool
+  names to `auto` or `confirm`.
+
+The object is complete immutable placement intent. Unknown or duplicate override
+names, an override for a tool outside the compiled runner registry, unadvertised
+availability, malformed working directory, or unconfigured repository fails
+before command identity is claimed. The terminal defaults omitted sandbox input
+to `workspace-restricted`, but the wire never omits it. `ambient` therefore
+always reflects an explicit command-line choice. A null `runner_placement`
+creates a daemon-only session.
+
+A version-seventeen replacement target is exactly one of:
+
+- `{"type":"runner","runner_id":"<canonical UUID>"}` for a different current
+  live runner; or
+- `{"type":"pending_enrollment","request_id":"<canonical UUID>"}` for the one
+  authority-free checked request visible in runner status.
+
+The second arm issues and registers the new runner only inside the successful
+replacement command. Neither arm creates automatic placement authority.
 
 A decision object is exactly one of:
 
@@ -479,17 +518,20 @@ admitted request and adds only the review-workflow requests above. Version
 twelve retains every earlier admitted request and adds no request variant.
 Version sixteen retains every earlier admitted request and adds only the
 read-only `list_conversations`; versions thirteen, fourteen, and fifteen remain
-reserved by concurrent stacks and unsupported here. A metadata request carried
-under version one, two, or three, an import request carried under version one
-through four, a defaults-replacement request carried under version one through
-five, a reconciliation request carried under version one through six, a
-turn-control request carried under version one through seven, a defaults read
-carried under version one through eight, an imported-frontier creation request
-carried under any version one through nine, a review request carried under any
-version one through ten, or a unified-listing request carried under any version
-one through twelve, is classified as `malformed_frame` because its supported
-version does not admit that request variant; it never reaches application
-construction. A version-one `submit_input`, `read_transcript`, or
+reserved by concurrent stacks and unsupported here. Version seventeen retains
+version sixteen's requests, adds the three runner requests, and requires the
+explicit nullable runner-placement member on both session-creation variants. A
+metadata request carried under version one, two, or three, an import request
+carried under version one through four, a defaults-replacement request carried
+under version one through five, a reconciliation request carried under version
+one through six, a turn-control request carried under version one through seven,
+a defaults read carried under version one through eight, an imported-frontier
+creation request carried under any version one through nine, a review request
+carried under any version one through ten, a unified-listing request carried
+under any version one through twelve, or a runner request carried under any
+version below seventeen, is classified as `malformed_frame` because its
+supported version does not admit that request variant; it never reaches
+application construction. A version-one `submit_input`, `read_transcript`, or
 `follow_session` request that selects imported ancestry returns a version-one
 `unsupported_version` error naming version two before mutation or snapshot
 construction.
@@ -526,6 +568,16 @@ every earlier shape and admit the new entry. A session system prompt adds no
 transcript entry and therefore raises no read or follow gate: transcripts of
 prompted sessions remain representable in every admitted version.
 
+A runner-backed session requires version seventeen for every session list,
+metadata projection, transcript read/follow, and mutation. A request under
+versions one through sixteen that would observe or change such a session returns
+`unsupported_version` naming seventeen before snapshot construction or mutation.
+A list or metadata page whose repeatable-read result would contain a
+runner-backed session fails before emitting its start frame. Older
+session-creation requests remain valid and create daemon-only sessions. This
+gate prevents an older client from hiding an ambient boundary or runner-loss
+state.
+
 Submitted `content` is limited to 1 MiB of UTF-8. The daemon applies that
 boundary before application construction or mutation and returns
 `invalid_request` when it is exceeded. This leaves enough space for worst-case
@@ -553,7 +605,8 @@ Message objects carry a required string `type` and reject fields not admitted by
 that variant. Every accepted non-review mutation request — `create_session`,
 `create_session_from_imported_frontier`, `submit_input`, `reconcile_turn`,
 `stop_turn`, `decide_tool_request`, `replace_session_metadata`,
-`replace_session_defaults`, or `import_conversation` — produces exactly one of:
+`replace_session_defaults`, `import_conversation`, `replace_lost_runner`, or
+`abandon_lost_runner` — produces exactly one of:
 
 - `session_created` with `session_id`;
 - `input_submitted` with `session_id`, `accepted_input_id`,
@@ -570,7 +623,13 @@ that variant. Every accepted non-review mutation request — `create_session`,
   `dangerous_tool_auto_approval`; at version nine and above it also requires the
   installed `system_prompt` (string or null), a member absent below nine;
 - `conversation_import_inserted` with `imported_conversation_id`;
-- `conversation_import_already_imported` with `imported_conversation_id`; or
+- `conversation_import_already_imported` with `imported_conversation_id`;
+- `runner_replaced` with `session_id`, `prior_runner_id`, `new_runner_id`,
+  successor `placement_revision`, and `sandbox_profile`;
+- `runner_abandoned` with `session_id`, `placement_revision`, nullable
+  `terminal_turn_id`, nullable `terminal_frontier_id`, and nullable terminal
+  `disposition`; all three terminal members are null exactly when no turn was
+  active; or
 - `error` with a stable `code` and a non-sensitive `message`.
 
 Version-eleven review mutations return exactly one stable acknowledgement:
@@ -598,6 +657,18 @@ finding-identity order, then `review_findings_end { finding_count }`. The client
 validates the selected run, ordering, and terminal count before presenting the
 list.
 
+A successful version-seventeen `read_runner_status` response is a bounded
+sequence: `runner_status_start { pending_replacement_request_id }`, exactly zero
+or one `runner_status` message, zero or more `runner_workspace_leak` messages,
+and `runner_status_end { leak_count }`. The status carries issued runner,
+enrollment, and registration identities, connection state (`connected`,
+`suspect`, or `lost`), registration revision, advertised capability classes,
+tool names, credential-profile names, repository keys, workspace capabilities,
+and sandbox profiles. Each leak carries only manifest identity facts and a
+closed reason, never a host path, repository URL, or credential fact. Strict
+ordering and the terminal count make the complete sequence authoritative without
+an aggregate frame bound.
+
 Versions twelve and above additionally admit
 `provider_text_delta { session_id, turn_id, model_call_id, part_index, content }`
 only on a `follow_session` response. The three identities correlate the provider
@@ -619,7 +690,12 @@ In the server shapes below, notation such as `queued` or
 `"type":"terminal"` plus exactly the named members.
 
 A session summary contains `session_id`, `defaults_version`, and
-`model_selection`. A successful `list_sessions` response is `sessions_start`,
+`model_selection`. Version seventeen additionally requires `runner`, either null
+or a complete object carrying selector, current runner id when pinned, placement
+revision, sandbox profile, credential-profile name, repository key, and state
+(`unpinned`, `pinned`, `runner_lost`, or `runner_abandoned`). The selected
+profile is therefore visible even before execution, and `ambient` is always
+printed as ambient. A successful `list_sessions` response is `sessions_start`,
 one `session_summary` per result in session-identity order, then
 `sessions_end { session_count }`. The summaries are read in one read-only
 repeatable-read transaction and spooled from one decoded row at a time before
@@ -727,8 +803,25 @@ A version-eight `decide_tool_request` rejection admits
 `tool_request_not_found { tool_request_id }`,
 `tool_request_already_resolved { tool_request_id }`,
 `tool_request_not_earliest_undecided { tool_request_id, earliest_tool_request_id }`,
-and `tool_request_not_in_session { session_id, tool_request_id }`. The
-`turn_not_awaiting_reconciliation` and `tool_request_not_in_session` details
+and `tool_request_not_in_session { session_id, tool_request_id }`. A
+version-seventeen `replace_lost_runner` rejection admits
+`session_not_found { session_id }`, `runner_placement_not_found { session_id }`,
+`placement_revision_mismatch { session_id, expected, current }`,
+`placement_not_lost { session_id, placement_revision, state }`,
+`replacement_same_runner { session_id, runner_id }`,
+`replacement_target_unavailable { session_id, target, reason }`, and
+`replacement_provisioning_failed { session_id, repository, failure_class }`.
+Target reason is `not_connected`, `not_current`, `not_advertised`,
+`pending_request_mismatch`, or `pending_request_disconnected`; provisioning
+failure class is `credential_unavailable`, `repository_unavailable`,
+`sandbox_unavailable`, or `workspace_conflict`. A version-seventeen
+`abandon_lost_runner` rejection admits `session_not_found`,
+`runner_placement_not_found`, `placement_revision_mismatch`, and
+`placement_not_lost` with those same shapes. Every admitted runner rejection is
+a recorded durable result; equal replay returns it even after runner state
+changes.
+
+The `turn_not_awaiting_reconciliation` and `tool_request_not_in_session` details
 report refusals made before command recording, so unlike every other `rejected`
 detail they name no durable command result and have no replay projection; a
 caller that repeats the request observes the current state, not a recorded
@@ -752,15 +845,19 @@ The error-code set in all admitted versions is:
 
 For `create_session`, `create_session_from_imported_frontier`, `submit_input`,
 `reconcile_turn`, `stop_turn`, `decide_tool_request`,
-`replace_session_metadata`, `replace_session_defaults`, and every review
-mutation, a lost commit response maps to `commit_ambiguous`; the client retries
-the exact command identity and payload to discover the recorded outcome. A
-`reconcile_turn` or `decide_tool_request` retry reaches that recorded outcome
-unconditionally, because a claimed command identity bypasses the precondition
-the first handling already satisfied. Once a review aggregate effect has been
-applied or recovered, any database failure during post-effect verification,
-typed-receipt insertion, or claim commit is likewise `commit_ambiguous`. A
-definitely pre-commit infrastructure failure maps to `unavailable`.
+`replace_session_metadata`, `replace_session_defaults`, `replace_lost_runner`,
+`abandon_lost_runner`, and every review mutation, a lost commit response maps to
+`commit_ambiguous`; the client retries the exact command identity and payload to
+discover the recorded outcome. A `reconcile_turn`, `decide_tool_request`,
+`replace_lost_runner`, or `abandon_lost_runner` retry reaches that recorded
+outcome or resumes its exact claimed pending effect unconditionally, because a
+claimed command identity bypasses the precondition the first handling already
+satisfied. Replacement recovery reuses only its recorded workspace authorization
+and manifest receipt; it never starts another clone under the same claim. Once a
+review aggregate effect has been applied or recovered, any database failure
+during post-effect verification, typed-receipt insertion, or claim commit is
+likewise `commit_ambiguous`. A definitely pre-commit infrastructure failure maps
+to `unavailable`.
 
 Conversation import carries no durable command identity because exact
 format-and-source replay already resolves through the import digest. A selected
@@ -798,7 +895,8 @@ predecessor lineage is authoritative.
 
 One logical snapshot is a bounded message sequence sharing the request identity:
 
-1. `transcript_snapshot_start { session_id, cursor }`;
+1. `transcript_snapshot_start { session_id, cursor }`; version seventeen also
+   requires the same complete nullable `runner` object as the session summary;
 2. one `transcript_turn` per turn, with canonical decimal `acceptance_position`;
 3. the entry messages below in frontier-member order; and
 4. `transcript_snapshot_end { session_id, cursor, turn_count, entry_count }`.
@@ -851,7 +949,11 @@ Version three preserves all of those model-call shapes unchanged and adds
 and
 `tool_reconciliation_required { terminal_frontier_id, terminal_attempt_id, terminal_tool_attempt_id }`.
 The distinct tool variant avoids changing the older `reconciliation_required`
-object.
+object. Version seventeen additionally admits
+`active_awaiting_runner_recovery { runner_id, placement_revision, tool_attempt_id }`,
+where `tool_attempt_id` is null when no physical tool attempt owns the loss. The
+snapshot-level runner object remains authoritative for queued and otherwise
+non-active sessions.
 
 Across their admitted representations, each non-text native frontier member is
 one `transcript_entry` with `entry_index`, `source_session_id`, `entry_id`, and
@@ -863,8 +965,11 @@ admits
 `tool_denied { tool_request_id, content }`, and
 `tool_closed { tool_request_id, content }`. Versions six and above additionally
 admit `model_identity_changed { turn_id, defaults_version, selected_model_id }`,
-naming the first started turn bound to a changed frozen direct selection. A
-native text member begins with
+naming the first started turn bound to a changed frozen direct selection.
+Version seventeen additionally admits
+`runner_placement_changed { prior_runner_id, new_runner_id, placement_revision, sandbox_profile }`.
+It is the reference-only semantic boundary injected before work resumes on the
+successor placement. A native text member begins with
 `transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
 `entry` is either `user { accepted_input_id, turn_id }` or
 `assistant { turn_id, model_call_id }`. It is followed by one or more
@@ -883,7 +988,12 @@ normalized JSON text or credential-scrubbed undecodable text stored on the
 request. `content` contains the exact provider-visible result string: admitted
 success text, or the compact closed error object serialized as text by the
 provider bridge. Tool entry discriminators and identifiers determine the
-semantic arm; clients never infer it by reparsing either string.
+semantic arm; clients never infer it by reparsing either string. Version
+seventeen adds a required `execution` object to each runner-produced
+`tool_execution_result`: exact `runner_id`, `placement_revision`, `lease_id`,
+`sandbox_profile`, and closed outcome classification. Daemon-local results carry
+`{"type":"daemon"}`. The profile label is evidence metadata, not text that a
+tool can forge.
 
 The version-three process projection resolves the domain's reference-only tool
 entries before crossing the wire. Tool use carries the exact checked name and
@@ -1022,6 +1132,13 @@ exactly `proposed { frontier_id }`, `results_projected { frontier_id }`, or
 `recovery_required { tool_attempt_id }`, and
 `turn_tool_reconciliation_required { turn_id, tool_attempt_id, terminal_frontier_id }`.
 
+Version seventeen additionally admits
+`runner_state_transition { runner_id, placement_revision, sandbox_profile, state }`,
+where state is `pinned`, `suspect`, `runner_lost`, `replaced`, or `abandoned`.
+The event carries no host path, credential fact, or arbitrary runner text. Older
+versions encounter the runner-backed-session compatibility gate before
+subscribing.
+
 The model-call `state` object is exactly `prepared`, `in_flight`,
 `cancellation_requested`, or `terminal { disposition }`; terminal disposition is
 one of `completed`, `known_failed`, `refused`, `cancelled`, or `ambiguous`.
@@ -1033,9 +1150,9 @@ For `follow_session`, the server subscribes to process-local fan-out before
 reading the repeatable-read transcript snapshot. It sends that snapshot first,
 then discards subscribed events at or below its cursor and sends matching
 session events above it in cursor order. Versions one through eleven subscribe
-to the durable-only fan-out. Version twelve subscribes to the ordered composite
-fan-out, which interleaves provider-text deltas with those same durable updates
-in their process send order.
+to the durable-only fan-out. Versions twelve and above subscribe to the ordered
+composite fan-out, which interleaves provider-text deltas with those same
+durable updates in their process send order.
 
 When the repeatable-read snapshot completes, the server records the exact count
 of updates already queued on that follower subscription. It discards deltas in
@@ -1054,15 +1171,15 @@ is therefore terminal in the initial snapshot and cannot leave `send` waiting
 for an event at or below the snapshot cursor. Previously seen transient display
 state may always be replaced by the new snapshot (INV-032).
 
-Versions one through eleven forward durable transition events only. Version
-twelve additionally forwards a correctly correlated `TextDelta` emitted while
-the selected session's turn is active. The HTTP adapter has already applied the
-credential-redaction boundary before that fact leaves the runtime (INV-035); the
-bridge and daemon copy its text unchanged and do not re-invent redaction. Deltas
-remain ephemeral process-incarnation presentation events: they are not appended
-to the transactional outbox, do not advance the follow cursor, do not enter the
-transcript, and do not alter the observation or terminal-evidence paths. The
-durable transcript remains the sole reply truth.
+Versions one through eleven forward durable transition events only. Versions
+twelve and above additionally forward a correctly correlated `TextDelta` emitted
+while the selected session's turn is active. The HTTP adapter has already
+applied the credential-redaction boundary before that fact leaves the runtime
+(INV-035); the bridge and daemon copy its text unchanged and do not re-invent
+redaction. Deltas remain ephemeral process-incarnation presentation events: they
+are not appended to the transactional outbox, do not advance the follow cursor,
+do not enter the transcript, and do not alter the observation or
+terminal-evidence paths. The durable transcript remains the sole reply truth.
 
 An overrun of either selected fan-out produces the existing `resync_required`. A
 lagging or reconnecting delta-admitting follower loses any unreceived deltas; it
@@ -1118,7 +1235,7 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack uses version sixteen; version four's
+The `signalbox` binary in this stack uses version seventeen; version four's
 single-session metadata read and metadata replacement remain core protocol and
 daemon capabilities without terminal-client UX, while its paginated metadata
 list is the `search` verb below. Older clients remain supported for
@@ -1126,8 +1243,8 @@ representations admitted by their declared version as described above. The
 client accepts a global `--socket <path>` override or reads
 `SIGNALBOX_SOCKET_PATH`, and provides:
 
-- `create (--model <selection-uuid> | --alias <alias-uuid>) [--system-prompt-file <path>] [--command-id <uuid>]`;
-- `continue <imported-conversation-uuid> --through-position <positive-decimal> --relationship <resume|fork> (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;
+- `create (--model <selection-uuid> | --alias <alias-uuid>) [--system-prompt-file <path>] [--runner <uuid> | --runner-class <name>] [--repository <key> --credential-profile <name> --sandbox-profile <workspace-restricted|ambient>] [--tool-auto <name>]... [--tool-confirm <name>]... [--command-id <uuid>]`;
+- `continue <imported-conversation-uuid> --through-position <positive-decimal> --relationship <resume|fork> (--model <selection-uuid> | --alias <alias-uuid>) [--runner <uuid> | --runner-class <name>] [--repository <key> --credential-profile <name> --sandbox-profile <workspace-restricted|ambient>] [--tool-auto <name>]... [--tool-confirm <name>]... [--command-id <uuid>]`;
 - `list`;
 - `search [--title <substring>] [--tag <tag>]... [--include-archived] [--limit <decimal>] [--after <session-uuid>]`;
 - `conversations [--title <substring>] [--origin <native|imported|all>] [--include-archived] [--limit <decimal>] [--after <native|imported>:<uuid>]`;
@@ -1140,7 +1257,11 @@ client accepts a global `--socket <path>` override or reads
 - `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `stop <session-uuid> [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
 - `approve <session-uuid> <tool-request-uuid> [--command-id <uuid>]`;
-- `deny <session-uuid> <tool-request-uuid> --reason <text> [--command-id <uuid>]`.
+- `deny <session-uuid> <tool-request-uuid> --reason <text> [--command-id <uuid>]`;
+- `runner status`;
+- `runner replace <session-uuid> (--new-runner <runner-uuid> | --pending-enrollment <request-uuid>) --placement-revision <positive-decimal> [--command-id <uuid>]`;
+  and
+- `runner abandon <session-uuid> --placement-revision <positive-decimal> [--command-id <uuid>]`.
 
 `list` remains the complete unfiltered version-one summary sequence. `search` is
 the separate verb for version four's `list_session_metadata`, whose filters,
@@ -1207,6 +1328,19 @@ Each review mutation also accepts `--command-id <uuid>`. Target creation accepts
 an optional `--stack-parent-target-id`; finding recording accepts an optional
 paired line range, diff side, and recommended fix.
 
+Runner creation accepts either an exact runner or a capability class, never
+both. Either selector requires `--repository`; the credential profile is
+optional, and omitting `--sandbox-profile` selects `workspace-restricted` before
+the request is encoded. `ambient` therefore requires that exact flag. Tool
+overrides require runner placement, duplicate or cross-listed names fail
+locally, and every selected fact is printed with the created session.
+`runner status` validates the complete status/leak sequence and prints profile
+availability and leaks without host paths. Replace and abandon print command
+identity and expected placement revision before socket I/O and require the
+complete recovery set on retry. Replace accepts either a different live runner
+or the exact pending enrollment request reported by `runner status`; the two
+targets are mutually exclusive. Abandon creates no successor input.
+
 `send` reads the exact input text from standard input through EOF and never
 accepts conversation content in process arguments. Empty or oversized input
 fails before socket I/O. `--system-prompt-file` likewise carries a path, never
@@ -1270,7 +1404,7 @@ ambiguous attempt. It uses a fresh nonzero request identity per connection,
 validates that a defaults receipt is the exact successor carrying the requested
 selection, copied posture, and exact replacement prompt, validates that a
 decision receipt echoes the exact request and decision it sent, renders only
-known version-sixteen messages, and exits nonzero on protocol or application
+known version-seventeen messages, and exits nonzero on protocol or application
 errors other than the follow-specific `resync_required` control case, which
 reconnects for a fresh snapshot.
 

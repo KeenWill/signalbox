@@ -24,7 +24,10 @@ and attempt lifecycle in
 kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
-[docs/invariants.md](../invariants.md); this page cites rows by tag.
+[docs/invariants.md](../invariants.md); this page cites rows by tag. The
+runner-orchestration transaction and lock paragraphs are the foundation proposal
+at the bottom of their implementing stack and become verified only with those
+child pull requests.
 
 ## Stack and boundaries
 
@@ -388,6 +391,42 @@ Locks per transaction, in acquisition order:
   and each opened streaming list page use one read-only repeatable-read
   transaction, so their root and satellite values come from one database
   snapshot.
+- **Runner enrollment and registration**: the current enrollment or pending
+  replacement-request head is locked first, followed by the current registration
+  head. Activating a pending replacement locks old and new runner heads in
+  runner identity order, retires the old enrollment, persists the issued
+  successor identities and registration, and installs the owner-command effect
+  in one transaction.
+- **Runner dispatch and result**: `session_scheduler` is the first lock,
+  followed by current runner connection/loss head, enrollment and registration
+  heads, placement head, current credential grant when present, and lease head.
+  The initial dispatch transaction then stores workspace receipt consumption,
+  pin, grant, `InFlight` attempt, and offered lease together. Claim locks the
+  runner head then lease head and commits before acknowledgement. Result
+  admission takes the session scheduler first, then the same runner and lease
+  rows, and commits the checked terminal attempt observation and claimed-lease
+  completion together.
+- **Runner loss**: one short transaction locks only the current connection/loss
+  head, advances a positive durable loss epoch, and thereby makes every trigger
+  reject new offers or claims from that connection. It never holds that global
+  row while waiting for a session lock. A restartable propagation cursor pages
+  at most 64 affected session identities in order; each session is updated in
+  its own transaction by locking `session_scheduler` first, then the loss head,
+  placement, current lease, and guarded turn rows. Offered leases with no
+  durable claim acquire exact no-execution proof; claimed leases follow effect
+  loss law. A crash resumes at the first uncommitted session, while every
+  not-yet-projected placement is already effectively lost through the epoch
+  fence.
+- **Runner replace, abandon, and release**: an unseen owner command first owns
+  its durable-command claim. It then locks `session_scheduler`, relevant runner
+  heads in identity order, current enrollment/registration, placement, grant and
+  lease heads, and only then guarded semantic-frontier and turn rows.
+  Replacement may atomically activate one pending enrollment and consumes
+  workspace-ready evidence before installing the placement frontier. Abandon
+  stores terminal placement state and applies active-turn cancellation when one
+  exists. Either transition enqueues the retired placement release; release
+  acknowledgement uses the same scheduler-then-placement order and never mutates
+  turn lifecycle.
 - **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
   exactly `delivered_through + 1` and its typed record are read. Only an
   accepted synchronous offer advances that same singleton inside the

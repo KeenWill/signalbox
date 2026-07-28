@@ -19,12 +19,15 @@ code-host result redaction are verified through PR #270
 defaults boundary was verified through PR #272 (`agent/mid-session-model`). The
 credential-file value narrowing and the credential-shaped code-host detail were
 verified through PR #285 (`agent/dev-instance-code-host-credential`). Invariant
-law lives in [docs/invariants.md](../invariants.md), cited here by tag.
+law lives in [docs/invariants.md](../invariants.md), cited here by tag. The
+runner configuration and credential paragraphs are the foundation proposal at
+the bottom of their implementing stack and become verified only with those child
+pull requests.
 
 ## Process configuration
 
-`signalboxd` reads exactly five deployment values from the process environment
-at startup:
+`signalboxd` reads exactly six deployment values from the process environment at
+startup:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
@@ -38,6 +41,9 @@ at startup:
 - `SIGNALBOX_SOCKET_PATH` — local Unix-socket path for the version-one
   [process protocol](process-protocol.md), which owns its binding and trust
   semantics.
+- `SIGNALBOX_RUNNER_SOCKET_PATH` — distinct local Unix-socket path for the
+  runner wire. It uses the same private-node discipline but has an independent
+  lock, identity, vocabulary, and listener.
 
 `DATABASE_URL` is the whole database configuration channel. The SQLx driver
 would otherwise seed anything the URL omits from the ambient libpq-style `PG*`
@@ -97,6 +103,68 @@ The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL`,
 `SIGNALBOX_CONFIG_FILE`, and `ANTHROPIC_API_KEY_FILE` in its `--anthropic` mode.
 It does not compose the daemon tool catalog and does not read
 `GITHUB_TOKEN_FILE`; it is a development driver, not the client protocol.
+
+## Runner configuration
+
+`signalbox-runner` accepts exactly one configuration path from either
+`SIGNALBOX_RUNNER_CONFIG_FILE` or one `--config PATH` argument. Both, neither,
+an empty path, another positional argument, or an unknown option fails before
+opening a socket. It reads the file once at startup as strict versioned TOML;
+the checked-in example is `config/signalbox-runner.example.toml`. Root version
+other than `1`, an unknown field, duplicate key, wrong type, or invalid nested
+entry fails with a sanitized path-free error.
+
+The root contains:
+
+- `daemon_socket_path`, the exact dedicated runner socket;
+- `runner_root`, one absolute runner-owned directory used for enrollment state,
+  result spool, `sessions/`, staging, and `trash/`;
+- `bubblewrap_path`, one absolute executable path;
+- `read_only_paths`, a bounded nonempty list of absolute toolchain or cache
+  paths admitted read-only to `workspace-restricted`;
+- `allowed_network_hosts`, a bounded subset of the fixed `github.com`,
+  `crates.io`, and `api.anthropic.com` entries;
+- one checked Git author name and email used by Git tools;
+- `[repositories.<name>]` tables mapping checked repository keys to an exact
+  credential-free GitHub HTTPS clone URL and one configured credential-profile
+  name; and
+- `[credentials.<name>]` tables mapping checked profile names to `file` and
+  `injection_env` strings.
+
+Names use the runner-protocol checked-name grammar. A version-one clone URL has
+scheme `https`, exact lowercase host `github.com`, no user information, port,
+query, fragment, percent encoding, empty component, or dot component, and an
+exact owner/repository path with an optional terminal `.git`. Its named
+credential profile must exist. Any repository requires `github.com` in the
+effective network list. Environment names use `[A-Z_][A-Z0-9_]*`, cannot name
+runner control, model-provider, or dynamic-loader variables, and are unique.
+Absolute paths are canonicalized without following a final credential symlink;
+duplicate, nested, writable/read-only-overlapping, or runner-root-overlapping
+allowlist paths fail closed. Configuration may narrow network entries but cannot
+add a hostname.
+
+The shipped example contains exactly one credential entry:
+`credentials.github-runner`, whose `file` names a fine-grained repository-scoped
+PAT file and whose `injection_env` is `GH_TOKEN`. The parser and resolver are
+otherwise name-generic: adding another credential shape is a configuration
+entry, not a code branch. The runner advertises the exact configured credential
+and repository names as availability; the daemon records no credential-specific
+effect or approval policy, and an owner placement may grant only a name the
+current registration advertised. Reserved model-provider profile and environment
+names are rejected. Because arbitrary secret bytes have no self-describing type,
+file contents cannot be classified as a provider key; the runner has no
+model-provider config field or daemon path that supplies one.
+
+Startup opens or creates `runner_root` as an effective-user-owned real `0700`
+directory without following its final component, retains its device/inode
+identity and dirfd, takes the exclusive lock through that root, checks socket
+and bubblewrap prerequisites, and loads only non-secret structure. It never
+reads a credential file at startup and never logs configuration paths,
+repository URLs, or values. Each lease admission checks that a granted name
+exists, and each dispatch rereads and validates its file as specified under
+[runner credential lifecycle](#runner-credential-lifecycle). The enrollment
+request identity and daemon-issued receipt are runtime state below the root, not
+operator-authored configuration.
 
 ## The static model and alias catalog
 
@@ -256,6 +324,42 @@ deployment-side rules that code cannot enforce are stated in
   compiled code-host declaration selects `github-primary` again when execution
   resumes.
 
+## Runner credential lifecycle
+
+Runner credential profiles are non-secret checked names granted by the daemon
+and resolved only by `signalbox-runner`. The daemon, client, database,
+transcript, workspace manifest, and runner wire never receive a runner
+credential path or value (INV-035, INV-045).
+
+At lease admission the runner requires the exact granted name in its startup
+configuration; absence rejects the claim before any executable capability is
+issued. Immediately before each provisioning or tool dispatch, it opens the
+configured path without following symlinks, requires a regular file owned by the
+effective user with exact `0600` mode, reads at most 65,536 bytes, and drops
+trailing `\n` and `\r` bytes while retaining all others. Empty, containing a NUL
+byte, unreadable, oversized, wrong-owner, wrong-mode, or
+replaced-with-nonregular files are typed unavailable failures. The value is
+scoped to that dispatch and never cached, so atomic file replacement rotates it
+between operations.
+
+The value is supplied only under the configured environment name inside the
+bubblewrap namespace. It does not appear in command arguments, Git remote URLs,
+Git configuration, inherited host environment, error details, or logs. Git tools
+use a fixed runner-owned credential helper inside the namespace. It returns the
+selected value only when protocol, exact `github.com` host, owner/repository
+path, repository key, and repository-bound credential profile all match the
+provisioned workspace; every other query returns no credential. The runner
+scrubs the exact value and its JSON-string-escaped form from admitted stdout,
+stderr, and result text before forwarding. This reduces accidental echo; it
+cannot prevent model-controlled code from transforming or using the value within
+its granted repository scope, which is an accepted restricted-profile cost.
+
+Unknown profiles fail before lease claim. A credential failure after a claimed
+dispatch is a fixed `ExecutionFailed` observation naming only the profile and
+failure class. A transport or supervisor loss remains effect-class ambiguous;
+credential failure never authorizes an automatic repeat of side-effecting work.
+Model-provider credentials are daemon-only and cannot be granted to a runner.
+
 ## Redaction and logs
 
 The following never appear in logs, error text, or durable records: credential
@@ -306,8 +410,10 @@ Enforcement as implemented:
 
 ## Credential operations policy
 
-Operational rules the deployment must honor; code cannot enforce them (retained
-here because the surviving daemon-side mechanics depend on them):
+Operational rules the daemon deployment must honor; code cannot enforce them
+(retained here because the surviving daemon-side mechanics depend on them).
+Runner credential files instead follow the same-host `0600` contract above and
+are outside this cluster-delivery policy:
 
 - **One source of truth per secret.** 1Password owns runtime credentials: the
   vault item a reference resolves to is the source of truth, and rotation is an

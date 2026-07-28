@@ -10,6 +10,211 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-27 — Limit runner version one to one same-host workstation
+
+**Context.** The merged runner domain and persistence foundations deliberately
+admit pools, remote transports, and several execution loci. The first executable
+slice needs coding parity on the owner's Ubuntu development host without making
+untested portability or distributed-scheduling claims.
+
+**Decision.** Version one composes one `signalbox-runner` instance on the same
+host and under the same operating-system user as `signalboxd`. Its closed tool
+families are workspace file read/write/edit, Git clone/fetch/branch/commit/push,
+serial shell execution, and serial build/test execution. Mac runners, remote
+transport, concurrent tool execution, and MCP placement are outside version one.
+The wire vocabulary remains additive but carries no remote-only design.
+
+**Rejected alternatives.** A cross-platform first slice would multiply sandbox
+and path semantics before one host works. A runner pool would require scheduling
+policy the owner explicitly deferred. MCP and concurrent execution would widen
+the milestone without advancing the coding-parity proof.
+
+**Affects.** The `signalbox-runner` composition, workstation tool catalog,
+runner wire protocol, deployment topology, and
+[runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-27 — Use a runner-initiated dedicated local socket
+
+**Context.** Runner dispatch needs a held bidirectional channel, but the client
+socket carries a different trust boundary and vocabulary. The first deployment
+is one local user and does not need a remote authentication or transport system.
+
+**Decision.** `signalboxd` binds a dedicated Unix domain stream socket for
+runners; `signalbox-runner` always dials it and never accepts inbound
+connections. The socket is distinct from the client socket and uses the same
+owner-private parent, exact `0600` node mode, sidecar `flock`, pinned path
+identity, effective-user peer check, bounded JSON-lines framing, and fail-closed
+version rules. Runner-wire version one uses a fixed 8 MiB frame bound. On the
+first checked same-user connection, the runner sends a durable random request
+identity and the daemon atomically issues the singleton enrollment identities;
+exact replay is idempotent and a second request conflicts. The daemon requests a
+heartbeat every five seconds, fences offers after one miss, and marks the
+connection lost after three consecutive misses. Remote transport is deferred; no
+remote handshake or negotiation is designed here.
+
+**Rejected alternatives.** Reusing the client socket couples independent
+vocabularies and backpressure. Letting runners listen creates an inbound host
+surface and reverses the accepted held-outbound-stream direction. Designing TLS
+or remote authentication now would specify an uncommissioned deployment.
+
+**Affects.** The runner listener and client, local socket construction, runner
+wire version one, heartbeat/loss orchestration, and
+[runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-27 — Make named bubblewrap profiles placement facts
+
+**Context.** An executable runner must state the boundary it actually provides,
+and a session cannot silently move between ambient user power and a confined
+workspace. Dynamic policy would add a policy language before the first two
+reviewable postures are proven.
+
+**Decision.** Every runner-backed session selects and durably records one closed
+profile: `workspace-restricted`, the default, or explicit `ambient`. Every
+restricted execution is wrapped by bubblewrap with writable filesystem access
+limited to the session worktree, declared read-only toolchain/cache paths, and a
+fresh network namespace whose only egress is the runner's checked hostname
+allowlist broker. Version one's initial hostname suffixes are `github.com`,
+`crates.io`, and the exact host `api.anthropic.com`. A suffix matches only the
+exact base or a dot-separated subdomain, never a raw string ending such as
+`evilgithub.com`; configuration may narrow the set but cannot add another suffix
+or host. Ambient execution is also launched through bubblewrap but retains the
+invoking user's filesystem and network powers. Every runner, daemon, protocol,
+client, and evidence surface labels the selected profile; ambient is never
+called sandboxed. Named profiles are upgradeable values. Dynamic policy
+composition is deferred.
+
+**Rejected alternatives.** An unlabelled ambient default violates inspectable
+boundary law. Filesystem-only containment leaves arbitrary network egress.
+Calling a shared-host-network bubblewrap invocation restricted would overstate
+its evidence. A general policy language is premature for two fixed profiles.
+
+**Affects.** Session placement, runner advertisement and evidence, bubblewrap
+invocation, network brokering, client presentation, INV-022 and INV-023, and
+[runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-27 — Scale runner approvals inversely with confinement
+
+**Context.** Prompting on every coding operation inside a deliberately narrow
+sandbox duplicates the owner's merge-everything review boundary, while ambient
+execution can affect the complete user account. The selected boundary must be a
+material approval constraint, not presentation metadata.
+
+**Decision.** `workspace-restricted` supplies `Auto` as the default for every
+version-one workstation tool. `ambient` supplies `Auto` only for pure tools and
+`Confirm` for every idempotent or side-effecting tool. Exact per-tool session
+overrides to `Auto` or `Confirm` sit at the existing reserved override rung;
+profiles supply defaults rather than replacing that mechanism. For runner
+execution this refines the earlier credential-pair catalog decision: the daemon
+still snapshots exact `(tool, credential profile)` posture in each grant, but
+compiles it from the immutable profile and override instead of assigning policy
+by token name. The frozen dangerous blanket remains daemon-local and never
+authorizes runner dispatch. The following costs are accepted verbatim: (a) the
+model can read the runner-held repo-scoped PAT inside the jail and misuse it
+within its scopes — mitigated by fine-grained scoping to the one repository and
+instant revocability; (b) pushes are unguarded — mitigated by branch protection
+on main and owner-merge-everything.
+
+**Rejected alternatives.** Confirming every restricted operation treats prompts
+as the boundary and defeats unattended coding. Making ambient automatic exports
+the restricted profile's trust assumption to the whole account. A second policy
+mechanism would create conflicting authority.
+
+**Affects.** Runner tool policy resolution, session placement snapshots,
+approval provenance, the workstation catalog, and
+[tool-loop specification](spec/tool-loop.md).
+
+## 2026-07-27 — Resolve named runner credentials from one config
+
+**Context.** The daemon already grants credential profiles by checked name while
+credential values remain runner-local. The executable runner needs a generic
+file-to-environment binding without sending values over the control channel or
+hard-coding token-specific readers.
+
+**Decision.** `signalbox-runner` loads exactly one versioned TOML file whose
+path comes from either `SIGNALBOX_RUNNER_CONFIG_FILE` or one `--config`
+argument; supplying both or neither fails startup. Named credential entries map
+a checked profile name to one exact file path and one checked injection
+environment variable. The shipped version-one entry is `github-runner`, backed
+by a fine-grained repository-scoped PAT file and injected as `GH_TOKEN`. The
+file must be a regular effective-user-owned `0600` file. It is reread for each
+dispatch, with trailing `\n` and `\r` removed exactly as for the daemon file
+channel. Unknown granted names fail closed before lease claim. This refines the
+earlier owner-catalog decision for credential names only: checked configured
+names are registration availability, while daemon-owned sandbox and override
+policy supply the grant posture; tools, effects, loci, and sandbox meanings
+remain compiled daemon authority. Adding another token shape is a config entry,
+not a code branch. Model-provider credentials never enter runner config, wire
+state, or execution.
+
+**Rejected alternatives.** Sending values from the daemon violates the accepted
+profile boundary. One environment variable per token type hard-codes an
+expanding credential catalog. Reading once at startup prevents rotation, and
+logging paths or values enlarges disclosure.
+
+**Affects.** Runner configuration, credential resolution and injection, lease
+admission, INV-035 and INV-045, and
+[configuration-and-credentials](spec/configuration-and-credentials.md).
+
+## 2026-07-27 — Make runner-loss recovery owner-explicit
+
+**Context.** A lost runner changes filesystem, process, credential, and tool
+availability facts. Even another runner with the same capability class is not
+the session's pinned execution boundary, and an in-flight effect may remain
+ambiguous.
+
+**Decision.** Heartbeat or channel loss marks the exact runner connection lost
+and durably surfaces typed `RunnerLost` state on every affected session. No
+automatic migration, class-based re-placement, or replacement occurs. The only
+runner-loss recovery verbs are owner `replace`, naming either a different exact
+currently registered live runner or the one pending replacement enrollment,
+which is atomically activated while creating a new placement/workspace frontier
+boundary, and owner `abandon`, which consumes proof of the exact lost placement
+and terminalizes through the existing proof-bearing cancellation and ambiguity
+algebra without a successor turn. Replacement never reuses the prior workspace
+or credential grant.
+
+**Rejected alternatives.** Automatic migration hides a changed execution
+boundary. Waiting indefinitely without an owner verb strands the progressing
+slot. Treating loss as ordinary cancellation could erase an issued
+side-effecting attempt's ambiguity.
+
+**Affects.** Runner connection loss, placement orchestration, owner protocol
+version seventeen, session/client state, frontier injection, INV-026 and
+INV-044, and [runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-27 — Provision one recoverable clone per runner session
+
+**Context.** The domain fixes runner-owned worktree-per-session capability but
+leaves repository acquisition, naming, cleanup, and crash recovery open. A
+shared Git directory would sit outside the restricted session filesystem and
+make one session's Git metadata writable by another.
+
+**Decision.** Runner config maps checked repository keys to exact HTTPS clone
+URLs and owns one `0700` workspace root under a process-wide exclusive lock.
+Each session is a complete non-shared clone at
+`sessions/<canonical-session-uuid>/<placement-revision>/repo`, including its own
+`.git` directory, acquired with the selected runner PAT under a single-use
+provisioning authorization. Provisioning occurs in a sibling staging directory,
+writes a versioned non-secret manifest, fsyncs the manifest and parents, and
+atomically renames into place before the first atomic pin/grant/lease
+transition. An explicit daemon release, accepted only after the exact placement
+is terminal and neither a lease nor unacknowledged result is live, atomically
+renames it below `trash/` before recursive deletion. Startup resumes
+manifest-proven trash and never-published staging cleanup, reconciles every
+ready workspace with the daemon, and reports every unknown, retired-but-present,
+conflicting, or otherwise unreconciled workspace as leaked; it never silently
+deletes a reported leak. Workspaces are never shared or inherited across
+placements or runners.
+
+**Rejected alternatives.** One shared bare clone gives sessions shared mutable
+Git authority outside their jail. Random opaque directory names hinder recovery.
+Deleting every unrecognized directory at startup risks destroying evidence
+before daemon reconciliation. Daemon-owned deletion crosses the runner boundary.
+
+**Affects.** Runner workspace configuration and manifests, provisioning, cleanup
+and startup recovery, session placement, INV-022 and INV-044, and
+[runner-protocol specification](spec/runner-protocol.md).
+
 ## 2026-07-27 — Serve the unified conversation listing from authoritative tables
 
 **Context.** The owner needs one read surface listing native sessions and

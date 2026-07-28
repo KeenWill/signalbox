@@ -10,17 +10,20 @@ failed-attempt operator event together with the credential-shaped code-host
 detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
 decision surface through PR #291 (`agent/turn-control-verbs`), and
 runner-protocol batch reconstitution through PR #260
-(`agent/runner-protocol-domain`). It owns logical tool requests, approval policy
-and decisions, physical tool attempts, result admission, intra-turn
-continuation, crash classification, the compiled registry, and the daemon-local
-catalog. Turn and attempt lifecycle law lives in
+(`agent/runner-protocol-domain`). The runner executable stack rooted at this
+foundation proposal extends the same laws to the runner locus. This page owns
+logical tool requests, approval policy and decisions, physical tool attempts,
+result admission, intra-turn continuation, crash classification, the compiled
+registry, and the daemon-local catalog. Turn and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
 model-call staging and provider translation in
 [model-call-execution](model-call-execution.md); durable-command identity in
 [identity-and-commands](identity-and-commands.md); and relational mechanics in
 [persistence-protocol](persistence-protocol.md). Invariant tags cite
-[the invariant catalog](../invariants.md).
+[the invariant catalog](../invariants.md). The runner-locus paragraphs in this
+page are the foundation proposal at the bottom of their implementing stack and
+become verified only with those child pull requests.
 
 ## Intra-turn rounds and request batches
 
@@ -72,35 +75,36 @@ Every request has an approval state separate from its execution state. The
 implemented decision sources are:
 
 - `OwnerCommand` — one applied owner-global durable decision command;
-- `PolicyAuto` — the registry declaration selected automatic approval; and
-- `SessionBlanket` — the turn's frozen dangerous blanket posture selected
-  automatic approval.
+- `PolicyAuto` — the selected registry or sandbox-profile default supplied
+  automatic approval;
+- `SessionBlanket` — the frozen dangerous blanket supplied daemon-local
+  automatic approval; and
+- `SessionOverride` — an exact runner-placement tool override supplied automatic
+  approval.
 
-`SessionOverride` and `JudgeRecommendation` are typed additive vocabulary but
-have no storage encoding or producer. In particular, an automated source never
-constructs `OwnerCommand` or claims owner agency (INV-020).
+`JudgeRecommendation` remains typed additive vocabulary without a storage
+encoding or producer. An automated source never constructs `OwnerCommand` or
+claims owner agency (INV-020).
 
-The implemented precedence below governs daemon-local execution and sessions
-without a credential profile. Runner dispatch under a selected credential
-profile first resolves the pair posture specified by
-[runner protocol and placement](runner-protocol.md#credential-profiles-and-approval):
-after the frozen dangerous blanket, pair-level `Automatic` authorizes the exact
-pair and `SessionPolicy` or an absent pair requires confirmation. The later
-application stack must add a distinct durable credential-policy decision source;
-this foundation does not encode one into the current persistence vocabulary.
-
-Daemon-local policy resolution uses this accepted precedence:
+Daemon-local execution keeps this precedence:
 
 1. the frozen session posture `DangerousToolAutoApproval::ApproveAll`;
-2. a future exact per-tool session override;
-3. the registry default (`Auto` or `Confirm`); then
-4. fail-closed `Confirm` when no declaration exists.
+2. the registry default (`Auto` or `Confirm`); then
+3. fail-closed `Confirm` when no declaration exists.
 
-Only steps 1, 3, and 4 have producers in this slice. The producing-call
-completion transaction resolves policy independently for every proposal: the
-blanket posture records `SessionBlanket`, registry auto records `PolicyAuto`,
-and confirm leaves that request undecided. Thus a frozen automatic decision may
-exist after an earlier confirmation wait without bypassing it; only
+Runner execution instead uses the immutable placement policy owned by
+[runner protocol and placement](runner-protocol.md#sandbox-profiles-and-approval):
+
+1. an exact per-tool override, recording `SessionOverride` for `Auto` and
+   leaving `Confirm` undecided;
+2. the selected profile default, recording `PolicyAuto` for `Auto` and leaving
+   `Confirm` undecided; then
+3. fail closed when no exact daemon-owned runner declaration exists.
+
+The dangerous blanket has no runner rung. The producing-call completion
+transaction resolves policy independently for every proposal after selecting its
+admissible locus and immutable definition snapshot. A frozen automatic choice
+may exist after an earlier confirmation wait without bypassing it; only
 owner-command decisions must form a proposal-order prefix. After each owner
 command, the earliest remaining undecided confirmation is the next wait, while
 already frozen automatic decisions require no later command. Why: recording the
@@ -112,8 +116,8 @@ value and is named `DangerousToolAutoApproval::{Disabled, ApproveAll}`. Safe
 session creation uses `Disabled`. Replacement installs a complete later defaults
 version through the existing `ReplaceSessionDefaults` command. Origin acceptance
 freezes the posture into `EffectiveConfiguration` alongside model selection;
-steering-derived work inherits its source turn's frozen value. A later defaults
-replacement never changes queued, active, or completed work (INV-008).
+steering-derived work inherits the frozen value of its source turn. A later
+defaults replacement never changes queued, active, or completed work (INV-008).
 
 An owner decision is the canonical `DecideToolRequest` command: owner-global
 `DurableCommandId`, exact `ToolRequestId`, and either `Approve` or
@@ -179,16 +183,34 @@ The current daemon-local application catalog remains one process-lifetime
 immutable compiled value. Its existing `EffectFree` declaration maps to
 `RunnerToolEffectClass::Pure`, and `ExternalEffect` maps to
 `RunnerToolEffectClass::SideEffecting`; no current local declaration can project
-`Idempotent`. Before a shared name can use a daemon locus, the later application
-adapter must validate exact model-facing description and schema, permission
+`Idempotent`. Before a shared name can use a daemon locus, the application
+adapter validates exact model-facing description and schema, permission
 equality, and this effect mapping against the authoritative runner declaration;
 it also compiles the schema into the executable validator used before dispatch.
-A mismatch is unavailable, never a choice between two policies. Consolidating
-the typed representations requires the later application and persistence stack
-and no migration is introduced here. Catalog lookup and iteration are ports
-rather than a static global, but runtime rebinding and deployment compatibility
-for outstanding requests are not implemented; they require the durable
-definition-revision decision recorded under Open edges.
+A mismatch is unavailable, never a choice between two policies. The runner
+authority child stack persists the consolidated placement and policy snapshot.
+Catalog lookup and iteration remain ports rather than a static global, but
+runtime rebinding and deployment compatibility for outstanding requests are not
+implemented; they require the durable definition-revision decision recorded
+under Open edges.
+
+The version-one workstation registry has exactly these runner-only tools and
+effects:
+
+- `workspace_read` is `Pure`;
+- `workspace_write` and `workspace_edit` are `SideEffecting`;
+- `git_fetch` is `Idempotent`;
+- `git_clone`, `git_branch`, `git_commit`, and `git_push` are `SideEffecting`;
+  and
+- `shell_exec` and `build_test` are `SideEffecting`.
+
+Every schema is a closed JSON object. Workspace paths are repository-relative;
+Git repository acquisition names a configured repository key rather than a URL
+with credentials; shell and build/test commands are bounded argument arrays, not
+shell source smuggled through another tool field. `workspace-restricted`
+defaults all ten to `Auto`; `ambient` defaults only `workspace_read` to `Auto`.
+The runner derives advertisement from the same compiled executor registry, while
+the daemon remains the declaration and policy authority.
 
 Each provider operation carries one exact definition snapshot. Initial approval
 for proposals returned by that operation is derived from that same advertised
@@ -197,15 +219,18 @@ provider call is in flight therefore cannot upgrade a proposal from `Confirm` to
 unattended execution.
 
 The registry is advisory input to policy and execution, never request-content
-authority. A model may propose an unknown name; absent a frozen `ApproveAll`
-blanket, fail-closed policy requires confirmation, and an approved unknown
-request produces a typed `UnknownTool` error without invoking an executor.
-Because the attempt schema requires a closed effect class, preparation records
-`EffectFree` as a non-dispatching sentinel when no declaration exists. The
-preflight transaction closes that attempt before authorization and before the
-executor boundary; the sentinel is not a claim that an unknown tool is safe to
-run. A declaration added or removed after the request was recorded does not
-rewrite its name or arguments.
+authority. For daemon-local execution, a model may propose an unknown name;
+absent a frozen `ApproveAll` blanket, fail-closed policy requires confirmation,
+and an approved unknown request produces a typed `UnknownTool` error without
+invoking an executor. Runner locus selection requires an exact declaration and
+advertised availability before approval, so an unknown runner name is
+unavailable and never reaches a runner lease. Because the attempt schema
+requires a closed effect class, preparation records `EffectFree` as a
+non-dispatching sentinel when no declaration exists. The preflight transaction
+closes that attempt before authorization and before the executor boundary; the
+sentinel is not a claim that an unknown tool is safe to run. A declaration added
+or removed after the request was recorded does not rewrite its name or
+arguments.
 
 Effect class controls crash classification, not permission identity. In the
 current daemon-local executor, a crash-lost prepared attempt, or an in-flight
@@ -221,52 +246,77 @@ fabricating a new physical attempt.
 
 ## Serialized staged execution
 
-Tool execution is daemon-local and in-process behind the application
-`ToolExecutor` port. The executor receives checked request content and returns
-evidence; it cannot write transcript, request, attempt, approval, or turn state
-(INV-024). Execution is serialized in this slice:
+The application selects the admissible locus before authorization. Daemon-local
+execution crosses the in-process `ToolExecutor` port. Runner execution crosses
+the lease repository and checked wire adapter. Either executor receives checked
+request content and returns evidence; neither can write transcript, request,
+attempt, approval, turn, placement, grant, or lease state directly (INV-024).
+Execution is serialized:
 
 - approval visits requests in proposal order;
 - a turn has at most one live tool attempt;
-- approved requests execute strictly in proposal order; and
+- approved requests execute strictly in proposal order;
 - each attempt reaches a durable terminal state before the next attempt is
-  created.
+  created; and
+- the version-one runner holds one process-wide execution permit across all
+  sessions.
 
-After all approvals resolve, the fresh current turn attempt owns the batch's
+After all approvals resolve, the fresh current turn attempt owns the batch
 execution and continuation. For each next approved request:
 
 1. **Prepare transaction.** The application mints a UUIDv7 `ToolAttemptId` and
    commits a `Prepared` attempt row before executor work. It fixes the request,
-   owning turn, issuing turn attempt, effect class, and
-   `ToolDispatchGeneration::first()`.
+   owning turn, issuing turn attempt, effect class, selected locus, sandbox
+   profile when applicable, and `ToolDispatchGeneration::first()`.
 2. **Authorize transaction.** Fresh locked state validates that the request is
    approved, is the earliest unresolved executable request, and still belongs to
-   the issuing current turn attempt; it transitions the tool attempt to
-   `InFlight` and the turn attempt from `Prepared` to `Running` when necessary.
-3. **Execution.** No database transaction spans the in-process effect. The
-   executor receives a correlation containing request, tool attempt, issuing
-   turn attempt, and dispatch generation and returns one evidence value. Only
-   the issued authorization mints the executor fence that can bind returned
-   evidence into a committable observation; a correlation reconstituted from raw
-   durable facts compares and persists but cannot bind.
-4. **Commit-result transaction.** Fresh locked state validates the complete
-   correlation and that the dispatch generation is current before changing the
-   attempt. A stale or duplicate result cannot advance logical state (INV-011,
-   INV-021). The row moves monotonically to `Completed`, `KnownFailed`, or
-   `Ambiguous` and never reopens. An `Ambiguous` result atomically ends the
-   issuing turn attempt as `WithoutStop(Ambiguous)` and moves the lifecycle to
-   `awaiting_tool_recovery` correlated with that exact attempt. The logical
-   orchestration has yielded to a durable wait; the stored attempt disposition
-   remains the exact physical ambiguity classification.
+   the issuing current turn attempt. For daemon execution it transitions the
+   attempt to `InFlight` and the turn attempt to `Running` when necessary. For
+   runner execution one repository transaction additionally consumes any
+   workspace-ready evidence, pins initial placement and grant when needed,
+   consumes the exact runner authorization, stores the offered lease, and moves
+   the same attempt and turn states. A crash cannot commit `InFlight` without
+   the correlated lease.
+3. **Claim transaction.** The runner admits the complete immutable dispatch but
+   cannot execute it. The daemon validates and commits the exact lease claim
+   before acknowledging it. Only receipt of that acknowledgement plus the
+   matching `dispatch` gives the runner an execution capability. This step is
+   absent for daemon-local execution.
+4. **Execution.** No database transaction spans the effect. The executor
+   correlation contains runner and lease generation when applicable in addition
+   to request, tool attempt, issuing turn attempt, and dispatch generation. Only
+   the issued authorization or claimed-lease capability can bind returned
+   evidence into a committable observation; raw durable facts can compare but
+   cannot bind.
+5. **Commit-result transaction.** Fresh locked state validates the complete
+   correlation and current dispatch generation. For a runner result, one
+   transaction also locks the current lease, proves that the claimed lease is
+   the source of the observation, stores the lease completion, and consumes the
+   result exactly once. A stale or duplicate result cannot advance either
+   aggregate (INV-011, INV-021). The attempt moves monotonically to `Completed`,
+   `KnownFailed`, or `Ambiguous` and never reopens. An `Ambiguous` result
+   atomically ends the issuing turn attempt as `WithoutStop(Ambiguous)` and
+   moves lifecycle to `awaiting_tool_recovery` correlated with that exact
+   attempt.
+
+The runner durably spools a terminal evidence envelope until `result_recorded`.
+A process exit, timeout, supervisor loss, or channel loss after claim is not a
+known tool failure; it enters the effect-class loss and ambiguity law. A tool
+that executes and exits nonzero returns bounded structured `ExecutionFailed`
+evidence and is `KnownFailed`. Output admission applies the existing size,
+U+0000, credential-redaction, and correlation checks before durable semantic
+projection.
 
 If the authorization commit acknowledgement is ambiguous, execution does not
 begin from the returned error. While retaining the dispatch gate and exact
 request, the application rereads the attempt under the scheduler lock.
-`Prepared` proves non-consumption and returns the infrastructure failure;
-`InFlight` restores the exact authorization fence and may enter the executor. An
-inconclusive reread retains that authority state for another identical reread,
-so neither retry nor crash classification can be inferred from a lost commit
-response.
+`Prepared` proves non-consumption and returns the infrastructure failure. For a
+daemon locus, `InFlight` restores the exact authorization fence and may enter
+the executor. For a runner locus, it must also load the exact offered or claimed
+lease and resume only the corresponding wire phase; bare attempt state never
+permits execution. An inconclusive reread retains that authority state for
+another identical reread, so neither retry nor crash classification can be
+inferred from a lost commit response.
 
 A process-shared turn-keyed dispatch gate orders immediate interrupts against
 physical-attempt checkpointing, prepared-attempt preflight, the authorize →
@@ -651,23 +701,18 @@ version constant.
 
 ## Open edges
 
-- Execution-strategy configuration placement is recorded in
+- Dynamic execution-strategy policy beyond the two named runner profiles,
+  model-declared approval expiry, LLM-judge approval, and additional high-risk
+  guardrails are recorded in [Tool safety](../open-questions.md#tool-safety).
+- Rich result-content variants and durable tool-definition revisioning across
+  outstanding requests are recorded in
   [Tool safety](../open-questions.md#tool-safety).
-- Model-declared approval expiry is recorded in
+- General tool-attempt retry and ambiguous-wait resolution beyond the sealed
+  runner-loss transitions are recorded in
   [Tool safety](../open-questions.md#tool-safety).
-- LLM-judge approval mechanics are recorded in
-  [Tool safety](../open-questions.md#tool-safety).
-- Per-tool session overrides and high-risk guardrails are recorded in
-  [Tool safety](../open-questions.md#tool-safety).
-- Rich result-content variants are recorded in
-  [Tool safety](../open-questions.md#tool-safety).
-- Durable tool-definition revisioning and safe deployment across outstanding
-  requests are recorded in [Tool safety](../open-questions.md#tool-safety).
-- Tool-attempt retry and ambiguous-wait resolution are recorded in
-  [Tool safety](../open-questions.md#tool-safety).
-- Runner placement and domain lease law are owned by
-  [runner protocol and placement](runner-protocol.md); its later transport,
-  persistence, and authentication edges remain recorded under
+- Runner placement, local transport, workspace, profile, and lease law are owned
+  by [runner protocol and placement](runner-protocol.md). Remote runner
+  transport and multiple-runner scheduling remain recorded under
   [Scheduling and runners](../open-questions.md#scheduling-and-runners),
   [Protocols and persistence](../open-questions.md#protocols-and-persistence),
   and
