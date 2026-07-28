@@ -150,15 +150,16 @@ identities already present on the event's exact base commit remain valid in a
 stacked child until that base PR merges. This reverses PR #246's mechanical
 exclusions without adding a dependency or network access to the checker; the CI
 validate job therefore supplies full history at checkout. Discovery reads the
-harness build, so `cfg(test)` is true and a page a stacked child renames is read
-at its base name. Rust tests remain explicit source declarations: macros that
-emit or forward test attributes are rejected, and a procedural macro that spells
-one in its expansion with it, so reverse registration never depends on expanding
-arbitrary macros; a forwarded attribute is read from the invocation argument its
-matcher binds whenever that binding is determinable, from every top-level
-metadata item of the invocation when it is not, and from invocations anywhere in
-the repository when the macro name has exactly one definition, from the defining
-file alone when it does not.
+harness build of the sources Cargo compiles, so `cfg(test)` is true, a file no
+Cargo target reaches is not read as a crate of its own, and a page a stacked
+child renames is read at its base name. Rust tests remain explicit source
+declarations: macros that emit or forward test attributes are rejected, and a
+procedural macro that spells one in its expansion with it, so reverse
+registration never depends on expanding arbitrary macros; a forwarded attribute
+is read from the invocation argument its matcher binds whenever that binding is
+determinable, from every top-level metadata item of the invocation when it is
+not, and from invocations anywhere in the repository when the macro name has
+exactly one definition, from the defining file alone when it does not.
 
 **Rejected alternatives.** Reviewer-only checks repeat deterministic work.
 GitHub calls or per-token fetches add mutable network state and do not inspect
