@@ -32,6 +32,13 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
                    AND state_kind = 'active'
             )";
 
+pub(crate) const CONTEXT_COMPACTION_SESSION: &str = "SELECT current.current_version
+           FROM session
+           LEFT JOIN session_current_defaults AS current
+             ON current.session_id = session.session_id
+          WHERE session.session_id = $1
+          FOR UPDATE OF session";
+
 pub(crate) const SUBMIT_INPUT_SESSION: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 

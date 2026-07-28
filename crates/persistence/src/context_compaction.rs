@@ -467,17 +467,13 @@ async fn prepare_in_transaction(
             .await
             .map(|outcome| (false, outcome));
     }
-    let current_version: Option<Decimal> = sqlx::query_scalar(
-        "SELECT current.current_version
-           FROM session
-           LEFT JOIN session_current_defaults AS current
-             ON current.session_id = session.session_id
-          WHERE session.session_id = $1
-          FOR UPDATE OF session",
-    )
-    .bind(session_id_to_uuid(request.session))
-    .fetch_optional(&mut **transaction)
-    .await?;
+    // Lock inventory: the target session row is the first and only explicit
+    // row lock. Guarded updates and inserts provide later serialization.
+    let current_version: Option<Decimal> =
+        sqlx::query_scalar(crate::lock_inventory::CONTEXT_COMPACTION_SESSION)
+            .bind(session_id_to_uuid(request.session))
+            .fetch_optional(&mut **transaction)
+            .await?;
     let Some(current_version) = current_version else {
         return Ok((false, PrepareContextCompactionOutcome::SessionNotFound));
     };

@@ -13,15 +13,16 @@ lock was verified against PR #267 (`agent/runner-persistence`); the current
 classifier names, ambiguity reconstitution facts, and command-adapter boundaries
 were verified through PR #288 (`agent/audit-fix-docs-coherence`); and the
 session system-prompt columns were verified through PR #286
-(`agent/session-system-prompt`). This page covers the Postgres representation in
-`crates/persistence` (source and migrations), migration discipline, durable
-command storage and replay equality, the fail-closed reconstitution boundary,
-the lock protocol, pending-steering durable state, the corruption taxonomy,
-commit-ambiguity handling, and the transactional outbox. Session aggregate
-semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
-and attempt lifecycle in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
-kinds and command construction in
+(`agent/session-system-prompt`); the context-compaction transaction and lock
+inventory were verified against `agent/context-compaction-protocol`. This page
+covers the Postgres representation in `crates/persistence` (source and
+migrations), migration discipline, durable command storage and replay equality,
+the fail-closed reconstitution boundary, the lock protocol, pending-steering
+durable state, the corruption taxonomy, commit-ambiguity handling, and the
+transactional outbox. Session aggregate semantics live in
+[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
+lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
+identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
 [docs/invariants.md](../invariants.md); this page cites rows by tag.
@@ -347,6 +348,12 @@ Locks per transaction, in acquisition order:
   append-only, so complete loading and boundary resolution need no mutable-state
   lock. Semantic-entry candidates are requested only after the resulting checked
   prefix fixes their cardinality.
+- **ContextCompaction**: an unseen command locks the target session row in
+  `FOR UPDATE` mode before reading defaults, turn, frontier, and existing
+  compaction state. It is the transaction's only explicit row lock; guarded
+  updates and inserts serialize the call, command, summary, and result-frontier
+  records. An equal replay resolves from the command registry and receipt
+  without taking the session lock.
 - **SubmitInput** (`prepare_against_locked_state`): session row
   `FOR NO KEY UPDATE`, then `session_scheduler` row `FOR UPDATE`, then
   `session_current_defaults` row `FOR UPDATE`; only then does it read the
