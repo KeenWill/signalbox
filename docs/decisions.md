@@ -1100,6 +1100,28 @@ reservation and merged filename differ.
 and interpretation of the earlier review-workflow decision entries' affected
 slice.
 
+## 2026-07-26 — Bound Codex streamed redaction lookbehind
+
+**Context.** Credential-shape redaction must retain an incomplete marker or
+value across streamed observations, but an unterminated value can otherwise grow
+that retained suffix for the lifetime of the process. Per-event bounds do not
+bound accumulation across many valid events.
+
+**Decision.** Retain at most 64 KiB of incomplete Codex credential-shaped stream
+text. When that bound is exceeded, emit redaction markers with the original
+observation metadata and suppress later streamed text through the terminal
+flush. This may redact benign continuation text but never releases the possible
+credential.
+
+**Rejected alternatives.** Retaining through the process deadline leaves memory
+unbounded. Truncating and resuming ordinary output could release the remainder
+of the same credential. Raising the per-event limit does not address cumulative
+growth.
+
+**Affects.** INV-035, the Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md), and the streaming redactor in
+`crates/model-runtime-codex-cli`.
+
 ## 2026-07-26 — Select execution locus before authorization
 
 **Context.** A combined-locus tool can use a runner-resident credential profile
@@ -1155,6 +1177,53 @@ forward narrowing.
 **Affects.** `RunnerToolAttemptAuthorization`, `AuthorizedToolAttempt`,
 `RunnerLease`, placement reconstitution, INV-043 and INV-044, S12, S30, S31, and
 the [runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-26 — Require Unix process-group supervision for Codex
+
+**Context.** Cancellation and timeout evidence is sound only when the adapter
+can terminate the spawned CLI and its descendants. The implemented supervisor
+uses Unix process groups; its non-Unix fallback could kill only the direct
+process and leave a descendant continuing provider work after terminal evidence
+was returned.
+
+**Decision.** Construct the Codex CLI runtime only on Unix hosts. Keep one
+process group per dispatch and signal that group through interrupt and forced
+termination. A later non-Unix implementation must provide equivalent
+process-tree lifetime control before broadening support.
+
+**Rejected alternatives.** Killing only the direct child violates the
+one-dispatch evidence boundary when a descendant survives. Adding a Windows Job
+Object dependency and implementation is outside this adapter slice. Claiming
+portable supervision from a no-op fallback would overstate implemented behavior.
+
+**Affects.** The Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md) and
+`crates/model-runtime-codex-cli`.
+
+## 2026-07-26 — Codex CLI generation settings are advisory
+
+**Context.** `ModelSettings` normally names provider-enforced request controls,
+including a required output-token ceiling. The pinned Codex CLI subscription
+surface exposes no argv, configuration, or request fields for that ceiling,
+temperature, top-p, or stop sequences. Prompt text can communicate intent but
+cannot enforce sampling or budget semantics. Rejecting the required ceiling
+would make every operation unsupported and leave the commissioned wrapper
+unusable.
+
+**Decision.** Record one capability-limited exception for the Codex CLI adapter:
+validate all four settings, render them into the complete model-visible
+operation prompt, and describe them as advisory rather than provider-enforced.
+Callers that require hard generation controls must not select this adapter. No
+other adapter inherits the exception.
+
+**Rejected alternatives.** Claiming prompt instructions as hard controls is
+false. Rejecting every operation preserves the generic rule but defeats the
+wrapped subscription runtime. Reimplementing the provider transport would
+reverse the recorded wrap direction.
+
+**Affects.** `ModelSettings` contract comments, the Codex CLI section of
+[runtime-substrate](spec/runtime-substrate.md), and
+`crates/model-runtime-codex-cli`.
 
 ## 2026-07-26 — Bound native followed-event buffering in memory
 
@@ -1304,6 +1373,88 @@ runtime contract beyond this boundary.
 **Affects.** Semantic transcript entries, turn-start frontier construction,
 provider-neutral conversation rendering, protocol version six, and
 [sessions and transcript](spec/sessions-and-transcript.md).
+
+## 2026-07-25 — Allowlist the Codex subprocess environment
+
+**Context.** A subprocess inherits its parent's complete environment by default.
+The Codex wrapper needs the operator-selected subscription-login location,
+ordinary process paths, locale, certificate, and proxy configuration, but
+passing unrelated service variables would expose ambient capabilities to the
+provider process. Clearing every variable would also make the CLI's own login
+and network configuration unreliable.
+
+**Decision.** Clear the environment for each Codex spawn, then copy only the
+named home and Codex-home paths, executable and temporary paths, XDG paths,
+locale and terminal settings, certificate paths, and proxy settings listed by
+the adapter. Never enumerate, retain, diagnose, or pass any other parent
+variable. Keep filesystem authority separate: this subprocess boundary supplies
+the CLI's documented read-only sandbox and working root, while stronger host
+isolation belongs to later composition.
+
+**Rejected alternatives.** Inheriting the complete service environment exposes
+unrelated secrets and capabilities. An empty environment can disconnect the CLI
+from the subscription login it exclusively owns and from required network
+configuration. Claiming a filesystem allowlist that the wrapped CLI does not
+enforce would overstate the adapter's authority.
+
+**Affects.** The Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md) and
+`crates/model-runtime-codex-cli`.
+
+## 2026-07-25 — Anchor subprocess dispatch at one process spawn
+
+**Context.** INV-025/026 prohibited hidden repeat sends around one authorized
+provider interaction, but named only the direct adapters' physical-request
+shape. A wrapped CLI exposes process control and a JSON event stream, not its
+internal provider requests, so treating each unobservable internal attempt as a
+hub dispatch would make the invariant unenforceable.
+
+**Decision.** Define the adapter-owned unit of irrevocable dispatch by
+transport: one physical request for a direct adapter and one process spawn for a
+subprocess adapter. One prepared call spawns at most once, never respawns after
+ambiguity, and treats provider-client activity inside the process as
+provider-internal. Process death or terminal-marker loss after spawn remains
+typed evidence for the original dispatch.
+
+**Rejected alternatives.** Reimplementing or observing the CLI's internal
+transport would reverse the accepted wrap direction and couple Signalbox to a
+provider implementation boundary. Treating one spawn as proven retry-free would
+claim evidence the adapter cannot observe. Respawning after an ambiguous exit
+would hide accepted duplicate risk.
+
+**Affects.** INV-025, INV-026, the two-stage runtime contract in
+[runtime-substrate](spec/runtime-substrate.md), and every subprocess
+`ModelRuntime` adapter.
+
+## 2026-07-25 — Make Codex CLI calls ephemeral structured subprocesses
+
+**Context.** The Codex wrapper needs exact frontier input, typed completion,
+refusal and tool evidence, bounded supervision, version-drift defense, and
+subscription login without reading the CLI credential store. The CLI's JSONL
+events supply process and turn boundaries, while its final agent message needs a
+stable model-shaped envelope. The adapter cannot spend a model dispatch on a
+separate version-probe process, and composition is outside this pass.
+
+**Decision.** Anchor the event-protocol fixture corpus and exported deployment
+pin at Codex CLI version `0.145.0`; composition must select that executable
+before wiring the adapter. Invoke one fresh `codex exec --json --ephemeral`
+process with user configuration and rule files ignored, read-only sandboxing,
+the resolved model, the complete rendered operation on stdin, and an
+adapter-owned JSON output schema in a private temporary file. Use Tokio process
+I/O, `tempfile` for schema lifetime, and Rustix only for safe Unix process-group
+interrupt before force-kill. Parse the last agent message as the
+completion/refusal/tool envelope and require `turn.completed`; use only offline
+scripted-process tests in CI.
+
+**Rejected alternatives.** Resume-by-default would move required semantic state
+behind an in-memory session pointer. Positional prompt arguments expose large
+frontiers through process listings. Reading Codex auth to seed exact-value
+redaction violates the credential boundary. Treating Codex's own command or MCP
+items as caller tool proposals confuses agent activity with the declared
+`ModelOperation` contract.
+
+**Affects.** `crates/model-runtime-codex-cli`, workspace dependencies, and the
+Codex CLI provider section of [runtime-substrate](spec/runtime-substrate.md).
 
 ## 2026-07-25 — Scoped verification references on specification pages
 
