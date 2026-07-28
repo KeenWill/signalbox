@@ -309,7 +309,7 @@ impl<C: Clone> EventDecoder<C> {
                 );
             }
         };
-        let mut content = match self.decode_content(&envelope, sink) {
+        let mut content = match self.decode_content(&envelope, &mut *sink) {
             Ok(content) => content,
             Err(detail) => {
                 return boundary_loss(
@@ -395,18 +395,20 @@ impl<C: Clone> EventDecoder<C> {
     fn decode_content(
         &self,
         envelope: &ModelEnvelope,
-        sink: &RedactingSink<'_, C>,
+        sink: &mut RedactingSink<'_, C>,
     ) -> Result<Vec<AssistantPart>, String> {
         if envelope.outcome == EnvelopeOutcome::Refused && !envelope.tool_calls.is_empty() {
             return Err("a refusal envelope also proposed tools".to_string());
         }
         let mut content = Vec::new();
-        // Consults the held lookbehind (including the emitted thread-id
-        // context), not just the stateless scan: a buffered final text whose
-        // start completes a credential marker ending the already-recorded
-        // thread id must be suppressed whole, exactly as the streamed path
-        // suppresses it delta by delta.
-        let text = sink.redact_terminal_failure_text(&envelope.text);
+        // Consults the held lookbehind (including the emitted thread-id and
+        // dropped-reasoning contexts), not just the stateless scan: a buffered
+        // final text whose start completes a credential marker ending either
+        // chain must be suppressed whole, exactly as the streamed path
+        // suppresses it delta by delta. Also resolves the dropped chain
+        // through this text so a chain the text broke does not misfire on the
+        // clean provider ids that follow.
+        let text = sink.redact_final_envelope_text(&envelope.text);
         if !text.is_empty() {
             content.push(AssistantPart::Text(text));
         }

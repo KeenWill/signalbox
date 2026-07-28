@@ -532,11 +532,24 @@ async fn execute_process<C: Clone + Send + Sync>(
             }
         }
         InputStep::TimedOut => {
-            force_kill(&mut child).await;
-            abort_stderr_task(&mut stderr_task).await;
-            return pre_exchange_boundary_loss(LossCause::TimedOut(TransportFacts::new(
-                "Codex CLI process exceeded its exchange timeout",
-            )));
+            // Work-first, mirroring the cancellation arm: a leader that
+            // already exited on its own while a descendant kept the upload
+            // blocked has a definitive, waitable status; force-killing here
+            // would launder a provider rejection — or a completed turn with
+            // an incomplete upload — into timeout loss. Continue through
+            // stdout and exit classification with the upload recorded as
+            // incomplete.
+            if leader_exited_without_reaping(child.id()) {
+                Some(std::io::Error::other(
+                    "request upload timed out after the Codex CLI leader had exited",
+                ))
+            } else {
+                force_kill(&mut child).await;
+                abort_stderr_task(&mut stderr_task).await;
+                return pre_exchange_boundary_loss(LossCause::TimedOut(TransportFacts::new(
+                    "Codex CLI process exceeded its exchange timeout",
+                )));
+            }
         }
     };
     drop(stdin);

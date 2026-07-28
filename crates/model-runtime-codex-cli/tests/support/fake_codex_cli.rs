@@ -21,6 +21,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         emit(r#"{"type":"turn.started"}"#);
         failed(fixtures::EARLY_STDIN_FAILURE);
     }
+    if Path::new(fixtures::EARLY_STDIN_HELD_EXIT_MARKER).exists() {
+        // A descendant inherits the stdin read end and never reads it, so the
+        // adapter's oversized upload stays blocked (no EPIPE) while the
+        // leader's definitive nonzero exit becomes waitable.
+        eprintln!("authentication failed");
+        let descendant = std::process::Command::new("sleep")
+            .arg("60")
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        std::fs::write(
+            "fake-codex-stdin-held-group",
+            format!(
+                "process_group={}\ndescendant={}\n",
+                std::process::id(),
+                descendant.id()
+            ),
+        )?;
+        std::process::exit(7);
+    }
     if Path::new(fixtures::EARLY_STDIN_COMPLETION_MARKER).exists() {
         emit(&format!(
             r#"{{"type":"thread.started","thread_id":"{}"}}"#,
