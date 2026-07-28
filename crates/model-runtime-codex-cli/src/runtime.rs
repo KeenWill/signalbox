@@ -953,14 +953,10 @@ fn spawn_environment_value(name: &str, value: std::ffi::OsString) -> std::ffi::O
     if name != "CODEX_HOME" && name != "HOME" {
         return value;
     }
-    // An explicitly empty value must pass through empty, not be absolutized:
-    // `std::path::absolute("")` succeeds by resolving to the parent's current
-    // directory, which would silently point the child's credential home at
-    // `<cwd>/.codex` and select an unintended ambient login. Left empty, the
-    // CLI itself rejects it.
-    if value.is_empty() {
-        return value;
-    }
+    // An explicitly empty value is refused upstream by `allowlisted_environment`
+    // (absolutizing `""` resolves to the parent's current directory and would
+    // select an ambient credential store), so only a non-empty path reaches
+    // here.
     match std::path::absolute(std::path::Path::new(&value)) {
         Ok(path) => path.into_os_string(),
         Err(_) => value,
@@ -980,20 +976,22 @@ const PROXY_URL_VARIABLES: &[&str] = &[
 ];
 
 /// Assembles the allowlisted child environment through the injectable `read`,
-/// rejecting (with the offending variable's name, never its value) a proxy
-/// URL that embeds userinfo. Such a credential would transit to the child
-/// verbatim, and a CLI that reflects its proxy configuration in an error or
-/// event would hand the password to output the adapter can only shape-redact
-/// — `redact_text` has no proxy-userinfo rule, so the value must never reach
-/// the child at all (INV-035).
+/// rejecting (with the offending variable's name, never its value): a proxy URL
+/// that embeds userinfo — such a credential would transit to the child verbatim
+/// and a CLI that reflects its proxy configuration would hand the password to
+/// output the adapter can only shape-redact, and `redact_text` has no
+/// proxy-userinfo rule (INV-035) — and an explicitly empty `HOME`/`CODEX_HOME`,
+/// which `std::path::absolute` would resolve to the parent's current directory
+/// and point the child's credential store at `<cwd>/.codex`, selecting an
+/// unintended ambient login. Both must never reach the child.
 fn allowlisted_environment(
     read: impl Fn(&str) -> Option<std::ffi::OsString>,
-) -> Result<Vec<(&'static str, std::ffi::OsString)>, ProxyRejection> {
+) -> Result<Vec<(&'static str, std::ffi::OsString)>, EnvironmentRejection> {
     let mut environment = Vec::new();
     for name in CODEX_ENVIRONMENT_ALLOWLIST {
         if let Some(value) = read(name) {
-            if let Some(reason) = proxy_rejection(name, &value) {
-                return Err(ProxyRejection { name, reason });
+            if let Some(reason) = environment_rejection(name, &value) {
+                return Err(EnvironmentRejection { name, reason });
             }
             environment.push((*name, spawn_environment_value(name, value)));
         }
@@ -1001,55 +999,73 @@ fn allowlisted_environment(
     Ok(environment)
 }
 
-/// A refused proxy variable: the variable name (never its value) and the exact
-/// reason, so the reference-only diagnostic names the correct remediation.
-struct ProxyRejection {
+/// A refused environment variable: the variable name (never its value) and the
+/// exact reason, so the reference-only diagnostic names the correct remediation.
+#[derive(Debug)]
+struct EnvironmentRejection {
     name: &'static str,
-    reason: ProxyRejectionReason,
+    reason: EnvironmentRejectionReason,
 }
 
-enum ProxyRejectionReason {
-    /// The URL authority embeds userinfo (`scheme://user:secret@host`).
+#[derive(Debug, PartialEq, Eq)]
+enum EnvironmentRejectionReason {
+    /// A proxy URL authority embeds userinfo (`scheme://user:secret@host`).
     EmbedsUserinfo,
-    /// The value is not UTF-8, so it cannot be verified credential-free.
+    /// A proxy value is not UTF-8, so it cannot be verified credential-free.
     Unverifiable,
+    /// `HOME`/`CODEX_HOME` is present but empty; absolutizing it would select
+    /// an ambient credential store under the working directory.
+    EmptyCredentialHome,
 }
 
-impl ProxyRejection {
+impl EnvironmentRejection {
     fn diagnostic(&self) -> String {
         let name = self.name;
         match self.reason {
-            ProxyRejectionReason::EmbedsUserinfo => format!(
+            EnvironmentRejectionReason::EmbedsUserinfo => format!(
                 "inherited `{name}` embeds URL userinfo; the Codex CLI would receive that \
                  credential verbatim and could reflect it in output the adapter can only \
                  shape-redact, so the exchange is refused — remove the credential from the \
                  proxy URL"
             ),
-            ProxyRejectionReason::Unverifiable => format!(
+            EnvironmentRejectionReason::Unverifiable => format!(
                 "inherited `{name}` is not valid UTF-8 and cannot be verified free of embedded \
                  credentials, so the exchange is refused — set it to a valid UTF-8 proxy URL"
+            ),
+            EnvironmentRejectionReason::EmptyCredentialHome => format!(
+                "inherited `{name}` is empty; absolutizing it would point the Codex login store \
+                 at the working directory and select an unintended ambient login, so the \
+                 exchange is refused — set it to an absolute directory or leave it unset"
             ),
         }
     }
 }
 
-/// Why a proxy variable's value is refused, or `None` when it is acceptable.
-/// The authority is the span after any `scheme://` up to the first `/`, `?`,
-/// or `#`; userinfo is an `@` inside it. A value that cannot be read as UTF-8
-/// cannot be verified credential-free and fails closed as `Unverifiable` — a
-/// distinct reason from an actual embedded credential.
-fn proxy_rejection(name: &str, value: &std::ffi::OsStr) -> Option<ProxyRejectionReason> {
+/// Why an allowlisted variable's value is refused, or `None` when it is
+/// acceptable. An empty `HOME`/`CODEX_HOME` is refused as
+/// `EmptyCredentialHome`. For proxy variables, the authority is the span after
+/// any `scheme://` up to the first `/`, `?`, or `#`; userinfo is an `@` inside
+/// it, and a value that cannot be read as UTF-8 cannot be verified
+/// credential-free and fails closed as `Unverifiable` — a distinct reason from
+/// an actual embedded credential.
+fn environment_rejection(
+    name: &str,
+    value: &std::ffi::OsStr,
+) -> Option<EnvironmentRejectionReason> {
+    if matches!(name, "HOME" | "CODEX_HOME") && value.is_empty() {
+        return Some(EnvironmentRejectionReason::EmptyCredentialHome);
+    }
     if !PROXY_URL_VARIABLES.contains(&name) {
         return None;
     }
     let Some(text) = value.to_str() else {
-        return Some(ProxyRejectionReason::Unverifiable);
+        return Some(EnvironmentRejectionReason::Unverifiable);
     };
     let after_scheme = text.split_once("://").map_or(text, |(_, rest)| rest);
     let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
     authority
         .contains('@')
-        .then_some(ProxyRejectionReason::EmbedsUserinfo)
+        .then_some(EnvironmentRejectionReason::EmbedsUserinfo)
 }
 
 /// Reaps a leader that has already exited on its own, returning its status and
@@ -1378,7 +1394,8 @@ fn already_fired(signal: &mut CancellationSignal) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProxyRejectionReason, allowlisted_environment, read_bounded_line, spawn_environment_value,
+        EnvironmentRejection, EnvironmentRejectionReason, allowlisted_environment,
+        read_bounded_line, spawn_environment_value,
     };
 
     #[test]
@@ -1403,130 +1420,145 @@ mod tests {
         assert_eq!(value, std::ffi::OsString::from("relative:paths"));
     }
 
-    /// Assembles the environment with exactly `name=value` set and asserts
-    /// the assembly refuses it by name, keeping each named case a
-    /// straight-line invocation.
+    /// Assembles the environment with exactly `name=value` set and returns the
+    /// rejection, so each test asserts the reason/name straight-line. The
+    /// branching lives here in the helper, not in a test body.
     #[track_caller]
-    fn assert_environment_rejects(name: &'static str, value: &str) {
-        match allowlisted_environment(|queried| {
-            (queried == name).then(|| std::ffi::OsString::from(value))
-        }) {
-            Err(rejection) => {
-                assert_eq!(
-                    rejection.name, name,
-                    "`{name}={value}` rejected by wrong name"
-                );
-                // A URL-userinfo rejection reports the credential-removal
-                // remediation, not the UTF-8 one.
-                assert!(matches!(
-                    rejection.reason,
-                    ProxyRejectionReason::EmbedsUserinfo
-                ));
-                assert!(rejection.diagnostic().contains("userinfo"));
-            }
-            Ok(_) => panic!("`{name}={value}` must be rejected"),
-        }
+    fn rejection_for(name: &'static str, value: std::ffi::OsString) -> EnvironmentRejection {
+        allowlisted_environment(|queried| (queried == name).then(|| value.clone()))
+            .err()
+            .expect("the value must be rejected")
     }
 
-    /// Assembles the environment with exactly `name=value` set and asserts
-    /// it passes through unchanged.
+    /// Assembles the environment with exactly `name=value` set and returns the
+    /// assembled child value, so a passing case asserts equality straight-line.
     #[track_caller]
-    fn assert_environment_passes(name: &'static str, value: &str) {
-        let result = allowlisted_environment(|queried| {
-            (queried == name).then(|| std::ffi::OsString::from(value))
-        });
-
-        assert!(
-            result.is_ok_and(|env| env == vec![(name, std::ffi::OsString::from(value))]),
-            "`{name}={value}` must pass through"
-        );
+    fn accepted_value(name: &'static str, value: std::ffi::OsString) -> std::ffi::OsString {
+        let env = allowlisted_environment(|queried| (queried == name).then(|| value.clone()))
+            .expect("the value must pass through");
+        env.into_iter()
+            .find(|(assembled, _)| *assembled == name)
+            .expect("the assembled environment contains the variable")
+            .1
     }
 
-    /// INV-035: a proxy URL embedding authority userinfo is refused by name.
+    /// INV-035: a proxy URL embedding authority userinfo is refused as such.
     #[test]
     fn credential_bearing_proxy_url_is_rejected() {
-        assert_environment_rejects(
+        let rejection = rejection_for(
             "HTTP_PROXY",
-            "http://alice:opaque-proxy-value@proxy.internal:8080",
+            "http://alice:opaque-proxy-value@proxy.internal:8080".into(),
         );
+
+        assert_eq!(rejection.name, "HTTP_PROXY");
+        assert_eq!(rejection.reason, EnvironmentRejectionReason::EmbedsUserinfo);
     }
 
     /// INV-035: username-only userinfo is still an inherited secret shape.
     #[test]
     fn password_less_proxy_userinfo_is_rejected() {
-        assert_environment_rejects("HTTPS_PROXY", "https://alice@proxy.internal");
+        let rejection = rejection_for("HTTPS_PROXY", "https://alice@proxy.internal".into());
+
+        assert_eq!(rejection.reason, EnvironmentRejectionReason::EmbedsUserinfo);
     }
 
     /// INV-035: a schemeless proxy value with userinfo is refused too.
     #[test]
     fn schemeless_proxy_userinfo_is_rejected() {
-        assert_environment_rejects("ALL_PROXY", "alice:opaque-proxy-value@proxy.internal:8080");
+        let rejection = rejection_for(
+            "ALL_PROXY",
+            "alice:opaque-proxy-value@proxy.internal:8080".into(),
+        );
+
+        assert_eq!(rejection.reason, EnvironmentRejectionReason::EmbedsUserinfo);
     }
 
     /// INV-035: the lowercase variable spellings share the refusal.
     #[test]
     fn lowercase_proxy_userinfo_is_rejected() {
-        assert_environment_rejects(
+        let rejection = rejection_for(
             "http_proxy",
-            "socks5://alice:opaque-proxy-value@proxy.internal",
+            "socks5://alice:opaque-proxy-value@proxy.internal".into(),
         );
+
+        assert_eq!(rejection.reason, EnvironmentRejectionReason::EmbedsUserinfo);
     }
 
     /// A credential-free proxy URL passes through unchanged.
     #[test]
     fn credential_free_proxy_url_passes_through() {
-        assert_environment_passes("HTTP_PROXY", "http://proxy.internal:8080");
+        assert_eq!(
+            accepted_value("HTTP_PROXY", "http://proxy.internal:8080".into()),
+            std::ffi::OsString::from("http://proxy.internal:8080")
+        );
     }
 
     /// An `@` confined to the URL path is not authority userinfo.
     #[test]
     fn path_confined_at_sign_passes_through() {
-        assert_environment_passes("HTTPS_PROXY", "https://proxy.internal/path/we@ird");
+        assert_eq!(
+            accepted_value("HTTPS_PROXY", "https://proxy.internal/path/we@ird".into()),
+            std::ffi::OsString::from("https://proxy.internal/path/we@ird")
+        );
     }
 
     /// `NO_PROXY` is a host list, never a URL with an authority.
     #[test]
     fn no_proxy_host_list_passes_through() {
-        assert_environment_passes("NO_PROXY", "internal,@odd-but-not-a-url");
+        assert_eq!(
+            accepted_value("NO_PROXY", "internal,@odd-but-not-a-url".into()),
+            std::ffi::OsString::from("internal,@odd-but-not-a-url")
+        );
     }
 
     /// Non-proxy allowlisted variables are not URL-checked.
     #[test]
     fn non_proxy_variables_are_not_url_checked() {
-        assert_environment_passes("TERM", "user:secret@not-a-proxy-variable");
+        assert_eq!(
+            accepted_value("TERM", "user:secret@not-a-proxy-variable".into()),
+            std::ffi::OsString::from("user:secret@not-a-proxy-variable")
+        );
     }
 
-    /// A proxy value that is not UTF-8 cannot be verified credential-free and
-    /// fails closed — but with the UTF-8 remediation, not the false claim that
-    /// it embeds userinfo (no userinfo was established).
+    /// A proxy value that is not UTF-8 is refused as `Unverifiable` (the UTF-8
+    /// remediation), not as an embedded-userinfo credential.
     #[cfg(unix)]
     #[test]
     fn non_utf8_proxy_value_is_rejected_as_unverifiable() {
         use std::os::unix::ffi::OsStringExt;
 
-        let value = std::ffi::OsString::from_vec(vec![0x68, 0x74, 0xff, 0xfe]);
-        match allowlisted_environment(|queried| (queried == "HTTP_PROXY").then(|| value.clone())) {
-            Err(rejection) => {
-                assert_eq!(rejection.name, "HTTP_PROXY");
-                assert!(matches!(
-                    rejection.reason,
-                    ProxyRejectionReason::Unverifiable
-                ));
-                let diagnostic = rejection.diagnostic();
-                assert!(diagnostic.contains("not valid UTF-8"));
-                assert!(!diagnostic.contains("userinfo"));
-            }
-            Ok(_) => panic!("a non-UTF-8 proxy value must be rejected"),
-        }
+        let rejection = rejection_for(
+            "HTTP_PROXY",
+            std::ffi::OsString::from_vec(vec![0x68, 0x74, 0xff, 0xfe]),
+        );
+
+        assert_eq!(rejection.name, "HTTP_PROXY");
+        assert_eq!(rejection.reason, EnvironmentRejectionReason::Unverifiable);
+        assert!(rejection.diagnostic().contains("not valid UTF-8"));
+        assert!(!rejection.diagnostic().contains("userinfo"));
     }
 
-    /// An explicitly empty `HOME`/`CODEX_HOME` passes through empty rather than
-    /// being absolutized to the parent's current directory (which would point
-    /// the child's credential home at `<cwd>/.codex`).
+    /// An explicitly empty `HOME`/`CODEX_HOME` is refused before spawning
+    /// rather than delegated to the CLI: absolutizing it would point the login
+    /// store at the working directory and select an unintended ambient login.
     #[test]
-    fn empty_credential_home_is_not_absolutized() {
-        assert!(spawn_environment_value("HOME", std::ffi::OsString::new()).is_empty());
-        assert!(spawn_environment_value("CODEX_HOME", std::ffi::OsString::new()).is_empty());
+    fn empty_home_is_rejected() {
+        let rejection = rejection_for("HOME", std::ffi::OsString::new());
+
+        assert_eq!(
+            rejection.reason,
+            EnvironmentRejectionReason::EmptyCredentialHome
+        );
+    }
+
+    #[test]
+    fn empty_codex_home_is_rejected() {
+        let rejection = rejection_for("CODEX_HOME", std::ffi::OsString::new());
+
+        assert_eq!(
+            rejection.reason,
+            EnvironmentRejectionReason::EmptyCredentialHome
+        );
     }
 
     #[tokio::test]
