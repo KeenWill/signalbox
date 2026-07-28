@@ -637,6 +637,17 @@ impl ImportedInspectionFixture {
         }
     }
 
+    /// The greatest selectable position, which is also the entry count: the
+    /// two-record source below emits exactly one entry per record.
+    fn last_position(&self) -> u64 {
+        2
+    }
+
+    /// One row per selectable position plus the trailing count line.
+    fn listed_line_count(&self) -> usize {
+        usize::try_from(self.last_position()).expect("the fixture position fits a line count") + 1
+    }
+
     fn source(&self) -> String {
         format!(
             "{{\"sessionId\":\"terminal-import-inspect\",\"type\":\"user\",\
@@ -702,14 +713,20 @@ async fn s28_terminal_client_completes_an_offline_imported_inspection() -> Resul
     let second = rows
         .get(1)
         .expect("the second selectable position is listed");
-    assert!(second.starts_with("position=2 "), "second row: {second}");
+    assert!(
+        second.starts_with(&format!("position={} ", fixture.last_position())),
+        "second row: {second}"
+    );
     assert!(second.contains(" speaker=assistant kind=text truncated=false text="));
     assert!(
         second.ends_with(fixture.assistant_text),
         "second row: {second}"
     );
-    assert_eq!(rows.get(2).map(String::as_str), Some("entry_count=2"));
-    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows.get(2).map(String::as_str),
+        Some(format!("entry_count={}", fixture.last_position()).as_str())
+    );
+    assert_eq!(rows.len(), fixture.listed_line_count());
 
     shutdown.send(true)?;
     timeout(Duration::from_secs(10), process_task).await???;
@@ -773,7 +790,7 @@ async fn s28_terminal_client_completes_an_offline_latest_position_continuation()
     let printed = String::from_utf8(continued.stderr)?;
     assert!(printed.starts_with("command_id="), "printed: {printed}");
     assert!(
-        printed.ends_with("through_position=2\n"),
+        printed.ends_with(&format!("through_position={}\n", fixture.last_position())),
         "printed: {printed}"
     );
 

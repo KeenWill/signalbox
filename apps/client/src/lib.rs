@@ -533,13 +533,10 @@ async fn continue_imported(
     let through_position = match through_position {
         ThroughPositionArgument::Exact(position) => position,
         ThroughPositionArgument::Latest => {
+            // The reader already rejects an empty inventory, so the resolved
+            // count is a selectable position.
             let entry_count =
                 read_imported_conversation(client, imported_conversation_id, |_| Ok(())).await?;
-            if entry_count == 0 {
-                return Err(ClientError::Protocol(
-                    "the imported conversation reported no entries to continue from",
-                ));
-            }
             output.resolved_through_position(entry_count)?;
             CanonicalU64::new(entry_count)
         }
@@ -1104,6 +1101,13 @@ async fn read_imported_conversation(
                 imported_conversation_id: ended,
                 entry_count: declared,
             } if *ended == imported_conversation_id && declared.value() == entry_count => {
+                // An imported conversation's normalized entry sequence is
+                // nonempty, so an empty inventory is never a valid read of one.
+                if entry_count == 0 {
+                    return Err(ClientError::Protocol(
+                        "imported conversation reported no entries",
+                    ));
+                }
                 return Ok(entry_count);
             }
             ServerMessage::Error {
@@ -3105,6 +3109,69 @@ mod tests {
             result,
             Err(ClientError::Protocol(
                 "imported entry positions were not the contiguous sequence from one"
+            ))
+        ));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    /// S28: an imported conversation's normalized entry sequence is nonempty,
+    /// so an empty inventory contradicts the record the daemon claims to be
+    /// reading. The shared reader fails closed on it rather than printing a
+    /// conversation with no selectable position.
+    #[tokio::test]
+    async fn imported_rejects_an_empty_entry_inventory() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let imported_conversation_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::ReadImportedConversation {
+                    imported_conversation_id,
+                }
+            );
+            let frame = |message| {
+                ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
+                    .map_err(io::Error::other)
+            };
+            let mut response = Vec::new();
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ImportedConversationStart {
+                    imported_conversation_id,
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ImportedConversationEnd {
+                    imported_conversation_id,
+                    entry_count: CanonicalU64::new(0),
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            writer.write_all(&response).await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let result = imported(&mut client, &mut output, imported_conversation_id).await;
+
+        assert!(matches!(
+            result,
+            Err(ClientError::Protocol(
+                "imported conversation reported no entries"
             ))
         ));
         assert!(stdout.is_empty());
