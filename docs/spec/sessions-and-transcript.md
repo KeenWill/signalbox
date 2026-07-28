@@ -61,8 +61,12 @@ INV-039).
 ## Session creation
 
 `CreateSession` carries the durable command identity, the provenance pair, and
-one complete unversioned initial defaults value. Structural equality excludes
-only the command identifier (INV-012). Three topics are owned by
+one complete unversioned initial defaults value, plus its explicit or
+template-derived creation mode. Structural equality excludes the command
+identifier. Explicit mode compares provenance and the complete defaults;
+template-derived mode compares provenance and the caller-supplied template name
+while excluding the copied defaults and content digest. The two modes are never
+equal (INV-012, INV-047). Three topics are owned by
 [identity-and-commands](identity-and-commands.md): durable-command storage, the
 structural-equality doctrine, and identity generation, supply, and encoding.
 

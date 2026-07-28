@@ -1127,14 +1127,17 @@ those tests.
   domain owns provenance and command equality; Postgres stores the copied
   defaults and provenance; protocol version eighteen exposes creation and
   listing.
-- **Failure behavior:** Unknown names and invalid request composition fail
-  before command claim. Unreadable prompt files, invalid paths or prompts,
-  duplicate names, unknown model selections, and malformed or unknown config
-  fields are precise typed startup errors. Conflicting command reuse and commit
-  ambiguity retain S01 behavior.
+- **Failure behavior:** Unknown names and invalid request composition fail after
+  durable-command lookup and before a new command claim. Unreadable prompt
+  files, invalid paths or prompts, duplicate names, unknown model selections,
+  and malformed or unknown config fields are precise typed startup errors.
+  Conflicting command reuse and commit ambiguity retain S01 behavior.
 - **Required invariants:** INV-002, INV-008, INV-012, INV-033, INV-046, INV-047.
-- **Remaining questions:** Durable template objects, CRUD, agent authoring
-  tools, and richer prompt/tool composition are deferred.
+- **Remaining questions:** Durable template objects, CRUD, and agent authoring
+  tools are owned by
+  [template storage and authoring surfaces](open-questions.md#template-storage-and-authoring);
+  richer prompt/tool composition remains owned by
+  [configuration categories](open-questions.md#configuration-categories).
 
 ## Coverage note
 

@@ -803,17 +803,18 @@ The error-code set in all admitted versions is:
 | `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.                                                                      |
 | `internal`            | Fail-closed corruption or a daemon defect stopped the request.                                                                         |
 
-For `create_session`, `create_session_from_imported_frontier`, `submit_input`,
-`reconcile_turn`, `stop_turn`, `decide_tool_request`,
-`replace_session_metadata`, `replace_session_defaults`, and every review
-mutation, a lost commit response maps to `commit_ambiguous`; the client retries
-the exact command identity and payload to discover the recorded outcome. A
-`reconcile_turn` or `decide_tool_request` retry reaches that recorded outcome
-unconditionally, because a claimed command identity bypasses the precondition
-the first handling already satisfied. Once a review aggregate effect has been
-applied or recovered, any database failure during post-effect verification,
-typed-receipt insertion, or claim commit is likewise `commit_ambiguous`. A
-definitely pre-commit infrastructure failure maps to `unavailable`.
+For `create_session`, `create_session_from_template`,
+`create_session_from_imported_frontier`, `submit_input`, `reconcile_turn`,
+`stop_turn`, `decide_tool_request`, `replace_session_metadata`,
+`replace_session_defaults`, and every review mutation, a lost commit response
+maps to `commit_ambiguous`; the client retries the exact command identity and
+payload to discover the recorded outcome. A `reconcile_turn` or
+`decide_tool_request` retry reaches that recorded outcome unconditionally,
+because a claimed command identity bypasses the precondition the first handling
+already satisfied. Once a review aggregate effect has been applied or recovered,
+any database failure during post-effect verification, typed-receipt insertion,
+or claim commit is likewise `commit_ambiguous`. A definitely pre-commit
+infrastructure failure maps to `unavailable`.
 
 Conversation import carries no durable command identity because exact
 format-and-source replay already resolves through the import digest. A selected
