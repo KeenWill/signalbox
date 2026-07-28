@@ -1321,9 +1321,13 @@ fn classify_terminal(
                     // durable thinking representation to replay from, so the
                     // signature is unusable either way and an empty part
                     // carries no transcript content — it is dropped exactly
-                    // like an empty text block. Thinking with actual text and
-                    // redacted thinking still fail closed: discarding them
-                    // would silently erase response material.
+                    // like an empty text block. The provider documents the
+                    // resulting tool continuation as graceful degradation:
+                    // a tool-use turn replayed without its thinking block
+                    // silently disables thinking for that request instead of
+                    // erroring. Thinking with actual text and redacted
+                    // thinking still fail closed: discarding them would
+                    // silently erase response material.
                     AssistantPart::Thinking { text, .. } if text.is_empty() => {}
                     AssistantPart::Thinking { .. } | AssistantPart::RedactedThinking { .. } => {
                         return Err(ClassificationFailure::bare(

@@ -28,7 +28,11 @@ signature as absent — the block must still close with exactly one non-empty
 signature — and the runtime bridge drops thinking parts whose text is empty,
 exactly as it drops empty text blocks. An empty thinking part carries no
 transcript content, and its replay signature is unusable either way because no
-durable thinking representation exists. Thinking with actual text and redacted
+durable thinking representation exists. The accepted cost is explicit: a
+tool-use continuation replayed without its thinking block is documented by the
+provider as graceful degradation — thinking is silently disabled for that
+request rather than the request erroring — and live verification completed a
+full tool round under exactly that shape. Thinking with actual text and redacted
 thinking still fail the adapter stage closed.
 
 **Rejected alternatives.** Keeping fail-closed for empty thinking parts: it

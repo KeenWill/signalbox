@@ -333,11 +333,13 @@ complete exchange by the runtime layer's contract
 Empty text blocks are dropped without creating invalid entries, and so are
 thinking blocks whose text is empty — the Claude 5-family omitted-display shape,
 which carries only a provider replay signature that no durable representation
-could replay. Tool-call parts with a `ToolUse` finish become the normalized
-proposals owned by [tool-loop](tool-loop.md); thinking with actual text or
-redacted-thinking still fails the adapter stage closed because no durable
-semantic representation exists. Scripted providers declare their exact terminal
-observation; nothing is inferred from timing or injected I/O errors.
+could replay. The provider documents the resulting tool continuation as graceful
+degradation, disabling thinking for that request rather than rejecting it.
+Tool-call parts with a `ToolUse` finish become the normalized proposals owned by
+[tool-loop](tool-loop.md); thinking with actual text or redacted-thinking still
+fails the adapter stage closed because no durable semantic representation
+exists. Scripted providers declare their exact terminal observation; nothing is
+inferred from timing or injected I/O errors.
 
 ### Provider-target identity
 

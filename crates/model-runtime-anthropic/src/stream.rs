@@ -324,10 +324,12 @@ impl StreamDecoder {
                 signature,
             } => BlockBuilder::Thinking {
                 text: thinking,
-                // Claude 5-family streams open the thinking block with an
-                // empty-string signature placeholder (`"signature": ""`,
-                // observed live on claude-sonnet-5) and deliver the real
-                // signature through a later `signature_delta`. An empty
+                // The provider's public thinking documentation states the
+                // streamed shape: the block opens with empty-string
+                // `thinking` and `signature` placeholder fields and the
+                // real signature arrives through a later `signature_delta`
+                // (under the newest models' default omitted display, that
+                // single delta is the block's only content). An empty
                 // opening value is therefore "not delivered yet", never a
                 // first signature: counting it would reject the documented
                 // shape as a duplicate. The close-time law is unchanged —
@@ -1515,12 +1517,13 @@ mod tests {
         assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
     }
 
-    /// The Claude 5-family streamed tool-turn shape, mirrored from a live
-    /// claude-sonnet-5 capture with synthetic content: the thinking block
-    /// opens with empty-string `thinking` and `signature` placeholders and
-    /// the real signature arrives only through `signature_delta`; the
-    /// tool_use start carries a `caller` field and its sole
-    /// `input_json_delta` is empty. Rejecting the placeholder as a first
+    /// The Claude 5-family streamed tool-turn shape the provider's public
+    /// thinking documentation states for the default omitted display, with
+    /// synthetic content: the thinking block opens with empty-string
+    /// `thinking` and `signature` placeholders, a single `signature_delta`
+    /// delivers the real signature with no thinking deltas at all, and the
+    /// tool_use start carries a `caller` field with its sole
+    /// `input_json_delta` empty. Rejecting the placeholder as a first
     /// signature is the regression that wedged every streamed sonnet-5 tool
     /// turn as ambiguous.
     #[test]
