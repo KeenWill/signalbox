@@ -190,6 +190,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "credential_split_across_dropped_pending_and_error_separator" => {
+            // Chronological provider text `api_key=<secret>`: a dropped error
+            // item seeds `api_`, a streamed reasoning delta contributes `key`
+            // (held only because it continues `api_`), a second dropped error
+            // supplies `=`, and the value arrives in the final text.
+            error_item("error-prefix", "api_");
+            reasoning("reason-key", "key");
+            error_item("error-separator", "=");
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "unsupported_item_marker_beside_benign_field" => {
+            // An unmodeled item carries a marker in one field and benign text
+            // in another; the benign field must not erase the marker.
+            emit(
+                r#"{"type":"item.completed","item":{"id":"diag","type":"diagnostic","message":"diagnostic notice","text":"api_"}}"#,
+            );
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
         "held_credential_prefix_then_unrelated_error_item" => {
             // The reasoning delta is itself an incomplete credential prefix
             // (`api_`), held in the lookbehind; an unrelated error item

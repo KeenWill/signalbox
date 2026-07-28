@@ -368,25 +368,77 @@ async fn inv_035_error_item_marker_suppresses_streamed_continuation() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: an unsupported (unmodeled) item whose text ends in a credential
-/// marker prefix (`api_`) seeds the dropped lookbehind, so a final text
-/// beginning with the continuation (`key=<secret>`) is suppressed rather than
-/// releasing the credential the adapter never surfaced the item for.
+/// INV-035: an unsupported (unmodeled) streamed item whose text ends in a
+/// credential marker prefix (`api_`) seeds the dropped lookbehind, so a final
+/// text beginning with the continuation (`key=<secret>`) is suppressed rather
+/// than releasing the credential the adapter never surfaced the item for.
 #[tokio::test]
-async fn inv_035_unsupported_item_marker_suppresses_the_continuation() {
-    for delivery in [DeliveryMode::Streamed, DeliveryMode::Buffered] {
-        let result = execute_scenario(
-            "credential_split_across_unsupported_item",
-            delivery,
-            OperationShape::Text,
-            CancellationSignal::never(),
-        )
-        .await;
-        let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+async fn inv_035_streamed_unsupported_item_marker_suppresses_the_continuation() {
+    let result = execute_scenario(
+        "credential_split_across_unsupported_item",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
-        assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-        assert_eq!(result.spawns, 1);
-    }
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: the same unsupported-item marker governs the buffered final text,
+/// which reaches terminal evidence without streamed deltas.
+#[tokio::test]
+async fn inv_035_buffered_unsupported_item_marker_suppresses_the_continuation() {
+    let result = execute_scenario(
+        "credential_split_across_unsupported_item",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a credential split as dropped `api_`, a held streamed `key` (safe
+/// alone but unsafe as a continuation of `api_`), a dropped `=`, then the
+/// value — the held bytes are treated as unsafe in the dropped context, so the
+/// value is suppressed rather than emitted verbatim.
+#[tokio::test]
+async fn inv_035_context_dependent_held_bytes_stay_in_the_dropped_chain() {
+    let result = execute_scenario(
+        "credential_split_across_dropped_pending_and_error_separator",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: an unsupported item's benign field must not erase the credential
+/// marker another field establishes, so a final text completing that marker is
+/// still suppressed.
+#[tokio::test]
+async fn inv_035_unsupported_item_benign_field_does_not_erase_a_marker() {
+    let result = execute_scenario(
+        "unsupported_item_marker_beside_benign_field",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
 }
 
 /// INV-035: a held credential-prefix (`api_` from a reasoning delta) followed
