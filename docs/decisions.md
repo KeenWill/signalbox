@@ -20,23 +20,24 @@ record class from sessions: import creates no eager session, and `continue`
 materializes lazily.
 
 **Decision.** One closed read-only protocol request, `list_conversations`
-(version fifteen; twelve through fourteen were reserved by concurrent stacks),
-served as a plain keyset read over the authoritative `session`,
-current-defaults, metadata, and `imported_conversation` tables inside one
-repeatable-read, read-only transaction — transactionally fresh, with no
-materialized view or caching layer. The surface unifies the view, never the
-storage. The unified order is conversation identity UUID value with a native row
-before an imported row of theoretical equal identity, and the cursor names
-origin plus identity, so pagination is honest at every boundary. If this read
-ever slows, the recorded upgrade is write-time-maintained projection tables —
-still transactionally fresh — never a lagging view.
+(version sixteen; thirteen and fourteen were reserved by concurrent stacks and
+fifteen by the imported-conversation inspection stack), served as a plain keyset
+read over the authoritative `session`, current-defaults, metadata, and
+`imported_conversation` tables inside one repeatable-read, read-only transaction
+— transactionally fresh, with no materialized view or caching layer. The surface
+unifies the view, never the storage. The unified order is conversation identity
+UUID value with a native row before an imported row of theoretical equal
+identity, and the cursor names origin plus identity, so pagination is honest at
+every boundary. If this read ever slows, the recorded upgrade is
+write-time-maintained projection tables — still transactionally fresh — never a
+lagging view.
 
 **Rejected alternatives.** A materialized or periodically refreshed view serves
 stale product data. An eager session per import unifies storage by fabricating
 lifecycle records evidence never established. Extending `search` would overload
 a sessions-only verb whose output shape recently stabilized.
 
-**Affects.** Process protocol version fifteen, the unified-listing repository
+**Affects.** Process protocol version sixteen, the unified-listing repository
 and application service, the terminal `conversations` verb, and
 [process-protocol](spec/process-protocol.md).
 
@@ -69,6 +70,39 @@ recompute per page and leave no queryable column for the title filter.
 **Affects.** Migration `202607290201`, import insertion and checked loading,
 daemon startup order, the unified listing's imported rows, and
 [conversation-import](spec/conversation-import.md).
+
+## 2026-07-27 — Keep provider-text deltas ephemeral and cursorless
+
+**Context.** Both HTTP model adapters can emit credential-redacted text deltas,
+but the provider bridge requested buffered delivery and the follow protocol
+carried only transactional-outbox events. Persisting every token fragment would
+turn presentation progress into durable authority and amplify transcript-sized
+storage, while an unbounded live channel would evade the follow stream's
+existing lag and recovery discipline.
+
+**Decision.** Protocol version twelve adds a cursorless `provider_text_delta`
+message to `follow_session`. The bridge requests streamed delivery, copies only
+correctly correlated, already-redacted `TextDelta` facts to a nonblocking daemon
+sink, and leaves the ordinary observation and terminal evidence paths unchanged.
+The daemon keeps a durable-only fan-out for older versions and an ordered
+bounded composite fan-out for version twelve. Deltas enter only the composite
+fan-out; durable outbox updates enter both. A lagging or reconnecting follower
+loses deltas, accepts `resync_required`, and reads the complete durable
+transcript. Delta clones share one immutable text allocation, and each follower
+records its fixed queued prefix when its snapshot completes and drops deltas in
+that prefix, so durable snapshot truth is never followed by stale fragments. No
+delta is stored and no migration is added.
+
+**Rejected alternatives.** Appending deltas to the transactional outbox would
+give presentation fragments durable semantics and storage cost. Re-redacting in
+the daemon would duplicate and potentially diverge from the adapter's INV-035
+boundary. Sending deltas through the sole legacy fan-out would let newer traffic
+force older clients to resynchronize. A separate unordered delta socket would
+lose the delta-before-terminal delivery order.
+
+**Affects.** The provider-runtime bridge, daemon follow fan-out, process
+protocol version twelve, terminal `follow` rendering, and the runtime-substrate
+and process-protocol specifications.
 
 ## 2026-07-27 — Renumber the system-prompt migration after main advanced
 

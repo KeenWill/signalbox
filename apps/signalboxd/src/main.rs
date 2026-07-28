@@ -475,6 +475,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
         tool_dispatch_gate.clone(),
         model_configuration,
     );
+    let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
             PostgresModelCallRepository::new(

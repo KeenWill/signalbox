@@ -51,11 +51,15 @@ pub const IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION: u64 = 10;
 /// The review-workflow protocol version.
 pub const REVIEW_WORKFLOW_PROTOCOL_VERSION: u64 = 11;
 
+/// The ephemeral provider-text streaming protocol version.
+pub const PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION: u64 = 12;
+
 /// The unified conversation-listing protocol version.
 ///
-/// Versions twelve, thirteen, and fourteen were reserved by concurrent
-/// protocol work when this version was selected.
-pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 15;
+/// Versions thirteen and fourteen were reserved by concurrent protocol work,
+/// and fifteen by the imported-conversation inspection stack, when this
+/// version was selected.
+pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
 
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -82,8 +86,10 @@ pub enum ProtocolVersion {
     Ten,
     /// Review-workflow command and read vocabulary.
     Eleven,
+    /// Ephemeral provider-text presentation events on follow streams.
+    Twelve,
     /// Unified conversation-listing vocabulary.
-    Fifteen,
+    Sixteen,
 }
 
 impl ProtocolVersion {
@@ -101,7 +107,8 @@ impl ProtocolVersion {
             Self::Nine => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::Ten => IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION,
             Self::Eleven => REVIEW_WORKFLOW_PROTOCOL_VERSION,
-            Self::Fifteen => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
+            Self::Twelve => PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
+            Self::Sixteen => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
         }
     }
 
@@ -118,7 +125,8 @@ impl ProtocolVersion {
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION => Some(Self::Nine),
             IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION => Some(Self::Ten),
             REVIEW_WORKFLOW_PROTOCOL_VERSION => Some(Self::Eleven),
-            UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION => Some(Self::Fifteen),
+            PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION => Some(Self::Twelve),
+            UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION => Some(Self::Sixteen),
             _ => None,
         }
     }
@@ -3102,6 +3110,19 @@ pub enum ServerMessage {
         /// Exact typed update.
         event: SessionEvent,
     },
+    /// One cursorless, process-local provider text fragment.
+    ProviderTextDelta {
+        /// Owning session.
+        session_id: CanonicalUuid,
+        /// Active turn receiving the provider response.
+        turn_id: CanonicalUuid,
+        /// Correlated model call producing the response.
+        model_call_id: CanonicalUuid,
+        /// Provider part position this fragment extends.
+        part_index: CanonicalU64,
+        /// One bounded fragment of already-redacted provider text.
+        content: ContentFragment,
+    },
     /// One immutable target registration was recorded or equally replayed.
     ReviewTargetCreated {
         /// Registered target.
@@ -3203,6 +3224,7 @@ impl ServerMessage {
             Self::TranscriptEntry { entry, .. } => entry.minimum_protocol_version(),
             Self::TranscriptTextEntry { entry, .. } => entry.minimum_protocol_version(),
             Self::SessionEvent { event, .. } => event.minimum_protocol_version(),
+            Self::ProviderTextDelta { .. } => PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
             Self::SessionMetadataPageStart {}
             | Self::SessionMetadataSummary { .. }
             | Self::SessionMetadataPageEnd { .. }
@@ -3523,7 +3545,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, and 15",
+                "process-protocol version is unsupported; supported versions are 1 through 12, and 16",
             ),
         }
     }
@@ -3734,7 +3756,7 @@ fn probe_header(
     }
     if !matches!(
         version_spelling,
-        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" | "15"
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" | "12" | "16"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -3849,7 +3871,8 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "9" => Some(ProtocolVersion::Nine),
         "10" => Some(ProtocolVersion::Ten),
         "11" => Some(ProtocolVersion::Eleven),
-        "15" => Some(ProtocolVersion::Fifteen),
+        "12" => Some(ProtocolVersion::Twelve),
+        "16" => Some(ProtocolVersion::Sixteen),
         _ => None,
     }
 }
@@ -3989,7 +4012,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, and 15")
+                .contains("supported versions are 1 through 12, and 16")
         );
     }
 
@@ -3999,7 +4022,7 @@ mod tests {
             r#"{"future":"#.repeat(payload_depth),
             "}".repeat(payload_depth)
         );
-        format!("{{\"version\":12,\"request_id\":\"9\",\"request\":{payload}}}")
+        format!("{{\"version\":13,\"request_id\":\"9\",\"request\":{payload}}}")
     }
 
     #[track_caller]
@@ -4188,7 +4211,7 @@ mod tests {
     #[test]
     fn inv033_unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
-        assert_unsupported_version("12");
+        assert_unsupported_version("13");
         assert_unsupported_version("18446744073709551616");
         assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
@@ -4787,9 +4810,9 @@ mod tests {
     }
 
     /// INV-033: the unified listing request is admitted only from version
-    /// fifteen and keeps its exact closed shape across one round trip.
+    /// sixteen and keeps its exact closed shape across one round trip.
     #[test]
-    fn inv033_version_fifteen_list_conversations_request_has_an_exact_closed_shape()
+    fn inv033_version_sixteen_list_conversations_request_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::ListConversations {
@@ -4804,7 +4827,7 @@ mod tests {
         };
         assert_eq!(
             ClientFrame::try_new_for_version(
-                ProtocolVersion::Eleven,
+                ProtocolVersion::Twelve,
                 request_id,
                 request_value.clone(),
             ),
@@ -4812,7 +4835,7 @@ mod tests {
         );
 
         let frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::Fifteen, request_id, request_value)?;
+            ClientFrame::try_new_for_version(ProtocolVersion::Sixteen, request_id, request_value)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
@@ -4833,16 +4856,16 @@ mod tests {
     #[test]
     fn inv033_list_conversations_members_are_required_and_closed() {
         assert_client_malformed(
-            r#"{"version":15,"request_id":"1","request":{"type":"list_conversations","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
+            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
         );
         assert_client_malformed(
-            r#"{"version":15,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50"}}"#,
+            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50"}}"#,
         );
         assert_client_malformed(
-            r#"{"version":15,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"everything","include_archived":false,"page_size":"50","after":null}}"#,
+            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"everything","include_archived":false,"page_size":"50","after":null}}"#,
         );
         assert_client_malformed(
-            r#"{"version":15,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50","after":{"origin":"native_session","conversation_id":"00000000-0000-0000-0000-000000000006","extra":true}}}"#,
+            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50","after":{"origin":"native_session","conversation_id":"00000000-0000-0000-0000-000000000006","extra":true}}}"#,
         );
     }
 
@@ -4851,25 +4874,25 @@ mod tests {
     #[test]
     fn inv033_list_conversations_validates_title_and_page_size() {
         assert_client_malformed(
-            r#"{"version":15,"request_id":"1","request":{"type":"list_conversations","title_contains":"","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
+            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":"","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
         );
         assert_client_malformed(
-            "{\"version\":15,\"request_id\":\"1\",\"request\":{\"type\":\"list_conversations\",\"title_contains\":\"a\\u0000b\",\"origin\":\"all\",\"include_archived\":false,\"page_size\":\"50\",\"after\":null}}",
+            "{\"version\":16,\"request_id\":\"1\",\"request\":{\"type\":\"list_conversations\",\"title_contains\":\"a\\u0000b\",\"origin\":\"all\",\"include_archived\":false,\"page_size\":\"50\",\"after\":null}}",
         );
         assert_client_malformed(
-            r#"{"version":15,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"0","after":null}}"#,
+            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"0","after":null}}"#,
         );
         assert_client_malformed(
-            r#"{"version":15,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"101","after":null}}"#,
+            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"101","after":null}}"#,
         );
     }
 
     /// INV-033: a listing request carried under any retained version one
-    /// through eleven is malformed rather than reinterpreted.
+    /// through twelve is malformed rather than reinterpreted.
     #[test]
-    fn inv033_list_conversations_is_rejected_below_version_fifteen() {
+    fn inv033_list_conversations_is_rejected_below_version_sixteen() {
         assert_client_malformed(
-            r#"{"version":11,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
+            r#"{"version":12,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
         );
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
@@ -4877,9 +4900,9 @@ mod tests {
     }
 
     /// INV-033: the three unified page messages exist only from version
-    /// fifteen and keep their exact closed shapes across round trips.
+    /// sixteen and keep their exact closed shapes across round trips.
     #[test]
-    fn inv033_version_fifteen_conversation_page_messages_have_exact_closed_shapes()
+    fn inv033_version_sixteen_conversation_page_messages_have_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
@@ -4949,10 +4972,10 @@ mod tests {
     #[test]
     fn inv033_conversation_page_end_shape_is_bounded() {
         assert_server_malformed(
-            r#"{"version":15,"request_id":"1","message":{"type":"conversation_page_end","conversation_count":"0","next_after":{"origin":"native_session","conversation_id":"00000000-0000-0000-0000-000000000001"}}}"#,
+            r#"{"version":16,"request_id":"1","message":{"type":"conversation_page_end","conversation_count":"0","next_after":{"origin":"native_session","conversation_id":"00000000-0000-0000-0000-000000000001"}}}"#,
         );
         assert_server_malformed(
-            r#"{"version":15,"request_id":"1","message":{"type":"conversation_page_end","conversation_count":"101","next_after":null}}"#,
+            r#"{"version":16,"request_id":"1","message":{"type":"conversation_page_end","conversation_count":"101","next_after":null}}"#,
         );
     }
 
@@ -4961,16 +4984,16 @@ mod tests {
     #[test]
     fn inv033_conversation_summary_shapes_are_validated() {
         assert_server_malformed(
-            r#"{"version":15,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"native_session","session_id":"00000000-0000-0000-0000-000000000001","title":"","archived":false,"defaults_version":"1"}}}"#,
+            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"native_session","session_id":"00000000-0000-0000-0000-000000000001","title":"","archived":false,"defaults_version":"1"}}}"#,
         );
         assert_server_malformed(
-            r#"{"version":15,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":"line\nbreak","entry_count":"1","source_format":"codex_rollout_jsonl_v1"}}}"#,
+            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":"line\nbreak","entry_count":"1","source_format":"codex_rollout_jsonl_v1"}}}"#,
         );
         assert_server_malformed(
-            r#"{"version":15,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":" padded","entry_count":"1","source_format":"codex_rollout_jsonl_v1"}}}"#,
+            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":" padded","entry_count":"1","source_format":"codex_rollout_jsonl_v1"}}}"#,
         );
         assert_server_malformed(
-            r#"{"version":15,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":null,"entry_count":"0","source_format":"codex_rollout_jsonl_v1"}}}"#,
+            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":null,"entry_count":"0","source_format":"codex_rollout_jsonl_v1"}}}"#,
         );
     }
 
@@ -4988,7 +5011,7 @@ mod tests {
             },
         };
         assert_eq!(
-            ServerFrame::try_new_for_version(ProtocolVersion::Fifteen, request(1)?, message)
+            ServerFrame::try_new_for_version(ProtocolVersion::Sixteen, request(1)?, message)
                 .expect_err("oversized imported title must fail validation"),
             FrameValidationError::ConversationListShape
         );
@@ -4996,13 +5019,13 @@ mod tests {
     }
 
     /// INV-033: the unified page messages are rejected under every retained
-    /// version below fifteen.
+    /// version below sixteen.
     #[test]
-    fn inv033_conversation_page_messages_require_version_fifteen()
+    fn inv033_conversation_page_messages_require_version_sixteen()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(
             ServerFrame::try_new_for_version(
-                ProtocolVersion::Eleven,
+                ProtocolVersion::Twelve,
                 request(1)?,
                 ServerMessage::ConversationPageStart {},
             )
@@ -5010,7 +5033,7 @@ mod tests {
             FrameValidationError::MessageRequiresNewerVersion
         );
         assert_server_malformed(
-            r#"{"version":11,"request_id":"1","message":{"type":"conversation_page_start"}}"#,
+            r#"{"version":12,"request_id":"1","message":{"type":"conversation_page_start"}}"#,
         );
         Ok(())
     }
@@ -5312,6 +5335,37 @@ mod tests {
         )?;
         let encoded_response = encode_server_line(&response_frame)?;
         assert_eq!(decode_server_line(&encoded_response)?, response_frame);
+        Ok(())
+    }
+
+    /// INV-033: version twelve retains version eleven's request vocabulary and
+    /// admits the cursorless provider-text message only at its new boundary.
+    #[test]
+    fn inv033_version_twelve_adds_only_the_provider_text_message()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let retained_request = ClientFrame::try_new_for_version(
+            ProtocolVersion::Twelve,
+            request_id,
+            ClientRequest::ReadReviewTarget { target_id: uuid(2) },
+        )?;
+        let encoded_request = encode_client_line(&retained_request)?;
+        let delta = ServerMessage::ProviderTextDelta {
+            session_id: uuid(3),
+            turn_id: uuid(4),
+            model_call_id: uuid(5),
+            part_index: CanonicalU64::new(6),
+            content: ContentFragment::try_new(String::from("already [redacted]"))?,
+        };
+
+        assert_eq!(decode_client_line(&encoded_request)?, retained_request);
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::Eleven, request_id, delta.clone(),),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::Twelve, request_id, delta)?;
+        let encoded_delta = encode_server_line(&frame)?;
+        assert_eq!(decode_server_line(&encoded_delta)?, frame);
         Ok(())
     }
 
@@ -5715,30 +5769,31 @@ mod tests {
     }
 
     /// INV-033: the admitted version set is closed exactly at one through
-    /// eleven plus fifteen; twelve, thirteen, and fourteen remain reserved by
-    /// concurrent protocol stacks and are not admitted here.
+    /// twelve plus sixteen; thirteen, fourteen, and fifteen remain reserved
+    /// by concurrent protocol stacks and are not admitted here.
     #[test]
-    fn inv033_version_fifteen_completes_the_admitted_set() {
+    fn inv033_version_sixteen_completes_the_admitted_set() {
         assert_eq!(
             ProtocolVersion::Nine.as_u64(),
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
         );
         assert_eq!(
-            ProtocolVersion::Fifteen.as_u64(),
+            ProtocolVersion::Sixteen.as_u64(),
             UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION
         );
         assert_eq!(ProtocolVersion::from_u64(8), Some(ProtocolVersion::Eight));
         assert_eq!(ProtocolVersion::from_u64(9), Some(ProtocolVersion::Nine));
         assert_eq!(ProtocolVersion::from_u64(10), Some(ProtocolVersion::Ten));
         assert_eq!(ProtocolVersion::from_u64(11), Some(ProtocolVersion::Eleven));
-        assert_eq!(ProtocolVersion::from_u64(12), None);
+        assert_eq!(ProtocolVersion::from_u64(12), Some(ProtocolVersion::Twelve));
         assert_eq!(ProtocolVersion::from_u64(13), None);
         assert_eq!(ProtocolVersion::from_u64(14), None);
+        assert_eq!(ProtocolVersion::from_u64(15), None);
         assert_eq!(
-            ProtocolVersion::from_u64(15),
-            Some(ProtocolVersion::Fifteen)
+            ProtocolVersion::from_u64(16),
+            Some(ProtocolVersion::Sixteen)
         );
-        assert_eq!(ProtocolVersion::from_u64(16), None);
+        assert_eq!(ProtocolVersion::from_u64(17), None);
     }
 
     #[test]
@@ -6859,6 +6914,17 @@ mod tests {
                 },
             },
             r#"{"type":"session_event","cursor":"6","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"model_call_transition","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"terminal","disposition":"refused"}}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(38)?,
+            ServerMessage::ProviderTextDelta {
+                session_id: uuid(1),
+                turn_id: uuid(3),
+                model_call_id: uuid(8),
+                part_index: CanonicalU64::new(2),
+                content: ContentFragment::try_new(String::from("already [redacted]"))?,
+            },
+            r#"{"type":"provider_text_delta","session_id":"00000000-0000-0000-0000-000000000001","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000008","part_index":"2","content":"already [redacted]"}"#,
         )?;
         assert_server_message_round_trip(
             request(29)?,

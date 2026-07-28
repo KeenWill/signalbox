@@ -648,6 +648,23 @@ impl<'a> Output<'a> {
         }
     }
 
+    pub(crate) fn provider_text_delta(
+        &mut self,
+        session_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        part_index: u64,
+        content: &str,
+    ) -> io::Result<()> {
+        let content = self.render_field(content, TextField::TrailingOnLine);
+        writeln!(
+            self.stdout,
+            "provider_text_delta session={session_id} turn={turn_id} call={model_call_id} \
+             part={part_index} content={content}"
+        )?;
+        self.stdout.flush()
+    }
+
     fn text(&mut self, text: &str) -> io::Result<()> {
         self.text_fragment(text, true, text.ends_with('\n'))
     }
@@ -1515,6 +1532,36 @@ mod tests {
             control_safe("café, and a space\u{1f980}", TextField::TrailingOnLine),
             "café, and a space\u{1f980}"
         );
+    }
+
+    #[test]
+    fn provider_text_delta_is_terminal_safe_and_flushed_immediately() {
+        let session_id = wire_uuid(1);
+        let turn_id = wire_uuid(2);
+        let model_call_id = wire_uuid(3);
+        let part_index = 4;
+        let mut stdout = FlushWriter::default();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .provider_text_delta(
+                session_id,
+                turn_id,
+                model_call_id,
+                part_index,
+                "first\nforged event\u{1b}",
+            )
+            .expect("in-memory output cannot fail");
+
+        assert_eq!(
+            String::from_utf8(stdout.bytes).expect("rendered output is UTF-8"),
+            format!(
+                "provider_text_delta session={session_id} turn={turn_id} \
+                 call={model_call_id} part={part_index} \
+                 content=first\\u{{a}}forged event\\u{{1b}}\n"
+            )
+        );
+        assert_eq!(stdout.flushes, 1);
+        assert!(stderr.is_empty());
     }
 
     #[test]
