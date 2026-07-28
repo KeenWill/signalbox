@@ -1426,8 +1426,7 @@ mod tests {
     #[track_caller]
     fn rejection_for(name: &'static str, value: std::ffi::OsString) -> EnvironmentRejection {
         allowlisted_environment(|queried| (queried == name).then(|| value.clone()))
-            .err()
-            .expect("the value must be rejected")
+            .expect_err("the value must be rejected")
     }
 
     /// Assembles the environment with exactly `name=value` set and returns the
