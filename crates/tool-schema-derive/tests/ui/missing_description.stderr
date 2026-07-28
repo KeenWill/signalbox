@@ -1,0 +1,5 @@
+error: field `absent`: missing #[tool_schema(description = "...")]
+ --> tests/ui/missing_description.rs:5:5
+  |
+5 |     absent: String,
+  |     ^^^^^^^^^^^^^^

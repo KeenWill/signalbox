@@ -1,21 +1,29 @@
-//! Derive-based daemon tool contracts.
+//! Typed daemon tool contracts and their model-facing schemas.
 //!
 //! A tool's argument struct is the single authority for its argument shape:
-//! the struct's serde implementation is the decoder, and its schemars
-//! implementation renders the model-facing JSON Schema, so the two cannot
-//! drift apart. `#[serde(deny_unknown_fields)]` on every argument struct
-//! keeps the rendered `additionalProperties: false` and the decoder's
-//! rejection of unexpected members in agreement by construction.
+//! serde decodes it and [`ToolSchema`] renders its model-facing JSON Schema.
+//! The proc-macro implementation lives in `signalbox-tool-schema-derive`.
+//! Existing schemars contracts remain supported while tool crates migrate to
+//! the owned derive.
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use signalbox_application::{ToolDefinition, ToolInputSchema};
 use signalbox_domain::{ToolEffectClass, ToolName, ToolPermissionDefault};
 
+/// A Rust type that owns its model-facing JSON Schema declaration.
+pub trait ToolSchema {
+    /// Renders the complete JSON Schema for this type.
+    fn schema() -> serde_json::Value;
+}
+
 /// One daemon tool's model-facing contract: registry name, description, and
 /// the typed argument shape its schema is derived from.
 pub trait ToolContract {
-    /// Typed argument shape decoded by serde and rendered by schemars.
+    /// Typed argument shape decoded by serde and rendered as JSON Schema.
+    ///
+    /// The schemars bound is a compatibility seam for contracts not yet
+    /// migrated to [`ToolSchema`]. The owned derive supplies this bridge.
     type Arguments: DeserializeOwned + JsonSchema;
 
     /// Registry name the model proposes this tool under.
@@ -36,15 +44,9 @@ pub enum ToolContractCompileError {
 
 /// Renders one contract's argument schema as a self-contained JSON object.
 ///
-/// The derived root keeps schemars' draft 2020-12 vocabulary but drops three
-/// root annotations: `$schema` and `title` because the wire contract has
-/// never carried them and the Rust type name a derived title would leak is
-/// not model-facing, and the root `description` the argument struct's own doc
-/// comment would render, because [`ToolContract::DESCRIPTION`] already
-/// carries the model-facing tool description in the definition itself. Field
-/// doc comments stay: they render as the per-property descriptions. Argument
-/// newtypes implement [`JsonSchema::inline_schema`], so the rendered object
-/// references no external definitions.
+/// Compatibility rendering removes schemars' root annotations because the
+/// wire contract has never carried them. Schemas produced by [`ToolSchema`]
+/// contain no such annotations, so the removal is a no-op for migrated types.
 pub fn rendered_contract_schema<Contract: ToolContract + ?Sized>() -> serde_json::Value {
     let mut value = schemars::SchemaGenerator::default()
         .into_root_schema_for::<Contract::Arguments>()
@@ -77,6 +79,144 @@ pub fn compile_contract_definition<Contract: ToolContract + ?Sized>(
         permission_default,
         effect_class,
     ))
+}
+
+fn scalar_schema(kind: &'static str) -> serde_json::Value {
+    serde_json::json!({ "type": kind })
+}
+
+macro_rules! impl_scalar_schema {
+    ($($type:ty => $kind:literal),+ $(,)?) => {
+        $(
+            impl ToolSchema for $type {
+                fn schema() -> serde_json::Value {
+                    scalar_schema($kind)
+                }
+            }
+        )+
+    }
+}
+
+impl_scalar_schema! {
+    String => "string",
+    bool => "boolean",
+    i8 => "integer",
+    i16 => "integer",
+    i32 => "integer",
+    i64 => "integer",
+    isize => "integer",
+    u8 => "integer",
+    u16 => "integer",
+    u32 => "integer",
+    u64 => "integer",
+    usize => "integer",
+    f32 => "number",
+    f64 => "number",
+}
+
+impl<Value: ToolSchema> ToolSchema for Option<Value> {
+    fn schema() -> serde_json::Value {
+        Value::schema()
+    }
+}
+
+impl<Value: ToolSchema> ToolSchema for Box<Value> {
+    fn schema() -> serde_json::Value {
+        Value::schema()
+    }
+}
+
+impl<Value: ToolSchema> ToolSchema for Vec<Value> {
+    fn schema() -> serde_json::Value {
+        serde_json::json!({
+            "items": Value::schema(),
+            "type": "array",
+        })
+    }
+}
+
+impl<Value: ToolSchema> ToolSchema for std::collections::BTreeMap<String, Value> {
+    fn schema() -> serde_json::Value {
+        serde_json::json!({
+            "additionalProperties": Value::schema(),
+            "type": "object",
+        })
+    }
+}
+
+/// Implementation details used by the derive expansion.
+#[doc(hidden)]
+pub mod __private {
+    pub use schemars;
+    pub use serde_json;
+
+    /// Attaches one required field description to its value schema.
+    pub fn described_schema(
+        mut schema: serde_json::Value,
+        description: &'static str,
+    ) -> serde_json::Value {
+        match schema.as_object_mut() {
+            Some(object) => {
+                object.insert(
+                    String::from("description"),
+                    serde_json::Value::String(String::from(description)),
+                );
+                schema
+            }
+            None => serde_json::json!({
+                "allOf": [schema],
+                "description": description,
+            }),
+        }
+    }
+
+    /// Builds one object schema from derive-checked property declarations.
+    pub fn object_schema(
+        properties: Vec<(&'static str, serde_json::Value)>,
+        required: Vec<&'static str>,
+        deny_unknown_fields: bool,
+    ) -> serde_json::Value {
+        let properties = properties
+            .into_iter()
+            .map(|(name, schema)| (String::from(name), schema))
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+        let mut schema = serde_json::Map::new();
+        if deny_unknown_fields {
+            schema.insert(
+                String::from("additionalProperties"),
+                serde_json::Value::Bool(false),
+            );
+        }
+        schema.insert(
+            String::from("properties"),
+            serde_json::Value::Object(properties),
+        );
+        if !required.is_empty() {
+            schema.insert(
+                String::from("required"),
+                serde_json::Value::Array(
+                    required
+                        .into_iter()
+                        .map(|name| serde_json::Value::String(String::from(name)))
+                        .collect(),
+                ),
+            );
+        }
+        schema.insert(
+            String::from("type"),
+            serde_json::Value::String(String::from("object")),
+        );
+        serde_json::Value::Object(schema)
+    }
+
+    /// Converts an owned schema object into the legacy schemars bridge.
+    pub fn into_schemars_schema(value: serde_json::Value) -> schemars::Schema {
+        #[expect(
+            clippy::expect_used,
+            reason = "ToolSchema implementations produce object-valued JSON Schema fragments"
+        )]
+        schemars::Schema::try_from(value).expect("ToolSchema must produce a JSON Schema object")
+    }
 }
 
 #[cfg(test)]

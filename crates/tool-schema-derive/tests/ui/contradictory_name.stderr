@@ -1,0 +1,5 @@
+error: field `rust_name`: tool_schema name contradicts serde name `wire_name`; put the rename on #[serde(rename = "...")]
+ --> tests/ui/contradictory_name.rs:6:58
+  |
+6 |     #[tool_schema(description = "A named field.", name = "other_name")]
+  |                                                          ^^^^^^^^^^^^
