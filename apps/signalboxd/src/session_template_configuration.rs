@@ -51,20 +51,34 @@ pub struct SessionTemplateConfiguration {
 
 impl SessionTemplateConfiguration {
     /// Reads and resolves a complete version-one catalog and every prompt file.
-    pub fn read(
+    pub fn read<F>(
         path: &Path,
-        home: Option<&Path>,
+        home: F,
         models: &HubModelConfiguration,
-    ) -> Result<Self, SessionTemplateConfigurationError> {
+    ) -> Result<Self, SessionTemplateConfigurationError>
+    where
+        F: Fn() -> Option<PathBuf>,
+    {
         let content =
             fs::read_to_string(path).map_err(|_| SessionTemplateConfigurationError::ReadCatalog)?;
-        Self::parse_at(&content, path, home, models)
+        Self::parse_at_with_home(&content, path, &home, models)
     }
 
+    #[cfg(test)]
     fn parse_at(
         content: &str,
         path: &Path,
         home: Option<&Path>,
+        models: &HubModelConfiguration,
+    ) -> Result<Self, SessionTemplateConfigurationError> {
+        let home = home.map(Path::to_path_buf);
+        Self::parse_at_with_home(content, path, &|| home.clone(), models)
+    }
+
+    fn parse_at_with_home(
+        content: &str,
+        path: &Path,
+        home: &dyn Fn() -> Option<PathBuf>,
         models: &HubModelConfiguration,
     ) -> Result<Self, SessionTemplateConfigurationError> {
         let document = DocumentMut::from_str(content)
@@ -111,7 +125,7 @@ impl SessionTemplateConfiguration {
 fn parse_template(
     table: &Table,
     catalog_path: &Path,
-    home: Option<&Path>,
+    home: &dyn Fn() -> Option<PathBuf>,
     models: &HubModelConfiguration,
 ) -> Result<ResolvedSessionTemplate, SessionTemplateConfigurationError> {
     reject_unknown_fields(
@@ -195,7 +209,7 @@ fn parse_template(
 fn resolve_prompt_path(
     reference: &str,
     catalog_path: &Path,
-    home: Option<&Path>,
+    home: &dyn Fn() -> Option<PathBuf>,
 ) -> Result<PathBuf, SessionTemplateConfigurationError> {
     if reference.is_empty()
         || reference.contains('\\')
@@ -209,9 +223,11 @@ fn resolve_prompt_path(
         if suffix.is_empty() || suffix.contains('$') {
             return Err(SessionTemplateConfigurationError::InvalidPromptPath);
         }
-        return home
-            .map(|home| home.join(suffix))
-            .ok_or(SessionTemplateConfigurationError::MissingHome);
+        let home = home().ok_or(SessionTemplateConfigurationError::MissingHome)?;
+        if !home.is_absolute() {
+            return Err(SessionTemplateConfigurationError::InvalidHome);
+        }
+        return Ok(home.join(suffix));
     }
     if reference.starts_with('/') || reference.contains('$') {
         return Err(SessionTemplateConfigurationError::InvalidPromptPath);
@@ -287,6 +303,7 @@ pub enum SessionTemplateConfigurationError {
     ConflictingPrompt,
     InvalidPromptPath,
     MissingHome,
+    InvalidHome,
     ReadPrompt,
     InvalidPrompt,
     InvalidApproval,
@@ -311,7 +328,8 @@ impl fmt::Display for SessionTemplateConfigurationError {
             Self::MissingPrompt => "session template has no system prompt",
             Self::ConflictingPrompt => "session template has multiple system prompts",
             Self::InvalidPromptPath => "session template contains an invalid prompt path",
-            Self::MissingHome => "session template prompt requires an unavailable home directory",
+            Self::MissingHome => "session template prompt requires a missing home directory",
+            Self::InvalidHome => "session template prompt requires an absolute home directory",
             Self::ReadPrompt => "session template prompt file could not be read as UTF-8",
             Self::InvalidPrompt => "session template contains an invalid system prompt",
             Self::InvalidApproval => "session template has a missing or mistyped approval posture",
@@ -336,6 +354,11 @@ mod tests {
     const TEMPLATE_NAME: &str = "reviewer";
     const TEMPLATE_VERSION: u64 = 7;
     const INLINE_PROMPT: &str = "Review the change and report concrete findings.";
+    const EXPECTED_TEMPLATE_DIGEST: [u8; 32] = [
+        0x00, 0xc0, 0x82, 0x75, 0x57, 0x7e, 0x73, 0xf1, 0x56, 0x57, 0x16, 0xb5, 0xc8, 0x86, 0x86,
+        0x1a, 0x0f, 0x19, 0xea, 0x4f, 0x2c, 0x9c, 0xb9, 0xe8, 0xf9, 0x30, 0x34, 0xd0, 0x30, 0xb9,
+        0x79, 0x6d,
+    ];
 
     fn models() -> HubModelConfiguration {
         HubModelConfiguration::parse(&format!(
@@ -408,7 +431,49 @@ dangerous_tool_auto_approval = true
                 .as_str(),
             INLINE_PROMPT
         );
-        assert_ne!(template.provenance().content_digest().as_bytes(), &[0; 32]);
+        assert_eq!(
+            template.provenance().content_digest().as_bytes(),
+            &EXPECTED_TEMPLATE_DIGEST
+        );
+    }
+
+    #[test]
+    fn template_version_uses_the_complete_positive_toml_integer_range() {
+        const MAXIMUM_TEMPLATE_VERSION: u64 = i64::MAX as u64;
+        let maximum_catalog = inline_catalog("").replace(
+            &format!("version = {TEMPLATE_VERSION}"),
+            &format!("version = {MAXIMUM_TEMPLATE_VERSION}"),
+        );
+        let maximum = SessionTemplateConfiguration::parse_at(
+            &maximum_catalog,
+            Path::new("deployment/session-templates.toml"),
+            None,
+            &models(),
+        )
+        .expect("maximum positive TOML integer version is admitted");
+        let name = SessionTemplateName::try_new(TEMPLATE_NAME.to_owned())
+            .expect("fixture template name is admitted");
+        let zero_catalog =
+            inline_catalog("").replace(&format!("version = {TEMPLATE_VERSION}"), "version = 0");
+
+        assert_eq!(
+            maximum
+                .resolve(&name)
+                .expect("maximum-version template resolves")
+                .version()
+                .as_u64(),
+            MAXIMUM_TEMPLATE_VERSION
+        );
+        assert_eq!(
+            SessionTemplateConfiguration::parse_at(
+                &zero_catalog,
+                Path::new("deployment/session-templates.toml"),
+                None,
+                &models(),
+            )
+            .expect_err("zero template version is rejected"),
+            SessionTemplateConfigurationError::InvalidVersion
+        );
     }
 
     #[test]
@@ -450,6 +515,35 @@ dangerous_tool_auto_approval = false
                 .expect("template prompt is required")
                 .as_str(),
             INLINE_PROMPT
+        );
+    }
+
+    #[test]
+    fn invalid_home_values_return_precise_typed_failures() {
+        let catalog = inline_catalog("").replace(
+            &format!("system_prompt = \"{INLINE_PROMPT}\""),
+            "system_prompt_file = \"$HOME/prompts/reviewer.txt\"",
+        );
+        let empty_home = SessionTemplateConfiguration::parse_at(
+            &catalog,
+            Path::new("deployment/session-templates.toml"),
+            Some(Path::new("")),
+            &models(),
+        );
+        let relative_home = SessionTemplateConfiguration::parse_at(
+            &catalog,
+            Path::new("deployment/session-templates.toml"),
+            Some(Path::new("relative-home")),
+            &models(),
+        );
+
+        assert_eq!(
+            empty_home.expect_err("empty HOME is rejected"),
+            SessionTemplateConfigurationError::InvalidHome
+        );
+        assert_eq!(
+            relative_home.expect_err("relative HOME is rejected"),
+            SessionTemplateConfigurationError::InvalidHome
         );
     }
 

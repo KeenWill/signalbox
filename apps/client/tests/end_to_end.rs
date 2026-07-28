@@ -407,7 +407,7 @@ dangerous_tool_auto_approval = true
 "#,
     );
     fs::write(&catalog_path, original_catalog)?;
-    let original_templates = SessionTemplateConfiguration::read(&catalog_path, None, &models)?;
+    let original_templates = SessionTemplateConfiguration::read(&catalog_path, || None, &models)?;
     let template_name = SessionTemplateName::try_new(TEMPLATE_NAME.to_owned())?;
     let original_template = original_templates
         .resolve(&template_name)
@@ -462,7 +462,7 @@ dangerous_tool_auto_approval = false
 "#,
     );
     fs::write(&catalog_path, edited_catalog)?;
-    let edited_templates = SessionTemplateConfiguration::read(&catalog_path, None, &models)?;
+    let edited_templates = SessionTemplateConfiguration::read(&catalog_path, || None, &models)?;
     let edited_template = edited_templates
         .resolve(&template_name)
         .expect("edited template resolves");
@@ -497,6 +497,34 @@ dangerous_tool_auto_approval = false
     assert!(edited_create.stderr.is_empty());
     let edited_session = Uuid::parse_str(String::from_utf8(edited_create.stdout)?.trim())?;
     edited_runtime.stop().await?;
+
+    fs::write(&catalog_path, "version = 1\n")?;
+    let empty_templates = SessionTemplateConfiguration::read(&catalog_path, || None, &models)?;
+    let replay_runtime =
+        TemplateProcessRuntime::start(&pool, models.clone(), empty_templates).await?;
+    let original_replay = run_client(
+        replay_runtime.socket(),
+        vec![
+            String::from("create"),
+            String::from("--template"),
+            String::from(TEMPLATE_NAME),
+            String::from("--command-id"),
+            String::from(ORIGINAL_COMMAND),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        original_replay.status.success(),
+        "template replay after removal failed: {}",
+        String::from_utf8_lossy(&original_replay.stderr)
+    );
+    assert!(original_replay.stderr.is_empty());
+    assert_eq!(
+        Uuid::parse_str(String::from_utf8(original_replay.stdout)?.trim())?,
+        original_session
+    );
+    replay_runtime.stop().await?;
 
     let load = LoadSessionService::new(SessionRepository::new(pool.clone()));
     let original_loaded = load

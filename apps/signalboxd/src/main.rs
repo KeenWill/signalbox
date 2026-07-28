@@ -365,10 +365,9 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let configuration = HubConfiguration::from_environment()?;
     let model_configuration = HubModelConfiguration::read(configuration.model_configuration_file())
         .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
-    let home = env::var_os("HOME").map(PathBuf::from);
     let template_configuration = SessionTemplateConfiguration::read(
         configuration.template_configuration_file(),
-        home.as_deref(),
+        || env::var_os("HOME").map(PathBuf::from),
         &model_configuration,
     )
     .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;

@@ -51,9 +51,9 @@ use signalbox_domain::{
     ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject,
     ReviewText, ReviewWorkflowKind, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
-    SessionMetadataLastWriter, SessionMetadataSnapshot, SessionTemplateName, SubmitInput,
-    SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision,
-    ToolDenialReason, ToolRequestId, TurnId, UserContent,
+    SessionMetadataLastWriter, SessionMetadataSnapshot, SessionTemplateName,
+    SessionTemplateProvenance, SubmitInput, SubmitInputAppliedResult, SubmitInputRejectedResult,
+    SubmitInputResult, ToolApprovalDecision, ToolDenialReason, ToolRequestId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{ProviderTextDelta, ProviderTextDeltaSink};
 use signalbox_persistence::{
@@ -3268,6 +3268,72 @@ where
         )
         .await;
     };
+    let command_id = DurableCommandId::from_uuid(command_id);
+    let repository = CreateSessionRepository::new(pool.clone());
+    match repository.load(command_id).await {
+        Ok(Some(recorded)) => {
+            let recorded_name = recorded
+                .command()
+                .template_provenance()
+                .map(SessionTemplateProvenance::name);
+            if recorded_name == Some(&template_name) {
+                return write_message(
+                    writer,
+                    version,
+                    request_id,
+                    ServerMessage::SessionCreated {
+                        session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
+                    },
+                )
+                .await;
+            }
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(CreateSessionRepositoryError::DifferentCommandKind { .. }) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::Database(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::CommitAmbiguous(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::Corruption(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await;
+        }
+    }
+
     let Some(template) = templates.resolve(&template_name) else {
         return write_error(
             writer,
@@ -3278,7 +3344,7 @@ where
         .await;
     };
     let request = CreateSessionRequest::try_new_from_template(
-        DurableCommandId::from_uuid(command_id),
+        command_id,
         template.provenance().clone(),
         template.defaults().clone(),
     );
