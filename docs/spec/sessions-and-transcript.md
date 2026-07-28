@@ -11,10 +11,11 @@ model-identity boundary were additionally verified through PR #272
 through PR #294 (`agent/continue-imported-conversation`); the session system
 prompt was verified through PR #286 (`agent/session-system-prompt`); and the
 version-thirteen input-delivery surface and its user-reachable steering boundary
-were verified through PR #302 (`agent/mid-turn-steering`). The
-imported-conversation record and converter are owned by
-[conversation-import](conversation-import.md). Where a law is cited as
-`INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
+were verified through PR #302 (`agent/mid-turn-steering`). The copy-on-create
+session-template provenance and creation mode were verified through PR #311
+(`agent/session-templates-spec`). The imported-conversation record and converter
+are owned by [conversation-import](conversation-import.md). Where a law is cited
+as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
 mechanics owned by another decision are summarized, the owning sibling page is
 linked inline.
 
@@ -60,8 +61,12 @@ INV-039).
 ## Session creation
 
 `CreateSession` carries the durable command identity, the provenance pair, and
-one complete unversioned initial defaults value. Structural equality excludes
-only the command identifier (INV-012). Three topics are owned by
+one complete unversioned initial defaults value, plus its explicit or
+template-derived creation mode. Structural equality excludes the command
+identifier. Explicit mode compares provenance and the complete defaults;
+template-derived mode compares provenance and the caller-supplied template name
+while excluding the copied defaults and content digest. The two modes are never
+equal (INV-012, INV-047). Three topics are owned by
 [identity-and-commands](identity-and-commands.md): durable-command storage, the
 structural-equality doctrine, and identity generation, supply, and encoding.
 
@@ -250,8 +255,8 @@ truncating or rewriting, and equality is the exact ordered scalar sequence.
 Absence is typed `None`, never empty text. `CreateSession` and
 `CreateSessionFromImportedFrontier` carry the optional prompt inside their
 complete unversioned initial defaults, and `ReplaceSessionDefaults` replaces it
-only as part of the complete successor epoch — there is no prompt-only mutation,
-template, or named profile; the
+only as part of the complete successor epoch — there is no prompt-only mutation;
+the
 [bound-and-placement decision](../decisions.md#2026-07-26--bound-the-session-system-prompt-as-a-defaults-epoch-value)
 records the capacity and epoch-placement choice. Matching
 `octet_length(convert_to(system_prompt, 'UTF8'))` CHECK constraints protect the
@@ -273,6 +278,37 @@ the
 [no-transcript-boundary decision](../decisions.md#2026-07-26--deliver-system-prompt-changes-without-a-transcript-boundary).
 The `ModelIdentityChanged` boundary below remains keyed to the frozen direct
 model selection alone.
+
+### Session-template provenance
+
+An owner-initiated session may carry one optional immutable
+`SessionTemplateProvenance`, distinct from its creation cause and transcript
+ancestry. Presence pairs a validated `SessionTemplateName` with an exact 32-byte
+`SessionTemplateContentDigest`; absence denotes explicit creation. Template
+provenance never joins defaults replacement, origin freezing, model call
+preparation, imported continuation, or transcript content.
+
+For template creation, the daemon supplies a resolved bundle containing the
+model-selection request, system prompt, and dangerous-tool blanket. Domain
+creation establishes the ordinary defaults version one from that complete copy
+and seals the name/digest alongside the session. The stored session has no
+template lookup operation: every later consumer reads its durable defaults and
+provenance only (INV-047).
+
+Durable-command equality distinguishes the caller's two creation modes. An
+explicit command compares its complete caller-supplied defaults exactly. A
+template command compares the caller-supplied template name and ignores the
+daemon-resolved candidate bundle for equal replay, so the same command and name
+returns its first recorded session after a template edit. A different template
+name, or switching between explicit and template creation under one command
+identity, is conflicting reuse. First handling still stores and cross-checks the
+complete resolved defaults and digest; this replay rule cannot rewrite them.
+
+Migration `202607300101_session_template_provenance.sql` adds nullable
+name/digest pairs to `session` and `create_session_command`, with `MATCH FULL`
+shape, name validation, a 32-byte digest bound, append-only protection, and
+command/session agreement. Existing and explicit sessions backfill as absent; no
+applied migration is modified.
 
 `ReplaceSessionDefaults` carries exactly command identity, target session,
 expected current version, and the complete replacement; equality excludes only
@@ -436,11 +472,12 @@ dependency for future creation-derived visibility is recorded in
 ## The session aggregate
 
 The long-lived domain `Session` (`crates/domain/src/session.rs`) contains
-exactly three facts: `SessionId`, the immutable creation provenance, and the
-complete current defaults version selected by the durable pointer. It embeds
-nothing else — no transcript entries, accepted inputs, turns, queue facts,
-command history, evidence, or presentation state (INV-005). Those remain
-independently stored facts correlated by typed identity.
+exactly four facts: `SessionId`, the immutable creation provenance, optional
+immutable template provenance, and the complete current defaults version
+selected by the durable pointer. It embeds nothing else — no transcript entries,
+accepted inputs, turns, queue facts, command history, evidence, or presentation
+state (INV-005). Those remain independently stored facts correlated by typed
+identity.
 
 Why (small aggregate): embedding session-associated collections would turn an
 ordinary session read into an unbounded reconstruction crossing several
@@ -456,16 +493,17 @@ loading never returns a receipt and command replay never returns a `Session`.
 ### Loading and reconstitution
 
 `load_session(SessionId)` performs one statement-consistent read joining the
-session row, its one current-defaults pointer, and exactly the version that
-pointer names (`crates/persistence/src/session.rs`). For imported ancestry, the
-same bounded read joins the one-to-one seed record and its frontier header as a
-constant-size proof: seed and frontier ownership and identity must agree with
-the session, and the stored member count must equal the selected imported
-boundary position. It does not materialize the imported conversation, frontier
-members, or semantic entries. Full prefix comparison belongs to creation replay
-and purpose-specific semantic-context resolution. The pointer is authoritative;
-a load never infers current defaults from version one, the greatest stored
-version, a caller-supplied version, or a cache.
+session row — including its creation provenance and optional template provenance
+— its one current-defaults pointer, and exactly the version that pointer names
+(`crates/persistence/src/session.rs`). For imported ancestry, the same bounded
+read joins the one-to-one seed record and its frontier header as a constant-size
+proof: seed and frontier ownership and identity must agree with the session, and
+the stored member count must equal the selected imported boundary position. It
+does not materialize the imported conversation, frontier members, or semantic
+entries. Full prefix comparison belongs to creation replay and purpose-specific
+semantic-context resolution. The pointer is authoritative; a load never infers
+current defaults from version one, the greatest stored version, a
+caller-supplied version, or a cache.
 
 Why (pointer authority): append-only version existence does not mean
 installation; only the pointer records the accepted current choice.
@@ -475,9 +513,12 @@ the row exists, a missing pointer, missing selected version, ownership mismatch,
 pointer/record version disagreement, unknown discriminator, invalid ordinal, or
 an absent or inconsistent bounded imported-seed proof fails closed as typed
 corruption: the adapter's decode checks feed the domain-owned
-`SessionReconstitutionInput::reconstitute` seam, which accepts only complete
-agreeing domain values (INV-002, INV-039). Reconstitution never yields `None`, a
-default, or a partial session.
+`SessionReconstitutionInput::reconstitute` seam. Its complete input retains the
+requested and stored session identities, creation provenance, optional template
+provenance, the current-pointer identity and version, and the selected defaults
+record's identity, version, and value; it accepts only complete agreeing domain
+values (INV-002, INV-039). Reconstitution never yields `None`, a default, or a
+partial session.
 
 Why (fail closed): a fabricated or partial session would mask corruption and
 launder invalid durable state into valid-looking domain values.
@@ -755,7 +796,7 @@ edges of [model-call-execution](model-call-execution.md).
 - The 1 MiB content bound is a provisional owner floor; the resource-governance
   limit question stays open, and non-text content kinds remain unconstructible
   pending their owning decisions.
-- The session system prompt is one optional bounded string per session.
-  Composition from base, per-use-case, and instruction-file sources, templates,
-  and named profiles remain the open
+- The session system prompt remains one optional bounded string per defaults
+  epoch. Composition from base, per-use-case, and instruction-file sources and
+  richer named profiles remain the open
   [configuration-category capability](../open-questions.md#configuration-categories).

@@ -38,7 +38,8 @@ pub(crate) enum SendDeliveryArgument {
 #[derive(Debug)]
 pub(crate) enum Command {
     Create {
-        selection: ModelSelection,
+        selection: Option<ModelSelection>,
+        template: Option<String>,
         command_id: Option<CommandId>,
         system_prompt_file: Option<PathBuf>,
     },
@@ -53,6 +54,7 @@ pub(crate) enum Command {
         imported_conversation_id: CanonicalUuid,
     },
     List,
+    Templates,
     Search(SessionMetadataPageRequest),
     Conversations(ConversationsPageRequest),
     Send {
@@ -210,6 +212,8 @@ enum CliCommand {
     Imported(ImportedArguments),
     /// List current sessions.
     List,
+    /// List available session templates.
+    Templates,
     /// Read one filtered page of current session metadata.
     Search(SearchArguments),
     /// Read one filtered page listing native sessions and imported
@@ -398,10 +402,10 @@ enum ReviewSeverityArgument {
 
 #[derive(Debug, ClapArgs)]
 #[command(group(
-    ArgGroup::new("selection")
+    ArgGroup::new("creation_source")
         .required(true)
         .multiple(false)
-        .args(["model", "alias"])
+        .args(["model", "alias", "template"])
 ))]
 struct CreateArguments {
     /// Select a model configuration directly.
@@ -410,6 +414,14 @@ struct CreateArguments {
     /// Select a configured model alias.
     #[arg(long, value_name = "UUID", value_parser = canonical_uuid)]
     alias: Option<CanonicalUuid>,
+    /// Copy the named daemon-owned template bundle at creation.
+    #[arg(
+        long,
+        value_name = "NAME",
+        value_parser = template_name,
+        conflicts_with_all = ["model", "alias", "system_prompt_file"]
+    )]
+    template: Option<String>,
     /// Read the exact optional session system prompt from one file.
     #[arg(long, value_name = "PATH")]
     system_prompt_file: Option<PathBuf>,
@@ -793,15 +805,17 @@ pub(crate) fn parse(
     let command = match parsed.command {
         CliCommand::Create(arguments) => Command::Create {
             selection: match (arguments.model, arguments.alias) {
-                (Some(selection_id), None) => ModelSelection::Direct { selection_id },
-                (None, Some(alias_id)) => ModelSelection::Alias { alias_id },
+                (Some(selection_id), None) => Some(ModelSelection::Direct { selection_id }),
+                (None, Some(alias_id)) => Some(ModelSelection::Alias { alias_id }),
+                (None, None) if arguments.template.is_some() => None,
                 (None, None) | (Some(_), Some(_)) => {
                     return Err(UsageError(Cli::command().error(
                         ErrorKind::ArgumentConflict,
-                        "create requires exactly one of --model or --alias",
+                        "create requires exactly one of --model, --alias, or --template",
                     )));
                 }
             },
+            template: arguments.template,
             command_id: arguments.command_id,
             system_prompt_file: arguments.system_prompt_file,
         },
@@ -828,6 +842,7 @@ pub(crate) fn parse(
             imported_conversation_id: arguments.imported_conversation_id,
         },
         CliCommand::List => Command::List,
+        CliCommand::Templates => Command::Templates,
         CliCommand::Search(arguments) => {
             let mut distinct = arguments.tags.clone();
             distinct.sort();
@@ -1120,6 +1135,27 @@ fn canonical_uuid(value: &str) -> Result<CanonicalUuid, String> {
 fn command_id(value: &str) -> Result<CommandId, String> {
     CommandId::try_from_uuid(canonical_uuid(value)?.into_uuid())
         .map_err(|_| "command UUID uses a reserved value".to_owned())
+}
+
+fn template_name(value: &str) -> Result<String, String> {
+    const MAX_UTF8_BYTES: usize = 128;
+
+    let first_is_admitted = value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+    if value.len() > MAX_UTF8_BYTES
+        || !first_is_admitted
+        || value.bytes().any(|byte| {
+            !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && !b"._-".contains(&byte)
+        })
+    {
+        return Err(
+            "template name must use 1 through 128 bytes of lowercase ASCII letters, digits, dot, dash, or underscore and begin with a letter or digit"
+                .to_owned(),
+        );
+    }
+    Ok(value.to_owned())
 }
 
 fn metadata_filter_text(value: &str) -> Result<String, String> {
@@ -1968,6 +2004,83 @@ mod tests {
         assert!(parse(["create"].map(Into::into)).is_err());
     }
 
+    #[test]
+    fn create_template_is_simple_and_excludes_every_explicit_default_flag() {
+        const TEMPLATE_NAME: &str = "reviewer";
+        let parsed = parse(["create", "--template", TEMPLATE_NAME].map(Into::into))
+            .expect("template creation parses");
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("template creation must run");
+        };
+        let Command::Create {
+            selection,
+            template,
+            system_prompt_file,
+            ..
+        } = arguments.command
+        else {
+            panic!("template creation maps to create");
+        };
+
+        assert_eq!(selection, None);
+        assert_eq!(template.as_deref(), Some(TEMPLATE_NAME));
+        assert_eq!(system_prompt_file, None);
+        assert!(
+            parse(
+                [
+                    "create",
+                    "--template",
+                    TEMPLATE_NAME,
+                    "--model",
+                    "00000000-0000-0000-0000-000000000001",
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                [
+                    "create",
+                    "--template",
+                    TEMPLATE_NAME,
+                    "--alias",
+                    "00000000-0000-0000-0000-000000000002",
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                [
+                    "create",
+                    "--template",
+                    TEMPLATE_NAME,
+                    "--system-prompt-file",
+                    "prompt.txt",
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn create_rejects_an_invalid_template_name_at_the_parse_boundary() {
+        assert!(parse(["create", "--template", "Reviewer"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn templates_maps_to_the_read_only_listing_command() {
+        let parsed = parse(["templates"].map(Into::into)).expect("templates parses");
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("templates must run");
+        };
+        let Command::Templates = arguments.command else {
+            panic!("templates maps to its listing command");
+        };
+    }
     #[test]
     fn continue_maps_an_explicit_imported_frontier_and_relationship() {
         let parsed = parse(
