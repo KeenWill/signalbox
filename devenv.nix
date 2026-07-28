@@ -163,6 +163,19 @@ in
   packages = [ pkgs.sccache ];
   env.RUSTC_WRAPPER = "sccache";
 
+  # The terminal client and the managed daemon share one socket without the
+  # developer having to derive its path from DEVENV_RUNTIME.
+  env.SIGNALBOX_SOCKET_PATH = daemonSocketPath;
+
+  # Run the working-tree client, letting Cargo rebuild it whenever its sources
+  # have changed.
+  scripts.signalbox = {
+    description = "Run the Signalbox terminal client from the working tree.";
+    exec = ''
+      exec cargo run -q -p signalbox-client -- "$@"
+    '';
+  };
+
   languages.python = {
     enable = true;
     venv = {

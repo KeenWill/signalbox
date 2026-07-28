@@ -120,18 +120,26 @@ rather than directly in the runtime directory, because the daemon accepts only a
 socket parent meeting the ownership and permission rules the
 [process protocol](docs/spec/process-protocol.md#transport-and-trust-boundary)
 states and creates neither that directory nor those permissions itself; the
-daemon process makes it before binding. Point the terminal client there with
-`--socket`.
+daemon process makes it before binding. The devenv shell exports that path as
+`SIGNALBOX_SOCKET_PATH`, and its `signalbox <verb>` convenience runs the
+working-tree client through Cargo, rebuilding it after source changes.
 
-The daemon reads its Anthropic key from `~/.config/signalbox/anthropic-api-key`
-and its code-host token from `~/.config/signalbox/github-token`, overridable
-with `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE` and
-`SIGNALBOX_DEV_GITHUB_TOKEN_FILE` respectively. No credential material is
-committed or generated. Both paths are passed to the daemon unconditionally
-because it requires both variables at startup; neither file has to exist, since
-neither is read at startup. When each file is read, what its bytes mean, and
-what its absence does are stated in the
+The daemon reads its Anthropic key from
+`$HOME/.config/signalbox/anthropic-api-key` and its code-host token from
+`$HOME/.config/signalbox/github-token`, overridable with
+`SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE` and `SIGNALBOX_DEV_GITHUB_TOKEN_FILE`
+respectively. No credential material is committed or generated. Both paths are
+passed to the daemon unconditionally because it requires both variables at
+startup; neither file has to exist, since neither is read at startup. When each
+file is read, what its bytes mean, and what its absence does are stated in the
 [credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle).
+Provision the default code-host path from the GitHub CLI, and create the
+Anthropic path for editing, with these one-line commands:
+
+```console
+install -d -m 700 "$HOME/.config/signalbox" && (umask 077; gh auth token >"$HOME/.config/signalbox/github-token")
+install -d -m 700 "$HOME/.config/signalbox" && install -m 600 /dev/null "$HOME/.config/signalbox/anthropic-api-key" && "${EDITOR:-vi}" "$HOME/.config/signalbox/anthropic-api-key"
+```
 
 Most of `devenv.nix` exists to satisfy the ambient-configuration refusals that
 [configuration and credentials](docs/spec/configuration-and-credentials.md#process-configuration)
