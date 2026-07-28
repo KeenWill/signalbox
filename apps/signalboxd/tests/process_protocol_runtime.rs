@@ -956,7 +956,7 @@ async fn s28_version_fifteen_reads_every_selectable_imported_position() -> Resul
     assert_eq!(
         second.message(),
         &ServerMessage::ImportedConversationEntry {
-            position: CanonicalU64::new(2),
+            position: fixture.last_position,
             imported_entry_id: fixture.tool_entry,
             source_speaker: ImportedSourceSpeaker::Attested {
                 speaker: ImportedSpeaker::Assistant,

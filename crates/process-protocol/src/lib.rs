@@ -2661,13 +2661,39 @@ pub enum ImportedContentKind {
 /// recognition aid for choosing a position; the immutable imported aggregate
 /// remains the authority for complete content.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawImportedTextPreview")]
 pub struct ImportedTextPreview {
     /// Exact leading scalars, at most
     /// [`MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES`] of UTF-8.
     preview: String,
     /// Whether exact text remains beyond the emitted scalars.
     truncated: bool,
+}
+
+/// The undecoded wire shape of a preview, before its bound and truncation
+/// marker are checked.
+///
+/// Deserializing through this raw shape keeps the checked type unconstructible
+/// from an invalid frame, so a direct `ImportedTextPreview` deserialization
+/// cannot bypass the validation an embedded one performs.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawImportedTextPreview {
+    preview: String,
+    truncated: bool,
+}
+
+impl TryFrom<RawImportedTextPreview> for ImportedTextPreview {
+    type Error = FrameValidationError;
+
+    fn try_from(raw: RawImportedTextPreview) -> Result<Self, Self::Error> {
+        let preview = Self {
+            preview: raw.preview,
+            truncated: raw.truncated,
+        };
+        preview.validate()?;
+        Ok(preview)
+    }
 }
 
 impl ImportedTextPreview {
@@ -4127,15 +4153,16 @@ mod tests {
         IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION, ImportedContentKind,
         ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
         ImportedSpeaker, ImportedTextPreview, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
-        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_JSON_CONTAINER_DEPTH,
-        MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
-        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
-        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
-        MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION,
-        ProtocolVersion, RejectionDetail, RequestId, ReviewTargetSubject,
-        SESSION_METADATA_PROTOCOL_VERSION, SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, ServerFrame,
-        ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
-        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
+        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES,
+        MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
+        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
+        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
+        MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallDisposition,
+        ModelCallState, ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail,
+        RequestId, ReviewTargetSubject, SESSION_METADATA_PROTOCOL_VERSION,
+        SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, ServerFrame, ServerMessage, SessionEvent,
+        SessionMetadata, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
+        TranscriptEntry, TranscriptTextEntry, TurnState,
         UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION, decode_client_line, decode_server_line,
         encode_client_line, encode_server_line,
     };
@@ -5495,6 +5522,30 @@ mod tests {
 
         assert_eq!(preview.preview(), "");
         assert!(!preview.truncated());
+    }
+
+    /// A preview deserialized on its own is checked exactly as an embedded one
+    /// is, so no consumer can hold a bounded preview that violates its bound.
+    #[test]
+    fn imported_text_preview_validates_on_direct_deserialization() {
+        let oversized = format!(
+            "{{\"preview\":\"{}\",\"truncated\":false}}",
+            "a".repeat(MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES + 1)
+        );
+
+        assert!(serde_json::from_str::<ImportedTextPreview>(&oversized).is_err());
+        assert!(
+            serde_json::from_str::<ImportedTextPreview>(r#"{"preview":"","truncated":true}"#)
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::from_str::<ImportedTextPreview>(r#"{"preview":"ab","truncated":true}"#)
+                .expect("a bounded truncated preview decodes"),
+            ImportedTextPreview {
+                preview: String::from("ab"),
+                truncated: true,
+            }
+        );
     }
 
     /// A truncation marker over an empty preview contradicts the scalar cut,
