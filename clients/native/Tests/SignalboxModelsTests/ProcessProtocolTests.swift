@@ -320,6 +320,71 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testTurnControlRejectionsDecodeTypedDetails() throws {
+    let notFound = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.toolRequestNotFoundFrame(toolRequestID: turnID)
+    )
+    let alreadyResolved = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.toolRequestAlreadyResolvedFrame(toolRequestID: turnID)
+    )
+    let notEarliest = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.toolRequestNotEarliestFrame(
+        toolRequestID: turnID,
+        earliestToolRequestID: sessionID
+      )
+    )
+    let notInSession = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.toolRequestNotInSessionFrame(
+        sessionID: sessionID,
+        toolRequestID: turnID
+      )
+    )
+
+    XCTAssertEqual(
+      try ProcessProtocolFixture.rejectionDetail(in: notFound.message),
+      .toolRequestNotFound(toolRequestID: try SignalboxCanonicalUUID(validating: turnID))
+    )
+    XCTAssertEqual(
+      try ProcessProtocolFixture.rejectionDetail(in: alreadyResolved.message),
+      .toolRequestAlreadyResolved(
+        toolRequestID: try SignalboxCanonicalUUID(validating: turnID))
+    )
+    XCTAssertEqual(
+      try ProcessProtocolFixture.rejectionDetail(in: notEarliest.message),
+      .toolRequestNotEarliestUndecided(
+        toolRequestID: try SignalboxCanonicalUUID(validating: turnID),
+        earliestToolRequestID: try SignalboxCanonicalUUID(validating: sessionID)
+      )
+    )
+    XCTAssertEqual(
+      try ProcessProtocolFixture.rejectionDetail(in: notInSession.message),
+      .toolRequestNotInSession(
+        sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+        toolRequestID: try SignalboxCanonicalUUID(validating: turnID)
+      )
+    )
+  }
+
+  func testConversationSummaryRequiresNullableTitleMember() throws {
+    let native = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.nativeConversationWithoutTitleFrame(sessionID: sessionID)
+    )
+    let imported = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.importedConversationWithoutTitleFrame(
+        importedConversationID: sessionID
+      )
+    )
+
+    XCTAssertEqual(
+      ProcessProtocolFixture.decodingDiagnostic(in: native.message),
+      ProcessProtocolFixture.missingConversationTitleDiagnostic
+    )
+    XCTAssertEqual(
+      ProcessProtocolFixture.decodingDiagnostic(in: imported.message),
+      ProcessProtocolFixture.missingConversationTitleDiagnostic
+    )
+  }
+
   func testPublicFrameDecoderRejectsOversizedInputBeforeScanning() {
     XCTAssertThrowsError(
       try SignalboxProcessServerFrame.decode(
@@ -352,6 +417,9 @@ private enum ProcessProtocolFixture {
   )
   static let unknownRejectionDetailDiagnostic = SignalboxDecodingDiagnostic(
     message: "Invalid field value at message.detail."
+  )
+  static let missingConversationTitleDiagnostic = SignalboxDecodingDiagnostic(
+    message: "Missing required field at message.conversation.title."
   )
 
   static func duplicateSnapshotBoundaryMessage(
@@ -503,6 +571,133 @@ private enum ProcessProtocolFixture {
     )
   }
 
+  static func toolRequestNotFoundFrame(toolRequestID: String) -> Data {
+    rejectedFrame(
+      detail:
+        """
+        {
+          "type":"tool_request_not_found",
+          "tool_request_id":"\(toolRequestID)"
+        }
+        """
+    )
+  }
+
+  static func toolRequestAlreadyResolvedFrame(toolRequestID: String) -> Data {
+    rejectedFrame(
+      detail:
+        """
+        {
+          "type":"tool_request_already_resolved",
+          "tool_request_id":"\(toolRequestID)"
+        }
+        """
+    )
+  }
+
+  static func toolRequestNotEarliestFrame(
+    toolRequestID: String,
+    earliestToolRequestID: String
+  ) -> Data {
+    rejectedFrame(
+      detail:
+        """
+        {
+          "type":"tool_request_not_earliest_undecided",
+          "tool_request_id":"\(toolRequestID)",
+          "earliest_tool_request_id":"\(earliestToolRequestID)"
+        }
+        """
+    )
+  }
+
+  static func toolRequestNotInSessionFrame(
+    sessionID: String,
+    toolRequestID: String
+  ) -> Data {
+    rejectedFrame(
+      detail:
+        """
+        {
+          "type":"tool_request_not_in_session",
+          "session_id":"\(sessionID)",
+          "tool_request_id":"\(toolRequestID)"
+        }
+        """
+    )
+  }
+
+  static func nativeConversationWithoutTitleFrame(sessionID: String) -> Data {
+    conversationFrame(
+      conversation:
+        """
+        {
+          "origin":"native_session",
+          "session_id":"\(sessionID)",
+          "archived":false,
+          "defaults_version":"1"
+        }
+        """
+    )
+  }
+
+  static func importedConversationWithoutTitleFrame(
+    importedConversationID: String
+  ) -> Data {
+    conversationFrame(
+      conversation:
+        """
+        {
+          "origin":"imported_conversation",
+          "imported_conversation_id":"\(importedConversationID)",
+          "entry_count":"1",
+          "source_format":"codex_rollout_jsonl_v1"
+        }
+        """
+    )
+  }
+
+  static func rejectionDetail(
+    in message: SignalboxProcessServerMessage
+  ) throws -> SignalboxRejectionDetail {
+    guard case .protocolError(let error) = message, let detail = error.detail else {
+      throw ProcessProtocolFixtureError.missingRejectionDetail
+    }
+    return detail
+  }
+
+  private static func rejectedFrame(detail: String) -> Data {
+    Data(
+      """
+      {
+        "version":18,
+        "request_id":"9",
+        "message":{
+          "type":"error",
+          "code":"rejected",
+          "message":"fixture rejection",
+          "detail":\(detail)
+        }
+      }
+      """.utf8
+    )
+  }
+
+  private static func conversationFrame(conversation: String) -> Data {
+    Data(
+      """
+      {
+        "version":18,
+        "request_id":"9",
+        "message":{
+          "type":"conversation_summary",
+          "conversation":\(conversation)
+        }
+      }
+      """.utf8
+    )
+  }
+
   static func oversizedFrame() -> Data {
     Data(
       repeating: 0x20,
@@ -518,4 +713,8 @@ private enum ProcessProtocolFixture {
     }
     return diagnostic
   }
+}
+
+private enum ProcessProtocolFixtureError: Error {
+  case missingRejectionDetail
 }

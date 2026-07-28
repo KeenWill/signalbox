@@ -8,7 +8,11 @@ public enum SignalboxProcessServiceError: LocalizedError, Equatable {
   case unexpectedMessage(String)
   case invalidPage(String)
   case deadlineExceeded(String)
-  case remote(code: SignalboxProcessErrorCode, message: String)
+  case remote(
+    code: SignalboxProcessErrorCode,
+    message: String,
+    detail: SignalboxRejectionDetail?
+  )
   case mutationRetryExhausted(code: SignalboxProcessErrorCode, message: String)
 
   public var errorDescription: String? {
@@ -16,7 +20,7 @@ public enum SignalboxProcessServiceError: LocalizedError, Equatable {
     case .unexpectedMessage(let message), .invalidPage(let message),
       .deadlineExceeded(let message):
       return message
-    case .remote(let code, let message):
+    case .remote(let code, let message, _):
       return "\(code.rawValue): \(message)"
     case .mutationRetryExhausted(let code, let message):
       return "\(code.rawValue): \(message) The exact command can be retried."
@@ -1314,6 +1318,6 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
   private func remote(
     _ error: SignalboxProcessError
   ) -> SignalboxProcessServiceError {
-    .remote(code: error.code, message: error.message)
+    .remote(code: error.code, message: error.message, detail: error.detail)
   }
 }

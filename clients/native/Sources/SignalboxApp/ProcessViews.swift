@@ -278,6 +278,64 @@ struct ProcessSessionsScreen: View {
   }
 }
 
+struct ProcessSessionCreationRetryState {
+  private var unresolvedCreation: SignalboxPreparedSessionCreation?
+
+  func reusableCreation(
+    modelSelection: SignalboxModelSelection,
+    systemPrompt: String?
+  ) -> SignalboxPreparedSessionCreation? {
+    guard
+      let unresolvedCreation,
+      unresolvedCreation.modelSelection == modelSelection,
+      Self.optionalStringsHaveExactUTF8(unresolvedCreation.systemPrompt, systemPrompt)
+    else {
+      return nil
+    }
+    return unresolvedCreation
+  }
+
+  mutating func prepareForNewIntent() {
+    unresolvedCreation = nil
+  }
+
+  mutating func recordSuccess() {
+    unresolvedCreation = nil
+  }
+
+  mutating func recordFailure(
+    _ error: Error,
+    prepared: SignalboxPreparedSessionCreation?,
+    reusedUnresolvedCreation: Bool
+  ) {
+    if error is CancellationError {
+      unresolvedCreation = prepared
+    } else if let serviceError = error as? SignalboxProcessServiceError,
+      case .mutationRetryExhausted = serviceError
+    {
+      unresolvedCreation = prepared
+    } else if let openError = error as? SignalboxProcessRequestOpenError,
+      case .definitelyUnsent = openError,
+      reusedUnresolvedCreation
+    {
+      unresolvedCreation = prepared
+    } else {
+      unresolvedCreation = nil
+    }
+  }
+
+  private static func optionalStringsHaveExactUTF8(_ lhs: String?, _ rhs: String?) -> Bool {
+    switch (lhs, rhs) {
+    case (.none, .none):
+      return true
+    case (.some(let lhs), .some(let rhs)):
+      return lhs.utf8.elementsEqual(rhs.utf8)
+    case (.none, .some), (.some, .none):
+      return false
+    }
+  }
+}
+
 private struct ProcessSessionCreationSheet: View {
   @EnvironmentObject private var coordinator: AppCoordinator
   @Environment(\.dismiss) private var dismiss
@@ -288,6 +346,7 @@ private struct ProcessSessionCreationSheet: View {
   @State private var isLoading = true
   @State private var isCreating = false
   @State private var errorMessage: String?
+  @State private var creationRetryState = ProcessSessionCreationRetryState()
 
   var body: some View {
     NavigationStack {
@@ -324,6 +383,7 @@ private struct ProcessSessionCreationSheet: View {
           Button("Cancel") {
             dismiss()
           }
+          .disabled(isCreating)
         }
         ToolbarItem(placement: .confirmationAction) {
           Button("Create") {
@@ -338,6 +398,7 @@ private struct ProcessSessionCreationSheet: View {
       }
     }
     .frame(minWidth: 520, minHeight: 320)
+    .interactiveDismissDisabled(isCreating)
   }
 
   private func loadAliases() async {
@@ -368,17 +429,37 @@ private struct ProcessSessionCreationSheet: View {
     defer {
       isCreating = false
     }
+    var preparedForAttempt: SignalboxPreparedSessionCreation?
+    var reusedUnresolvedCreation = false
     do {
       let prompt = systemPrompt.isEmpty ? nil : systemPrompt
-      let prepared = try await service.prepareSessionCreation(
-        modelSelection: .alias(aliasID: selectedAliasID),
+      let modelSelection = SignalboxModelSelection.alias(aliasID: selectedAliasID)
+      let prepared: SignalboxPreparedSessionCreation
+      if let unresolvedCreation = creationRetryState.reusableCreation(
+        modelSelection: modelSelection,
         systemPrompt: prompt
-      )
+      ) {
+        prepared = unresolvedCreation
+        reusedUnresolvedCreation = true
+      } else {
+        creationRetryState.prepareForNewIntent()
+        prepared = try await service.prepareSessionCreation(
+          modelSelection: modelSelection,
+          systemPrompt: prompt
+        )
+      }
+      preparedForAttempt = prepared
       let sessionID = try await service.createSession(prepared)
+      creationRetryState.recordSuccess()
       coordinator.selectedProcessSessionID = sessionID
       await didCreate()
       dismiss()
     } catch {
+      creationRetryState.recordFailure(
+        error,
+        prepared: preparedForAttempt,
+        reusedUnresolvedCreation: reusedUnresolvedCreation
+      )
       errorMessage = error.localizedDescription
     }
   }
@@ -492,7 +573,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   @Published var composerText = ""
   @Published var errorMessage: String?
 
-  let session: SignalboxProcessSession
+  @Published private(set) var session: SignalboxProcessSession
   private var serviceProvider: () -> (any SignalboxProcessServiceProtocol)?
   private var connectedService: (any SignalboxProcessServiceProtocol)?
   private var synchronization: (any SignalboxSessionSynchronizing)?
@@ -625,6 +706,14 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       guard serviceGeneration == generation else {
         return
       }
+      await refreshSessionDefaultsIfNeeded(
+        after: error,
+        using: service,
+        generation: generation
+      )
+      guard serviceGeneration == generation else {
+        return
+      }
       if error is CancellationError {
         unresolvedSubmission = preparedForAttempt
       } else if let serviceError = error as? SignalboxProcessServiceError,
@@ -710,13 +799,29 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         acceptancePosition: submitted.acceptancePosition,
         content: prepared.content
       )
-      pendingInputs.append(acceptedInput)
-      pendingInputs.sort { $0.acceptancePosition.rawValue < $1.acceptancePosition.rawValue }
+      pendingInputs.removeAll { $0.id == submitted.acceptedInputID }
+      acceptedInputsAwaitingTranscript.removeAll { $0.id == submitted.acceptedInputID }
+      if !materializedAcceptedInputIDs.contains(submitted.acceptedInputID) {
+        if terminalTurnIDs.contains(submitted.turnID) {
+          retainAcceptedInputAwaitingTranscript(acceptedInput)
+        } else {
+          pendingInputs.append(acceptedInput)
+          pendingInputs.sort { $0.acceptancePosition.rawValue < $1.acceptancePosition.rawValue }
+        }
+      }
       if hasExactUTF8(composerText, prepared.content) {
         composerText = ""
       }
       errorMessage = nil
     } catch {
+      guard serviceGeneration == generation else {
+        return
+      }
+      await refreshSessionDefaultsIfNeeded(
+        after: error,
+        using: service,
+        generation: generation
+      )
       guard serviceGeneration == generation else {
         return
       }
@@ -732,6 +837,16 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       return true
     }
     return false
+  }
+
+  var canSend: Bool {
+    canSubmit && activeTurnID == nil
+  }
+
+  var canStopAndSend: Bool {
+    canSubmit
+      && activeTurnID != nil
+      && activity.state != .waitingForToolDecision
   }
 
   func apply(_ update: SignalboxSessionSynchronizationDriverUpdate) {
@@ -827,6 +942,31 @@ final class ProcessSessionDetailViewModel: ObservableObject {
 
   private func hasExactUTF8(_ lhs: String, _ rhs: String) -> Bool {
     lhs.utf8.elementsEqual(rhs.utf8)
+  }
+
+  private func refreshSessionDefaultsIfNeeded(
+    after error: Error,
+    using service: any SignalboxProcessServiceProtocol,
+    generation: UInt64
+  ) async {
+    guard
+      let serviceError = error as? SignalboxProcessServiceError,
+      case .remote(
+        code: .rejected,
+        message: _,
+        detail: .some(
+          .defaultsVersionMismatch(let sessionID, expected: _, current: _)
+        )
+      ) = serviceError,
+      sessionID == session.id,
+      let refreshed = try? await service.listSessions(includeArchived: true).first(where: {
+        $0.id == session.id
+      }),
+      serviceGeneration == generation
+    else {
+      return
+    }
+    session = refreshed
   }
 
   private func sideSnapshotApprovalMatchesTrigger(
@@ -948,8 +1088,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         turnID: turnID,
         terminalActivity: .init(state: .cancelled, label: "Cancelled")
       )
-    case .turnReconciliationRequired, .turnToolReconciliationRequired:
-      activity = .init(state: .recoveryRequired, label: "Recovery required")
+    case .turnReconciliationRequired(let turnID, _, _),
+      .turnToolReconciliationRequired(let turnID, _, _):
+      applyTerminalTurn(
+        turnID: turnID,
+        terminalActivity: .init(state: .recoveryRequired, label: "Recovery required")
+      )
     case .sessionCreated, .unknown:
       break
     }
@@ -1202,7 +1346,7 @@ struct ProcessSessionDetailScreen: View {
         guard let request = deniedToolRequest else {
           return
         }
-        let reason = denialReason
+        let reason = denialReason.trimmingCharacters(in: .whitespacesAndNewlines)
         deniedToolRequest = nil
         denialReason = ""
         Task {
@@ -1247,7 +1391,7 @@ struct ProcessSessionDetailScreen: View {
       .disabled(
         viewModel.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
           || viewModel.isSubmitting
-          || !viewModel.canSubmit
+          || !viewModel.canSend
       )
       .accessibilityLabel("Send")
       .accessibilityIdentifier("send-message-button")
@@ -1261,7 +1405,7 @@ struct ProcessSessionDetailScreen: View {
         .disabled(
           viewModel.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || viewModel.isSubmitting
-            || !viewModel.canSubmit
+            || !viewModel.canStopAndSend
         )
         .help("Stop the active turn and submit the composer text as its successor.")
         .accessibilityIdentifier("stop-turn-button")

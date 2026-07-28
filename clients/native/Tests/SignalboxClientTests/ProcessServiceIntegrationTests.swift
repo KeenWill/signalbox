@@ -285,6 +285,24 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testActiveTurnGatesSendAndApprovalWaitGatesStop() async throws {
+    let service = makeService(scenario: .pendingApproval)
+    let sessions = try await service.listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.approvalSessionID, in: sessions)
+    let snapshot = try await authoritativeSnapshot(service: service, session: session)
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+
+    viewModel.apply(.authoritativeSnapshot(snapshot))
+
+    XCTAssertFalse(viewModel.canSend)
+    XCTAssertFalse(viewModel.canStopAndSend)
+  }
+
+  @MainActor
   func testSideSnapshotDoesNotPublishLaterProposalApprovalState() async throws {
     let service = makeService(scenario: .pendingApproval)
     let sessions = try await service.listSessions(includeArchived: false)
@@ -454,6 +472,28 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
   }
 
+  func testAmbiguousCreationRetryReusesPreparedCommandIdentity() throws {
+    var state = ProcessSessionCreationRetryState()
+    let prepared = try ProcessSubmissionFixture.preparedCreation()
+    state.recordFailure(
+      ProcessSubmissionFixture.ambiguousMutationError,
+      prepared: prepared,
+      reusedUnresolvedCreation: false
+    )
+
+    let retried = state.reusableCreation(
+      modelSelection: prepared.modelSelection,
+      systemPrompt: prepared.systemPrompt
+    )
+    let edited = state.reusableCreation(
+      modelSelection: prepared.modelSelection,
+      systemPrompt: ProcessSubmissionFixture.replacementContent
+    )
+
+    XCTAssertEqual(retried, prepared)
+    XCTAssertNil(edited)
+  }
+
   @MainActor
   func testCancelledSubmissionRetryReusesPreparedCommandIdentity() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
@@ -563,6 +603,26 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       viewModel.pendingInputs.map(\.id.rawValue),
       ProcessSubmissionFixture.receiptReconciledPendingIDs
+    )
+  }
+
+  @MainActor
+  func testStopReceiptDeduplicatesPreviouslyFollowedSuccessor() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.composerText = ProcessSubmissionFixture.content
+    viewModel.apply(.event(try ProcessProjectionFixture.activatedEvent()))
+    viewModel.apply(.event(try ProcessProjectionFixture.acceptedSuccessorEvent()))
+
+    await viewModel.stopAndSendSuccessor()
+
+    XCTAssertEqual(
+      viewModel.pendingInputs.map(\.id.rawValue),
+      ProcessSubmissionFixture.singleAcceptedInputID
     )
   }
 
@@ -839,6 +899,40 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       ProcessProjectionFixture.remainingPendingIDs
     )
     XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.queuedActivity)
+  }
+
+  @MainActor
+  func testReconciliationRequiredClearsLiveActiveTurn() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(.event(try ProcessProjectionFixture.activatedEvent()))
+
+    viewModel.apply(.event(try ProcessProjectionFixture.toolReconciliationTrigger()))
+
+    XCTAssertNil(viewModel.activeTurnID)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
+  }
+
+  @MainActor
+  func testDefaultsMismatchRefreshesTheNextSubmissionEpoch() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let refreshed = try ProcessSubmissionFixture.refreshedSession(from: session)
+    let service = DefaultsMismatchThenAcceptingProcessService(refreshed: refreshed)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.composerText = ProcessSubmissionFixture.content
+
+    await viewModel.send()
+    await viewModel.send()
+    let preparedVersions = await service.preparedVersions
+
+    XCTAssertEqual(
+      preparedVersions,
+      ProcessSubmissionFixture.submissionVersions(from: session, refreshed: refreshed)
+    )
+    XCTAssertEqual(viewModel.session.defaultsVersion, refreshed.defaultsVersion)
   }
 
   @MainActor
@@ -1500,10 +1594,16 @@ private enum ProcessSubmissionFixture {
   static let commandID = "abababab-0000-4000-8000-000000000001"
   static let replacementCommandID = "abababab-0000-4000-8000-000000000004"
   static let failureMessage = "Fixture submission rejection."
+  static let defaultsMismatchMessage = "Fixture defaults changed."
+  static let ambiguousMutationError = SignalboxProcessServiceError.mutationRetryExhausted(
+    code: .commitAmbiguous,
+    message: failureMessage
+  )
   static let initialSocketPath = "/tmp/signalbox-initial-review-fixture.sock"
   static let replacementSocketPath = "/tmp/signalbox-review-fixture.sock"
   static let acceptedInputID = "abababab-0000-4000-8000-000000000002"
   static let acceptedTurnID = "abababab-0000-4000-8000-000000000003"
+  static let singleAcceptedInputID = [acceptedInputID]
   static let retriedCommandIDs = [commandID, commandID]
   static let threeIdenticalCommandIDs = [commandID, commandID, commandID]
   static let editedComposerCommandIDs = [commandID, replacementCommandID]
@@ -1546,12 +1646,65 @@ private enum ProcessSubmissionFixture {
     )
   }
 
+  static func refreshedSession(
+    from session: SignalboxProcessSession
+  ) throws -> SignalboxProcessSession {
+    let refreshedDefaultsVersion = SignalboxCanonicalUInt64(
+      rawValue: session.defaultsVersion.rawValue + 1
+    )
+    let defaults = try SignalboxJSONCoding.decoder().decode(
+      SignalboxSessionDefaultsRead.self,
+      from: Data(
+        """
+        {
+          "type":"session_defaults",
+          "session_id":"\(session.id.rawValue)",
+          "defaults_version":"\(refreshedDefaultsVersion.rawValue)",
+          "model_selection":{
+            "kind":"direct",
+            "selection_id":"\(ProcessDriverFixture.modelCall)"
+          },
+          "dangerous_tool_auto_approval":false,
+          "system_prompt":null
+        }
+        """.utf8
+      )
+    )
+    return SignalboxProcessSession(
+      id: session.id,
+      defaults: defaults,
+      metadata: SignalboxProcessSessionMetadata(
+        title: session.title,
+        tags: session.tags,
+        attributes: [:],
+        archived: session.archived
+      )
+    )
+  }
+
+  static func submissionVersions(
+    from session: SignalboxProcessSession,
+    refreshed: SignalboxProcessSession
+  ) -> [SignalboxCanonicalUInt64] {
+    [session.defaultsVersion, refreshed.defaultsVersion]
+  }
+
   static func preparedSubmission() throws -> SignalboxPreparedInputSubmission {
     SignalboxPreparedInputSubmission(
       commandID: try SignalboxCommandID(validating: commandID),
       sessionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.session),
       content: content,
       expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 1)
+    )
+  }
+
+  static func preparedCreation() throws -> SignalboxPreparedSessionCreation {
+    SignalboxPreparedSessionCreation(
+      commandID: try SignalboxCommandID(validating: commandID),
+      modelSelection: .alias(
+        aliasID: try SignalboxCanonicalUUID(validating: MockProcessProtocolFixtures.aliasID)
+      ),
+      systemPrompt: systemPrompt
     )
   }
 
@@ -2042,6 +2195,87 @@ private actor ImmediateAcceptingProcessService: SignalboxProcessServiceProtocol 
     _ submission: SignalboxPreparedInputSubmission
   ) async throws -> SignalboxInputSubmitted {
     submittedContents.append(submission.content)
+    return try ProcessSubmissionFixture.submittedReceipt(sessionID: submission.sessionID)
+  }
+
+  func prepareTurnStop(
+    session: SignalboxProcessSession,
+    activeTurnID: SignalboxCanonicalUUID,
+    content: String
+  ) async throws -> SignalboxPreparedTurnStop {
+    SignalboxPreparedTurnStop(
+      commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
+      sessionID: session.id,
+      activeTurnID: activeTurnID,
+      content: content,
+      expectedDefaultsVersion: session.defaultsVersion
+    )
+  }
+
+  func stopTurn(
+    _ prepared: SignalboxPreparedTurnStop
+  ) async throws -> SignalboxInputSubmitted {
+    try ProcessSubmissionFixture.submittedReceipt(sessionID: prepared.sessionID)
+  }
+
+  func makeSynchronization(
+    sessionID: SignalboxCanonicalUUID,
+    updates: @escaping @Sendable (SignalboxSessionSynchronizationDriverUpdate) async -> Void
+  ) async -> any SignalboxSessionSynchronizing {
+    NoopProcessSynchronization()
+  }
+}
+
+private actor DefaultsMismatchThenAcceptingProcessService: SignalboxProcessServiceProtocol {
+  private let refreshed: SignalboxProcessSession
+  private var submitCount = 0
+  private(set) var preparedVersions: [SignalboxCanonicalUInt64] = []
+
+  init(refreshed: SignalboxProcessSession) {
+    self.refreshed = refreshed
+  }
+
+  func testConnection() async throws {}
+
+  func listSessions(includeArchived: Bool) async throws -> [SignalboxProcessSession] {
+    [refreshed]
+  }
+
+  func setArchived(
+    _ archived: Bool,
+    session: SignalboxProcessSession
+  ) async throws -> SignalboxProcessSession {
+    session
+  }
+
+  func prepareInputSubmission(
+    session: SignalboxProcessSession,
+    content: String
+  ) async throws -> SignalboxPreparedInputSubmission {
+    preparedVersions.append(session.defaultsVersion)
+    return SignalboxPreparedInputSubmission(
+      commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
+      sessionID: session.id,
+      content: content,
+      expectedDefaultsVersion: session.defaultsVersion
+    )
+  }
+
+  func submit(
+    _ submission: SignalboxPreparedInputSubmission
+  ) async throws -> SignalboxInputSubmitted {
+    submitCount += 1
+    guard submitCount > 1 else {
+      throw SignalboxProcessServiceError.remote(
+        code: .rejected,
+        message: ProcessSubmissionFixture.defaultsMismatchMessage,
+        detail: .defaultsVersionMismatch(
+          sessionID: submission.sessionID,
+          expected: submission.expectedDefaultsVersion,
+          current: refreshed.defaultsVersion
+        )
+      )
+    }
     return try ProcessSubmissionFixture.submittedReceipt(sessionID: submission.sessionID)
   }
 
@@ -3453,6 +3687,20 @@ private enum ProcessProjectionFixture {
         "type":"input_accepted",
         "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
         "turn_id":"\(ProcessDriverFixture.turn)",
+        "acceptance_position":"1",
+        "content":"\(ProcessSubmissionFixture.content)"
+      }
+      """
+    )
+  }
+
+  static func acceptedSuccessorEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"input_accepted",
+        "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
+        "turn_id":"\(ProcessSubmissionFixture.acceptedTurnID)",
         "acceptance_position":"1",
         "content":"\(ProcessSubmissionFixture.content)"
       }

@@ -851,6 +851,15 @@ public enum SignalboxConversationSummary: Decodable, Equatable, Sendable {
         decoder: decoder
       )
       let container = try decoder.container(keyedBy: NativeCodingKeys.self)
+      guard container.contains(.title) else {
+        throw DecodingError.keyNotFound(
+          NativeCodingKeys.title,
+          .init(
+            codingPath: decoder.codingPath,
+            debugDescription: "Native conversation summary is missing its title."
+          )
+        )
+      }
       self = .native(
         SignalboxNativeConversationSummary(
           sessionID: try container.decode(SignalboxCanonicalUUID.self, forKey: .sessionID),
@@ -871,6 +880,15 @@ public enum SignalboxConversationSummary: Decodable, Equatable, Sendable {
         decoder: decoder
       )
       let container = try decoder.container(keyedBy: ImportedCodingKeys.self)
+      guard container.contains(.title) else {
+        throw DecodingError.keyNotFound(
+          ImportedCodingKeys.title,
+          .init(
+            codingPath: decoder.codingPath,
+            debugDescription: "Imported conversation summary is missing its title."
+          )
+        )
+      }
       self = .imported(
         SignalboxImportedConversationSummary(
           importedConversationID: try container.decode(
@@ -1875,12 +1893,59 @@ public struct SignalboxProcessError: Decodable, Equatable, Sendable {
 public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
   case sessionNotFound(sessionID: SignalboxCanonicalUUID)
   case activeTurnPresent(sessionID: SignalboxCanonicalUUID, activeTurnID: SignalboxCanonicalUUID)
+  case activeTurnMismatch(
+    sessionID: SignalboxCanonicalUUID,
+    expectedActiveTurnID: SignalboxCanonicalUUID,
+    activeTurnID: SignalboxCanonicalUUID
+  )
+  case noActiveTurn(
+    sessionID: SignalboxCanonicalUUID,
+    expectedActiveTurnID: SignalboxCanonicalUUID
+  )
+  case turnNotAwaitingReconciliation(
+    sessionID: SignalboxCanonicalUUID,
+    turnID: SignalboxCanonicalUUID
+  )
+  case interruptAlreadyApplied(
+    sessionID: SignalboxCanonicalUUID,
+    activeTurnID: SignalboxCanonicalUUID,
+    existingCommandID: SignalboxCanonicalUUID
+  )
+  case interruptUnavailableWhileAwaitingApproval(
+    sessionID: SignalboxCanonicalUUID,
+    activeTurnID: SignalboxCanonicalUUID
+  )
+  case safePointUnavailableWhileStopping(
+    sessionID: SignalboxCanonicalUUID,
+    activeTurnID: SignalboxCanonicalUUID,
+    existingCommandID: SignalboxCanonicalUUID
+  )
+  case toolRequestNotFound(toolRequestID: SignalboxCanonicalUUID)
+  case toolRequestAlreadyResolved(toolRequestID: SignalboxCanonicalUUID)
+  case toolRequestNotEarliestUndecided(
+    toolRequestID: SignalboxCanonicalUUID,
+    earliestToolRequestID: SignalboxCanonicalUUID
+  )
+  case toolRequestNotInSession(
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID
+  )
   case defaultsVersionMismatch(
     sessionID: SignalboxCanonicalUUID, expected: SignalboxCanonicalUInt64,
     current: SignalboxCanonicalUInt64)
   case unknownModelAlias(sessionID: SignalboxCanonicalUUID, aliasID: SignalboxCanonicalUUID)
   case acceptancePositionExhausted(
     sessionID: SignalboxCanonicalUUID, last: SignalboxCanonicalUInt64)
+  case defaultsVersionExhausted(
+    sessionID: SignalboxCanonicalUUID,
+    current: SignalboxCanonicalUInt64
+  )
+  case importedConversationNotFound(importedConversationID: SignalboxCanonicalUUID)
+  case importedFrontierPositionOutOfRange(
+    importedConversationID: SignalboxCanonicalUUID,
+    requestedPosition: SignalboxCanonicalUInt64,
+    lastPosition: SignalboxCanonicalUInt64
+  )
   case unknown(kind: String, payload: [String: SignalboxJSONValue])
 
   public init(from decoder: Decoder) throws {
@@ -1897,6 +1962,94 @@ public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
       self = .activeTurnPresent(
         sessionID: try decoder.decode("session_id"),
         activeTurnID: try decoder.decode("active_turn_id"))
+    case "active_turn_mismatch":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "expected_active_turn_id", "active_turn_id"],
+        decoder: decoder
+      )
+      self = .activeTurnMismatch(
+        sessionID: try decoder.decode("session_id"),
+        expectedActiveTurnID: try decoder.decode("expected_active_turn_id"),
+        activeTurnID: try decoder.decode("active_turn_id")
+      )
+    case "no_active_turn":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "expected_active_turn_id"],
+        decoder: decoder
+      )
+      self = .noActiveTurn(
+        sessionID: try decoder.decode("session_id"),
+        expectedActiveTurnID: try decoder.decode("expected_active_turn_id")
+      )
+    case "turn_not_awaiting_reconciliation":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "turn_id"],
+        decoder: decoder
+      )
+      self = .turnNotAwaitingReconciliation(
+        sessionID: try decoder.decode("session_id"),
+        turnID: try decoder.decode("turn_id")
+      )
+    case "interrupt_already_applied":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "active_turn_id", "existing_command_id"],
+        decoder: decoder
+      )
+      self = .interruptAlreadyApplied(
+        sessionID: try decoder.decode("session_id"),
+        activeTurnID: try decoder.decode("active_turn_id"),
+        existingCommandID: try decoder.decode("existing_command_id")
+      )
+    case "interrupt_unavailable_while_awaiting_approval":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "active_turn_id"],
+        decoder: decoder
+      )
+      self = .interruptUnavailableWhileAwaitingApproval(
+        sessionID: try decoder.decode("session_id"),
+        activeTurnID: try decoder.decode("active_turn_id")
+      )
+    case "safe_point_unavailable_while_stopping":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "active_turn_id", "existing_command_id"],
+        decoder: decoder
+      )
+      self = .safePointUnavailableWhileStopping(
+        sessionID: try decoder.decode("session_id"),
+        activeTurnID: try decoder.decode("active_turn_id"),
+        existingCommandID: try decoder.decode("existing_command_id")
+      )
+    case "tool_request_not_found":
+      try tagged.rejectUnadmittedFields(
+        ["type", "tool_request_id"],
+        decoder: decoder
+      )
+      self = .toolRequestNotFound(toolRequestID: try decoder.decode("tool_request_id"))
+    case "tool_request_already_resolved":
+      try tagged.rejectUnadmittedFields(
+        ["type", "tool_request_id"],
+        decoder: decoder
+      )
+      self = .toolRequestAlreadyResolved(
+        toolRequestID: try decoder.decode("tool_request_id"))
+    case "tool_request_not_earliest_undecided":
+      try tagged.rejectUnadmittedFields(
+        ["type", "tool_request_id", "earliest_tool_request_id"],
+        decoder: decoder
+      )
+      self = .toolRequestNotEarliestUndecided(
+        toolRequestID: try decoder.decode("tool_request_id"),
+        earliestToolRequestID: try decoder.decode("earliest_tool_request_id")
+      )
+    case "tool_request_not_in_session":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "tool_request_id"],
+        decoder: decoder
+      )
+      self = .toolRequestNotInSession(
+        sessionID: try decoder.decode("session_id"),
+        toolRequestID: try decoder.decode("tool_request_id")
+      )
     case "defaults_version_mismatch":
       try tagged.rejectUnadmittedFields(
         ["type", "session_id", "expected", "current"],
@@ -1921,6 +2074,37 @@ public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
       )
       self = .acceptancePositionExhausted(
         sessionID: try decoder.decode("session_id"), last: try decoder.decode("last"))
+    case "defaults_version_exhausted":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "current"],
+        decoder: decoder
+      )
+      self = .defaultsVersionExhausted(
+        sessionID: try decoder.decode("session_id"),
+        current: try decoder.decode("current")
+      )
+    case "imported_conversation_not_found":
+      try tagged.rejectUnadmittedFields(
+        ["type", "imported_conversation_id"],
+        decoder: decoder
+      )
+      self = .importedConversationNotFound(
+        importedConversationID: try decoder.decode("imported_conversation_id"))
+    case "imported_frontier_position_out_of_range":
+      try tagged.rejectUnadmittedFields(
+        [
+          "type",
+          "imported_conversation_id",
+          "requested_position",
+          "last_position",
+        ],
+        decoder: decoder
+      )
+      self = .importedFrontierPositionOutOfRange(
+        importedConversationID: try decoder.decode("imported_conversation_id"),
+        requestedPosition: try decoder.decode("requested_position"),
+        lastPosition: try decoder.decode("last_position")
+      )
     default:
       self = .unknown(kind: tagged.kind, payload: tagged.payload)
     }
