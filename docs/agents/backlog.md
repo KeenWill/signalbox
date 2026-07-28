@@ -536,7 +536,8 @@ Collides-with: session-creation surfaces. Version one is the owner-commissioned
 named, versioned, copy-on-create bundle of model selection, system prompt, and
 dangerous-tool blanket.
 
-Follow-up owner direction, 2026-07-28:
+Follow-up owner direction, 2026-07-28 (deferred under
+[template storage and authoring surfaces](../open-questions.md#template-storage-and-authoring)):
 
 - durable database template objects with protocol CRUD;
 - agent tools for reading and editing templates so agents can help the owner

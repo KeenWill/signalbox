@@ -175,7 +175,8 @@ Each template table carries exactly:
 
 - `name` — 1 through 128 ASCII bytes matching `[a-z0-9][a-z0-9._-]*`, unique in
   the document;
-- `version` — a positive `u64` bundle version;
+- `version` — a positive TOML integer bundle version, from 1 through
+  9,223,372,036,854,775,807 inclusive;
 - exactly one of `model` or `alias` — the canonical UUID of a direct selection
   or alias present in the already-validated model catalog;
 - exactly one of `system_prompt` or `system_prompt_file`; and
@@ -194,15 +195,27 @@ newline trimming or interpolation.
 
 One valid table becomes an immutable resolved bundle containing the exact model
 request, system prompt, and dangerous-tool blanket. Its content digest is
-domain-separated SHA-256 over length-framed canonical values: template version,
-the direct-or-alias tag and UUID bytes, the blanket tag, and the exact resolved
-prompt bytes. The name and source form are excluded: an inline and file-backed
-prompt with the same version and bundle have the same digest, while changing any
-copied value or the template version changes it. The daemon exposes only sorted
-name/version summaries to clients; clients never receive prompt text or parse
-this file.
+domain-separated SHA-256 over length-framed canonical values. Each frame is an
+unsigned 64-bit big-endian byte length followed by that many exact bytes. The
+frames, in order, are: ASCII `signalbox/session-template/content-digest/v1`; the
+template version as eight unsigned big-endian bytes; ASCII `direct` or `alias`;
+the selected UUID as its 16 network-order bytes; ASCII `disabled` or
+`approve_all`; and the exact UTF-8 prompt bytes. The name and source form are
+excluded: an inline and file-backed prompt with the same version and bundle have
+the same digest, while changing any copied value or the template version changes
+it. The stable vector for version 7, alias
+`30000000-0000-4000-8000-000000000003`, `ApproveAll`, and prompt
+`Review the change and report concrete findings.` is hexadecimal
+`00c08275577e73f1565716b5c886861a0f19ea4f2c9cb9e8f93034d030b9796d`. The daemon
+exposes only sorted name/version summaries to clients; clients never receive
+prompt text or parse this file.
 
-Creation by template name resolves against this process-lifetime catalog and
+Creation by template name first consults the owner-global durable-command
+registry by command identity. An existing create-session claim is reconstituted
+and compared using the caller-supplied creation mode and template name before
+the current catalog is consulted; an equal replay returns its stored session,
+including when that name is absent or changed in the current catalog. Only an
+unclaimed command identity resolves against this process-lifetime catalog and
 copies the complete bundle into the session's immutable defaults version one.
 The session separately records the template name and content digest; it retains
 no live catalog reference. An edit therefore requires a daemon restart and

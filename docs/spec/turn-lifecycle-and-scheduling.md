@@ -595,12 +595,14 @@ rather than repairs, and no effect is authorized from a failed reconstruction
 
 signalboxd is the composition root. It reads exactly `DATABASE_URL`,
 `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML naming provider targets,
-selections, and aliases), `ANTHROPIC_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, and
-`SIGNALBOX_SOCKET_PATH` from the process environment (the provisional
-configuration channels are
+selections, and aliases), `SIGNALBOX_TEMPLATE_CONFIG_FILE`,
+`ANTHROPIC_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, and `SIGNALBOX_SOCKET_PATH` from
+the process environment (the provisional configuration channels are
 [configuration-and-credentials](configuration-and-credentials.md) scope). It
-connects, acquires the single-daemon guard, fences the prior pool incarnation,
-migrates and resolves the one-time imported display-title backfill
+validates the model catalog, then resolves the template catalog and all of its
+prompt files against that model catalog, before connecting. It then acquires the
+single-daemon guard, fences the prior pool incarnation, migrates and resolves
+the one-time imported display-title backfill
 ([conversation-import](conversation-import.md#derived-display-titles)),
 completes recovery scan, binds the process socket, then concurrently admits
 protocol requests, dispatches the outbox, and schedules eligible work. On a
