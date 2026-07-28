@@ -208,7 +208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The marker is in a non-`text`/`message` field of an unmodeled
             // item; every string leaf must still seed the lookbehind.
             emit(
-                r#"{"type":"item.completed","item":{"id":"diag","type":"diagnostic","aggregated_output":"api_"}}"#,
+                r#"{"type":"item.completed","item":{"id":"diag","type":"diagnostic","content":"api_"}}"#,
             );
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,

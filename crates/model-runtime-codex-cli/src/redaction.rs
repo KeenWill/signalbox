@@ -941,7 +941,17 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             if !held_unsafe.is_empty() {
                 let mut merged = self.emitted_context.clone();
                 merged.push_str(held_unsafe);
-                self.emitted_context = trailing_credential_context(&merged).to_string();
+                let carried_emitted = trailing_credential_context(&merged);
+                // Same 64-KiB lookbehind bound as the dropped chain: an
+                // emitted marker that opens a line credential (`Authorization:`)
+                // can grow this context by a full held delta each dropped
+                // newline, so an unterminated candidate past the cap fails
+                // closed instead of pinning unbounded provider-controlled bytes.
+                if carried_emitted.len() > MAX_PENDING_STREAM_BYTES {
+                    self.suppress_remaining();
+                    return;
+                }
+                self.emitted_context = carried_emitted.to_string();
             }
             // The dropped chain carries the unsafe tail of the full
             // chronological chain (which already folds in any emitted/dropped
@@ -957,6 +967,13 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             return;
         }
         self.dropped_context = context.to_string();
+    }
+
+    /// Whether the sink has entered fail-closed suppression (every subsequent
+    /// emission becomes `[redacted]` and the match-only contexts are cleared).
+    #[cfg(test)]
+    pub(crate) fn is_suppressing(&self) -> bool {
+        self.suppressing
     }
 
     /// Fails closed: suppresses all subsequent emitted output. Used when the
@@ -2983,6 +3000,31 @@ safe-line"
             sink.redact_terminal_failure_text("opaque-thread-continuation"),
             REDACTED
         );
+    }
+
+    /// INV-035: an emitted marker (`Authorization:`) whose held continuation
+    /// plus dropped newlines would grow the carried emitted context past the
+    /// lookbehind bound fails closed into suppression rather than pinning
+    /// unbounded provider-controlled bytes.
+    #[test]
+    fn inv_035_oversized_carried_emitted_context_fails_closed() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.seed_emitted_context("Authorization:");
+        // A held line-credential body larger than the lookbehind bound; a
+        // dropped newline then forces the carried emitted context to resolve.
+        let body = "a".repeat(MAX_PENDING_STREAM_BYTES + 1);
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: body,
+            },
+        });
+        sink.extend_dropped_context("\n");
+
+        // Fail-closed suppression, not an unbounded held context.
+        assert!(sink.is_suppressing());
     }
 
     /// INV-035: a dropped-text marker (an error item's message) governs
