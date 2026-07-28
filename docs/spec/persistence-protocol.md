@@ -11,19 +11,20 @@ proof was verified through PR #265 (`agent/tool-batch-tier0`); the
 through PR #272 (`agent/mid-session-model`); the runner lease-admission trigger
 lock was verified against PR #267 (`agent/runner-persistence`); the current
 classifier names, ambiguity reconstitution facts, and command-adapter boundaries
-were verified through PR #288 (`agent/audit-fix-docs-coherence`); and the
-session system-prompt columns were verified through PR #286
-(`agent/session-system-prompt`); and the session-template provenance columns and
-storage version four were verified through PR #311
-(`agent/session-templates-spec`). This page covers the Postgres representation
-in `crates/persistence` (source and migrations), migration discipline, durable
-command storage and replay equality, the fail-closed reconstitution boundary,
-the lock protocol, pending-steering durable state, the corruption taxonomy,
-commit-ambiguity handling, and the transactional outbox. Session aggregate
-semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
-and attempt lifecycle in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
-kinds and command construction in
+were verified through PR #288 (`agent/audit-fix-docs-coherence`); the session
+system-prompt columns were verified through PR #286
+(`agent/session-system-prompt`); the terminal model-call token evidence columns
+and transcript reader were verified through this PR (`agent/token-usage`); and
+the session-template provenance columns and storage version four were verified
+through PR #311 (`agent/session-templates-spec`). This page covers the Postgres
+representation in `crates/persistence` (source and migrations), migration
+discipline, durable command storage and replay equality, the fail-closed
+reconstitution boundary, the lock protocol, pending-steering durable state, the
+corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
+Session aggregate semantics live in
+[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
+lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
+identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
 [docs/invariants.md](../invariants.md); this page cites rows by tag.
@@ -62,7 +63,7 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — thirty-seven files, `202607180001` through
+`crates/persistence/migrations/` — thirty-eight files, `202607180001` through
 `202607300101` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
@@ -124,7 +125,15 @@ Implemented table families (across the forward-only migrations):
 - `model_call` (execution state owned by
   [model-call-execution](model-call-execution.md), its turn-level
   provider-target pin on `turn_lifecycle`, and its pinned
-  `credential_reference`);
+  `credential_reference`); migration `202607290301` adds four independently
+  nullable, scale-preserving `numeric` token-usage columns whose explicit
+  integrality and full-`u64` range checks reject fractional or out-of-range
+  input without rounding. A nonterminal row must keep all four null, and a
+  direct Prepared-to-terminal transition likewise requires all four null because
+  no send occurred; the `cancelled` terminal disposition also requires all four
+  null because cancellation evidence reports no usage. The ordinary sent-call
+  terminal update installs the exact provider-reported fields alongside the
+  disposition before terminal-row immutability applies;
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_delta`,
   plus the resolved `context_frontier_member` compatibility projection;
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
@@ -464,11 +473,14 @@ The scheduling load proves its own completeness — it counts
 than trusting whichever rows a filter returned. It also walks the union of the
 required frontier prefix chains once, loads each reachable header and delta
 once, and reconstitutes shared prefixes without rebuilding their complete
-membership. A process transcript read likewise opens one database cursor over
-one resolution of the selected frontier chain, validates its declared count and
-contiguous positions while advancing, and decodes at most one entry row at a
-time. Active-phase, terminal-evidence, and acceptance-tail validation semantics
-are owned by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
+membership. A process transcript read likewise yields acceptance-ordered turns,
+then every terminal model call in turn-acceptance and call-identity order, then
+opens one database cursor over one resolution of the selected frontier chain. It
+validates declared counts and contiguous positions while advancing and decodes
+at most one row at a time. The model-call phase decodes every nullable token
+field through the full-range ordinal boundary; null remains absence.
+Active-phase, terminal-evidence, and acceptance-tail validation semantics are
+owned by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired

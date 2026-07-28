@@ -185,6 +185,33 @@ version eighteen, terminal creation and template listing, migration
 [sessions and transcript](spec/sessions-and-transcript.md), and
 [process protocol](spec/process-protocol.md).
 
+## 2026-07-27 — Retain provider token usage as evidence, not cost
+
+**Context.** Model runtimes already parse independently optional input, output,
+cache-creation input, and cache-read input token counts from provider reports.
+Those facts ended at the runtime boundary, so neither durable model-call history
+nor the transcript client could state the token evidence for a turn or session.
+Currency prices vary over time and by contract, while provider omissions and a
+reported zero have different meanings.
+
+**Decision.** Store each provider-reported token field verbatim on the terminal
+model-call record, preserving null as unreported and zero as reported zero. The
+version-nineteen transcript projection exposes one record for every terminal
+call. The `transcript` client computes labeled per-turn and session token
+subtotals with per-field reported-call coverage for presentation only. Neither
+storage nor the client derives currency cost, fills omissions, or corrects a
+provider value.
+
+**Rejected alternatives.** Persisting only client-computed totals would discard
+per-call evidence and omission coverage. Treating absent fields as zero would
+invent provider claims. Persisting currency cost would turn changing external
+prices into misleading historical evidence. Adding a separate `usage` command
+would duplicate transcript session selection and its validated snapshot path.
+
+**Affects.** Model-call terminal observation mapping and persistence, process
+transcript version nineteen, `signalbox transcript`, and the model-call,
+persistence, and process-protocol specifications.
+
 ## 2026-07-27 — Assign deterministic review bookkeeping to code-host tools
 
 **Context.** Review sessions repeatedly spend model context reconstructing the

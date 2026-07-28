@@ -22,6 +22,68 @@ use crate::{
     },
 };
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ReportedTokenTotal {
+    tokens: u128,
+    reported_calls: u64,
+}
+
+impl ReportedTokenTotal {
+    fn add(
+        &mut self,
+        value: Option<signalbox_process_protocol::CanonicalU64>,
+    ) -> Result<(), ClientError> {
+        let Some(value) = value else {
+            return Ok(());
+        };
+        self.tokens = self
+            .tokens
+            .checked_add(u128::from(value.value()))
+            .ok_or(ClientError::Protocol("token usage total overflowed"))?;
+        self.reported_calls = self
+            .reported_calls
+            .checked_add(1)
+            .ok_or(ClientError::Protocol("token usage coverage overflowed"))?;
+        Ok(())
+    }
+
+    fn label(self) -> String {
+        if self.reported_calls == 0 {
+            String::from("unreported")
+        } else {
+            self.tokens.to_string()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TokenUsageTotal {
+    terminal_calls: u64,
+    input: ReportedTokenTotal,
+    output: ReportedTokenTotal,
+    cache_creation_input: ReportedTokenTotal,
+    cache_read_input: ReportedTokenTotal,
+}
+
+impl TokenUsageTotal {
+    fn add(
+        &mut self,
+        usage: signalbox_process_protocol::ModelCallTokenUsage,
+    ) -> Result<(), ClientError> {
+        self.terminal_calls = self
+            .terminal_calls
+            .checked_add(1)
+            .ok_or(ClientError::Protocol(
+                "terminal model-call count overflowed",
+            ))?;
+        self.input.add(usage.input_tokens)?;
+        self.output.add(usage.output_tokens)?;
+        self.cache_creation_input
+            .add(usage.cache_creation_input_tokens)?;
+        self.cache_read_input.add(usage.cache_read_input_tokens)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SnapshotSelection {
     All,
@@ -114,6 +176,16 @@ enum TextField {
     DelimitedOnLine,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChatTurnStatus {
+    Queued(CanonicalUuid),
+    Active(CanonicalUuid),
+    AwaitingApproval {
+        turn_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+    },
+}
+
 pub(crate) struct Output<'a> {
     stdout: &'a mut dyn Write,
     stderr: &'a mut dyn Write,
@@ -127,6 +199,130 @@ impl<'a> Output<'a> {
             stderr,
             raw,
         }
+    }
+
+    pub(crate) fn flush(&mut self) -> io::Result<()> {
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_started(
+        &mut self,
+        session_id: CanonicalUuid,
+        status: Option<ChatTurnStatus>,
+        commands: &str,
+    ) -> io::Result<()> {
+        match status {
+            Some(ChatTurnStatus::Active(turn_id)) => writeln!(
+                self.stdout,
+                "chat session={session_id} state=following turn={turn_id} commands={commands}"
+            )?,
+            Some(ChatTurnStatus::AwaitingApproval {
+                turn_id,
+                tool_request_id,
+            }) => writeln!(
+                self.stdout,
+                "chat session={session_id} state=awaiting_approval turn={turn_id} request={tool_request_id} commands={commands}"
+            )?,
+            Some(ChatTurnStatus::Queued(turn_id)) => writeln!(
+                self.stdout,
+                "chat session={session_id} state=queued turn={turn_id} commands={commands}"
+            )?,
+            None => writeln!(
+                self.stdout,
+                "chat session={session_id} state=ready commands={commands}"
+            )?,
+        }
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_ready(&mut self, session_id: CanonicalUuid) -> io::Result<()> {
+        writeln!(self.stdout, "chat session={session_id} state=ready")?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_queued(&mut self, turn_id: CanonicalUuid) -> io::Result<()> {
+        writeln!(self.stdout, "chat state=queued turn={turn_id}")?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_activated(&mut self, turn_id: CanonicalUuid) -> io::Result<()> {
+        writeln!(self.stdout, "chat state=streaming turn={turn_id}")?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_stopped(
+        &mut self,
+        stopped_turn_id: CanonicalUuid,
+        successor_turn_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "chat state=queued stopped_turn={stopped_turn_id} successor_turn={successor_turn_id}"
+        )?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_awaiting_approval(
+        &mut self,
+        turn_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "chat state=awaiting_approval turn={turn_id} request={tool_request_id}"
+        )?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_usage(&mut self, message: &str, commands: &str) -> io::Result<()> {
+        let message = self.render_field(message, TextField::TrailingOnLine);
+        writeln!(self.stderr, "chat: {message}; commands: {commands}")?;
+        self.stderr.flush()
+    }
+
+    pub(crate) fn chat_interrupt_offered(&mut self, commands: &str) -> io::Result<()> {
+        writeln!(
+            self.stderr,
+            "chat: turn still running; use :stop TEXT to stop and continue, or press Ctrl-C again to exit leaving it running; commands: {commands}"
+        )?;
+        self.stderr.flush()
+    }
+
+    pub(crate) fn chat_approval_interrupt_offered(
+        &mut self,
+        tool_request_id: CanonicalUuid,
+        commands: &str,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stderr,
+            "chat: turn awaits approval request {tool_request_id}; use :approve ID or :deny ID REASON, or press Ctrl-C again to exit leaving it running; commands: {commands}"
+        )?;
+        self.stderr.flush()
+    }
+
+    pub(crate) fn chat_mutation_abandoned(&mut self) -> io::Result<()> {
+        writeln!(
+            self.stderr,
+            "chat: exiting with an in-flight mutation whose outcome may be ambiguous; use the printed recovery values for any exact standalone retry"
+        )?;
+        self.stderr.flush()
+    }
+
+    pub(crate) fn chat_exiting(&mut self, status: Option<ChatTurnStatus>) -> io::Result<()> {
+        match status {
+            Some(
+                ChatTurnStatus::Active(turn_id) | ChatTurnStatus::AwaitingApproval { turn_id, .. },
+            ) => writeln!(
+                self.stderr,
+                "chat: exiting; turn {turn_id} remains running in the daemon"
+            ),
+            Some(ChatTurnStatus::Queued(turn_id)) => writeln!(
+                self.stderr,
+                "chat: exiting; turn {turn_id} remains queued in the daemon"
+            ),
+            None => writeln!(self.stderr, "chat: exiting; no turn is queued or running"),
+        }?;
+        self.stderr.flush()
     }
 
     pub(crate) fn recovery_value(&mut self, name: &str, value: &str) -> io::Result<()> {
@@ -508,7 +704,8 @@ impl<'a> Output<'a> {
         &mut self,
         snapshot: &mut TranscriptSnapshot,
     ) -> Result<(), ClientError> {
-        self.render_snapshot(snapshot, None, SnapshotSelection::All, true)
+        self.render_snapshot(snapshot, None, SnapshotSelection::All, true)?;
+        self.render_usage(snapshot)
     }
 
     pub(crate) fn followed_snapshot(
@@ -541,6 +738,7 @@ impl<'a> Output<'a> {
             match record? {
                 SnapshotRecord::Turn(turn) if render_turns => self.snapshot_turn(&turn)?,
                 SnapshotRecord::Turn(_) => {}
+                SnapshotRecord::ModelCallUsage(_) => {}
                 SnapshotRecord::Entry(entry) => {
                     render_content = false;
                     let selected = selection.includes(&entry, &selection_context);
@@ -574,6 +772,66 @@ impl<'a> Output<'a> {
             }
         }
         Ok(())
+    }
+
+    fn render_usage(&mut self, snapshot: &mut TranscriptSnapshot) -> Result<(), ClientError> {
+        let mut current_turn: Option<(CanonicalUuid, TokenUsageTotal)> = None;
+        let mut session_total = TokenUsageTotal::default();
+        for record in snapshot.replay()? {
+            let SnapshotRecord::ModelCallUsage(evidence) = record? else {
+                continue;
+            };
+            if current_turn
+                .as_ref()
+                .is_some_and(|(turn, _)| *turn != evidence.turn_id)
+            {
+                let (turn, total) = current_turn.take().ok_or(ClientError::Protocol(
+                    "token usage turn grouping was invalid",
+                ))?;
+                self.usage_line(Some(turn), total)?;
+            }
+            let (_, turn_total) =
+                current_turn.get_or_insert((evidence.turn_id, TokenUsageTotal::default()));
+            turn_total.add(evidence.usage)?;
+            session_total.add(evidence.usage)?;
+        }
+        if let Some((turn, total)) = current_turn {
+            self.usage_line(Some(turn), total)?;
+        }
+        self.usage_line(None, session_total)?;
+        Ok(())
+    }
+
+    fn usage_line(
+        &mut self,
+        turn: Option<CanonicalUuid>,
+        total: TokenUsageTotal,
+    ) -> io::Result<()> {
+        let prefix = turn.map_or_else(
+            || String::from("usage_total scope=session"),
+            |turn| format!("usage turn={turn}"),
+        );
+        writeln!(
+            self.stdout,
+            "{prefix} terminal_calls={} input_tokens={} input_tokens_reported_calls={}/{} \
+             output_tokens={} output_tokens_reported_calls={}/{} \
+             cache_creation_input_tokens={} \
+             cache_creation_input_tokens_reported_calls={}/{} cache_read_input_tokens={} \
+             cache_read_input_tokens_reported_calls={}/{}",
+            total.terminal_calls,
+            total.input.label(),
+            total.input.reported_calls,
+            total.terminal_calls,
+            total.output.label(),
+            total.output.reported_calls,
+            total.terminal_calls,
+            total.cache_creation_input.label(),
+            total.cache_creation_input.reported_calls,
+            total.terminal_calls,
+            total.cache_read_input.label(),
+            total.cache_read_input.reported_calls,
+            total.terminal_calls,
+        )
     }
 
     pub(crate) fn assistant_text_fragment(
@@ -1513,10 +1771,10 @@ mod tests {
         CanonicalU64, CanonicalUuid, ContentFragment, CurrentModelCall, CurrentModelCallState,
         ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
         ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-        InputContent, MetadataActor, MetadataLastWriter, ModelCallState, ReviewDiffSide,
-        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
-        ReviewTargetSnapshot, ReviewTargetSubject, ServerMessage, SessionEvent, TranscriptEntry,
-        TranscriptTextEntry, TurnState,
+        InputContent, MetadataActor, MetadataLastWriter, ModelCallState, ModelCallTokenUsage,
+        ReviewDiffSide, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
+        ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject, ServerMessage, SessionEvent,
+        TranscriptEntry, TranscriptTextEntry, TurnState,
     };
     use uuid::Uuid;
 
@@ -2060,6 +2318,7 @@ mod tests {
         expect![[r#"
             imported_user imported_conversation=00000000-0000-0000-0000-000000000003 imported_entry=00000000-0000-0000-0000-000000000004 source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000002
             exact imported text
+            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());
@@ -2091,6 +2350,7 @@ mod tests {
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
             imported_speaker_unattested kind=tool_call imported_conversation=00000000-0000-0000-0000-000000000003 imported_entry=00000000-0000-0000-0000-000000000006 source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000005
+            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());
@@ -2365,6 +2625,7 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=active_running attempt=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 call_state=cancellation_requested
+            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
         "#]]
         .assert_eq(&rendered);
     }
@@ -2382,6 +2643,7 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=failed frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=00000000-0000-0000-0000-000000000004 call_disposition=cancelled
+            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
         "#]]
         .assert_eq(&rendered);
     }
@@ -2396,6 +2658,7 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=cancelled frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=none
+            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
         "#]]
         .assert_eq(&rendered);
     }
@@ -2410,8 +2673,87 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=reconciliation_required frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 operation=model_call operation_id=00000000-0000-0000-0000-000000000004
+            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
         "#]]
         .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn transcript_without_terminal_calls_renders_a_session_usage_total() {
+        let mut snapshot =
+            TranscriptSnapshot::from_messages(1, std::iter::empty::<ServerMessage>())
+                .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect("empty usage snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn transcript_usage_preserves_zero_absence_and_partial_coverage() {
+        let first_turn = wire_uuid(1);
+        let second_turn = wire_uuid(2);
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            1,
+            [
+                ServerMessage::TranscriptModelCallUsage {
+                    model_call_index: CanonicalU64::new(0),
+                    turn_id: first_turn,
+                    model_call_id: wire_uuid(11),
+                    usage: ModelCallTokenUsage {
+                        input_tokens: Some(CanonicalU64::new(10)),
+                        output_tokens: Some(CanonicalU64::new(0)),
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: Some(CanonicalU64::new(4)),
+                    },
+                },
+                ServerMessage::TranscriptModelCallUsage {
+                    model_call_index: CanonicalU64::new(1),
+                    turn_id: first_turn,
+                    model_call_id: wire_uuid(12),
+                    usage: ModelCallTokenUsage {
+                        input_tokens: None,
+                        output_tokens: None,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                    },
+                },
+                ServerMessage::TranscriptModelCallUsage {
+                    model_call_index: CanonicalU64::new(2),
+                    turn_id: second_turn,
+                    model_call_id: wire_uuid(13),
+                    usage: ModelCallTokenUsage {
+                        input_tokens: None,
+                        output_tokens: None,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                    },
+                },
+            ],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect("usage snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            usage turn=00000000-0000-0000-0000-000000000001 terminal_calls=2 input_tokens=10 input_tokens_reported_calls=1/2 output_tokens=0 output_tokens_reported_calls=1/2 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/2 cache_read_input_tokens=4 cache_read_input_tokens_reported_calls=1/2
+            usage turn=00000000-0000-0000-0000-000000000002 terminal_calls=1 input_tokens=unreported input_tokens_reported_calls=0/1 output_tokens=unreported output_tokens_reported_calls=0/1 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/1 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/1
+            usage_total scope=session terminal_calls=3 input_tokens=10 input_tokens_reported_calls=1/3 output_tokens=0 output_tokens_reported_calls=1/3 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/3 cache_read_input_tokens=4 cache_read_input_tokens_reported_calls=1/3
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
     }
 
     #[test]
