@@ -52,17 +52,63 @@ fn the_pin_manifest_uses_an_exact_version() {
         .unwrap_or_else(|| panic!("{PIN_MANIFEST} declares a {PIN_PACKAGE} dependency"));
 
     assert!(
-        pinned.split('.').all(|component| !component.is_empty()
-            && component.bytes().all(|byte| byte.is_ascii_digit())),
+        is_exact_pin(pinned),
         "{PIN_MANIFEST} must pin {PIN_PACKAGE} at an exact `major.minor.patch` \
-         version, not the range or tag {pinned}"
+         version, not the range, tag, or alias {pinned}"
     );
-    assert_eq!(
-        pinned.split('.').count(),
-        3,
-        "{PIN_MANIFEST} must pin {PIN_PACKAGE} at an exact `major.minor.patch` \
-         version, not {pinned}"
-    );
+}
+
+/// Whether `version` is an exact `major.minor.patch` pin: exactly three
+/// dot-separated components, each a nonempty run of ASCII digits — so a range
+/// (`^1.2.3`), tag (`latest`), alias, prerelease suffix, or wrong component
+/// count is rejected. Factored out of the manifest test so focused fixtures
+/// exercise both accepted and rejected shapes, not only the live manifest.
+fn is_exact_pin(version: &str) -> bool {
+    let components: Vec<&str> = version.split('.').collect();
+    components.len() == 3
+        && components
+            .iter()
+            .all(|component| !component.is_empty() && component.bytes().all(|b| b.is_ascii_digit()))
+}
+
+#[test]
+fn exact_pin_accepts_major_minor_patch() {
+    assert!(is_exact_pin("0.145.0"));
+}
+
+#[test]
+fn exact_pin_rejects_a_caret_range() {
+    assert!(!is_exact_pin("^0.145.0"));
+}
+
+#[test]
+fn exact_pin_rejects_a_tilde_range() {
+    assert!(!is_exact_pin("~0.145.0"));
+}
+
+#[test]
+fn exact_pin_rejects_a_dist_tag() {
+    assert!(!is_exact_pin("latest"));
+}
+
+#[test]
+fn exact_pin_rejects_too_few_components() {
+    assert!(!is_exact_pin("0.145"));
+}
+
+#[test]
+fn exact_pin_rejects_too_many_components() {
+    assert!(!is_exact_pin("0.145.0.1"));
+}
+
+#[test]
+fn exact_pin_rejects_an_empty_component() {
+    assert!(!is_exact_pin("0..0"));
+}
+
+#[test]
+fn exact_pin_rejects_a_prerelease_suffix() {
+    assert!(!is_exact_pin("0.145.0-beta"));
 }
 
 fn read_pin_manifest() -> serde_json::Value {

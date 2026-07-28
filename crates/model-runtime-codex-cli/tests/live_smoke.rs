@@ -577,6 +577,52 @@ fn proc_stat_is_zombie(stat: &str) -> bool {
         .is_some_and(|(_, fields)| fields.starts_with("Z "))
 }
 
+/// The zombie state `Z` after a plain comm is detected.
+#[cfg(unix)]
+#[test]
+fn proc_stat_detects_a_zombie() {
+    assert!(proc_stat_is_zombie("4321 (codex) Z 1 4321 4321 0 -1"));
+}
+
+/// A running (`R`) process is not a zombie.
+#[cfg(unix)]
+#[test]
+fn proc_stat_running_process_is_not_a_zombie() {
+    assert!(!proc_stat_is_zombie("4321 (codex) R 1 4321 4321 0 -1"));
+}
+
+/// A comm containing `) ` (the exact split token) does not fool the parser: the
+/// state is read after the *last* `") "`, so a zombie is still detected.
+#[cfg(unix)]
+#[test]
+fn proc_stat_detects_a_zombie_with_embedded_paren_in_comm() {
+    assert!(proc_stat_is_zombie("4321 (od) d ) name) Z 1 4321 4321"));
+}
+
+/// The same embedded-`) ` comm on a running process is still not a zombie.
+#[cfg(unix)]
+#[test]
+fn proc_stat_embedded_paren_running_is_not_a_zombie() {
+    assert!(!proc_stat_is_zombie("4321 (od) d ) name) S 1 4321 4321"));
+}
+
+/// A malformed line without the `") "` boundary is treated as not-a-zombie
+/// (the caller then falls back to the signalable-is-live check).
+#[cfg(unix)]
+#[test]
+fn proc_stat_without_boundary_is_not_a_zombie() {
+    assert!(!proc_stat_is_zombie("garbage-without-the-boundary"));
+}
+
+/// An *unset* `PATH` cannot locate a bare command and fails, rather than being
+/// silently searched in the current directory as `unwrap_or_default` would.
+#[test]
+#[should_panic(expected = "PATH is unset")]
+fn bare_command_with_unset_path_fails() {
+    let directory = tempfile::tempdir().expect("fixture directory is created");
+    let _ = resolved_executable("codex", directory.path(), None);
+}
+
 /// A probe that floods stdout is stopped at the byte bound and fails the gate
 /// with the overflow diagnostic — not buffered whole until the timeout, which
 /// let a fast producer consume unbounded memory before failing.
@@ -867,7 +913,7 @@ fn absolute_executable(executable: &str) -> std::path::PathBuf {
     resolved_executable(
         executable,
         &std::env::current_dir().expect("the smoke process has a working directory"),
-        &std::env::var_os("PATH").unwrap_or_default(),
+        std::env::var_os("PATH").as_deref(),
     )
 }
 
@@ -877,7 +923,12 @@ fn absolute_executable(executable: &str) -> std::path::PathBuf {
 fn resolved_executable(
     executable: &str,
     current_directory: &std::path::Path,
-    search: &std::ffi::OsStr,
+    // `None` distinguishes an *unset* `PATH` from a present-but-empty one: an
+    // unset PATH offers no search directories, so a bare command name cannot be
+    // located and must fail — not be silently searched in the current directory
+    // as `unwrap_or_default()` would. A present-but-empty entry (`Some("")`)
+    // keeps its POSIX meaning of the current directory.
+    search: Option<&std::ffi::OsStr>,
 ) -> std::path::PathBuf {
     let path = std::path::Path::new(executable);
     if path.is_absolute() {
@@ -886,6 +937,12 @@ fn resolved_executable(
     if path.components().count() > 1 {
         return current_directory.join(path);
     }
+    let search = search.unwrap_or_else(|| {
+        panic!(
+            "PATH is unset, so the bare command `{executable}` cannot be located; \
+             set {EXECUTABLE_VARIABLE} to an absolute executable path"
+        )
+    });
     // The resolved candidate is kept as a `PathBuf`, never lossily converted to
     // a `String`, so a match in a non-UTF-8 `PATH` directory still names the
     // real executable.
@@ -938,7 +995,7 @@ fn executable_resolution_passes_an_absolute_path_through() {
     let resolved = resolved_executable(
         absolute.to_str().expect("the fixture path is UTF-8"),
         directory.path(),
-        std::ffi::OsStr::new(""),
+        Some(std::ffi::OsStr::new("")),
     );
 
     assert_eq!(resolved, absolute);
@@ -949,7 +1006,7 @@ fn executable_resolution_anchors_a_relative_path_to_the_working_directory() {
     let directory = tempfile::tempdir().expect("resolution fixture directory is created");
     let relative = "tooling/codex-relative";
 
-    let resolved = resolved_executable(relative, directory.path(), std::ffi::OsStr::new(""));
+    let resolved = resolved_executable(relative, directory.path(), Some(std::ffi::OsStr::new("")));
 
     assert_eq!(resolved, directory.path().join(relative));
 }
@@ -978,7 +1035,7 @@ fn executable_resolution_finds_a_bare_command_on_the_search_path() {
     let search = std::env::join_paths([empty.path(), populated.path()])
         .expect("the fixture search path joins");
 
-    let resolved = resolved_executable("codex-on-path", empty.path(), &search);
+    let resolved = resolved_executable("codex-on-path", empty.path(), Some(&search));
 
     assert_eq!(resolved, on_path);
 }
@@ -1018,7 +1075,7 @@ fn verify_other_only_execute_bit_is_skipped() {
     let search = std::env::join_paths([shadowing.path(), populated.path()])
         .expect("the fixture search path joins");
 
-    let resolved = resolved_executable("codex-other-only", shadowing.path(), &search);
+    let resolved = resolved_executable("codex-other-only", shadowing.path(), Some(&search));
 
     assert_eq!(resolved, on_path);
 }
@@ -1040,7 +1097,7 @@ fn executable_resolution_preserves_a_non_utf8_path_directory() {
     let on_path = executable_fixture(&directory, "codex-nonutf8");
     let search = std::env::join_paths([&directory]).expect("the fixture search path joins");
 
-    let resolved = resolved_executable("codex-nonutf8", root.path(), &search);
+    let resolved = resolved_executable("codex-nonutf8", root.path(), Some(&search));
 
     assert_eq!(resolved, on_path);
 }
@@ -1054,7 +1111,11 @@ fn executable_resolution_anchors_a_relative_search_entry() {
     std::fs::create_dir(working.path().join("bin")).expect("the relative bin directory is created");
     let on_path = executable_fixture(&working.path().join("bin"), "codex-rel");
 
-    let resolved = resolved_executable("codex-rel", working.path(), std::ffi::OsStr::new("bin"));
+    let resolved = resolved_executable(
+        "codex-rel",
+        working.path(),
+        Some(std::ffi::OsStr::new("bin")),
+    );
 
     assert_eq!(resolved, on_path);
 }
@@ -1072,7 +1133,7 @@ fn executable_resolution_skips_a_non_executable_shadow() {
     let search = std::env::join_paths([shadowing.path(), populated.path()])
         .expect("the fixture search path joins");
 
-    let resolved = resolved_executable("codex-shadowed", shadowing.path(), &search);
+    let resolved = resolved_executable("codex-shadowed", shadowing.path(), Some(&search));
 
     assert_eq!(resolved, on_path);
 }
@@ -1083,5 +1144,5 @@ fn executable_resolution_panics_for_a_missing_bare_command() {
     let empty = tempfile::tempdir().expect("resolution fixture directory is created");
     let search = std::env::join_paths([empty.path()]).expect("the fixture search path joins");
 
-    let _ = resolved_executable("codex-missing", empty.path(), &search);
+    let _ = resolved_executable("codex-missing", empty.path(), Some(&search));
 }

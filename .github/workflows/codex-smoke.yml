@@ -69,6 +69,14 @@ jobs:
         with:
           cache-on-failure: true
           key: codex-smoke
+      # Compile the smoke test binary BEFORE the credential store exists, so no
+      # repository code — build scripts, procedural macros, the test itself —
+      # ever executes as this job's user while the API key is readable under
+      # CODEX_HOME. The run step below is then fresh and does not recompile.
+      - name: Build the smoke test binary
+        run: >-
+          cargo test -p signalbox-model-runtime-codex-cli
+          --test live_smoke --no-run
       # The CLI reads the key from stdin and writes its own credential store
       # under CODEX_HOME. The value is never an argument (process listings),
       # never echoed, and never exported to the smoke step: the adapter's
