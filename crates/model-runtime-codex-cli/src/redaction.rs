@@ -3475,3 +3475,7 @@ safe-line"
         assert_eq!(emitted, vec!["key=ordinary value.".to_string()]);
     }
 }
+
+#[cfg(test)]
+#[path = "redaction_corpus_tests.rs"]
+mod redaction_corpus_tests;
