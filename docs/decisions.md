@@ -10,6 +10,46 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-27 — Drop empty thinking parts instead of failing completions closed
+
+**Context.** Claude 5-family models run adaptive thinking by default, and with
+the default omitted display their responses carry thinking blocks whose text is
+empty: the block holds only the provider's replay signature. On the streamed
+path the block opens with an empty-string signature placeholder and the real
+signature arrives through a later signature delta; the strict decoder counted
+the placeholder as a delivered first signature and rejected every such stream as
+a protocol violation, parking each live claude-sonnet-5 tool turn in ambiguity
+recovery. Had the stream decoded, the bridge would still have failed the
+completion closed, because any thinking part was unsupported completion
+material.
+
+**Decision.** The Anthropic streamed decoder treats an empty-string opening
+signature as absent — the block must still close with exactly one non-empty
+signature — and the runtime bridge drops thinking parts whose text is empty,
+exactly as it drops empty text blocks. An empty thinking part carries no
+transcript content, and its replay signature is unusable either way because no
+durable thinking representation exists. The accepted cost is explicit: a
+tool-use continuation replayed without its thinking block is documented by the
+provider as graceful degradation — thinking is silently disabled for that
+request rather than the request erroring — and live verification completed a
+full tool round under exactly that shape. Thinking with actual text and redacted
+thinking still fail the adapter stage closed.
+
+**Rejected alternatives.** Keeping fail-closed for empty thinking parts: it
+rejects legitimate documented provider output, wedging live turns (streamed) or
+raising fatal supervision (buffered). Persisting thinking parts durably so they
+can replay: a foundation-weight transcript-vocabulary change that this defect
+fix must not smuggle in; it stays with the open model-input projection work.
+Tolerating any duplicate signature delta: it would weaken the stream integrity
+law beyond what the provider's shape requires.
+
+**Affects.** `crates/model-runtime-anthropic/src/stream.rs`,
+`crates/model-provider-runtime/src/lib.rs`,
+[runtime-substrate](spec/runtime-substrate.md) (stream integrity),
+[model-call-execution](spec/model-call-execution.md) (observation
+classification), and the wedge-then-reconcile process regression in
+`apps/signalboxd/tests/process_protocol_runtime.rs`.
+
 ## 2026-07-27 — Serve the unified conversation listing from authoritative tables
 
 **Context.** The owner needs one read surface listing native sessions and
