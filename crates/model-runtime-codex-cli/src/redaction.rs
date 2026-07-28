@@ -318,6 +318,8 @@ fn partial_triple_open(text: &str, value_start: usize) -> bool {
 fn redact_identifier_assignment(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut remaining = text;
+    let json_claims = JsonCredentialKeyClaims::new(text);
+    let mut json_claim_cursor = json_claims.cursor();
     while let Some(separator) = remaining
         .bytes()
         .position(|byte| matches!(byte, b'=' | b':'))
@@ -333,7 +335,7 @@ fn redact_identifier_assignment(text: &str) -> String {
             let content = identifier.as_ptr() as usize - text.as_ptr() as usize;
             let json_scanner_owns_key = quote == Some('"')
                 && content > 0
-                && json_scanner_claims_credential_key_at(text, content - 1);
+                && json_claim_cursor.claims_in_source_order(content - 1);
             let termination = if json_scanner_owns_key {
                 ValueTermination::Token
             } else if credential_key_is_free_form(identifier) {
@@ -699,42 +701,98 @@ fn next_json_credential_value(text: &str) -> Option<(usize, usize)> {
     None
 }
 
-fn json_scanner_claims_credential_key_at(text: &str, target: usize) -> bool {
-    let mut offset = 0;
-    while let Some(relative_start) = text[offset..].find('"') {
-        let key_start = offset + relative_start;
-        if key_start > target {
-            return false;
-        }
-        if !json_key_can_start_at(text, key_start) {
-            offset = key_start + 1;
-            continue;
-        }
-        let key_end = quoted_value_end(text, key_start + 1, '"');
-        if key_end == text.len() {
-            return false;
-        }
-        let encoded_key = &text[key_start..=key_end];
-        let Ok(key) = serde_json::from_str::<String>(encoded_key) else {
-            if key_start == target {
-                return false;
+#[cfg(test)]
+std::thread_local! {
+    static JSON_CLAIM_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_json_claim_scan_bytes() {
+    JSON_CLAIM_SCAN_BYTES.set(0);
+}
+
+#[cfg(test)]
+fn json_claim_scan_bytes() -> usize {
+    JSON_CLAIM_SCAN_BYTES.get()
+}
+
+/// Credential-bearing JSON key offsets claimed by one source-order scan.
+///
+/// Both identifier scanners ask about separators in ascending source order.
+/// Caching the structural scanner's claimed key offsets once lets those queries
+/// advance one shared cursor instead of restarting quote parsing at byte zero
+/// for every separator. A malformed or undecodable key is deliberately absent:
+/// the raw identifier scanner must retain ownership and fail closed for it.
+struct JsonCredentialKeyClaims {
+    claimed_offsets: Vec<usize>,
+}
+
+struct JsonCredentialKeyClaimCursor<'a> {
+    claimed_offsets: &'a [usize],
+    cursor: usize,
+    last_target: Option<usize>,
+}
+
+impl JsonCredentialKeyClaims {
+    fn new(text: &str) -> Self {
+        #[cfg(test)]
+        JSON_CLAIM_SCAN_BYTES.set(JSON_CLAIM_SCAN_BYTES.get().saturating_add(text.len()));
+
+        let mut claimed_offsets = Vec::new();
+        let mut offset = 0;
+        while let Some(relative_start) = text[offset..].find('"') {
+            let key_start = offset + relative_start;
+            if !json_key_can_start_at(text, key_start) {
+                offset = key_start + 1;
+                continue;
+            }
+            let key_end = quoted_value_end(text, key_start + 1, '"');
+            if key_end == text.len() {
+                break;
+            }
+            let encoded_key = &text[key_start..=key_end];
+            let Ok(key) = serde_json::from_str::<String>(encoded_key) else {
+                offset = key_end + 1;
+                continue;
+            };
+            let whitespace_end = key_end
+                + 1
+                + text[key_end + 1..]
+                    .chars()
+                    .take_while(|character| character.is_whitespace())
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+            if text.as_bytes().get(whitespace_end) == Some(&b':') && credential_key(&key) {
+                claimed_offsets.push(key_start);
             }
             offset = key_end + 1;
-            continue;
-        };
-        let whitespace_end = key_end
-            + 1
-            + text[key_end + 1..]
-                .chars()
-                .take_while(|character| character.is_whitespace())
-                .map(char::len_utf8)
-                .sum::<usize>();
-        if key_start == target {
-            return text.as_bytes().get(whitespace_end) == Some(&b':') && credential_key(&key);
         }
-        offset = key_end + 1;
+
+        Self { claimed_offsets }
     }
-    false
+
+    fn cursor(&self) -> JsonCredentialKeyClaimCursor<'_> {
+        JsonCredentialKeyClaimCursor {
+            claimed_offsets: &self.claimed_offsets,
+            cursor: 0,
+            last_target: None,
+        }
+    }
+}
+
+impl JsonCredentialKeyClaimCursor<'_> {
+    fn claims_in_source_order(&mut self, target: usize) -> bool {
+        debug_assert!(self.last_target.is_none_or(|previous| target >= previous));
+        self.last_target = Some(target);
+        while self
+            .claimed_offsets
+            .get(self.cursor)
+            .is_some_and(|claimed| *claimed < target)
+        {
+            self.cursor += 1;
+        }
+        self.claimed_offsets.get(self.cursor) == Some(&target)
+    }
 }
 
 fn json_key_can_start_at(text: &str, key_start: usize) -> bool {
@@ -2327,9 +2385,12 @@ fn curl_userinfo_unsafe_start(text: &str) -> Option<usize> {
 /// lookbehind rule retained the prefix, so candidate recognition cannot assume
 /// the credential itself starts at byte zero.
 fn identifier_assignment_candidate(text: &str) -> bool {
-    if identifier_assignment_unsafe_start(text) == Some(0) {
+    let json_claims = JsonCredentialKeyClaims::new(text);
+    let mut unsafe_cursor = json_claims.cursor();
+    if identifier_assignment_unsafe_start_with_claims(text, &mut unsafe_cursor) == Some(0) {
         return true;
     }
+    let mut candidate_cursor = json_claims.cursor();
     let base = text.as_ptr() as usize;
     let mut offset = 0;
     while let Some(relative) = text[offset..]
@@ -2347,7 +2408,7 @@ fn identifier_assignment_candidate(text: &str) -> bool {
                 content
             };
             let json_scanner_declined =
-                quote == Some('"') && !json_scanner_claims_credential_key_at(text, start);
+                quote == Some('"') && !candidate_cursor.claims_in_source_order(start);
             if start == 0 || json_scanner_declined {
                 return true;
             }
@@ -2502,6 +2563,14 @@ fn spaced_credential_unsafe_start(text: &str) -> Option<usize> {
 /// separator or with an unterminated value — so a credential split across
 /// deltas is held rather than emitted piecewise.
 fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
+    let json_claims = JsonCredentialKeyClaims::new(text);
+    identifier_assignment_unsafe_start_with_claims(text, &mut json_claims.cursor())
+}
+
+fn identifier_assignment_unsafe_start_with_claims(
+    text: &str,
+    json_claim_cursor: &mut JsonCredentialKeyClaimCursor<'_>,
+) -> Option<usize> {
     let mut earliest: Option<usize> = None;
     let mut fold = |start: usize| {
         earliest = Some(earliest.map_or(start, |current: usize| current.min(start)));
@@ -2522,7 +2591,7 @@ fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
             let content = identifier.as_ptr() as usize - base;
             let json_scanner_owns_key = quote == Some('"')
                 && content > 0
-                && json_scanner_claims_credential_key_at(text, content - 1);
+                && json_claim_cursor.claims_in_source_order(content - 1);
             let termination = if json_scanner_owns_key {
                 ValueTermination::Token
             } else if credential_key_is_free_form(identifier) {
@@ -2767,7 +2836,9 @@ mod tests {
 
     use super::{
         MAX_PENDING_STREAM_BYTES, PendingRescanWork, REDACTED, REDACTED_JSON_OBJECT, RedactingSink,
-        decode_unicode_escapes, redact_json, redact_text, stream_candidate_starts_at_zero,
+        decode_unicode_escapes, identifier_assignment_candidate,
+        identifier_assignment_unsafe_start, json_claim_scan_bytes, redact_identifier_assignment,
+        redact_json, redact_text, reset_json_claim_scan_bytes, stream_candidate_starts_at_zero,
         trailing_credential_context, unsafe_stream_suffix_start, unterminated_json_key_start,
     };
 
@@ -2787,6 +2858,17 @@ mod tests {
     const MULTILINE_SECRET_VALUE: &str = "sensitive\nmultiline\nvalue";
     const COMPOSITE_SECRET_VALUE: &str = "sensitive-composite-value";
     const PLANTED_SYNTHETIC_SECRET: &str = "SYNTHETIC-SECRET-SHAPE-COVERAGE";
+    /// Large enough that a whole-prefix ownership scan per member is
+    /// observably super-linear while the one-pass bound stays deterministic.
+    const REPEATED_QUOTED_CREDENTIAL_MEMBERS: usize = 512;
+
+    fn repeated_quoted_credential_members() -> String {
+        let member = format!(r#""client_secret":"{PLANTED_SYNTHETIC_SECRET}","#);
+        format!(
+            r#"{{{}"safe":"tail"}}"#,
+            member.repeat(REPEATED_QUOTED_CREDENTIAL_MEMBERS)
+        )
+    }
 
     fn observation_text(observation: Observation<u8>) -> String {
         match observation.fact {
@@ -3411,6 +3493,45 @@ mod tests {
         assert!(!text_output.contains(PLANTED_SYNTHETIC_SECRET));
         assert!(!json_output.contains(PLANTED_SYNTHETIC_SECRET));
         assert!(!tool_output.contains(PLANTED_SYNTHETIC_SECRET));
+    }
+
+    #[test]
+    fn json_claim_lookup_is_single_pass_for_stateless_identifier_assignments() {
+        let fixture = repeated_quoted_credential_members();
+        reset_json_claim_scan_bytes();
+
+        let _ = redact_identifier_assignment(&fixture);
+
+        assert!(
+            json_claim_scan_bytes() <= fixture.len(),
+            "JSON-key ownership lookup must inspect at most one source-length"
+        );
+    }
+
+    #[test]
+    fn json_claim_lookup_is_single_pass_for_stream_identifier_assignments() {
+        let fixture = repeated_quoted_credential_members();
+        reset_json_claim_scan_bytes();
+
+        let _ = identifier_assignment_unsafe_start(&fixture);
+
+        assert!(
+            json_claim_scan_bytes() <= fixture.len(),
+            "stream JSON-key ownership lookup must inspect at most one source-length"
+        );
+    }
+
+    #[test]
+    fn json_claim_lookup_is_single_pass_for_stream_candidate_recognition() {
+        let fixture = repeated_quoted_credential_members();
+        reset_json_claim_scan_bytes();
+
+        let _ = identifier_assignment_candidate(&fixture);
+
+        assert!(
+            json_claim_scan_bytes() <= fixture.len(),
+            "stream candidate ownership lookup must inspect at most one source-length"
+        );
     }
 
     /// INV-035: credential-shaped JSON nested inside a JSON string remains
