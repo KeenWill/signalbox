@@ -140,6 +140,10 @@ let
   scrub = builtins.concatStringsSep " " (map (name: "-u ${name}") refusedVariables);
 
   openssl = "${pkgs.openssl}/bin/openssl";
+  # The client helper preserves its caller's directory, where rustup would not
+  # discover the workspace toolchain file.
+  workspaceRustToolchain =
+    (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain.channel;
 in
 
 {
@@ -172,9 +176,9 @@ in
   scripts.signalbox = {
     description = "Run the Signalbox terminal client from the working tree.";
     exec = ''
-      cd "$DEVENV_ROOT"
-      exec cargo run -q --manifest-path "$DEVENV_ROOT/Cargo.toml" \
-        -p signalbox-client -- "$@"
+      exec env RUSTUP_TOOLCHAIN=${shellArg workspaceRustToolchain} \
+        cargo run -q --manifest-path "$DEVENV_ROOT/Cargo.toml" \
+          -p signalbox-client -- "$@"
     '';
   };
 

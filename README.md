@@ -119,26 +119,26 @@ And the process socket lives at `$DEVENV_RUNTIME/signalbox/signalboxd.sock`
 rather than directly in the runtime directory, because the daemon accepts only a
 socket parent meeting the ownership and permission rules the
 [process protocol](docs/spec/process-protocol.md#transport-and-trust-boundary)
-states and creates neither that directory nor those permissions itself; the
-daemon process makes it before binding. The devenv shell exports that path as
-`SIGNALBOX_SOCKET_PATH`, and its `signalbox <verb>` convenience runs the
-working-tree client through Cargo, rebuilding it after source changes.
+states. The devenv dev-instance launcher creates that directory and sets mode
+`0700` before executing the daemon; the daemon then binds the socket there. The
+devenv shell
+[exports that path as `SIGNALBOX_SOCKET_PATH` and provides a `signalbox <verb>` convenience](docs/decisions.md#2026-07-28--expose-the-dev-instance-client-from-every-shell-directory);
+the convenience runs the working-tree client through Cargo, rebuilding it after
+source changes.
 
-The daemon reads its Anthropic key from
-`$HOME/.config/signalbox/anthropic-api-key` and its code-host token from
-`$HOME/.config/signalbox/github-token`, overridable with
+The daemon's default Anthropic key path is
+`$HOME/.config/signalbox/anthropic-api-key` and its default code-host token path
+is `$HOME/.config/signalbox/github-token`, overridable with
 `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE` and `SIGNALBOX_DEV_GITHUB_TOKEN_FILE`
-respectively. No credential material is committed or generated. Both paths are
-passed to the daemon unconditionally because it requires both variables at
-startup; neither file has to exist, since neither is read at startup. When each
-file is read, what its bytes mean, and what its absence does are stated in the
-[credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle).
-Provision the default code-host path from the GitHub CLI, and create the
-Anthropic path for editing, with these one-line commands:
+respectively. No credential material is committed or generated. The
+[credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle)
+owns when those files are read, what their bytes mean, and how absence is
+handled. Provision the default code-host path from the GitHub CLI, and create
+the Anthropic path for editing, with these one-line commands:
 
 ```console
 install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.config/signalbox/github-token"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; gh auth token >"$temporary" && mv "$temporary" "$destination" && trap - EXIT)
-install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.config/signalbox/anthropic-api-key"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; if [ -e "$destination" ]; then cp "$destination" "$temporary" || exit; fi; "${EDITOR:-vi}" "$temporary" && mv "$temporary" "$destination" && trap - EXIT)
+install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.config/signalbox/anthropic-api-key"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; if [ -e "$destination" ]; then cp "$destination" "$temporary" || exit; fi; editor="${EDITOR:-vi}"; EDITOR="$editor" sh -c 'set -f; $EDITOR "$1"' sh "$temporary" && mv "$temporary" "$destination" && trap - EXIT)
 ```
 
 Most of `devenv.nix` exists to satisfy the ambient-configuration refusals that
