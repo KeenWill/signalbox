@@ -380,7 +380,7 @@ fn stateful_outputs(case: CorpusCase) -> Vec<ObservedOutput> {
                     sink.suppress_remaining();
                 }
                 CorpusPart::Event(CorpusEvent::Seed) => {
-                    let sanitized = sink.redact_terminal_failure_text(&text);
+                    let sanitized = sink.redact_provider_id("", &text);
                     sink.seed_emitted_context(&text);
                     direct_outputs.push(ObservedOutput {
                         channel: "provider id",

@@ -3443,9 +3443,9 @@ mod tests {
         ));
         let usage = r#"{"input_tokens":11,"output_tokens":7}"#;
 
-        assert_eq!(github, "GITHUB_TOKEN=[redacted]");
-        assert_eq!(bare, "token=[redacted]");
-        assert_eq!(member, r#"{"CI_JOB_TOKEN":"[redacted]"}"#);
+        assert_eq!(github, format!("GITHUB_TOKEN={REDACTED}"));
+        assert_eq!(bare, format!("token={REDACTED}"));
+        assert_eq!(member, format!(r#"{{"CI_JOB_TOKEN":"{REDACTED}"}}"#));
         assert_eq!(redact_json(usage), usage);
     }
 
@@ -3457,9 +3457,9 @@ mod tests {
         let api_key = redact_text(&format!("codex --api-key {PLANTED_SYNTHETIC_SECRET}"));
         let passphrase = redact_text(&format!("gpg --passphrase {PLANTED_SYNTHETIC_SECRET}"));
 
-        assert_eq!(password, "codex --password [redacted]");
-        assert_eq!(api_key, "codex --api-key [redacted]");
-        assert_eq!(passphrase, "gpg --passphrase [redacted]");
+        assert_eq!(password, format!("codex --password {REDACTED}"));
+        assert_eq!(api_key, format!("codex --api-key {REDACTED}"));
+        assert_eq!(passphrase, format!("gpg --passphrase {REDACTED}"));
     }
 
     /// INV-035: URL userinfo passwords are redacted without rewriting their
@@ -3470,7 +3470,7 @@ mod tests {
 
         assert_eq!(
             redact_text(&fixture),
-            "psql postgres://admin:[redacted]@db.internal/app"
+            format!("psql postgres://admin:{REDACTED}@db.internal/app")
         );
     }
 
@@ -3482,7 +3482,7 @@ mod tests {
 
         assert_eq!(
             redact_text(&fixture),
-            "curl -u admin:[redacted] https://api.example.test"
+            format!("curl -u admin:{REDACTED} https://api.example.test")
         );
     }
 
