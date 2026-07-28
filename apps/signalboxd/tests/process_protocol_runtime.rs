@@ -16,13 +16,15 @@ use std::{
 };
 
 use signalbox_application::{
-    AuthorizeModelCallOutcome, CreateSessionFromImportedFrontierIdGenerator,
-    CreateSessionFromImportedFrontierOutcome, CreateSessionFromImportedFrontierRequest,
-    CreateSessionFromImportedFrontierService, EligibilityPass, ImportConversationOutcome,
-    ImportConversationService, ImportedConversationIdGenerator, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    ModelCallExecutionOutcome, ModelCallExecutionService, NoToolCatalog, SchedulerLoop,
-    SchedulerLoopExit, ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnOutcome,
+    AuthorizeModelCallOutcome, ClassifyOperatorFailure,
+    CreateSessionFromImportedFrontierIdGenerator, CreateSessionFromImportedFrontierOutcome,
+    CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
+    EligibilityPass, ImportConversationOutcome, ImportConversationService,
+    ImportedConversationIdGenerator, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
+    InProcessToolDispatchGate, ModelCallCredentialReference, ModelCallExecutionOutcome,
+    ModelCallExecutionService, ModelCallInputTokenCount, ModelCallInputTokenCounter, NoToolCatalog,
+    OperatorFailureClass, PreparedModelOperation, SchedulerLoop, SchedulerLoopExit,
+    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanService, UuidV7ModelCallExecutionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
@@ -5657,6 +5659,117 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
     .fetch_one(&runtime.pool)
     .await?;
     assert_eq!(automatic_command_count, 1);
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// A classified guarded-pass failure whose durable commit outcome is unknown.
+///
+/// Every durable stage of `ContextGuardedTurnPass` can report
+/// `OperatorFailureClass::Infrastructure { commit_ambiguous: true }`; the
+/// counting seam is the one a fixture can drive without a provable database
+/// commit failure, and the pass owes the same reported outcome to all of them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CommitAmbiguousCountFailure;
+
+impl std::fmt::Display for CommitAmbiguousCountFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("guarded count acknowledgement was lost")
+    }
+}
+
+impl Error for CommitAmbiguousCountFailure {}
+
+impl ClassifyOperatorFailure for CommitAmbiguousCountFailure {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        OperatorFailureClass::Infrastructure {
+            commit_ambiguous: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CommitAmbiguousCounter;
+
+impl ModelCallInputTokenCounter for CommitAmbiguousCounter {
+    type Error = CommitAmbiguousCountFailure;
+
+    fn count_input_tokens<Cancellation>(
+        &self,
+        _operation: PreparedModelOperation,
+        _cancellation: Cancellation,
+    ) -> impl std::future::Future<Output = Result<ModelCallInputTokenCount, Self::Error>> + Send
+    where
+        Cancellation: std::future::Future<Output = ()> + Send + 'static,
+    {
+        std::future::ready(Err(CommitAmbiguousCountFailure))
+    }
+}
+
+/// S03 / INV-034: the production guarded pass reports post-activation failure
+/// for the declared ambiguous-commit class, so the daemon stops scheduling and
+/// startup recovery regains authority over durable state whose outcome ordinary
+/// scheduler retry cannot decide.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(
+        &mut connection,
+        session_id,
+        String::from("ambiguous guarded stage request"),
+    )
+    .await?;
+    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let runtime_models = model_configuration.runtime_model_catalog();
+    let provider = RuntimeModelCallProvider::new(
+        ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>()),
+        runtime_models.clone(),
+    )
+    .with_text_delta_sink(runtime.provider_text_delta_sink());
+    let repository = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        model_configuration.target_catalog(),
+        ModelCallCredentialReference::new("ambiguous-guard-fixture"),
+    );
+    let guarded_repository = repository.clone();
+    let (execution, fatal_execution) =
+        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+            repository,
+            InProcessAttemptDispatchGate::default(),
+            provider,
+        ));
+    let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
+        Arc::new(RuntimeContextCompactionModel::new(
+            ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>()),
+            runtime_models.clone(),
+        ));
+    let mut pass = ContextGuardedTurnPass::new(
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+        guarded_repository,
+        CommitAmbiguousCounter,
+        NoToolCatalog,
+        runtime_models,
+        model_configuration,
+        compaction_model,
+        "ambiguous-guard-summary-fixture",
+        execution,
+    );
+    let session = SessionId::from_uuid(session_id.into_uuid());
+
+    let outcome = pass.run(session).await;
+
+    assert!(matches!(
+        outcome,
+        Err(ContextGuardedTurnPassError::Count(
+            CommitAmbiguousCountFailure
+        ))
+    ));
+    assert!(fatal_execution.is_triggered());
 
     drop(connection);
     runtime.stop().await

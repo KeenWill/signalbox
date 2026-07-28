@@ -199,10 +199,24 @@ where
             }
             let mut summary = String::new();
             for part in completed.content {
-                let AssistantPart::Text(text) = part else {
-                    return Err(ContextCompactionModelError::NonTextSummary);
-                };
-                summary.push_str(&text);
+                match part {
+                    AssistantPart::Text(text) => summary.push_str(&text),
+                    // The dedicated compaction request configures no thinking
+                    // display, so a Claude 5-family completion carries the
+                    // omitted-display empty thinking block by default: it holds
+                    // only a provider replay signature and no summary material.
+                    // It is dropped exactly as this crate's ordinary bridge
+                    // drops it, since rejecting it would fail compaction on the
+                    // default path. Thinking with actual text, redacted
+                    // thinking, and tool calls still fail closed, because a
+                    // summary must never silently omit returned material.
+                    AssistantPart::Thinking { text, .. } if text.is_empty() => {}
+                    AssistantPart::Thinking { .. }
+                    | AssistantPart::RedactedThinking { .. }
+                    | AssistantPart::ToolCall(_) => {
+                        return Err(ContextCompactionModelError::NonTextSummary);
+                    }
+                }
             }
             if summary.is_empty() || summary.contains('\0') {
                 return Err(ContextCompactionModelError::InvalidSummary);
@@ -271,3 +285,130 @@ impl fmt::Display for ContextCompactionModelError {
 }
 
 impl Error for ContextCompactionModelError {}
+
+#[cfg(test)]
+mod tests {
+    use signalbox_domain::{
+        DirectModelSelection, ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SessionId,
+    };
+    use signalbox_model_runtime::{
+        AssistantPart, CompletionEvidence, CompletionFinish, ExchangeFacts, ProviderReportedModel,
+        Script, ScriptedModel, TerminalEvidence, TokenUsage,
+    };
+    use uuid::Uuid;
+
+    use super::{
+        ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
+        RuntimeContextCompactionModel,
+    };
+    use crate::{RuntimeModelCatalog, RuntimeModelDefinition};
+
+    /// The exact provider-model spelling this fixture deployment configures.
+    const PROVIDER_MODEL: &str = "fixture-compaction-model";
+
+    fn target() -> ResolvedProviderTarget {
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(7)))
+    }
+
+    fn catalog() -> RuntimeModelCatalog {
+        RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
+            target(),
+            String::from(PROVIDER_MODEL),
+            256,
+            200_000,
+        )
+        .expect("the fixture definition states a request-safe mapping")])
+        .expect("the fixture catalog names one target once")
+    }
+
+    fn request() -> ContextCompactionModelRequest {
+        ContextCompactionModelRequest {
+            call: ModelCallId::from_uuid(Uuid::from_u128(1)),
+            session: SessionId::from_uuid(Uuid::from_u128(2)),
+            selection: DirectModelSelection::from_uuid(Uuid::from_u128(3)),
+            target: target(),
+            credential_reference: String::from("fixture-compaction-credential"),
+            system_prompt: String::from("Summarize the prior conversation faithfully."),
+            rendered_range: String::from("[\"fixture summarized range\"]"),
+        }
+    }
+
+    fn completion(content: Vec<AssistantPart>) -> Script {
+        Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new(PROVIDER_MODEL)),
+            finish: CompletionFinish::EndTurn,
+            content,
+            usage: TokenUsage::unreported(),
+        }))
+    }
+
+    fn compaction_model(
+        content: Vec<AssistantPart>,
+    ) -> RuntimeContextCompactionModel<ScriptedModel<ModelCallId>> {
+        RuntimeContextCompactionModel::new(
+            ScriptedModel::<ModelCallId>::single(completion(content)),
+            catalog(),
+        )
+    }
+
+    /// S02 / INV-014: the dedicated compaction call configures no thinking
+    /// display, so a Claude 5-family completion carries the omitted-display
+    /// empty thinking block by default. Folding the summary drops it exactly as
+    /// the ordinary bridge does, instead of failing the default path closed and
+    /// stalling the very turn automatic compaction exists to rescue.
+    #[tokio::test]
+    async fn s02_inv014_empty_thinking_part_is_dropped_from_a_compaction_summary() {
+        let model = compaction_model(vec![
+            AssistantPart::Thinking {
+                text: String::new(),
+                signature: Some(String::from("sig_synthetic_1")),
+            },
+            AssistantPart::Text(String::from("compacted fixture summary")),
+        ]);
+
+        let result = model
+            .execute(request())
+            .await
+            .expect("an empty thinking part must not fail the summary closed");
+
+        assert_eq!(result.summary, "compacted fixture summary");
+    }
+
+    /// S02 / INV-014: thinking with actual text still fails the summary closed,
+    /// because accepting it would publish a summary that silently omits
+    /// response material no durable representation can carry.
+    #[tokio::test]
+    async fn s02_inv014_nonempty_thinking_part_still_fails_the_summary_closed() {
+        let model = compaction_model(vec![
+            AssistantPart::Thinking {
+                text: String::from("visible reasoning"),
+                signature: Some(String::from("sig_synthetic_1")),
+            },
+            AssistantPart::Text(String::from("compacted fixture summary")),
+        ]);
+
+        assert_eq!(
+            model.execute(request()).await,
+            Err(ContextCompactionModelError::NonTextSummary)
+        );
+    }
+
+    /// S02 / INV-014: redacted thinking carries withheld reasoning in opaque
+    /// form and fails the summary closed for the same reason.
+    #[tokio::test]
+    async fn s02_inv014_redacted_thinking_part_still_fails_the_summary_closed() {
+        let model = compaction_model(vec![
+            AssistantPart::RedactedThinking {
+                data: String::from("opaque-fixture-payload"),
+            },
+            AssistantPart::Text(String::from("compacted fixture summary")),
+        ]);
+
+        assert_eq!(
+            model.execute(request()).await,
+            Err(ContextCompactionModelError::NonTextSummary)
+        );
+    }
+}

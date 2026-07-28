@@ -452,14 +452,7 @@ where
             let outcome = match activation.await {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    if matches!(
-                        error.operator_failure_class(),
-                        signalbox_application::OperatorFailureClass::Infrastructure {
-                            commit_ambiguous: true
-                        }
-                    ) {
-                        execution.report_post_activation_failure();
-                    }
+                    report_ambiguous_commit(&execution, &error);
                     return Err(ActivatedTurnPassError::Activation(error));
                 }
             };
@@ -476,6 +469,28 @@ where
                 }
             }
         }
+    }
+}
+
+/// Reports one classified failure whose durable commit outcome is unknown, so
+/// startup recovery rather than ordinary scheduler retry regains authority.
+///
+/// `OperatorFailureClass::Infrastructure { commit_ambiguous: true }` is the
+/// declared class for exactly that state. Every eligibility pass able to
+/// observe it owes the same reported outcome, so the reaction is defined once
+/// here instead of being restated — and diverging — per pass.
+pub(crate) fn report_ambiguous_commit<Execution, Failure>(execution: &Execution, error: &Failure)
+where
+    Execution: ActivatedTurnExecution,
+    Failure: ClassifyOperatorFailure,
+{
+    if matches!(
+        error.operator_failure_class(),
+        signalbox_application::OperatorFailureClass::Infrastructure {
+            commit_ambiguous: true
+        }
+    ) {
+        execution.report_post_activation_failure();
     }
 }
 

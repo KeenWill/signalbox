@@ -2666,6 +2666,7 @@ dependencies = [
  "signalbox-domain",
  "signalbox-expect-table",
  "signalbox-model-runtime",
+ "tokio",
  "tracing",
  "uuid",
 ]

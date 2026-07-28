@@ -191,9 +191,16 @@ current direct selection, resolved provider target, complete source frontier,
 non-secret credential reference, terminal disposition, and the provider's
 independently optional input, output, cache-creation-input, and cache-read-input
 token fields. Only a completed call may produce a `ContextSummary` and
-compaction result. The compaction prompt is a required bounded deployment value
-in the model-catalog configuration, not a source-code literal; the ordinary
-session system prompt is not substituted for it.
+compaction result. Its completion content folds into the summary under the same
+content rule the bridge applies to ordinary assistant content
+([provider observation classification](#provider-observation-classification)):
+text parts concatenate in order and an empty thinking block is dropped, while
+thinking with actual text, redacted thinking, and tool calls fail the summary
+closed. The compaction request configures no thinking display, so the empty
+thinking block is a default-path shape rather than an exceptional one. The
+compaction prompt is a required bounded deployment value in the model-catalog
+configuration, not a source-code literal; the ordinary session system prompt is
+not substituted for it.
 
 Authorization, failure, and completion take the same per-session row lock used
 by guarded session mutation. Each transition first rereads its exact call and
@@ -583,7 +590,11 @@ fatal signal, the scheduler stops (in-flight work bounded by a shutdown grace
 window), and the process exits nonzero so the next incarnation's startup scan
 regains authority. Why: startup recovery is the one audited path that classifies
 an issued call from durable evidence, so a live process that cannot construct a
-trustworthy result must stop rather than improvise.
+trustworthy result must stop rather than improvise. An eligibility pass raises
+the same signal whenever a durable stage it owns reports
+`Infrastructure { commit_ambiguous: true }` — the guarded counted activation
+commit and automatic compaction preparation alike — since only that next scan
+can decide what committed.
 
 Startup recovery (`crates/persistence/src/startup.rs`), inside the same
 per-session locked transaction as the general scan (INV-034):
