@@ -350,6 +350,41 @@ async fn inv_035_thread_id_marker_prefix_suppresses_buffered_continuation() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a credential marker inside a dropped error item governs the
+/// streamed final text that follows — the marker appears in no record, but
+/// the value completing it is a secret the stream must suppress.
+#[tokio::test]
+async fn inv_035_error_item_marker_suppresses_streamed_continuation() {
+    let result = execute_scenario(
+        "credential_split_across_error_item",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: the dropped error-item marker also governs the buffered final
+/// text, which reaches terminal evidence without streamed deltas.
+#[tokio::test]
+async fn inv_035_error_item_marker_suppresses_buffered_continuation() {
+    let result = execute_scenario(
+        "credential_split_across_error_item",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
 /// INV-035: a credential marker held from streamed reasoning also governs the
 /// agent-message item id, so an id extending the marker never surfaces as
 /// `ProviderMessageId` in terminal evidence.
@@ -2003,6 +2038,41 @@ async fn post_line_deadline_preserves_an_exited_leader() {
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-keepalive-group"));
 }
 
+/// An adversarial continuous flood of padded keepalive events — which keeps
+/// the biased read arm always ready AND the reader buffer non-empty — cannot
+/// starve the exchange deadline: the post-line control checks run after every
+/// decoded line, so the exchange ends in bounded time as timeout loss.
+#[cfg(unix)]
+#[tokio::test]
+async fn adversarial_keepalive_flood_cannot_starve_the_deadline() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = starving_keepalive_flood_cli(temporary.path());
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(1));
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(10),
+        runtime.execute(prepared, &mut observations, CancellationSignal::never()),
+    )
+    .await
+    .expect("a continuous flood must not starve the exchange deadline");
+
+    assert_eq!(
+        timed_out(&boundary_loss(&report.evidence).cause).detail,
+        "Codex CLI process exceeded its exchange timeout"
+    );
+    assert_recorded_process_group_exited(temporary.path().join("fake-codex-starving-flood-group"));
+}
+
 /// The retained output-schema argument is absolute, so the child's move to
 /// the configured working root cannot re-root a relative schema path.
 #[tokio::test]
@@ -2845,6 +2915,56 @@ exit 7
         thread_id = fixtures::THREAD_ID
     );
     script_cli(directory, "keepalive-exit-codex", &script)
+}
+
+/// Scripts a CLI that floods keepalive events continuously without exiting,
+/// from a pregenerated block whose event boundaries never land on a multiple
+/// of the reader's 8 KiB refill (offsets 0 and 4096 mod 8192 are avoided and
+/// the block length is 4096 mod 8192, so the avoidance holds across `cat`
+/// iterations while the pipe stays saturated). While the post-line control
+/// checks were gated on an empty reader buffer, this shape starved the
+/// exchange deadline; the checks now run after every decoded line.
+#[cfg(unix)]
+fn starving_keepalive_flood_cli(directory: &Path) -> std::path::PathBuf {
+    // Preamble bytes already on stdout when the flood starts.
+    let preamble = format!(
+        "{{\"type\":\"thread.started\",\"thread_id\":\"{}\"}}\n{{\"type\":\"turn.started\"}}\n",
+        fixtures::THREAD_ID
+    );
+    let mut block = String::new();
+    let mut total = preamble.len();
+    // Build ~16 MiB whose line ends avoid 0 and 4096 mod 8192; ending the
+    // block at 4096 mod 8192 shifts the orbit {0, 4096} each iteration, so
+    // the avoided residues cover every pass.
+    while total < preamble.len() + 16 * 1024 * 1024 || (total - preamble.len()) % 8192 != 4096 {
+        let mut line = format!(
+            "{{\"type\":\"keepalive\",\"padding\":\"{}\"}}\n",
+            "a".repeat(900)
+        );
+        let mut end = (total + line.len()) % 8192;
+        while end == 0 || end == 4096 {
+            line = line.replace("\"}}\n", "a\"}}\n");
+            end = (total + line.len()) % 8192;
+        }
+        block.push_str(&line);
+        total += line.len();
+    }
+    std::fs::write(directory.join("fake-codex-flood-block"), block)
+        .expect("the flood block is written");
+    let script = format!(
+        r#"#!/bin/sh
+printf '%s
+' '{{"type":"thread.started","thread_id":"{thread_id}"}}'
+printf '%s
+' '{{"type":"turn.started"}}'
+printf 'process_group=%s
+descendant=%s
+' "$$" "$$" > fake-codex-starving-flood-group
+while :; do cat fake-codex-flood-block; done
+"#,
+        thread_id = fixtures::THREAD_ID
+    );
+    script_cli(directory, "starving-flood-codex", &script)
 }
 
 /// Scripts a CLI that writes a classifiable stderr failure, then hands its

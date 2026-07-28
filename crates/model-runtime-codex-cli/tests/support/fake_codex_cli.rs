@@ -182,6 +182,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             completed();
         }
+        "credential_split_across_error_item" => {
+            error_item("error-marker", "Authorization:");
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
         "credential_prefix_thread_id_before_text" => {
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
@@ -571,6 +579,13 @@ fn agent_message(id: &str, value: &str) {
     let escaped = json_escape(value);
     emit(&format!(
         r#"{{"type":"item.completed","item":{{"id":"{id}","type":"agent_message","text":"{escaped}"}}}}"#
+    ));
+}
+
+fn error_item(id: &str, message: &str) {
+    emit(&format!(
+        r#"{{"type":"item.completed","item":{{"id":"{id}","type":"error","message":"{}"}}}}"#,
+        json_escape(message)
     ));
 }
 
