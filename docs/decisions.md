@@ -994,6 +994,55 @@ in [model-call-execution](spec/model-call-execution.md), the adapter contract in
 model-identifier-normalization half of the model fallback and provenance
 question.
 
+## 2026-07-26 — Pin the wrapped Codex CLI in npm and gate bumps on a smoke
+
+**Context.** The recorded drift-defense direction is that a wrapped CLI is
+pinned to an exact version, bumped frequently by Renovate, and each bump
+verified by a compatibility smoke on the cheapest model using real credentials
+that fork pull requests can never reach. The adapter landed with a
+supported-version constant and an offline fixture corpus but nothing binding
+either to the executable anyone actually installs. Executing the direction
+required choosing a manifest form Renovate tracks, a bump policy, and an
+authentication path the CLI genuinely supports unattended.
+
+**Decision.** Pin the CLI as an exact npm dependency in
+`tooling/codex-cli/package.json` with a committed lockfile, tracked by
+Renovate's built-in npm manager with no release-age gate and no automerge. Bind
+the pin to the adapter with an offline test asserting that the manifest version
+equals the supported-version constant, so a bump fails the ordinary Rust check
+until the constant and fixtures move with it. Verify bumps against the live CLI
+with a gated smoke — one cheapest-model exchange through the adapter, preceded
+by a fail-closed assertion that the invoked executable reports the pinned
+version — triggered only by manual dispatch and by pushes to `main` that touch
+the pin, never by a pull-request event, with credentials held in a protected
+deployment environment. Authenticate that smoke through the CLI's
+non-interactive API-key login, piped from the secret into the CLI's own
+credential store, and state plainly that it therefore covers protocol
+compatibility and not subscription login. Treat the addressable model set as an
+account-scoped input: keep the cheapest advertised model as a local fallback,
+and let the environment or local caller select another model without changing
+the test when its credential cannot address that fallback.
+
+**Rejected alternatives.** Pinning the Homebrew cask that serves local installs
+has no Renovate manager; a GitHub-release regex manager would hand-roll a
+datasource the npm manager already provides for the same artifact. Probing the
+version inside the adapter would spend a process on every model dispatch and was
+already rejected. Letting the smoke skip on a version mismatch or a missing
+credential would record compatibility evidence for a version that never ran.
+Applying the cargo policy's minimum-release-age gate would delay bumps on
+calendar time while proving nothing. Storing a subscription access token as a
+secret would go stale between the CLI's own token rotations, so automation built
+on it would fail for reasons unrelated to compatibility; weakening the
+fork-exposure rules to reach a subscription session was not considered.
+Hard-coding the model that one subscription account currently addresses would
+make another subscription or API-key credential's model set look like protocol
+drift.
+
+**Affects.** `tooling/codex-cli`, `renovate.json5`,
+`.github/workflows/codex-smoke.yml`, the tests of
+`crates/model-runtime-codex-cli`, and the Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md).
+
 ## 2026-07-26 — Carry credential lineage in runner placement
 
 **Context.** Runner replacement can intentionally move from a credential-bearing

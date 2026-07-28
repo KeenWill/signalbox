@@ -5,10 +5,11 @@ This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime-openai`, and `crates/model-runtime-codex-cli`, verified
 against the implementing stack through PR #183
 (`agent/provider-call-security-parser`) plus the Codex CLI adapter stack (PR
-#264, `agent/codex-cli-wrap`). The `signalboxd` names this page states for the
-composition root, its telemetry, and the production `FileCredentialAccess` were
-verified through PR #258 (`agent/signalboxd-rename`); the Anthropic adapter's
-server-side `fallback`-block recognition was verified through PR #280
+#264, `agent/codex-cli-wrap`, and PR #268, `agent/codex-cli-pin-smoke`). The
+`signalboxd` names this page states for the composition root, its telemetry, and
+the production `FileCredentialAccess` were verified through PR #258
+(`agent/signalboxd-rename`); the Anthropic adapter's server-side
+`fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The five persistence-repository
 families in the operator-failure inventory were verified through PR #288
 (`agent/audit-fix-docs-coherence`). The streamed-delivery bridge and ephemeral
@@ -547,6 +548,53 @@ likewise keeps the leader waitable until it has killed remaining group
 descendants, then reaps the leader, so cleanup never signals through a reusable
 process identity. The offline test binary exercises all process and evidence
 paths without a live CLI or network.
+
+### Version pin and compatibility smoke
+
+The wrapped CLI is an external program on its own release cadence, so the
+adapter's exported supported-version constant is only a claim until three
+statements agree: the version pinned for installation, the version the adapter
+covers, and the version actually invoked.
+
+`tooling/codex-cli/package.json` is the pin of record — an npm manifest naming
+the CLI's distribution package at an exact `major.minor.patch` version, with a
+committed lockfile so the installed artifact is integrity-checked. It is a
+Renovate-tracked manifest, so a new CLI release arrives as an ordinary pull
+request rather than as silent drift on whatever machine last installed the tool.
+The manifest carries no minimum-release-age gate and never automerges. Why: for
+a dependency that releases this often, calendar age is not evidence, and the two
+gates below are.
+
+An offline test asserts that the pinned version equals the adapter's supported
+version. It runs unconditionally in the ordinary Rust check, so a pin bump fails
+that check until the supported-version constant moves with it — which is what
+forces the fixture corpus to be re-examined against the new release rather than
+inherited.
+
+The compatibility smoke is the second gate: one exchange against the cheapest
+model the smoke credential can address, run through this adapter with the real
+pinned executable. Which models a credential may address is account-scoped, so
+the model is a configured value with the cheapest advertised model as default.
+Before spending anything it asserts that the executable's reported version
+equals the supported version, and an unreadable, unparsable, or mismatched
+version fails the smoke rather than skipping it. Why: evidence recorded against
+a version that never ran is worse than no evidence. The smoke then asserts only
+the protocol surfaces a version bump moves — the thread identifier reaching the
+exchange facts, the terminal usage counters, and the response envelope decoding
+as a completed or refused terminal outcome — and nothing about answer quality.
+It never runs on a pull-request event, so no fork can reach its credentials; it
+is dispatched manually, including against a pin-bump branch to verify that bump
+before it lands, and runs automatically on `main` only when the pin manifest or
+its committed lockfile changes. The model dispatch itself still performs no
+version probe: this check lives in the smoke, never in the hot path.
+
+The smoke authenticates the CLI through its own non-interactive API-key login,
+piped from an environment-scoped secret into the CLI's credential store, which
+the adapter then never reads — the same ownership split as production. Because
+that is an API-key login rather than a subscription one, the smoke proves the
+process, event-protocol, and envelope compatibility that a version bump breaks;
+it does not exercise subscription login itself, which the CLI offers no durable
+unattended path for.
 
 ## Credential-access boundary
 
