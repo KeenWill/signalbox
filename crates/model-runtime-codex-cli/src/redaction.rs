@@ -117,11 +117,11 @@ const CREDENTIAL_INDICATORS: &[&str] = &[
     "secret",
     "credential",
     "token",
-    "signing_key",
-    "encryption_key",
-    "ssh_key",
-    "hmac_key",
-    "license_key",
+    "signing",
+    "encryption",
+    "ssh",
+    "hmac",
+    "license",
     "sk-",
     "eyJ",
     "://",
@@ -330,7 +330,11 @@ fn redact_identifier_assignment(text: &str) -> String {
         if let Some((identifier, quote)) = trailing_identifier(&remaining[..separator])
             && credential_key(identifier)
         {
-            let termination = if quote == Some('"') {
+            let content = identifier.as_ptr() as usize - text.as_ptr() as usize;
+            let json_scanner_owns_key = quote == Some('"')
+                && content > 0
+                && json_scanner_claims_credential_key_at(text, content - 1);
+            let termination = if json_scanner_owns_key {
                 ValueTermination::Token
             } else if credential_key_is_free_form(identifier) {
                 ValueTermination::Line
@@ -839,6 +843,23 @@ fn credential_key(key: &str) -> bool {
 
 fn credential_identifier_could_extend_to_credential(identifier: &str) -> bool {
     let lower = identifier.to_ascii_lowercase();
+    let normalized = lower
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    if [
+        "signingkey",
+        "encryptionkey",
+        "sshkey",
+        "hmackey",
+        "licensekey",
+    ]
+    .iter()
+    .any(|shape| {
+        !normalized.is_empty() && normalized.len() < shape.len() && shape.starts_with(&normalized)
+    }) {
+        return true;
+    }
     let (qualified, tail) = lower
         .rfind(['_', '-'])
         .map_or((false, lower.as_str()), |separator| {
@@ -2444,7 +2465,11 @@ fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
         if let Some((identifier, quote)) = trailing_identifier(&text[..separator])
             && credential_key(identifier)
         {
-            let termination = if quote == Some('"') {
+            let content = identifier.as_ptr() as usize - base;
+            let json_scanner_owns_key = quote == Some('"')
+                && content > 0
+                && json_scanner_claims_credential_key_at(text, content - 1);
+            let termination = if json_scanner_owns_key {
                 ValueTermination::Token
             } else if credential_key_is_free_form(identifier) {
                 ValueTermination::Line
@@ -2455,7 +2480,6 @@ fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
                 credential_value_bounds(text, separator + 1, termination);
             let consumed = value_end.max(token_start);
             if consumed == text.len() || partial_triple_open(text, separator + 1) {
-                let content = identifier.as_ptr() as usize - base;
                 fold(if quote.is_some() {
                     content - 1
                 } else {
@@ -2735,6 +2759,45 @@ mod tests {
                 fact: ObservationFact::TextDelta {
                     index: 1,
                     text: second.to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(
+            !emitted.contains(PLANTED_SYNTHETIC_SECRET),
+            "split credential value must not survive stateful redaction: {emitted}"
+        );
+    }
+
+    #[track_caller]
+    fn assert_three_delta_split_redacts(first: &str, second: &str, third: &str) {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: first.to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: second.to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 2,
+                    text: third.to_string(),
                 },
             });
             sink.finish();
@@ -3296,6 +3359,25 @@ mod tests {
         assert!(!tool_output.contains(PLANTED_SYNTHETIC_SECRET));
     }
 
+    /// INV-035: credential-shaped JSON nested inside a JSON string remains
+    /// covered even though its member quotes are escaped in the outer text.
+    #[test]
+    fn inv_035_redacts_escaped_nested_json_credential_text() {
+        let fixture =
+            format!(r#"{{"detail":"{{\"client_secret\":\"{PLANTED_SYNTHETIC_SECRET}\"}}"}}"#);
+        let text_output = redact_text(&fixture);
+        let json_output = redact_json(&fixture);
+
+        assert!(
+            !text_output.contains(PLANTED_SYNTHETIC_SECRET),
+            "{text_output}"
+        );
+        assert!(
+            !json_output.contains(PLANTED_SYNTHETIC_SECRET),
+            "{json_output}"
+        );
+    }
+
     /// INV-035: bare `token` and every singular `*_TOKEN` assignment are
     /// credential-bearing, while plural usage counters remain ordinary data.
     #[test]
@@ -3373,6 +3455,8 @@ mod tests {
         let ssh = redact_text(&format!("ssh_key={PLANTED_SYNTHETIC_SECRET}"));
         let hmac = redact_text(&format!("hmac_key={PLANTED_SYNTHETIC_SECRET}"));
         let license = redact_text(&format!("license_key={PLANTED_SYNTHETIC_SECRET}"));
+        let concatenated = redact_text(&format!("signingkey={PLANTED_SYNTHETIC_SECRET}"));
+        let hyphenated = redact_text(&format!("encryption-key={PLANTED_SYNTHETIC_SECRET}"));
 
         assert!(!passwd.contains(PLANTED_SYNTHETIC_SECRET));
         assert!(!mysql_pwd.contains(PLANTED_SYNTHETIC_SECRET));
@@ -3382,6 +3466,28 @@ mod tests {
         assert!(!ssh.contains(PLANTED_SYNTHETIC_SECRET));
         assert!(!hmac.contains(PLANTED_SYNTHETIC_SECRET));
         assert!(!license.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!concatenated.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!hyphenated.contains(PLANTED_SYNTHETIC_SECRET));
+    }
+
+    /// INV-035: underscore, concatenated, and hyphenated security-key names
+    /// remain covered when their names are split across two or three deltas.
+    #[test]
+    fn inv_035_stream_redacts_a_security_key_name_split_across_three_deltas() {
+        assert_three_delta_split_redacts(
+            "pi: s",
+            "igni",
+            &format!("ng_key={PLANTED_SYNTHETIC_SECRET} tail"),
+        );
+        assert_two_delta_split_redacts(
+            "pi: signingk",
+            &format!("ey={PLANTED_SYNTHETIC_SECRET} tail"),
+        );
+        assert_three_delta_split_redacts(
+            "pi: sign",
+            "ing-",
+            &format!("key={PLANTED_SYNTHETIC_SECRET} tail"),
+        );
     }
 
     /// INV-035: splitting a credential flag inside its name cannot release the
