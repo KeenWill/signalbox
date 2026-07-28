@@ -36,6 +36,7 @@ use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_s
 use uuid::Uuid;
 
 mod arguments;
+mod chat;
 mod connection;
 mod error;
 mod presentation;
@@ -156,6 +157,63 @@ pub async fn run(
     }
 }
 
+/// Parses and runs one invocation against the process terminal.
+///
+/// The interactive `chat` verb uses asynchronous standard-input lines and
+/// catches terminal interrupts. Every other verb retains the one-shot standard
+/// input and output path exposed by [`run`].
+pub async fn run_terminal(
+    arguments: impl IntoIterator<Item = OsString>,
+    socket_environment: Option<OsString>,
+) -> ExitCode {
+    let arguments = arguments.into_iter().collect::<Vec<_>>();
+    let parsed = match arguments::parse(arguments.clone()) {
+        Ok(ParseOutcome::Help(help)) => {
+            return if write!(std::io::stdout().lock(), "{help}").is_ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+        Ok(ParseOutcome::Run(arguments)) => arguments,
+        Err(error) => {
+            let _ = write!(std::io::stderr().lock(), "{error}");
+            return ExitCode::from(2);
+        }
+    };
+    let Command::Chat { session_id } = parsed.command else {
+        return run(
+            arguments,
+            socket_environment,
+            &mut std::io::stdin().lock(),
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        )
+        .await;
+    };
+    let raw_output = parsed.raw_output;
+    let result = async {
+        let socket = socket_path(parsed.socket, socket_environment)?;
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = std::io::stdout().lock();
+        let mut stderr = std::io::stderr().lock();
+        let mut output = Output::new(&mut stdout, &mut stderr, raw_output);
+        let input = chat::terminal_input()?;
+        chat::run(&mut client, &mut output, session_id, input).await
+    }
+    .await;
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let mut stdout = std::io::stdout().lock();
+            let mut stderr = std::io::stderr().lock();
+            let mut output = Output::new(&mut stdout, &mut stderr, raw_output);
+            let _ = output.error(&error);
+            ExitCode::FAILURE
+        }
+    }
+}
+
 async fn execute(
     arguments: arguments::Arguments,
     socket_environment: Option<OsString>,
@@ -187,6 +245,7 @@ async fn execute(
         | Command::Continue { .. }
         | Command::Imported { .. }
         | Command::List
+        | Command::Templates
         | Command::Search(_)
         | Command::Conversations(_)
         | Command::Send { .. }
@@ -194,6 +253,7 @@ async fn execute(
         | Command::Model { .. }
         | Command::Transcript { .. }
         | Command::Follow { .. }
+        | Command::Chat { .. }
         | Command::Reconcile { .. }
         | Command::Review(_)
         | Command::Stop { .. }
@@ -211,6 +271,7 @@ async fn execute(
         } => Some(read_system_prompt_file(path).await?),
         Command::Create { .. }
         | Command::List
+        | Command::Templates
         | Command::Search(_)
         | Command::Conversations(_)
         | Command::Send { .. }
@@ -222,6 +283,7 @@ async fn execute(
         | Command::Model { .. }
         | Command::Transcript { .. }
         | Command::Follow { .. }
+        | Command::Chat { .. }
         | Command::Continue { .. }
         | Command::Imported { .. }
         | Command::Review(_)
@@ -234,18 +296,27 @@ async fn execute(
     match arguments.command {
         Command::Create {
             selection,
+            template,
             command_id,
             system_prompt_file: _,
-        } => {
-            create(
-                &mut client,
-                &mut output,
-                selection,
-                command_id,
-                system_prompt_text,
-            )
-            .await
-        }
+        } => match (selection, template) {
+            (Some(selection), None) => {
+                create(
+                    &mut client,
+                    &mut output,
+                    selection,
+                    command_id,
+                    system_prompt_text,
+                )
+                .await
+            }
+            (None, Some(template)) => {
+                create_from_template(&mut client, &mut output, template, command_id).await
+            }
+            _ => Err(ClientError::Protocol(
+                "create source was internally invalid",
+            )),
+        },
         Command::Continue {
             imported_conversation_id,
             through_position,
@@ -268,6 +339,7 @@ async fn execute(
             imported_conversation_id,
         } => imported(&mut client, &mut output, imported_conversation_id).await,
         Command::List => list(&mut client, &mut output).await,
+        Command::Templates => list_templates(&mut client, &mut output).await,
         Command::Search(page) => search(&mut client, &mut output, page).await,
         Command::Conversations(page) => conversations(&mut client, &mut output, page).await,
         Command::Send {
@@ -338,6 +410,9 @@ async fn execute(
             Ok(())
         }
         Command::Follow { session_id } => follow(&mut client, &mut output, session_id).await,
+        Command::Chat { .. } => Err(ClientError::Input(
+            "chat requires the process terminal input path",
+        )),
         Command::Import { format, .. } => {
             match prepared_import.ok_or(ClientError::Input("import source was not prepared"))? {
                 PreparedImport::File(source) => {
@@ -559,6 +634,41 @@ async fn create(
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("create returned an unexpected response").mutation()),
+    }
+}
+
+async fn create_from_template(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    template_name: String,
+    command_id: Option<CommandId>,
+) -> Result<(), ClientError> {
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let mut connection = client
+        .mutation_request(ClientRequest::CreateSessionFromTemplate {
+            command_id,
+            template_name,
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::SessionCreated { session_id } => {
+            output.session_created(session_id)?;
+            Ok(())
+        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(
+            ClientError::Protocol("template creation returned an unexpected response").mutation(),
+        ),
     }
 }
 
@@ -1199,6 +1309,81 @@ async fn list(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(),
             _ => {
                 return Err(ClientError::Protocol(
                     "session-summary spool contained a non-summary frame",
+                ));
+            }
+        }
+        line.clear();
+    }
+    Ok(())
+}
+
+async fn list_templates(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+) -> Result<(), ClientError> {
+    let mut connection = client.request(ClientRequest::ListTemplates {}).await?;
+    match connection.message().await? {
+        ServerMessage::TemplatesStart {} => {}
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(code, message, detail)),
+        _ => {
+            return Err(ClientError::Protocol(
+                "template list did not begin with its start frame",
+            ));
+        }
+    }
+    let mut spool = tempfile::tempfile()?;
+    let mut prior_name: Option<String> = None;
+    let mut summary_count = 0_u64;
+    loop {
+        let frame = connection.frame().await?;
+        match frame.message() {
+            ServerMessage::TemplateSummary { name, .. } => {
+                if prior_name
+                    .as_ref()
+                    .is_some_and(|prior| prior.as_str() >= name.as_str())
+                {
+                    return Err(ClientError::Protocol(
+                        "template summaries were not strictly ordered",
+                    ));
+                }
+                summary_count = summary_count
+                    .checked_add(1)
+                    .ok_or(ClientError::Protocol("template summary count overflowed"))?;
+                prior_name = Some(name.clone());
+                spool.write_all(&encode_server_line(&frame)?)?;
+            }
+            ServerMessage::TemplatesEnd { template_count }
+                if template_count.value() == summary_count =>
+            {
+                break;
+            }
+            ServerMessage::Error {
+                code,
+                message,
+                detail,
+            } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+            _ => {
+                return Err(ClientError::Protocol(
+                    "template list sequence or count was invalid",
+                ));
+            }
+        }
+    }
+    spool.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(spool);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        match decode_server_line(&line)?.message() {
+            ServerMessage::TemplateSummary { name, version } => {
+                output.template_summary(name, version.value())?;
+            }
+            _ => {
+                return Err(ClientError::Protocol(
+                    "template-summary spool contained a non-summary frame",
                 ));
             }
         }
@@ -2248,7 +2433,9 @@ fn write_assistant_texts(
                     selected_entry = false;
                 }
             }
-            SnapshotRecord::Turn(_) | SnapshotRecord::Content(_) => {}
+            SnapshotRecord::Turn(_)
+            | SnapshotRecord::ModelCallUsage(_)
+            | SnapshotRecord::Content(_) => {}
         }
     }
     Ok(())
@@ -2885,6 +3072,12 @@ mod tests {
                     .map_err(io::Error::other)?,
                 );
                 response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptModelCallsEnd {
+                        model_call_count: CanonicalU64::new(0),
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                response.extend_from_slice(
                     &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
                         session_id,
                         cursor: CanonicalU64::new(cursor),
@@ -3004,6 +3197,12 @@ mod tests {
                 .map_err(io::Error::other)?,
             );
             response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::TranscriptModelCallsEnd {
+                    model_call_count: CanonicalU64::new(0),
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
                 &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
                     session_id,
                     cursor: CanonicalU64::new(0),
@@ -3086,6 +3285,12 @@ mod tests {
                         accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
                         content: InputContent::new(String::from("stream the reply")),
                     },
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::TranscriptModelCallsEnd {
+                    model_call_count: CanonicalU64::new(0),
                 })?)
                 .map_err(io::Error::other)?,
             );
@@ -4250,7 +4455,7 @@ mod tests {
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert_eq!(request.version(), ProtocolVersion::Seventeen);
+            assert_eq!(request.version(), ProtocolVersion::Nineteen);
             assert_eq!(
                 request.request(),
                 &ClientRequest::SubmitInput {

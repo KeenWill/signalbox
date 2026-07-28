@@ -421,8 +421,12 @@ mod tests {
                 CODE_HOST_TOOL_NAMES[7],
                 CODE_HOST_TOOL_NAMES[8],
                 CODE_HOST_TOOL_NAMES[9],
+                CODE_HOST_TOOL_NAMES[10],
+                CODE_HOST_TOOL_NAMES[11],
+                CODE_HOST_TOOL_NAMES[12],
                 CURRENT_TIME_NAME,
                 ECHO_NAME,
+                CODE_HOST_TOOL_NAMES[13],
                 SESSION_STATUS_UPDATE_NAME,
                 WEB_FETCH_NAME,
             ]

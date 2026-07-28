@@ -18,19 +18,28 @@ code-host result redaction are verified through PR #270
 (`agent/tool-batch-tier1`). The per-turn pinning behavior at a mid-session
 defaults boundary was verified through PR #272 (`agent/mid-session-model`). The
 credential-file value narrowing and the credential-shaped code-host detail were
-verified through PR #285 (`agent/dev-instance-code-host-credential`). Invariant
-law lives in [docs/invariants.md](../invariants.md), cited here by tag.
+verified through PR #285 (`agent/dev-instance-code-host-credential`). The static
+copy-on-create session-template catalog was verified through PR #311
+(`agent/session-templates-spec`). Invariant law lives in
+[docs/invariants.md](../invariants.md), cited here by tag.
 
 ## Process configuration
 
-`signalboxd` reads exactly five deployment values from the process environment
-at startup:
+`signalboxd` reads exactly six required deployment values from the process
+environment at startup and also consults `HOME`:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
   channel is explicitly provisional; the database-credential delivery decision
   remains open (see Open edges).
 - `SIGNALBOX_CONFIG_FILE` — path to the static model/alias catalog (below).
+- `SIGNALBOX_TEMPLATE_CONFIG_FILE` — path to the static session-template catalog
+  (below).
+- `HOME` — consulted during production database configuration validation to
+  locate the default PostgreSQL password file. When a template uses a `$HOME/`
+  prompt-file reference, the environment value is additionally required to be a
+  nonempty absolute path; absence, an empty value, or a relative value is a
+  typed template-configuration failure.
 - `ANTHROPIC_API_KEY_FILE` — path to the file holding the current Anthropic API
   key value.
 - `GITHUB_TOKEN_FILE` — path to the file holding the current GitHub code-host
@@ -52,36 +61,39 @@ it, so a root named by the environment would verify the production server even
 under an explicit root certificate. The driver also falls back to libpq's
 default password file when the URL carries no password and `PGPASSFILE` is
 unset, so the same path refuses when `~/.pgpass` exists under the process home
-directory; presence alone decides and the file is never opened. With those
-closed the driver still completes an incomplete URL from outside it — an omitted
-user name from the process account, an omitted host by probing the local socket
-directories and then `localhost` — so the same path refuses a URL that states
-either nowhere the driver reads it: the authority, or the `user`, `host`, and
-`hostaddr` query parameters. Port and database name stay with the driver and the
-server, which derive them from the URL alone: an omitted port is the fixed 5432,
-and an omitted database name is the user name the URL states. The refusal names
-the offending channel and never its contents, and it happens before any database
-contact. A deployment carries every connection parameter in the URL. The
-separate local test connection path is unchanged and keeps SQLx's behavior; it
-is a development and test channel by intent — the integration suites and
-`signalbox-debug`, which reads its own `SIGNALBOX_DEBUG_DATABASE_URL` — and no
-check confines the URL it is given to a local cluster, so the refusals above are
-what stand between a production cluster and ambient configuration, not that
-path's name.
+directory; presence alone decides and the file is never opened. Locating that
+default consults `HOME` even when every template prompt is inline or
+config-relative; an earlier ambient-variable refusal can end validation before
+that lookup. With those closed the driver still completes an incomplete URL from
+outside it — an omitted user name from the process account, an omitted host by
+probing the local socket directories and then `localhost` — so the same path
+refuses a URL that states either nowhere the driver reads it: the authority, or
+the `user`, `host`, and `hostaddr` query parameters. Port and database name stay
+with the driver and the server, which derive them from the URL alone: an omitted
+port is the fixed 5432, and an omitted database name is the user name the URL
+states. The refusal names the offending channel and never its contents, and it
+happens before any database contact. A deployment carries every connection
+parameter in the URL. The separate local test connection path is unchanged and
+keeps SQLx's behavior; it is a development and test channel by intent — the
+integration suites and `signalbox-debug`, which reads its own
+`SIGNALBOX_DEBUG_DATABASE_URL` — and no check confines the URL it is given to a
+local cluster, so the refusals above are what stand between a production cluster
+and ambient configuration, not that path's name.
 
-A missing or empty value, an unreadable or invalid catalog file, or a failed
-Anthropic or GitHub transport construction fails startup at the `Configuration`
-phase, before any database contact. Startup and shutdown logs carry the phase,
-an operator failure class, and small typed fields where present (session and
-turn ids, recovered-turn count, grace-window seconds) — never configuration
-values, paths, or URLs. The typed configuration error does not survive to the
-log: `run_hub` collapses every catalog-parse and adapter-construction variant
-(and likewise connection and migration errors) into a generic `Infrastructure`
-class carrying only its phase, so an operator cannot distinguish an unreadable
-catalog from an unknown field, bad version, or invalid limit (see Open edges).
-The three file paths are accepted without I/O at configuration time; only the
-catalog file is actually read during startup. Neither credential file is read at
-startup (see credential lifecycle below).
+A missing or empty required value, an unreadable or invalid model or template
+catalog, an invalid or unreadable referenced prompt file, or a failed Anthropic
+or GitHub transport construction fails startup at the `Configuration` phase,
+before any database contact. Startup and shutdown logs carry the phase, an
+operator failure class, and small typed fields where present (session and turn
+ids, recovered-turn count, grace-window seconds) — never configuration values,
+paths, or URLs. The typed configuration error does not survive to the log:
+`run_hub` collapses every catalog-parse and adapter-construction variant (and
+likewise connection and migration errors) into a generic `Infrastructure` class
+carrying only its phase, so an operator cannot distinguish an unreadable catalog
+from an unknown field, bad version, or invalid limit (see Open edges). The five
+deployment paths are accepted without I/O at environment parsing time; both
+catalogs and every template prompt file are read during startup. Neither
+credential file is read at startup (see credential lifecycle below).
 
 The deployed daemon supplies no Anthropic endpoint or timeout knob; it
 constructs the adapter with its defaults. The
@@ -153,6 +165,80 @@ the catalog now resolves that selection to a different target. The startup-scan
 restart path instead rebuilds its target catalog from the stored calls
 themselves, deliberately not from configuration — part of why recovery of
 acknowledged work is configuration-independent (INV-034).
+
+## The static session-template catalog
+
+The file named by `SIGNALBOX_TEMPLATE_CONFIG_FILE` is a separate versioned TOML
+document (`config/session-templates.example.toml` is the checked-in example). It
+is read once at startup, after the model catalog, and never reread within a
+process. Its root requires exactly `version = 1` and an optional array of
+`[[templates]]` tables; a version-only document is a valid empty catalog.
+Unknown root and table fields, a mistyped templates value, duplicate names, and
+every invalid field fail as precise sanitized
+`SessionTemplateConfigurationError` variants without including file paths,
+prompt content, or document text.
+
+Each template table carries exactly:
+
+- `name` — 1 through 128 ASCII bytes matching `[a-z0-9][a-z0-9._-]*`, unique in
+  the document;
+- `version` — a positive TOML integer bundle version, from 1 through
+  9,223,372,036,854,775,807 inclusive;
+- exactly one of `model` or `alias` — the canonical UUID of a direct selection
+  or alias present in the already-validated model catalog;
+- exactly one of `system_prompt` or `system_prompt_file`; and
+- `dangerous_tool_auto_approval` — the required Boolean encoding of the complete
+  `Disabled`/`ApproveAll` blanket.
+
+An inline prompt is the exact TOML string value. A prompt-file reference is
+either a relative path resolved from the template document's parent directory,
+or `$HOME/` followed by a relative suffix resolved from the process's `HOME` at
+load. Every component after either root must be normal and nonempty: absolute
+paths, `.` or `..`, another `$`, any other variable spelling, and a missing,
+empty, or non-absolute `HOME` for a `$HOME/` reference fail typed validation.
+The target must be a regular file containing readable UTF-8, and its complete
+contents must construct the same nonempty, U+0000-free, 1,048,576-byte-bounded
+`SessionSystemPrompt` as an inline value. The loader reads at most 1,048,577
+bytes even if the file changes during loading; a file already larger than the
+bound is rejected before its contents are read. There is no newline trimming or
+interpolation.
+
+One valid table becomes an immutable resolved bundle containing the exact model
+request, system prompt, and dangerous-tool blanket. Its content digest is
+domain-separated SHA-256 over length-framed canonical values. Each frame is an
+unsigned 64-bit big-endian byte length followed by that many exact bytes. The
+frames, in order, are: ASCII `signalbox/session-template/content-digest/v1`; the
+template version as eight unsigned big-endian bytes; ASCII `direct` or `alias`;
+the selected UUID as its 16 network-order bytes; ASCII `disabled` or
+`approve_all`; and the exact UTF-8 prompt bytes. The name and source form are
+excluded: an inline and file-backed prompt with the same version and bundle have
+the same digest, while changing any copied value or the template version changes
+it. The stable vector for version 7, alias
+`30000000-0000-4000-8000-000000000003`, `ApproveAll`, and prompt
+`Review the change and report concrete findings.` is hexadecimal
+`00c08275577e73f1565716b5c886861a0f19ea4f2c9cb9e8f93034d030b9796d`. The daemon
+exposes only sorted name/version summaries to clients; clients never receive
+prompt text or parse this file.
+
+Creation by template name first consults the owner-global durable-command
+registry by command identity. An existing create-session claim is reconstituted
+and compared using the caller-supplied creation mode and template name before
+the current catalog is consulted; an equal replay returns its stored session,
+including when that name is absent or changed in the current catalog. Only an
+unclaimed command identity resolves against this process-lifetime catalog and
+copies the complete bundle into the session's immutable defaults version one.
+The session separately records the template name and content digest; it retains
+no live catalog reference. An edit therefore requires a daemon restart and
+affects only creation commands first handled under the new catalog. Equal replay
+of an already handled command and template name returns the original copied
+session rather than comparing against the current bundle (INV-047).
+
+Why: a separate file lets operators change the reusable creation surface without
+mixing it into immutable model-identity definitions, while one load boundary
+keeps validation fail-closed. Config-relative paths make a catalog directory
+portable; explicit `$HOME/` supports machine-local long prompts without
+committing a machine's absolute home path. Copying preserves ordinary defaults
+epoch authority and makes configuration edits forward-only.
 
 ## Model-selection validation
 

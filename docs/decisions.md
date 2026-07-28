@@ -38,14 +38,17 @@ behavior.
 boundary offered no read that let a native client discover the aliases the
 running daemon would accept. Bundling UUIDs in the app or deriving them from
 existing sessions would drift from deployment configuration and could submit an
-unknown or retired alias. Version seventeen is allocated to the open imported
-conversation inspection stack.
+unknown or retired alias. This surface originally reserved protocol version
+eighteen; the session-template surface shipped that number first while this one
+was still in flight, and the concurrent context-compaction protocol stack
+separately claimed twenty, also still in flight.
 
-**Decision.** Protocol version eighteen adds the read-only `list_model_aliases`
-sequence. The daemon emits every configured alias and its current
-direct-selection target in alias-identity order with an exact terminal count.
-This is current deployment configuration, not durable session state and not a
-provider catalog: creation still records an alias request and the existing
+**Decision.** Protocol version twenty-one adds the read-only
+`list_model_aliases` sequence, the next number free of both already-shipped and
+concurrently in-flight claims. The daemon emits every configured alias and its
+current direct-selection target in alias-identity order with an exact terminal
+count. This is current deployment configuration, not durable session state and
+not a provider catalog: creation still records an alias request and the existing
 acceptance path freezes its meaning. Deployment configuration and the protocol
 sequence admit at most 10,000 aliases; the native app enforces that same bound
 and offers only returned aliases in its creation picker.
@@ -60,6 +63,189 @@ deployment configuration impose unbounded client retention.
 **Affects.** `crates/process-protocol`, `apps/signalboxd` configuration and
 process serving, [process protocol](spec/process-protocol.md), and the native
 session-creation client.
+
+## 2026-07-28 — Expose the dev-instance client from every shell directory
+
+**Context.** The first hands-on use of
+[the recorded dev-instance choice](#2026-07-26--dev-instance-under-devenvs-native-process-manager)
+still required a developer to derive the managed socket path and spell the
+workspace Cargo invocation. Its credential provisioning examples also wrote
+directly to the live files, so a failed producer or editor could truncate a
+previously usable credential.
+
+**Decision.** The devenv shell exports the daemon's shared socket path as
+`SIGNALBOX_SOCKET_PATH` and provides a `signalbox` script that runs the
+working-tree client through the workspace manifest, independent of the caller's
+current directory. Cargo remains responsible for rebuilding changed sources.
+Credential provisioning stages an owner-only temporary beside each destination
+and replaces the live file only after `gh auth token` or the editor succeeds;
+editing begins from the existing Anthropic file when one is present.
+
+**Rejected alternatives.** Requiring `--socket` and a hand-derived runtime path
+keeps routine client use needlessly checkout-specific. Installing a built
+artifact can silently lag working-tree changes. Direct redirection or editing of
+a live credential exposes a partial or empty file when its producer fails.
+
+**Affects.** `devenv.nix` shell ergonomics and the README's dev-instance
+operational guidance only; daemon, domain, persistence, and protocol behavior do
+not change.
+
+## 2026-07-28 — Fail closed at the Codex CLI's declared input and capability boundaries
+
+**Context.** The Codex adapter projected JSONL through serde's last-value-wins
+object representation, so repeated provider members could overwrite evidence
+before classification. Its specification also claimed descendant-lifetime
+supervision beyond the process group the adapter can control. Finally, the
+invocation disabled three CLI features while prompt prose asked the model not to
+use other built-ins; the pinned CLI exposes a larger, evolving feature registry.
+Ambiguous provider input and undeclared capabilities both need mechanical
+boundaries, while a process can deliberately leave its inherited group.
+
+**Decision.** Repeated JSON object members in either the JSONL event or its
+escaped response envelope are stream-protocol violations; additive tolerance
+covers unknown members, never repeated ones. A duplicate is ambiguous by
+construction, and ambiguous provider input is refused rather than resolved by
+choosing a winner, matching the native client's repeated-member rule. Adapter
+supervision contains exactly the process group it creates; host isolation, owned
+by the runner sandbox in build-out, contains a descendant that deliberately
+leaves that group. Every feature in the pinned CLI inventory is classified.
+Features that can add a model-visible tool, external interaction, instruction
+source, or delegated execution outside the declared tools are explicitly
+disabled, with independent agent, ambient skill-instruction, MCP-server, and
+web-search controls. The pre-spend version smoke compares the complete name,
+stage, and default inventory so a version bump cannot add an unclassified
+feature, and verifies the skill control against an isolated synthetic skill that
+the pinned CLI otherwise injects. Prompt prose is not a capability boundary.
+
+**Rejected alternatives.** Keeping serde's last or first occurrence would
+silently choose among contradictory evidence. Claiming process-tree containment
+would promise control the adapter does not possess; adding host isolation inside
+this adapter would cross the runner boundary. Prompt-only restrictions, or
+testing only today's enabled features, would let a CLI default or version bump
+widen the tool surface without review.
+
+**Affects.** `crates/model-runtime-codex-cli/src/event.rs`,
+`crates/model-runtime-codex-cli/src/runtime.rs`, its process and compatibility
+tests, and [runtime-substrate](spec/runtime-substrate.md) (Codex CLI provider
+adapter and version smoke). The runner sandbox remains the owner of stronger
+host containment.
+
+## 2026-07-28 — Bound the Codex compatibility-smoke login
+
+**Context.** The gated compatibility smoke bounded its build, version probe,
+model exchange, and whole job, but its non-interactive CLI login could consume
+the entire twenty-minute job slot if the launcher or a descendant hung.
+
+**Decision.** Give login thirty seconds, then send `TERM` to the command's
+process group and allow five seconds before `KILL`. A managed shell remains live
+through that grace even when the direct CLI launcher exits on `TERM`, so the
+`KILL` phase still reaches surviving group members. The key remains stdin-only,
+absent from the timeout and CLI child environments and never placed in argv.
+
+**Rejected alternatives.** Relying only on the job timeout would hold the sole
+smoke concurrency slot too long. Reusing the four-minute model-exchange bound
+would conflate a local authentication setup command with a billable provider
+turn. Killing only the direct launcher could strand its native descendant.
+
+**Affects.** `.github/workflows/codex-smoke.yml` and the operational duration of
+the non-merge-gating, manually dispatched compatibility smoke.
+
+## 2026-07-28 — Load versioned session templates and copy them at creation
+
+**Context.** Session creation can already set a model selection and one bounded
+system prompt, while the dangerous-tool blanket is part of the same immutable
+defaults epoch. Repeating that bundle at each call site makes long prompts
+awkward and gives clients configuration-file responsibilities. The owner
+commissioned a deliberately narrow first template slice and fixed copy-on-create
+as its provenance law.
+
+**Decision.** `SIGNALBOX_TEMPLATE_CONFIG_FILE` names a separate version-one TOML
+document loaded once beside the model catalog at daemon startup. Each uniquely
+named template carries a positive version, exactly one configured direct model
+or alias, exactly one inline prompt or prompt-file reference, and the complete
+dangerous-tool blanket. Prompt files are resolved and validated at load; paths
+are either relative to the template file or begin `$HOME/`, and every other
+absolute, parent-traversing, or variable-bearing spelling is rejected. The
+content digest is domain-separated SHA-256 over the template version and exact
+resolved bundle, not its source spelling.
+
+Protocol version eighteen adds daemon-side creation by template name and a
+read-only name/version listing. Creation copies the resolved bundle into
+defaults version one and records template name plus content digest on the
+session. Equal replay is keyed by the original command and template name and
+returns the copied result even after configuration changes; a new command sees
+the new bundle. The terminal's `create --template NAME` is mutually exclusive
+with `--model`, `--alias`, and `--system-prompt-file`; explicit overrides are
+excluded so one invocation has one complete source of defaults.
+
+**Rejected alternatives.** Client-side parsing would duplicate daemon validation
+and expose deployment files. Explicit flags overriding a template would create a
+composition algebra and ambiguous digest meaning. Storing a template reference
+for later lookup would let edits rewrite existing sessions. Durable template
+objects and CRUD are deferred rather than hidden behind the static file.
+
+**Affects.** Session configuration and creation provenance, process protocol
+version eighteen, terminal creation and template listing, migration
+`202607300101_session_template_provenance.sql`,
+[configuration and credentials](spec/configuration-and-credentials.md),
+[sessions and transcript](spec/sessions-and-transcript.md), and
+[process protocol](spec/process-protocol.md).
+
+## 2026-07-27 — Retain provider token usage as evidence, not cost
+
+**Context.** Model runtimes already parse independently optional input, output,
+cache-creation input, and cache-read input token counts from provider reports.
+Those facts ended at the runtime boundary, so neither durable model-call history
+nor the transcript client could state the token evidence for a turn or session.
+Currency prices vary over time and by contract, while provider omissions and a
+reported zero have different meanings.
+
+**Decision.** Store each provider-reported token field verbatim on the terminal
+model-call record, preserving null as unreported and zero as reported zero. The
+version-nineteen transcript projection exposes one record for every terminal
+call. The `transcript` client computes labeled per-turn and session token
+subtotals with per-field reported-call coverage for presentation only. Neither
+storage nor the client derives currency cost, fills omissions, or corrects a
+provider value.
+
+**Rejected alternatives.** Persisting only client-computed totals would discard
+per-call evidence and omission coverage. Treating absent fields as zero would
+invent provider claims. Persisting currency cost would turn changing external
+prices into misleading historical evidence. Adding a separate `usage` command
+would duplicate transcript session selection and its validated snapshot path.
+
+**Affects.** Model-call terminal observation mapping and persistence, process
+transcript version nineteen, `signalbox transcript`, and the model-call,
+persistence, and process-protocol specifications.
+
+## 2026-07-27 — Assign deterministic review bookkeeping to code-host tools
+
+**Context.** Review sessions repeatedly spend model context reconstructing the
+same mechanical facts: current-head reviewer coverage, usage-limit starvation,
+thread disposition and resolution, buried escalation markers, CI state, and
+stack ancestry. The owner recorded the direction that language models perform
+judgment while tools perform slog. Existing code-host tools already provide the
+bounded typed transport and external-effect policy for authenticated GitHub
+reads.
+
+**Decision.** Add four read-only `Auto` / `ExternalEffect` tools to that
+boundary. Convergence state, stack state, and thread inventory return exact
+bounded code-host evidence with explicit truncation and continuation cursors;
+the review gate purely composes those evidence shapes into stable blockers for
+requesting a review wave or declaring convergence. Reviewer coverage scans both
+review bodies and issue comments in timestamp order, and a usage-limit response
+is starvation rather than a verdict. Sessions decide how to act on the results;
+this change adds no daemon workflow automation.
+
+**Rejected alternatives.** Keeping the calculations in prompts would continue to
+consume model context and permit session-to-session drift. Automating review
+workflow transitions in the daemon would move policy and owner gates into this
+slice. Returning unbounded or silently capped lists would make a clean verdict
+indistinguishable from incomplete evidence.
+
+**Affects.** The Tier 1 code-host catalog and GitHub adapter, typed tool
+results, golden tool schemas, daemon catalog wiring, and offline tool-loop
+tests.
 
 ## 2026-07-27 — Drop empty thinking parts instead of failing completions closed
 

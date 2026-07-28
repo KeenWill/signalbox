@@ -529,11 +529,19 @@ Owns: frontier machinery, compaction entries, new spec section. Collides-with:
 turn machinery. The frontier-snapshot substrate is ready. Never expose the state
 before the semantics.
 
-## Templates [blocked-on: system-prompt configuration category] [size: M]
+## Templates [delivered by session-templates stack] [size: M]
 
-Owns: template store, session-creation additions. Collides-with:
-session-creation surfaces. Versioned, derivable prompt/tool/model presets; the
-versioned-defaults machinery is the in-repo analog.
+Owns: static template configuration and session-creation additions.
+Collides-with: session-creation surfaces. Version one is the owner-commissioned
+named, versioned, copy-on-create bundle of model selection, system prompt, and
+dangerous-tool blanket.
+
+Follow-up owner direction, 2026-07-28 (deferred under
+[template storage and authoring surfaces](../open-questions.md#template-storage-and-authoring)):
+
+- durable database template objects with protocol CRUD;
+- agent tools for reading and editing templates so agents can help the owner
+  author them.
 
 ## Goal mode in platform [blocked-on: tool loop; owner design pass] [size: L-XL]
 

@@ -60,7 +60,16 @@ pub const INPUT_DELIVERY_PROTOCOL_VERSION: u64 = 13;
 /// The unified conversation-listing protocol version.
 ///
 /// Version thirteen is allocated by input delivery; versions fourteen and
-/// fifteen remain reserved by concurrent protocol work.
+/// fifteen were reserved by concurrent protocol work that had not yet shipped
+/// when this version claimed sixteen. That establishes a standing convention:
+/// once any version ships, every lower number still unshipped is retired
+/// permanently, not merely skipped, because admitting it later would
+/// retroactively widen an already-closed vocabulary underneath a version
+/// already in use (admission is numeric, version >= minimum, and a closed
+/// enum decodes a version's frames against exactly its own vocabulary, never
+/// a gap's). Fourteen and fifteen are retired under this rule and are never
+/// admitted; a later surface always claims the next number above the
+/// highest already shipped, never a lower gap.
 pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
 
 /// The imported-conversation inspection protocol version.
@@ -68,12 +77,36 @@ pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
 /// This surface reserved fifteen while sixteen was still unclaimed, but sixteen
 /// shipped first. Numbering the inspection request below an already-closed
 /// vocabulary would retroactively admit it in version-sixteen frames, so this
-/// version sits above sixteen instead. Fourteen and fifteen remain reserved and
-/// unadmitted here.
+/// version sits above sixteen instead, per the retirement convention sixteen's
+/// comment states. Fourteen and fifteen remain retired and unadmitted here.
 pub const IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION: u64 = 17;
 
+/// The daemon-resolved session-template protocol version.
+pub const SESSION_TEMPLATE_PROTOCOL_VERSION: u64 = 18;
+
+/// The provider-reported model-call token-usage protocol version.
+///
+/// This surface originally reserved fourteen, but versions sixteen, seventeen,
+/// and eighteen all shipped first while it was still in flight. Numbering it
+/// below their already-closed vocabularies would retroactively admit
+/// `transcript_model_call_usage` frames under those versions, so this version
+/// sits above eighteen instead, per the retirement convention sixteen's
+/// comment states. Fourteen is retired under that convention alongside
+/// fifteen and is never admitted.
+pub const MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION: u64 = 19;
+
 /// The deployment model-alias catalog read protocol version.
-pub const MODEL_ALIAS_CATALOG_PROTOCOL_VERSION: u64 = 18;
+///
+/// This surface originally reserved eighteen, but the session-template surface
+/// shipped that number first while this one was still in flight. Version
+/// twenty is separately allocated to the concurrent context-compaction
+/// protocol stack, also still in flight. Numbering this request under either
+/// already-spoken-for number would collide with a sibling stack's closed
+/// vocabulary rather than the version-sixteen-style retroactive widening the
+/// retirement convention above guards against, but the same rule of taking
+/// the next genuinely free number applies, so this version sits above both
+/// instead.
+pub const MODEL_ALIAS_CATALOG_PROTOCOL_VERSION: u64 = 21;
 
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -108,8 +141,12 @@ pub enum ProtocolVersion {
     Sixteen,
     /// Imported-conversation inspection vocabulary.
     Seventeen,
-    /// Deployment model-alias catalog vocabulary.
+    /// Daemon-resolved session-template creation and listing vocabulary.
     Eighteen,
+    /// Provider-reported model-call token-usage vocabulary.
+    Nineteen,
+    /// Deployment model-alias catalog vocabulary.
+    TwentyOne,
 }
 
 impl ProtocolVersion {
@@ -131,7 +168,9 @@ impl ProtocolVersion {
             Self::Thirteen => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::Sixteen => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
             Self::Seventeen => IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
-            Self::Eighteen => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
+            Self::Eighteen => SESSION_TEMPLATE_PROTOCOL_VERSION,
+            Self::Nineteen => MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
+            Self::TwentyOne => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
         }
     }
 
@@ -152,7 +191,9 @@ impl ProtocolVersion {
             INPUT_DELIVERY_PROTOCOL_VERSION => Some(Self::Thirteen),
             UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION => Some(Self::Sixteen),
             IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION => Some(Self::Seventeen),
-            MODEL_ALIAS_CATALOG_PROTOCOL_VERSION => Some(Self::Eighteen),
+            SESSION_TEMPLATE_PROTOCOL_VERSION => Some(Self::Eighteen),
+            MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION => Some(Self::Nineteen),
+            MODEL_ALIAS_CATALOG_PROTOCOL_VERSION => Some(Self::TwentyOne),
             _ => None,
         }
     }
@@ -715,6 +756,28 @@ impl ContentFragment {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Provider-reported token fields for one terminal model call.
+///
+/// Every field is required on the wire but independently nullable. A null is
+/// unreported evidence; a reported zero is encoded as the canonical string
+/// `"0"`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCallTokenUsage {
+    /// Provider-reported input-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub input_tokens: Option<CanonicalU64>,
+    /// Provider-reported output-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub output_tokens: Option<CanonicalU64>,
+    /// Provider-reported cache-creation input-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub cache_creation_input_tokens: Option<CanonicalU64>,
+    /// Provider-reported cache-read input-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub cache_read_input_tokens: Option<CanonicalU64>,
 }
 
 impl TryFrom<String> for ContentFragment {
@@ -1537,6 +1600,22 @@ fn validate_imported_display_title(title: &str) -> Result<(), FrameValidationErr
     Ok(())
 }
 
+fn validate_session_template_name(value: &str) -> Result<(), FrameValidationError> {
+    let first_is_admitted = value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+    if value.len() > 128
+        || !first_is_admitted
+        || value.bytes().any(|byte| {
+            !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && !b"._-".contains(&byte)
+        })
+    {
+        return Err(FrameValidationError::TemplateShape);
+    }
+    Ok(())
+}
+
 /// Closed versioned request family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -1552,6 +1631,15 @@ pub enum ClientRequest {
         #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
         system_prompt: SystemPromptMember,
     },
+    /// Create an owner-initiated session from one daemon-held template.
+    CreateSessionFromTemplate {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Validated static template name.
+        template_name: String,
+    },
+    /// List available static templates by name and version.
+    ListTemplates {},
     /// List current sessions.
     ListSessions {},
     /// Submit owner input with an admitted delivery treatment.
@@ -1853,6 +1941,9 @@ impl ClientRequest {
             | Self::ReadReviewFinding { .. }
             | Self::ListReviewFindings { .. } => REVIEW_WORKFLOW_PROTOCOL_VERSION,
             Self::StopTurn { .. } | Self::DecideToolRequest { .. } => TURN_CONTROL_PROTOCOL_VERSION,
+            Self::CreateSessionFromTemplate { .. } | Self::ListTemplates {} => {
+                SESSION_TEMPLATE_PROTOCOL_VERSION
+            }
             Self::ListConversations { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
             Self::ListModelAliases {} => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
             Self::ReadSessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
@@ -1938,6 +2029,9 @@ impl ClientRequest {
             if !(1..=100).contains(&page_size.value()) {
                 return Err(FrameValidationError::ConversationListShape);
             }
+        }
+        if let Self::CreateSessionFromTemplate { template_name, .. } = self {
+            validate_session_template_name(template_name)?;
         }
         Ok(())
     }
@@ -3175,6 +3269,20 @@ pub enum ServerMessage {
         /// Number of preceding summaries.
         session_count: CanonicalU64,
     },
+    /// Begins the available-template sequence.
+    TemplatesStart {},
+    /// One available static template summary.
+    TemplateSummary {
+        /// Validated template name.
+        name: String,
+        /// Positive owner-assigned bundle version.
+        version: CanonicalU64,
+    },
+    /// Completes the available-template sequence.
+    TemplatesEnd {
+        /// Number of preceding summaries.
+        template_count: CanonicalU64,
+    },
     /// Begins one bounded metadata-summary page.
     SessionMetadataPageStart {},
     /// One current session metadata summary.
@@ -3351,6 +3459,22 @@ pub enum ServerMessage {
         /// Exact lifecycle state.
         state: TurnState,
     },
+    /// Exact provider-reported token fields for one terminal model call.
+    TranscriptModelCallUsage {
+        /// Zero-based model-call evidence index in this snapshot.
+        model_call_index: CanonicalU64,
+        /// Turn that owns the terminal model call.
+        turn_id: CanonicalUuid,
+        /// Immutable model-call identity.
+        model_call_id: CanonicalUuid,
+        /// Exact independently nullable provider fields.
+        usage: ModelCallTokenUsage,
+    },
+    /// Completes the model-call evidence section of one transcript snapshot.
+    TranscriptModelCallsEnd {
+        /// Number of preceding model-call usage messages.
+        model_call_count: CanonicalU64,
+    },
     /// One non-text frontier member.
     TranscriptEntry {
         /// Zero-based frontier member index.
@@ -3515,6 +3639,9 @@ impl ServerMessage {
     pub const fn minimum_protocol_version(&self) -> u64 {
         match self {
             Self::TranscriptTurn { state, .. } => state.minimum_protocol_version(),
+            Self::TranscriptModelCallUsage { .. } | Self::TranscriptModelCallsEnd { .. } => {
+                MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION
+            }
             Self::TranscriptEntry { entry, .. } => entry.minimum_protocol_version(),
             Self::TranscriptTextEntry { entry, .. } => entry.minimum_protocol_version(),
             Self::SessionEvent { event, .. } => event.minimum_protocol_version(),
@@ -3548,6 +3675,9 @@ impl ServerMessage {
                 IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
             }
             Self::ToolRequestDecided { .. } => TURN_CONTROL_PROTOCOL_VERSION,
+            Self::TemplatesStart {} | Self::TemplateSummary { .. } | Self::TemplatesEnd { .. } => {
+                SESSION_TEMPLATE_PROTOCOL_VERSION
+            }
             Self::ConversationPageStart {}
             | Self::ConversationSummary { .. }
             | Self::ConversationPageEnd { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
@@ -3608,6 +3738,12 @@ impl ServerMessage {
                 }
             }
             Self::ConversationSummary { conversation } => conversation.validate()?,
+            Self::TemplateSummary { name, version } => {
+                validate_session_template_name(name)?;
+                if version.value() == 0 {
+                    return Err(FrameValidationError::TemplateShape);
+                }
+            }
             Self::ConversationPageEnd {
                 conversation_count,
                 next_after,
@@ -3823,6 +3959,8 @@ pub enum FrameValidationError {
     ImportedFrontierRangeShape,
     /// A submit-input delivery carried forbidden or missing correlated fields.
     InputDeliveryShape,
+    /// A template name or positive version carried an invalid shape.
+    TemplateShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -3848,6 +3986,7 @@ impl fmt::Display for FrameValidationError {
             Self::ImportedTextPreviewShape => "imported text preview shape is inconsistent",
             Self::ImportedFrontierRangeShape => "imported frontier rejection range is inconsistent",
             Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
+            Self::TemplateShape => "session-template frame shape is inconsistent",
         })
     }
 }
@@ -3901,7 +4040,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1 through 13, 16, 17, and 18",
+                "process-protocol version is unsupported; supported versions are 1 through 13, 16 through 19, and 21",
             ),
         }
     }
@@ -4127,6 +4266,8 @@ fn probe_header(
             | "16"
             | "17"
             | "18"
+            | "19"
+            | "21"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -4246,6 +4387,8 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "16" => Some(ProtocolVersion::Sixteen),
         "17" => Some(ProtocolVersion::Seventeen),
         "18" => Some(ProtocolVersion::Eighteen),
+        "19" => Some(ProtocolVersion::Nineteen),
+        "21" => Some(ProtocolVersion::TwentyOne),
         _ => None,
     }
 }
@@ -4299,12 +4442,13 @@ mod tests {
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
         MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
-        MODEL_ALIAS_CATALOG_PROTOCOL_VERSION, MetadataActor, MetadataLastWriter,
-        ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
-        RejectionDetail, RequestId, ReviewTargetSubject, SESSION_METADATA_PROTOCOL_VERSION,
-        SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, ServerFrame, ServerMessage, SessionEvent,
-        SessionMetadata, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TurnState,
+        MODEL_ALIAS_CATALOG_PROTOCOL_VERSION, MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
+        MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState,
+        ModelCallTokenUsage, ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail,
+        RequestId, ReviewTargetSubject, SESSION_METADATA_PROTOCOL_VERSION,
+        SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, SESSION_TEMPLATE_PROTOCOL_VERSION, ServerFrame,
+        ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
         UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION, decode_client_line, decode_server_line,
         encode_client_line, encode_server_line,
     };
@@ -4388,7 +4532,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1 through 13, 16, 17, and 18")
+                .contains("supported versions are 1 through 13, 16 through 19, and 21")
         );
     }
 
@@ -5507,6 +5651,50 @@ mod tests {
         Ok(())
     }
 
+    /// INV-033: version nineteen adds exact required-nullable token evidence
+    /// without admitting it in the preceding retained vocabulary.
+    #[test]
+    fn inv033_version_nineteen_model_call_usage_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let message = ServerMessage::TranscriptModelCallUsage {
+            model_call_index: CanonicalU64::new(0),
+            turn_id: uuid(2),
+            model_call_id: uuid(3),
+            usage: ModelCallTokenUsage {
+                input_tokens: Some(CanonicalU64::new(10)),
+                output_tokens: Some(CanonicalU64::new(0)),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(CanonicalU64::new(4)),
+            },
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::Twelve, request_id, message.clone()),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+
+        let frame =
+            ServerFrame::try_new_for_version(ProtocolVersion::Nineteen, request_id, message)?;
+        let encoded = encode_server_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            format!(
+                "{{\"version\":{MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION},\"request_id\":\"1\",\"message\":{{\"type\":\"transcript_model_call_usage\",\"model_call_index\":\"0\",\"turn_id\":\"00000000-0000-0000-0000-000000000002\",\"model_call_id\":\"00000000-0000-0000-0000-000000000003\",\"usage\":{{\"input_tokens\":\"10\",\"output_tokens\":\"0\",\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":\"4\"}}}}}}\n"
+            )
+        );
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn version_nineteen_usage_rejects_an_omitted_evidence_field() {
+        let error = decode_server_line(&line(
+            r#"{"version":19,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null}}}"#,
+        ))
+        .expect_err("required-nullable evidence fields cannot be omitted");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
+    }
+
     /// INV-033: a version-ten imported-frontier request rejects position zero.
     #[test]
     fn inv033_version_ten_imported_frontier_rejects_zero_position()
@@ -6473,11 +6661,103 @@ mod tests {
         assert!(SystemPromptText::try_new("a\u{0}b".to_owned()).is_err());
     }
 
-    /// INV-033: the admitted version set is closed exactly at one through
-    /// thirteen plus sixteen, seventeen, and eighteen; fourteen and fifteen
-    /// remain reserved by concurrent protocol stacks and are not admitted here.
+    /// INV-033 / INV-047: version eighteen gives template creation and listing
+    /// exact closed request and response shapes.
     #[test]
-    fn inv033_versions_thirteen_sixteen_seventeen_and_eighteen_complete_the_admitted_set() {
+    fn inv033_inv047_version_eighteen_template_frames_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let create = ClientFrame::try_new_for_version(
+            ProtocolVersion::Eighteen,
+            request(1)?,
+            ClientRequest::CreateSessionFromTemplate {
+                command_id: command(2)?,
+                template_name: "reviewer".to_owned(),
+            },
+        )?;
+        let encoded_create = encode_client_line(&create)?;
+        assert_eq!(
+            String::from_utf8(encoded_create.clone())?,
+            r#"{"version":18,"request_id":"1","request":{"type":"create_session_from_template","command_id":"00000000-0000-0000-0000-000000000002","template_name":"reviewer"}}
+"#
+        );
+        assert_eq!(decode_client_line(&encoded_create)?, create);
+
+        let list = ClientFrame::try_new_for_version(
+            ProtocolVersion::Eighteen,
+            request(2)?,
+            ClientRequest::ListTemplates {},
+        )?;
+        let encoded_list = encode_client_line(&list)?;
+        assert_eq!(
+            String::from_utf8(encoded_list.clone())?,
+            r#"{"version":18,"request_id":"2","request":{"type":"list_templates"}}
+"#
+        );
+        assert_eq!(decode_client_line(&encoded_list)?, list);
+
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::TemplatesStart {},
+            r#"{"type":"templates_start"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::TemplateSummary {
+                name: "reviewer".to_owned(),
+                version: CanonicalU64::new(7),
+            },
+            r#"{"type":"template_summary","name":"reviewer","version":"7"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::TemplatesEnd {
+                template_count: CanonicalU64::new(1),
+            },
+            r#"{"type":"templates_end","template_count":"1"}"#,
+        )?;
+        Ok(())
+    }
+
+    /// INV-033: template vocabulary is rejected below eighteen and invalid
+    /// names or versions cannot enter admitted frames.
+    #[test]
+    fn inv033_template_frames_require_version_eighteen_and_valid_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_client_malformed(
+            r#"{"version":16,"request_id":"1","request":{"type":"list_templates"}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":18,"request_id":"1","request":{"type":"create_session_from_template","command_id":"00000000-0000-0000-0000-000000000002","template_name":"Reviewer"}}"#,
+        );
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::Sixteen,
+                request(1)?,
+                ServerMessage::TemplatesStart {},
+            )
+            .expect_err("version sixteen must reject template messages"),
+            FrameValidationError::MessageRequiresNewerVersion
+        );
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::Eighteen,
+                request(1)?,
+                ServerMessage::TemplateSummary {
+                    name: "reviewer".to_owned(),
+                    version: CanonicalU64::new(0),
+                },
+            )
+            .expect_err("zero template version is rejected"),
+            FrameValidationError::TemplateShape
+        );
+        Ok(())
+    }
+
+    /// INV-033: the admitted set is one through thirteen, sixteen through
+    /// nineteen, and twenty-one; fourteen, fifteen, and twenty remain retired
+    /// or reserved and unsupported here.
+    #[test]
+    fn inv033_version_twenty_one_completes_the_admitted_set() {
         assert_eq!(
             ProtocolVersion::Nine.as_u64(),
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
@@ -6493,6 +6773,14 @@ mod tests {
         assert_eq!(
             ProtocolVersion::Sixteen.as_u64(),
             UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            ProtocolVersion::Eighteen.as_u64(),
+            SESSION_TEMPLATE_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            ProtocolVersion::Nineteen.as_u64(),
+            MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION
         );
         assert_eq!(ProtocolVersion::from_u64(8), Some(ProtocolVersion::Eight));
         assert_eq!(ProtocolVersion::from_u64(9), Some(ProtocolVersion::Nine));
@@ -6517,23 +6805,37 @@ mod tests {
             ProtocolVersion::from_u64(18),
             Some(ProtocolVersion::Eighteen)
         );
+        assert_eq!(
+            ProtocolVersion::from_u64(19),
+            Some(ProtocolVersion::Nineteen)
+        );
+        assert_eq!(ProtocolVersion::from_u64(20), None);
+        assert_eq!(
+            ProtocolVersion::TwentyOne.as_u64(),
+            MODEL_ALIAS_CATALOG_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            ProtocolVersion::from_u64(21),
+            Some(ProtocolVersion::TwentyOne)
+        );
+        assert_eq!(ProtocolVersion::from_u64(22), None);
     }
 
-    /// INV-033: version eighteen's alias-catalog request and messages have
+    /// INV-033: version twenty-one's alias-catalog request and messages have
     /// exact closed shapes.
     #[test]
-    fn inv033_version_eighteen_model_alias_catalog_has_exact_closed_shapes()
+    fn inv033_version_twenty_one_model_alias_catalog_has_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Eighteen,
+            ProtocolVersion::TwentyOne,
             request_id,
             ClientRequest::ListModelAliases {},
         )?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":18,\"request_id\":\"1\",\"request\":{\"type\":\"list_model_aliases\"}}\n"
+            "{\"version\":21,\"request_id\":\"1\",\"request\":{\"type\":\"list_model_aliases\"}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
         assert_eq!(

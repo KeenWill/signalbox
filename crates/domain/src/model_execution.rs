@@ -1542,10 +1542,98 @@ impl IssuedModelCallCorrelation {
         self,
         observation: ModelCallTerminalObservation,
     ) -> CorrelatedModelCallTerminalObservation {
+        self.bind_terminal_observation_with_usage(
+            observation,
+            ProviderReportedTokenUsage::unreported(),
+        )
+    }
+
+    /// Binds one provider-neutral terminal observation and the exact
+    /// provider-reported token fields to these issued facts.
+    pub fn bind_terminal_observation_with_usage(
+        self,
+        observation: ModelCallTerminalObservation,
+        usage: ProviderReportedTokenUsage,
+    ) -> CorrelatedModelCallTerminalObservation {
         CorrelatedModelCallTerminalObservation {
             correlation: self,
             observation,
+            usage,
         }
+    }
+}
+
+/// Token usage exactly as reported for one provider interaction.
+///
+/// Each field is independently absent when the provider did not report it.
+/// In particular, a reported zero remains distinct from absence.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ProviderReportedTokenUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+}
+
+impl ProviderReportedTokenUsage {
+    /// Returns usage with every field unreported.
+    pub const fn unreported() -> Self {
+        Self {
+            input_tokens: None,
+            output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        }
+    }
+
+    /// Retains the provider's input-token field exactly.
+    pub const fn with_input_tokens(mut self, input_tokens: Option<u64>) -> Self {
+        self.input_tokens = input_tokens;
+        self
+    }
+
+    /// Retains the provider's output-token field exactly.
+    pub const fn with_output_tokens(mut self, output_tokens: Option<u64>) -> Self {
+        self.output_tokens = output_tokens;
+        self
+    }
+
+    /// Retains the provider's cache-creation input-token field exactly.
+    pub const fn with_cache_creation_input_tokens(
+        mut self,
+        cache_creation_input_tokens: Option<u64>,
+    ) -> Self {
+        self.cache_creation_input_tokens = cache_creation_input_tokens;
+        self
+    }
+
+    /// Retains the provider's cache-read input-token field exactly.
+    pub const fn with_cache_read_input_tokens(
+        mut self,
+        cache_read_input_tokens: Option<u64>,
+    ) -> Self {
+        self.cache_read_input_tokens = cache_read_input_tokens;
+        self
+    }
+
+    /// Returns the provider's input-token field.
+    pub const fn input_tokens(self) -> Option<u64> {
+        self.input_tokens
+    }
+
+    /// Returns the provider's output-token field.
+    pub const fn output_tokens(self) -> Option<u64> {
+        self.output_tokens
+    }
+
+    /// Returns the provider's cache-creation input-token field.
+    pub const fn cache_creation_input_tokens(self) -> Option<u64> {
+        self.cache_creation_input_tokens
+    }
+
+    /// Returns the provider's cache-read input-token field.
+    pub const fn cache_read_input_tokens(self) -> Option<u64> {
+        self.cache_read_input_tokens
     }
 }
 
@@ -1554,6 +1642,7 @@ impl IssuedModelCallCorrelation {
 pub struct CorrelatedModelCallTerminalObservation {
     correlation: IssuedModelCallCorrelation,
     observation: ModelCallTerminalObservation,
+    usage: ProviderReportedTokenUsage,
 }
 
 impl CorrelatedModelCallTerminalObservation {
@@ -1570,6 +1659,11 @@ impl CorrelatedModelCallTerminalObservation {
     /// Borrows the provider-neutral physical outcome.
     pub const fn observation(&self) -> &ModelCallTerminalObservation {
         &self.observation
+    }
+
+    /// Returns the exact provider-reported token fields.
+    pub const fn usage(&self) -> ProviderReportedTokenUsage {
+        self.usage
     }
 }
 
@@ -4590,6 +4684,7 @@ mod tests {
                 frontier: call.frontier().snapshot(),
             },
             observation,
+            usage: ProviderReportedTokenUsage::unreported(),
         }
     }
 

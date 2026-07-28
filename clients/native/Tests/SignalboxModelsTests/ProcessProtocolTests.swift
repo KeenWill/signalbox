@@ -7,7 +7,7 @@ final class ProcessProtocolTests: XCTestCase {
   private let sessionID = "11111111-1111-4111-8111-111111111111"
   private let turnID = "22222222-2222-4222-8222-222222222222"
 
-  func testClientFrameUsesVersionEighteenAndCanonicalStringScalars() throws {
+  func testClientFrameUsesVersionTwentyOneAndCanonicalStringScalars() throws {
     let frame = SignalboxProcessClientFrame(
       requestID: try SignalboxRequestID(validating: 7),
       request: .readTranscript(
@@ -19,11 +19,11 @@ final class ProcessProtocolTests: XCTestCase {
 
     XCTAssertEqual(
       String(decoding: encoded, as: UTF8.self),
-      #"{"request":{"session_id":"\#(sessionID)","type":"read_transcript"},"request_id":"7","version":18}"#
+      #"{"request":{"session_id":"\#(sessionID)","type":"read_transcript"},"request_id":"7","version":21}"#
     )
   }
 
-  func testModelAliasCatalogRequestAndSummaryUseClosedVersionEighteenShapes() throws {
+  func testModelAliasCatalogRequestAndSummaryUseClosedVersionTwentyOneShapes() throws {
     let requestFrame = SignalboxProcessClientFrame(
       requestID: try SignalboxRequestID(validating: 8),
       request: .listModelAliases
@@ -31,13 +31,13 @@ final class ProcessProtocolTests: XCTestCase {
     let encodedRequest = try SignalboxJSONCoding.encoder().encode(requestFrame)
     XCTAssertEqual(
       String(decoding: encodedRequest, as: UTF8.self),
-      #"{"request":{"type":"list_model_aliases"},"request_id":"8","version":18}"#
+      #"{"request":{"type":"list_model_aliases"},"request_id":"8","version":21}"#
     )
 
     let encodedSummary = Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"8",
         "message":{
           "type":"model_alias_summary",
@@ -85,7 +85,7 @@ final class ProcessProtocolTests: XCTestCase {
     let encoded = Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"9",
         "message":{
           "type":"session_event",
@@ -124,7 +124,7 @@ final class ProcessProtocolTests: XCTestCase {
     let encoded = Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"9",
         "message":{
           "type":"session_event",
@@ -161,7 +161,7 @@ final class ProcessProtocolTests: XCTestCase {
     let encoded = Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"9",
         "message":{"type":"session_created","session_id":17}
       }
@@ -189,7 +189,7 @@ final class ProcessProtocolTests: XCTestCase {
     let encoded = Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"9",
         "message":{
           "type":"transcript_snapshot_start",
@@ -213,7 +213,7 @@ final class ProcessProtocolTests: XCTestCase {
     let encoded = Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"9",
         "unexpected":true,
         "message":{"type":"sessions_start"}
@@ -228,7 +228,7 @@ final class ProcessProtocolTests: XCTestCase {
     let encoded = Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"9",
         "message":{
           "type":"session_event",
@@ -468,7 +468,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"9",
         "message":{
           "type":"error",
@@ -487,7 +487,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"9",
         "message":{
           "type":"error",
@@ -508,7 +508,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"9",
         "message":{
           "type":"error",
@@ -524,7 +524,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"9",
         "message":{
           "type":"error",
@@ -541,7 +541,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"9",
         "message":{
           "type":"error",
@@ -558,7 +558,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"9",
         "message":{
           "type":"error",
@@ -670,7 +670,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"9",
         "message":{
           "type":"error",
@@ -687,7 +687,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":18,
+        "version":21,
         "request_id":"9",
         "message":{
           "type":"conversation_summary",

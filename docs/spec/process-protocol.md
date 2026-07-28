@@ -36,28 +36,39 @@ surface adds protocol version eleven, verified through PR #295
 protocol version twelve, verified through PR #300
 (`agent/token-level-streaming`). The client-selectable input-delivery surface
 adds protocol version thirteen, verified through PR #302
-(`agent/mid-turn-steering`). Version fourteen remains allocated to a concurrent
-protocol stack. The unified conversation-listing surface adds version sixteen
-for the single read-only `list_conversations` request, verified through PR #304
-(`agent/unified-conversation-listing`). The imported-conversation inspection
-surface reserved fifteen while sixteen was still unclaimed, but sixteen shipped
-first: numbering its request below an already-closed vocabulary would
-retroactively admit that request in version-sixteen frames, so the inspection
-surface takes version seventeen for the single `read_imported_conversation`
-request and the two typed imported-continuation rejections, verified through PR
-#303 (`agent/imported-conversation-inspection`). Versions one through thirteen
-and sixteen retain their closed request and message vocabularies unchanged. The
-native client wiring stack adds version eighteen for the deployment model-alias
-read, verified through PR #315 (`agent/native-live-process-wiring`). The
-implementation here speaks versions one through thirteen, sixteen, seventeen,
-and eighteen while fourteen and fifteen remain unsupported; the native client
-selects version eighteen and the terminal client selects version seventeen. Its
-`search` verb over version four's metadata list was verified through PR #283
-(`agent/session-search-cli`; terminal client surface only). This page's
-version-four last-writer member spelling was verified through PR #288
-(`agent/audit-fix-docs-coherence`). This page is the normative boundary between
-a local client process and `signalboxd`; domain values, PostgreSQL records, and
-wire messages remain distinct representations.
+(`agent/mid-turn-steering`). The unified conversation-listing surface adds
+version sixteen for the single read-only `list_conversations` request, verified
+through PR #304 (`agent/unified-conversation-listing`). The
+imported-conversation inspection surface reserved fifteen while sixteen was
+still unclaimed, but sixteen shipped first: numbering its request below an
+already-closed vocabulary would retroactively admit that request in
+version-sixteen frames, so inspection takes version seventeen for
+`read_imported_conversation` and its typed continuation rejections, verified
+through PR #303 (`agent/imported-conversation-inspection`). The session-template
+surface takes version eighteen for daemon-side copy-on-create resolution and
+template listing, verified through PR #311 (`agent/session-templates-spec`).
+Provider-reported model-call token evidence originally reserved fourteen, but
+versions sixteen, seventeen, and eighteen all shipped first while it was still
+in flight; numbering it below their already-closed vocabularies would
+retroactively admit `transcript_model_call_usage` frames under those versions,
+so it takes version nineteen instead, verified through this PR
+(`agent/token-usage`). The interactive terminal chat surface adds no protocol
+version and was verified through this PR (`agent/interactive-terminal-chat`).
+The native client wiring stack adds version twenty-one for the deployment
+model-alias read, verified through this PR (`agent/native-live-process-wiring`);
+this surface reserved eighteen, but the session-template surface shipped that
+number first while this one was still in flight, and the concurrent
+context-compaction protocol stack separately claimed twenty, also still in
+flight, so this surface sits above both instead. Every earlier admitted version
+retains its closed vocabulary. This implementation speaks versions one through
+thirteen, sixteen through nineteen, and twenty-one, with fourteen, fifteen, and
+twenty unsupported; the terminal client selects version nineteen and the native
+client selects version twenty-one. Its `search` verb over version four's
+metadata list was verified through PR #283 (`agent/session-search-cli`; terminal
+client surface only). This page's version-four last-writer member spelling was
+verified through PR #288 (`agent/audit-fix-docs-coherence`). This page is the
+normative boundary between a local client process and `signalboxd`; domain
+values, PostgreSQL records, and wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -169,7 +180,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1` through `13`, `16`, `17`, or `18`;
+- `version`: JSON integer `1` through `13`, `16` through `19`, or `21`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -182,19 +193,24 @@ contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
 spellings decode to the same name. A version other than one through thirteen,
-sixteen, seventeen, or eighteen produces an `unsupported_version` error naming
-the supported versions, then the server closes the connection. Versions fourteen
-and fifteen are reserved by other stacks and are unsupported here, so the
-admitted set has one gap; that gap is a reservation, not a retired version.
-Every response uses the request's admitted version; when no version can be
-admitted, the server error uses version one as the pre-admission fallback. A
-client speaking a version above one admits that version-one fallback only for
-`malformed_frame` or `unsupported_version`, then applies the ordinary
-request-identity check; every other response-version mismatch fails locally. A
-server error uses `request_id = "0"` only when the incoming frame prevents
-recovery of a valid nonzero identity; zero is never a valid client identity or
-success-response identity. Leading zeroes, a plus sign, whitespace, and any
-spelling other than the shortest ASCII decimal form are invalid.
+sixteen through nineteen, or twenty-one produces an `unsupported_version` error
+naming the supported versions, then the server closes the connection. Versions
+fourteen and fifteen are retired and unsupported here, so the admitted set has a
+permanent gap: each was reserved by protocol work that had not yet shipped when
+a higher number shipped first, and admitting either now would retroactively
+widen an already-closed vocabulary underneath a version already in use, so
+neither is ever admitted. Version twenty is a second, temporary gap: it is
+reserved by the concurrent context-compaction protocol stack, still in flight,
+and becomes admitted once that stack ships rather than retired. Every response
+uses the request's admitted version; when no version can be admitted, the server
+error uses version one as the pre-admission fallback. A client speaking a
+version above one admits that version-one fallback only for `malformed_frame` or
+`unsupported_version`, then applies the ordinary request-identity check; every
+other response-version mismatch fails locally. A server error uses
+`request_id = "0"` only when the incoming frame prevents recovery of a valid
+nonzero identity; zero is never a valid client identity or success-response
+identity. Leading zeroes, a plus sign, whitespace, and any spelling other than
+the shortest ASCII decimal form are invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -210,7 +226,9 @@ that variant.
 | Type                                    | Version         | Additional required members                                                                                                                                                                                                                                          | Meaning                                                                                                                                                                                                                                           |
 | --------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `create_session`                        | 1+              | `command_id` (canonical UUID string), `initial_model_selection` (selection object); version nine and above also require `system_prompt` (string or null)                                                                                                             | Create an owner-initiated session with no ancestry and establish defaults version one.                                                                                                                                                            |
+| `create_session_from_template`          | 18              | `command_id` (canonical UUID string), `template_name` (template-name string)                                                                                                                                                                                         | Resolve one daemon-held template and copy its complete bundle into an owner-initiated session's defaults version one.                                                                                                                             |
 | `list_sessions`                         | 1+              | none                                                                                                                                                                                                                                                                 | Read all current sessions as legacy summaries, ordered by session identity.                                                                                                                                                                       |
+| `list_templates`                        | 18              | none                                                                                                                                                                                                                                                                 | Read every available template's name and version in name order.                                                                                                                                                                                   |
 | `submit_input`                          | 1+; delivery 13 | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string, or null only for version-thirteen steering), and optional version-thirteen `delivery`                                             | Submit exact owner text with the selected closed delivery intent; omitting `delivery` retains `StartWhenNoActiveTurn`.                                                                                                                            |
 | `read_transcript`                       | 1+              | `session_id` (canonical UUID string)                                                                                                                                                                                                                                 | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                                                                                                    |
 | `follow_session`                        | 1+              | `session_id` (canonical UUID string)                                                                                                                                                                                                                                 | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session; versions twelve and above additionally receive ephemeral provider-text deltas. |
@@ -226,7 +244,15 @@ that variant.
 | `read_session_defaults`                 | 9               | `session_id` (canonical UUID string), `defaults_version` (canonical decimal string or null)                                                                                                                                                                          | Read one complete immutable defaults epoch: the current one for null, otherwise exactly the named one.                                                                                                                                            |
 | `list_conversations`                    | 16              | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                  | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                    |
 | `read_imported_conversation`            | 17              | `imported_conversation_id` (canonical UUID string)                                                                                                                                                                                                                   | Read one immutable imported conversation's complete entry inventory, including the positions `create_session_from_imported_frontier` consumes.                                                                                                    |
-| `list_model_aliases`                    | 18              | none                                                                                                                                                                                                                                                                 | Read the deployment's complete configured alias-to-direct-selection catalog.                                                                                                                                                                      |
+| `list_model_aliases`                    | 21              | none                                                                                                                                                                                                                                                                 | Read the deployment's complete configured alias-to-direct-selection catalog.                                                                                                                                                                      |
+
+Version eighteen's `template_name` uses the same 1-through-128-byte lowercase
+ASCII grammar as the configuration catalog. The daemon resolves it before domain
+construction; an unknown name is `invalid_request` and claims no command
+identity. No create-from-template request carries model, prompt, or approval
+members, so the wire has no override or partial-template shape. Existing
+`create_session` remains explicit creation and never consults the template
+catalog.
 
 Version thirteen adds one optional closed `delivery` object to `submit_input`.
 Its exact variants are `start_when_idle {}`,
@@ -510,8 +536,15 @@ Version thirteen retains every earlier admitted request and adds only the
 optional delivery member on `submit_input` plus its steering receipt. Version
 sixteen retains every earlier admitted request and adds only the read-only
 `list_conversations`. Version seventeen retains every earlier admitted request
-and adds only the read-only `read_imported_conversation`; versions fourteen and
-fifteen remain reserved by concurrent stacks and unsupported here. A metadata
+and adds only the read-only `read_imported_conversation`. Version eighteen
+retains every request admitted by version seventeen and adds only
+`create_session_from_template` and `list_templates`. Version nineteen retains
+every request admitted by version eighteen and adds no request variant, only the
+follow-stream and snapshot `transcript_model_call_usage` vocabulary described
+above. Version twenty-one retains every request admitted by version nineteen and
+adds only the read-only `list_model_aliases`; versions fourteen and fifteen
+remain permanently retired and unsupported here, and twenty remains a temporary
+gap reserved by the concurrent context-compaction protocol stack. A metadata
 request carried under version one, two, or three, an import request carried
 under version one through four, a defaults-replacement request carried under
 version one through five, a reconciliation request carried under version one
@@ -520,20 +553,22 @@ defaults read carried under version one through eight, an imported-frontier
 creation request carried under any version one through nine, a review request
 carried under any version one through ten, a delivery-bearing submit carried
 under any version before thirteen, a unified-listing request carried under any
-version one through twelve, or an imported-conversation read carried under any
-version one through sixteen, is classified as `malformed_frame` because its
-supported version does not admit that request variant; it never reaches
-application construction. A version-one `submit_input`, `read_transcript`, or
-`follow_session` request that selects imported ancestry returns a version-one
-`unsupported_version` error naming version two before mutation or snapshot
-construction.
+version one through twelve, an imported-conversation read carried under any
+version one through sixteen, a template request carried under any version before
+eighteen, or an alias request carried under any version before twenty-one is
+classified as `malformed_frame` because its supported version does not admit
+that request variant; it never reaches application construction. A version-one
+`submit_input`, `read_transcript`, or `follow_session` request that selects
+imported ancestry returns a version-one `unsupported_version` error naming
+version two before mutation or snapshot construction.
 
-Versions four and above also inherit every transcript, turn-state, entry, and
-event shape admitted by version three, including the imported representations
-introduced by version two and the tool-bearing representations introduced by
-version three. A `read_transcript`, `follow_session`, or `submit_input` under
-version four and above therefore never requires a downgrade or a newer version
-for a representation already admitted by version three.
+Every admitted version four and above also inherits every transcript,
+turn-state, entry, and event shape admitted by version three, including the
+imported representations introduced by version two and the tool-bearing
+representations introduced by version three. A `read_transcript`,
+`follow_session`, or `submit_input` under an admitted version four and above
+therefore never requires a downgrade or a newer version for a representation
+already admitted by version three.
 
 Tool-free native sessions remain readable and mutable through every admitted
 version. A version-one or version-two `read_transcript` or `follow_session`
@@ -585,9 +620,10 @@ request.
 
 Message objects carry a required string `type` and reject fields not admitted by
 that variant. Every accepted non-review mutation request — `create_session`,
-`create_session_from_imported_frontier`, `submit_input`, `reconcile_turn`,
-`stop_turn`, `decide_tool_request`, `replace_session_metadata`,
-`replace_session_defaults`, or `import_conversation` — produces exactly one of:
+`create_session_from_template`, `create_session_from_imported_frontier`,
+`submit_input`, `reconcile_turn`, `stop_turn`, `decide_tool_request`,
+`replace_session_metadata`, `replace_session_defaults`, or `import_conversation`
+— produces exactly one of:
 
 - `session_created` with `session_id`;
 - `input_submitted` with `session_id`, `accepted_input_id`,
@@ -635,6 +671,14 @@ A successful `list_review_findings` response is
 finding-identity order, then `review_findings_end { finding_count }`. The client
 validates the selected run, ordering, and terminal count before presenting the
 list.
+
+A successful `list_templates` response is `templates_start`, zero or more
+`template_summary { name, version }` messages in strictly increasing UTF-8 name
+order, then `templates_end { template_count }`. `version` and `template_count`
+are canonical decimal strings. The sequence is one immutable in-memory catalog
+snapshot and becomes authoritative only after ordering and count validation; the
+terminal client buffers no prompt or bundle content because none crosses the
+protocol.
 
 Versions twelve and above additionally admit
 `provider_text_delta { session_id, turn_id, model_call_id, part_index, content }`
@@ -717,7 +761,7 @@ names the last emitted summary's origin and identity. The page sequence is
 spooled before output and becomes authoritative only after its count, ordering,
 and cursor validate.
 
-Version eighteen's deployment model-alias catalog is one ordered sequence:
+Version twenty-one's deployment model-alias catalog is one ordered sequence:
 
 1. `model_aliases_start`;
 2. zero through 10,000 `model_alias_summary { alias_id, selection_id }` messages
@@ -852,7 +896,7 @@ contradictory frame and is rejected rather than presented. The admitted versions
 ten through thirteen and sixteen have no typed detail for either case and keep
 the undetailed `not_found` their closed message vocabulary already admits,
 distinguished only by its non-normative message. Fourteen and fifteen are
-reserved rather than admitted, so no frame ever reaches this mapping under them.
+retired rather than admitted, so no frame ever reaches this mapping under them.
 The `turn_not_awaiting_reconciliation`, `tool_request_not_in_session`,
 `imported_conversation_not_found`, and `imported_frontier_position_out_of_range`
 details report refusals made before command recording, so unlike every other
@@ -882,17 +926,18 @@ The error-code set in all admitted versions is:
 | `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.                                                                      |
 | `internal`            | Fail-closed corruption or a daemon defect stopped the request.                                                                         |
 
-For `create_session`, `create_session_from_imported_frontier`, `submit_input`,
-`reconcile_turn`, `stop_turn`, `decide_tool_request`,
-`replace_session_metadata`, `replace_session_defaults`, and every review
-mutation, a lost commit response maps to `commit_ambiguous`; the client retries
-the exact command identity and payload to discover the recorded outcome. A
-`reconcile_turn` or `decide_tool_request` retry reaches that recorded outcome
-unconditionally, because a claimed command identity bypasses the precondition
-the first handling already satisfied. Once a review aggregate effect has been
-applied or recovered, any database failure during post-effect verification,
-typed-receipt insertion, or claim commit is likewise `commit_ambiguous`. A
-definitely pre-commit infrastructure failure maps to `unavailable`.
+For `create_session`, `create_session_from_template`,
+`create_session_from_imported_frontier`, `submit_input`, `reconcile_turn`,
+`stop_turn`, `decide_tool_request`, `replace_session_metadata`,
+`replace_session_defaults`, and every review mutation, a lost commit response
+maps to `commit_ambiguous`; the client retries the exact command identity and
+payload to discover the recorded outcome. A `reconcile_turn` or
+`decide_tool_request` retry reaches that recorded outcome unconditionally,
+because a claimed command identity bypasses the precondition the first handling
+already satisfied. Once a review aggregate effect has been applied or recovered,
+any database failure during post-effect verification, typed-receipt insertion,
+or claim commit is likewise `commit_ambiguous`. A definitely pre-commit
+infrastructure failure maps to `unavailable`.
 
 Conversation import carries no durable command identity because exact
 format-and-source replay already resolves through the import digest. A selected
@@ -932,8 +977,24 @@ One logical snapshot is a bounded message sequence sharing the request identity:
 
 1. `transcript_snapshot_start { session_id, cursor }`;
 2. one `transcript_turn` per turn, with canonical decimal `acceptance_position`;
-3. the entry messages below in frontier-member order; and
-4. `transcript_snapshot_end { session_id, cursor, turn_count, entry_count }`.
+3. in version nineteen, one `transcript_model_call_usage` per terminal model
+   call followed by one `transcript_model_calls_end`;
+4. the entry messages below in frontier-member order; and
+5. `transcript_snapshot_end { session_id, cursor, turn_count, entry_count }`.
+
+Versions one through eighteen omit the complete model-call usage section,
+preserving their closed snapshot vocabularies and original sequence: the usage
+section ships numerically above them, so admitting it there would retroactively
+widen their already-closed vocabularies. Version nineteen orders usage rows
+first by the owning turn's acceptance position and then by model-call UUID. Each
+row carries contiguous zero-based `model_call_index`, `turn_id`,
+`model_call_id`, and a required `usage` object with required-nullable
+`input_tokens`, `output_tokens`, `cache_creation_input_tokens`, and
+`cache_read_input_tokens`. A null field means the provider did not report it; a
+reported zero is the canonical decimal string `"0"`.
+`transcript_model_calls_end { model_call_count }` acknowledges the exact row
+count before any entry message. Every terminal call has one row, including
+historical, cancellation, and recovery calls whose four fields are all null.
 
 The daemon builds that complete sequence in a secure unnamed temporary file
 before writing its first snapshot frame to the connection. Persistence validates
@@ -1124,14 +1185,14 @@ therefore duplicate that cursor; delivery is at least once and globally ordered
 The process-local durable-only fan-out and delta-admitting composite fan-out
 each retain 64 update events. The dispatcher offers every durable update to
 both; the provider bridge offers deltas only to the composite fan-out. Versions
-one through eleven therefore cannot lag because of delta volume, while a
-follower whose version admits deltas — twelve and above — preserves one send
-order across deltas and durable updates. One immutable text allocation backs
-every clone of a delta delivered to concurrent followers, so fan-out count does
-not multiply provider-sized text allocations. Having no connected followers does
-not block durable cursor advancement: reconnecting clients use a fresh
-authoritative snapshot. A follower that overruns its selected bounded fan-out
-receives `resync_required` and reconnects for another snapshot.
+one through eleven therefore cannot lag because of delta volume, while the
+delta-admitting versions twelve and above preserve one send order across deltas
+and durable updates. One immutable text allocation backs every clone of a delta
+delivered to concurrent followers, so fan-out count does not multiply
+provider-sized text allocations. Having no connected followers does not block
+durable cursor advancement: reconnecting clients use a fresh authoritative
+snapshot. A follower that overruns its selected bounded fan-out receives
+`resync_required` and reconnects for another snapshot.
 
 Each `session_event` message carries `cursor`, `session_id`, and exactly one
 closed `event` object. Every version admits these unchanged event shapes:
@@ -1257,7 +1318,7 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack uses version seventeen; version four's
+The `signalbox` binary in this stack uses version nineteen; version four's
 single-session metadata read and metadata replacement remain core protocol and
 daemon capabilities without terminal-client UX, while its paginated metadata
 list is the `search` verb below. Older clients remain supported for
@@ -1265,10 +1326,11 @@ representations admitted by their declared version as described above. The
 client accepts a global `--socket <path>` override or reads
 `SIGNALBOX_SOCKET_PATH`, and provides:
 
-- `create (--model <selection-uuid> | --alias <alias-uuid>) [--system-prompt-file <path>] [--command-id <uuid>]`;
+- `create ((--model <selection-uuid> | --alias <alias-uuid>) [--system-prompt-file <path>] | --template <name>) [--command-id <uuid>]`;
 - `continue <imported-conversation-uuid> --through-position <positive-decimal|latest> --relationship <resume|fork> (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;
 - `imported <imported-conversation-uuid>`;
 - `list`;
+- `templates`;
 - `search [--title <substring>] [--tag <tag>]... [--include-archived] [--limit <decimal>] [--after <session-uuid>]`;
 - `conversations [--title <substring>] [--origin <native|imported|all>] [--include-archived] [--limit <decimal>] [--after <native|imported>:<uuid>]`;
 - `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
@@ -1282,7 +1344,65 @@ client accepts a global `--socket <path>` override or reads
 - `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `stop <session-uuid> [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
 - `approve <session-uuid> <tool-request-uuid> [--command-id <uuid>]`;
-- `deny <session-uuid> <tool-request-uuid> --reason <text> [--command-id <uuid>]`.
+- `deny <session-uuid> <tool-request-uuid> --reason <text> [--command-id <uuid>]`;
+- `chat <session-uuid>`.
+
+`chat` is the plain line-oriented interactive surface for one live session. It
+opens one long-lived `follow_session` connection before accepting input and
+keeps that connection dedicated to ordered snapshots, provider-text deltas, and
+durable events. Submissions and in-loop control operations use a second
+connection, opened through the existing one-request connection path; the client
+does not multiplex requests onto the follow connection. The initial and every
+resynchronized follow snapshot replace transient display state with the durable
+transcript, and later provider-text deltas remain ephemeral presentation exactly
+as they do for `follow`. Snapshot reconciliation selects the active turn or,
+when there is none, the first acceptance-ordered queued turn; queued work is not
+presented as an idle loop.
+
+A line without the `:` prefix submits exact nonempty line content only while the
+loop awaits neither a queued nor active reply. Line termination removes LF or
+CRLF only, retaining a bare trailing carriage return at standard-input EOF. The
+returned `input_submitted` receipt marks that turn queued; only its durable
+`turn_activated` event enables active-turn controls and changes the displayed
+state to streaming. The closed in-loop command set is `:stop TEXT`,
+`:steer TEXT`, `:approve ID`, `:deny ID REASON`, `:transcript`,
+`:model ALIAS-UUID`, and `:quit`. These map to the existing `stop_turn`,
+configuration-free steering `submit_input`, `decide_tool_request`,
+`read_transcript`, and `replace_session_defaults` requests, or local exit;
+ordinary input maps to start-when-idle `submit_input`. `:stop` requires
+successor text because the interrupt request cannot represent a standalone
+cancellation. `:deny` applies the existing denial contract's POSIX
+edge-whitespace rule without rejecting other Unicode whitespace. `:steer`
+requires an active turn, binds the exact turn currently observed by the loop,
+and prints the existing typed steering receipt without waiting for a successor
+turn. `:model` changes only the alias selection and copies the observed
+dangerous-tool posture and system prompt into the forward-only successor
+defaults epoch. Tool proposals and projected results are reread and presented at
+their durable transition, and an approval wait prints its exact request
+identity. Each successful decision rereads authoritative state and immediately
+announces the next approval identity when the batch has one. All process-derived
+text, including live deltas and tool content, uses the same terminal-safe
+escaping as the other client verbs unless the invocation selected
+`--raw-output`.
+
+While a stoppable turn is active, the first Ctrl-C leaves the daemon turn
+running and prints the `:stop TEXT` choice. During an approval wait, that first
+interrupt instead names the exact `:approve` or `:deny` decision the turn
+requires; active-only `:stop` and `:steer` are unavailable in that phase. A
+second Ctrl-C exits and explicitly reports that the turn remains running. The
+offer is bound to the exact observed turn phase and is reset by
+resynchronization. Every follow resubscription and in-loop side request
+continues polling Ctrl-C. Exiting while a mutation request is in flight reports
+its potentially ambiguous outcome and terminates the loop, so the loop cannot
+retry with a fresh command identity; the printed recovery values remain the
+standalone exact-retry path.
+
+`:quit` and standard-input EOF use the same honest exit report. While a turn is
+queued, Ctrl-C, `:quit`, or standard-input EOF exits immediately and reports
+that the turn remains queued; active-only `:stop` and `:steer` remain
+unavailable until activation. Once the followed turn terminalizes, the client
+presents its exact durable terminal material and accepts another ordinary input
+line.
 
 `list` remains the complete unfiltered version-one summary sequence. `search` is
 the separate verb for version four's `list_session_metadata`, whose filters,
@@ -1372,6 +1492,16 @@ no-successor, receipt-only completion semantics explicit; queueing remains a
 `send` option because it still creates and waits for a separate reply-bearing
 turn.
 
+`create --template NAME` sends only the name and command identity and validates
+the ordinary `session_created` receipt. Clap rejects combining it with
+`--model`, `--alias`, or `--system-prompt-file` before socket I/O; explicit
+flags never override template values. The choice keeps one invocation's complete
+creation defaults under either client control or daemon configuration, not both.
+The `templates` verb sends one `list_templates` request, validates strict name
+order and the terminal count, and prints one `name=<name> version=<decimal>`
+line per summary. Template prompt text, model selection, approval posture, and
+digest do not cross this listing surface.
+
 `--system-prompt-file` likewise carries a path, never prompt content in a
 process argument: the client reads one bounded file snapshot before socket I/O
 and rejects an empty, oversized, non-UTF-8, or U+0000-bearing prompt locally,
@@ -1433,19 +1563,21 @@ current system prompt, prints the version and posture, and changes only the
 requested fields. Thus every client-generated or server-discovered scalar
 recovery value is visible before its commit can become ambiguous; the
 content-sized prompt is deliberately never echoed. Exact replay also requires
-the original selection, imported-conversation, or session arguments and, for
-`send`, `steer`, `reconcile`, and `stop`, the exact standard-input content; the
-client does not echo that potentially sensitive input or synthesize a shell
-command. Its ambiguity diagnostic directs the user to retry the original command
-with those arguments and input plus any printed recovery values. For recovery,
-the user supplies the printed command identity. An ordinary `send` and
-`reconcile` also require the exact `--defaults-version`; `send --queue` requires
-defaults version and the exact expected `--turn`; `steer` requires that turn but
-no defaults version; and `stop` requires command identity, defaults version, and
-the exact expected `--turn`, because a stopped turn cannot be rediscovered once
-the first handling terminalizes it. `model` instead requires all three printed
-facts — command identity, defaults version, and dangerous-tool posture — plus
-the original prompt option: a re-supplied `--system-prompt-file` or
+the original selection, template name, imported-conversation, or session
+arguments and, for `send`, `steer`, `reconcile`, and `stop`, the exact
+standard-input content; the client does not echo that potentially sensitive
+input or synthesize a shell command. Template recovery deliberately needs no
+digest or copied values: equal replay uses the original command and name. Its
+ambiguity diagnostic directs the user to retry the original command with those
+arguments and input plus any printed recovery values. For recovery, the user
+supplies the printed command identity. An ordinary `send` and `reconcile` also
+require the exact `--defaults-version`; `send --queue` requires defaults version
+and the exact expected `--turn`; `steer` requires that turn but no defaults
+version; and `stop` requires command identity, defaults version, and the exact
+expected `--turn`, because a stopped turn cannot be rediscovered once the first
+handling terminalizes it. `model` instead requires all three printed facts —
+command identity, defaults version, and dangerous-tool posture — plus the
+original prompt option: a re-supplied `--system-prompt-file` or
 `--clear-system-prompt` is re-read or re-applied exactly, while a copied-forward
 prompt is re-read from the immutable epoch the printed defaults version names,
 so the retried payload is byte-exact under concurrent replacements without
@@ -1454,7 +1586,7 @@ silently substitutes a new command identity for an ambiguous attempt. It uses a
 fresh nonzero request identity per connection, validates that a defaults receipt
 is the exact successor carrying the requested selection, copied posture, and
 exact replacement prompt, validates that a decision receipt echoes the exact
-request and decision it sent, renders only known version-seventeen messages, and
+request and decision it sent, renders only known version-nineteen messages, and
 exits nonzero on protocol or application errors other than the follow-specific
 `resync_required` control case, which reconnects for a fresh snapshot.
 
@@ -1474,14 +1606,28 @@ content field, location, severity, confidence, category, optional-repair
 presence, ancestry identity, status, and event count.
 
 The client validates each complete snapshot and its terminal counts into an
-owner-private anonymous temporary-file spool before replay or presentation. Turn
-and source-qualified entry identity indexes are disk-backed too, so the wire's
-intentionally unbounded aggregate snapshot size does not become unbounded client
-memory. Before adopting an initial or resynchronized snapshot cursor, `follow`
-presents its acceptance-ordered turn projections, including queued owner
-content, active attempt and current-call state, recovery waits, and terminal
-state. A transition committed at or below that cursor therefore remains visible
-even when it has not added a semantic transcript entry.
+owner-private anonymous temporary-file spool before replay or presentation.
+Turn, model-call, and source-qualified entry identity indexes are disk-backed
+too, so the wire's intentionally unbounded aggregate snapshot size does not
+become unbounded client memory. Before adopting an initial or resynchronized
+snapshot cursor, `follow` presents its acceptance-ordered turn projections,
+including queued owner content, active attempt and current-call state, recovery
+waits, and terminal state. It validates but does not print the snapshot's usage
+section; follow updates remain durable transitions rather than provider
+evidence. A transition committed at or below that cursor therefore remains
+visible even when it has not added a semantic transcript entry.
+
+`transcript` replays the validated usage rows after ordinary turn and frontier
+output. It prints one compact subtotal per turn that has terminal calls and one
+session-total line, including `terminal_calls=0` with `0/0` field coverage when
+there are no terminal calls. Each of the four token fields carries both its
+subtotal and `reported_calls/terminal_calls` coverage. Zero is printed as zero;
+a field with no reported calls is printed as `unreported`, and partial coverage
+is never silently treated as complete. Snapshot validation rejects noncontiguous
+indices, unknown turn identities, repeated model-call identities, or usage rows
+outside strict turn-acceptance and per-turn model-call-UUID order. These client
+totals are presentation arithmetic over the exact per-call evidence. The client
+does not compute currency cost or store a derived total.
 
 The unbounded aggregate session-summary sequence is bounded the same way. `list`
 validates ordering and the terminal count while spooling summary frames to an

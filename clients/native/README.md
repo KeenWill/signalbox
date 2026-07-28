@@ -5,7 +5,7 @@
 
 Native SwiftUI client for the Signalbox process protocol.
 
-The production path encodes and decodes the version 18 session and transcript
+The production path encodes and decodes the version 21 session and transcript
 vocabulary as newline-delimited JSON. It does not use the earlier REST,
 WebSocket, or OpenAI-compatible surfaces.
 

@@ -55,10 +55,11 @@ use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationImportFormat,
     ConversationImportSource, ConversationOriginFilter, ConversationSummary, CurrentModelCallState,
     ErrorCode, ImportedContentKind, ImportedConversationSourceFormat, ImportedSourceSpeaker,
-    ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MetadataActor,
-    ModelSelection, ProtocolVersion, RejectionDetail, RequestId, ServerFrame, ServerMessage,
-    SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText, ToolDecision,
-    TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
+    ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+    MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION, MetadataActor, ModelSelection, ProtocolVersion,
+    RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent, SessionMetadata,
+    SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry,
+    TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
@@ -530,6 +531,13 @@ async fn attach_empty_follower(
             ..
         } if *snapshot_session == session_id
     ));
+    if version.as_u64() >= MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION {
+        assert!(matches!(
+            response_within(&mut follow).await?.message(),
+            ServerMessage::TranscriptModelCallsEnd { model_call_count }
+                if model_call_count.value() == 0
+        ));
+    }
     assert!(matches!(
         response_within(&mut follow).await?.message(),
         ServerMessage::TranscriptSnapshotEnd {
@@ -3171,13 +3179,12 @@ async fn s24_inv032_inv033_version_thirteen_inherits_provider_text_streaming()
 }
 
 /// S01 / S02 / S24 / INV-032 / INV-035: the provider bridge asks the scripted
-/// runtime for streamed delivery, and two already-attached followers — one at
-/// version twelve and one at version sixteen, both of which admit the delta
-/// message — each observe the exact already-redacted deltas before the
-/// durable terminal entries expose the same complete assistant reply.
+/// runtime for streamed delivery, and already-attached followers on versions
+/// twelve, fourteen, and sixteen each observe the exact already-redacted deltas
+/// before durable terminal entries expose the same complete assistant reply.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_durable_truth()
+async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_three_followers_then_durable_truth()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut commands = Connection::connect(runtime.socket()).await?;
@@ -3185,7 +3192,9 @@ async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_dur
     let first_follow =
         attach_empty_follower(runtime.socket(), ProtocolVersion::Twelve, 10, session_id).await?;
     let second_follow =
-        attach_empty_follower(runtime.socket(), ProtocolVersion::Sixteen, 11, session_id).await?;
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Nineteen, 11, session_id).await?;
+    let third_follow =
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Sixteen, 12, session_id).await?;
     let expected_delta_count = 2;
     let (script, assistant) =
         streamed_script(expected_delta_count, String::from("already [redacted] "));
@@ -3201,17 +3210,22 @@ async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_dur
     .await?;
     let first = follow_streamed_turn_to_completion(first_follow, session_id, turn_id).await?;
     let second = follow_streamed_turn_to_completion(second_follow, session_id, turn_id).await?;
-    let first_durable = read_completed_assistant(runtime.socket(), 12, session_id, turn_id).await?;
+    let third = follow_streamed_turn_to_completion(third_follow, session_id, turn_id).await?;
+    let first_durable = read_completed_assistant(runtime.socket(), 13, session_id, turn_id).await?;
     let second_durable =
-        read_completed_assistant(runtime.socket(), 13, session_id, turn_id).await?;
+        read_completed_assistant(runtime.socket(), 14, session_id, turn_id).await?;
+    let third_durable = read_completed_assistant(runtime.socket(), 15, session_id, turn_id).await?;
     let operations = probe.received_operations();
 
     assert_eq!(first.delta_count, expected_delta_count);
     assert_eq!(first.text, assistant);
     assert_eq!(second.delta_count, expected_delta_count);
     assert_eq!(second.text, assistant);
+    assert_eq!(third.delta_count, expected_delta_count);
+    assert_eq!(third.text, assistant);
     assert_eq!(first_durable, assistant);
     assert_eq!(second_durable, assistant);
+    assert_eq!(third_durable, assistant);
     assert_eq!(operations.len(), 1);
     assert_eq!(operations[0].delivery, DeliveryMode::Streamed);
 

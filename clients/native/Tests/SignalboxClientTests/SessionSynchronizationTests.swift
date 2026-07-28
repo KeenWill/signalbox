@@ -2421,7 +2421,7 @@ private enum SynchronizationFixture {
   static func message(_ object: String) throws -> SignalboxProcessServerMessage {
     let data = Data(
       """
-      {"version":18,"request_id":"1","message":\(object)}
+      {"version":21,"request_id":"1","message":\(object)}
       """.utf8
     )
     return try SignalboxProcessServerFrame.decode(from: data).message
