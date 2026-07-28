@@ -1561,6 +1561,238 @@ impl ImportedConversation {
     }
 }
 
+/// One bounded source-derived display title for an imported conversation.
+///
+/// The value is presentation evidence derived once from the preserved source
+/// records by [`Self::derive`]; it never participates in the source digest,
+/// the imported-conversation identity, or the unique source-identity
+/// constraint. Construction admits exactly the shape derivation emits:
+/// nonempty single-line text without U+0000, carrying at most
+/// [`Self::MAX_SCALARS`] Unicode scalars and no leading or trailing ASCII
+/// space or tab.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ImportedConversationDisplayTitle(String);
+
+impl ImportedConversationDisplayTitle {
+    /// Maximum Unicode scalars in one derived display title.
+    pub const MAX_SCALARS: usize = 256;
+
+    /// Validates one exact stored display-title value.
+    pub fn try_new(value: String) -> Result<Self, ImportedConversationDisplayTitleError> {
+        if value.is_empty() {
+            return Err(ImportedConversationDisplayTitleError::Empty);
+        }
+        if value.contains('\0') {
+            return Err(ImportedConversationDisplayTitleError::ContainsNul);
+        }
+        if value.contains(['\n', '\r']) {
+            return Err(ImportedConversationDisplayTitleError::ContainsLineBreak);
+        }
+        let scalars = value.chars().count();
+        if scalars > Self::MAX_SCALARS {
+            return Err(ImportedConversationDisplayTitleError::ExceedsMaxScalars { scalars });
+        }
+        if value.starts_with([' ', '\t']) || value.ends_with([' ', '\t']) {
+            return Err(ImportedConversationDisplayTitleError::UntrimmedEdgeWhitespace);
+        }
+        Ok(Self(value))
+    }
+
+    /// Derives the display title for one complete imported conversation.
+    ///
+    /// Candidate strings are tried in a fixed per-format order and the first
+    /// candidate that shapes to a nonempty title
+    /// wins; a conversation with no shapeable candidate has no display title:
+    ///
+    /// - Claude Code versions 1 and 2: for every raw record in physical order
+    ///   whose normalized value is an object whose first `type` member is the
+    ///   string `summary`, the string value of its first `summary` member;
+    ///   then every attested-text entry with an attested `user` speaker, in
+    ///   imported order.
+    /// - Codex rollout version 1: for every raw record in physical order
+    ///   whose normalized value is an object whose first `type` member is the
+    ///   string `session_meta` and whose first `payload` member is an object,
+    ///   the string value of the payload's first `title` member; then the
+    ///   string value of each such payload's first `instructions` member;
+    ///   then every attested-text entry with an attested `user` speaker, in
+    ///   imported order.
+    ///
+    /// The derivation reads only preserved source evidence, never a filename,
+    /// wall clock, or import-time context, so re-deriving from the same
+    /// immutable aggregate always returns the same value.
+    pub fn derive(conversation: &ImportedConversation) -> Option<Self> {
+        match conversation.format() {
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV1
+            | ImportedConversationFormat::ClaudeCodeSessionJsonlV2 => {
+                typed_record_string_candidates(conversation, "summary", &["summary"])
+                    .filter_map(Self::shape_candidate)
+                    .next()
+                    .or_else(|| {
+                        attested_user_text_candidates(conversation)
+                            .filter_map(Self::shape_candidate)
+                            .next()
+                    })
+            }
+            ImportedConversationFormat::CodexRolloutJsonlV1 => {
+                typed_record_string_candidates(conversation, "session_meta", &["payload", "title"])
+                    .filter_map(Self::shape_candidate)
+                    .next()
+                    .or_else(|| {
+                        typed_record_string_candidates(
+                            conversation,
+                            "session_meta",
+                            &["payload", "instructions"],
+                        )
+                        .filter_map(Self::shape_candidate)
+                        .next()
+                    })
+                    .or_else(|| {
+                        attested_user_text_candidates(conversation)
+                            .filter_map(Self::shape_candidate)
+                            .next()
+                    })
+            }
+        }
+    }
+
+    /// Shapes one candidate string into a valid display title, or exhausts it.
+    ///
+    /// The shape is the candidate's prefix up to its first line feed, carriage
+    /// return, or U+0000, with leading and trailing ASCII space and tab
+    /// removed, truncated to the first [`Self::MAX_SCALARS`] Unicode scalars,
+    /// and finally stripped of any truncation-exposed trailing ASCII space or
+    /// tab. An empty shape exhausts the candidate.
+    fn shape_candidate(candidate: &str) -> Option<Self> {
+        let first_line = candidate
+            .split(['\n', '\r', '\0'])
+            .next()
+            .unwrap_or_default();
+        let trimmed = first_line.trim_matches([' ', '\t']);
+        let mut shaped: String = trimmed.chars().take(Self::MAX_SCALARS).collect();
+        shaped.truncate(shaped.trim_end_matches([' ', '\t']).len());
+        if shaped.is_empty() {
+            return None;
+        }
+        Some(Self(shaped))
+    }
+
+    /// Borrows the exact title text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Transfers the exact title text out of the value.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+/// A stored display-title value violated the derived-shape contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImportedConversationDisplayTitleError {
+    /// The value was empty.
+    Empty,
+    /// The value contained U+0000.
+    ContainsNul,
+    /// The value contained a line feed or carriage return.
+    ContainsLineBreak,
+    /// The value exceeded the scalar bound.
+    ExceedsMaxScalars {
+        /// The rejected scalar count.
+        scalars: usize,
+    },
+    /// The value carried leading or trailing ASCII space or tab.
+    UntrimmedEdgeWhitespace,
+}
+
+impl fmt::Display for ImportedConversationDisplayTitleError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("imported display title is empty"),
+            Self::ContainsNul => formatter.write_str("imported display title contains U+0000"),
+            Self::ContainsLineBreak => {
+                formatter.write_str("imported display title contains a line break")
+            }
+            Self::ExceedsMaxScalars { scalars } => write!(
+                formatter,
+                "imported display title carries {scalars} Unicode scalars; the bound is {}",
+                ImportedConversationDisplayTitle::MAX_SCALARS
+            ),
+            Self::UntrimmedEdgeWhitespace => {
+                formatter.write_str("imported display title carries edge ASCII whitespace")
+            }
+        }
+    }
+}
+
+impl Error for ImportedConversationDisplayTitleError {}
+
+/// Yields, for every raw record in physical order whose normalized value is
+/// an object whose first `type` member is the exact `record_type` string, the
+/// string at the record's `path` of first-member lookups.
+///
+/// Each path step selects the first member with that exact name; a step whose
+/// member is absent, or whose value is not the shape the next step needs,
+/// exhausts that record without failing the derivation.
+fn typed_record_string_candidates<'conversation>(
+    conversation: &'conversation ImportedConversation,
+    record_type: &'conversation str,
+    path: &'conversation [&'conversation str],
+) -> impl Iterator<Item = &'conversation str> {
+    conversation.raw_records().iter().filter_map(move |record| {
+        let ImportedStructuredValue::Object(members) = record.normalized() else {
+            return None;
+        };
+        let ImportedStructuredValue::String(found_type) = first_member(members, "type")? else {
+            return None;
+        };
+        if found_type.as_str() != record_type {
+            return None;
+        }
+        let mut value = record.normalized();
+        for step in path {
+            let ImportedStructuredValue::Object(members) = value else {
+                return None;
+            };
+            value = first_member(members, step)?;
+        }
+        let ImportedStructuredValue::String(text) = value else {
+            return None;
+        };
+        Some(text.as_str())
+    })
+}
+
+/// Yields every attested-text entry with an attested user speaker, in
+/// imported order.
+fn attested_user_text_candidates(
+    conversation: &ImportedConversation,
+) -> impl Iterator<Item = &str> {
+    conversation.entries().iter().filter_map(|entry| {
+        if *entry.source_speaker() != ImportedSourceAttestation::Attested(ImportedSpeaker::User) {
+            return None;
+        }
+        let ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text)) =
+            entry.content()
+        else {
+            return None;
+        };
+        Some(text.as_str())
+    })
+}
+
+/// Selects the first object member with the exact name, retaining duplicates
+/// as inert later members.
+fn first_member<'members>(
+    members: &'members [ImportedStructuredObjectMember],
+    name: &str,
+) -> Option<&'members ImportedStructuredValue> {
+    members
+        .iter()
+        .find(|member| member.name().as_str() == name)
+        .map(ImportedStructuredObjectMember::value)
+}
+
 fn conversion_error(
     id: ImportedConversationId,
     format: ImportedConversationFormat,
@@ -3016,7 +3248,8 @@ mod tests {
     };
 
     use super::{
-        ImportedConversation, ImportedConversationFormat,
+        ImportedConversation, ImportedConversationDisplayTitle,
+        ImportedConversationDisplayTitleError, ImportedConversationFormat,
         ImportedConversationReconstitutionFailure, ImportedConversationReconstitutionInput,
         ImportedConversationSourceDigest, ImportedJsonNumber, ImportedMessageContentAbsence,
         ImportedRawRecordConversionDigest, ImportedRawRecordHash, ImportedRawRecordPosition,
@@ -4446,5 +4679,274 @@ mod tests {
         let error = ImportedJsonNumber::try_new(String::from(source_value))
             .expect_err("fixture has an incomplete exponent");
         assert!(!format!("{error:?}").contains(source_value));
+    }
+
+    /// One Claude Code aggregate whose first record is a `summary` source
+    /// event and whose second record is one attested user text message.
+    fn claude_code_summary_fixture(summary: &str, user_text: &str) -> ImportedConversation {
+        let owner = conversation(1);
+        let raw_records = vec![
+            ImportedRawSourceRecord::from_converted(
+                format!(r#"{{"type":"summary","summary":"{summary}"}}"#).into_bytes(),
+                object_with_members(vec![
+                    ("type", ImportedStructuredValue::String(text("summary"))),
+                    ("summary", ImportedStructuredValue::String(text(summary))),
+                ]),
+            ),
+            ImportedRawSourceRecord::from_converted(
+                format!(r#"{{"type":"user","message":{{"role":"user","content":"{user_text}"}}}}"#)
+                    .into_bytes(),
+                user_message_record(user_text),
+            ),
+        ];
+        let entries = vec![
+            EntryFixture::new(
+                2,
+                owner,
+                ImportedTranscriptContent::SourceEvent {
+                    source_type: ImportedSourceAttestation::Attested(text("summary")),
+                },
+            )
+            .build(),
+            EntryFixture::new(
+                3,
+                owner,
+                ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text(
+                    user_text,
+                ))),
+            )
+            .position(2)
+            .raw_position(2)
+            .speaker(ImportedSpeaker::User)
+            .build(),
+        ];
+        ImportedConversation::from_converted_records(
+            owner,
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV2,
+            raw_records,
+            entries,
+        )
+        .expect("complete summary fixture is valid")
+    }
+
+    /// One complete normalized Claude Code user record whose attested role
+    /// agrees with its top-level type.
+    fn user_message_record(user_text: &str) -> ImportedStructuredValue {
+        object_with_members(vec![
+            ("type", ImportedStructuredValue::String(text("user"))),
+            (
+                "message",
+                object_with_members(vec![
+                    ("role", ImportedStructuredValue::String(text("user"))),
+                    ("content", ImportedStructuredValue::String(text(user_text))),
+                ]),
+            ),
+        ])
+    }
+
+    /// One Claude Code aggregate containing exactly one attested user text
+    /// message and no summary record.
+    fn claude_code_user_text_fixture(user_text: &str) -> ImportedConversation {
+        let owner = conversation(1);
+        let raw_records = vec![ImportedRawSourceRecord::from_converted(
+            format!(r#"{{"type":"user","message":{{"role":"user","content":{user_text:?}}}}}"#)
+                .into_bytes(),
+            user_message_record(user_text),
+        )];
+        let entries = vec![
+            EntryFixture::new(
+                2,
+                owner,
+                ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text(
+                    user_text,
+                ))),
+            )
+            .speaker(ImportedSpeaker::User)
+            .build(),
+        ];
+        ImportedConversation::from_converted_records(
+            owner,
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV2,
+            raw_records,
+            entries,
+        )
+        .expect("complete user-text fixture is valid")
+    }
+
+    /// One Codex aggregate whose first record is a `session_meta` source event
+    /// carrying the supplied payload members.
+    fn codex_session_meta_fixture(
+        payload: Vec<(&str, ImportedStructuredValue)>,
+    ) -> ImportedConversation {
+        let owner = conversation(1);
+        let raw_records = vec![ImportedRawSourceRecord::from_converted(
+            br#"{"type":"session_meta","payload":{}}"#.to_vec(),
+            object_with_members(vec![
+                (
+                    "type",
+                    ImportedStructuredValue::String(text("session_meta")),
+                ),
+                ("payload", object_with_members(payload)),
+            ]),
+        )];
+        let entries = vec![
+            EntryFixture::new(
+                2,
+                owner,
+                ImportedTranscriptContent::SourceEvent {
+                    source_type: ImportedSourceAttestation::Attested(text("session_meta")),
+                },
+            )
+            .build(),
+        ];
+        ImportedConversation::from_converted_records(
+            owner,
+            ImportedConversationFormat::CodexRolloutJsonlV1,
+            raw_records,
+            entries,
+        )
+        .expect("complete session-meta fixture is valid")
+    }
+
+    /// The display title prefers the first summary record over user text.
+    #[test]
+    fn display_title_derives_from_the_first_claude_code_summary_record() {
+        let imported = claude_code_summary_fixture("Fix the flaky import", "unrelated question");
+
+        let title = ImportedConversationDisplayTitle::derive(&imported)
+            .expect("summary fixture derives a title");
+        assert_eq!(title.as_str(), "Fix the flaky import");
+    }
+
+    /// Without a summary record, the first attested user text supplies the
+    /// candidate, shaped to its trimmed first line.
+    #[test]
+    fn display_title_falls_back_to_shaped_first_attested_user_text() {
+        let imported = claude_code_user_text_fixture("  padded question\nsecond line");
+
+        let title = ImportedConversationDisplayTitle::derive(&imported)
+            .expect("user-text fixture derives a title");
+        assert_eq!(title.as_str(), "padded question");
+    }
+
+    /// A whitespace-only summary is exhausted and the user text is tried next.
+    #[test]
+    fn display_title_exhausts_a_blank_summary_candidate() {
+        let imported = claude_code_summary_fixture("  ", "fallback question");
+
+        let title = ImportedConversationDisplayTitle::derive(&imported)
+            .expect("fallback candidate derives a title");
+        assert_eq!(title.as_str(), "fallback question");
+    }
+
+    /// A candidate longer than the bound truncates to the first 256 scalars.
+    #[test]
+    fn display_title_truncates_to_the_scalar_bound() {
+        let imported = claude_code_user_text_fixture(&"x".repeat(300));
+
+        let title = ImportedConversationDisplayTitle::derive(&imported)
+            .expect("oversized candidate still derives a title");
+        assert_eq!(title.as_str(), "x".repeat(256));
+    }
+
+    /// A conversation with no summary and no attested user text derives
+    /// nothing rather than fabricating a title.
+    #[test]
+    fn display_title_is_underivable_without_any_candidate() {
+        let imported = codex_session_meta_fixture(vec![(
+            "cwd",
+            ImportedStructuredValue::String(text("/workspace/rollout")),
+        )]);
+
+        assert_eq!(ImportedConversationDisplayTitle::derive(&imported), None);
+    }
+
+    /// A Codex `session_meta` payload title outranks its instructions.
+    #[test]
+    fn display_title_prefers_codex_session_meta_title_over_instructions() {
+        let imported = codex_session_meta_fixture(vec![
+            (
+                "instructions",
+                ImportedStructuredValue::String(text("long standing instructions")),
+            ),
+            (
+                "title",
+                ImportedStructuredValue::String(text("Rollout title")),
+            ),
+        ]);
+
+        let title = ImportedConversationDisplayTitle::derive(&imported)
+            .expect("titled session-meta fixture derives a title");
+        assert_eq!(title.as_str(), "Rollout title");
+    }
+
+    /// A Codex `session_meta` without a title falls back to instructions.
+    #[test]
+    fn display_title_derives_from_codex_session_meta_instructions() {
+        let imported = codex_session_meta_fixture(vec![(
+            "instructions",
+            ImportedStructuredValue::String(text("Review the queue daily")),
+        )]);
+
+        let title = ImportedConversationDisplayTitle::derive(&imported)
+            .expect("instruction session-meta fixture derives a title");
+        assert_eq!(title.as_str(), "Review the queue daily");
+    }
+
+    #[test]
+    fn display_title_construction_rejects_empty_text() {
+        assert_eq!(
+            ImportedConversationDisplayTitle::try_new(String::new()),
+            Err(ImportedConversationDisplayTitleError::Empty)
+        );
+    }
+
+    #[test]
+    fn display_title_construction_rejects_nul() {
+        assert_eq!(
+            ImportedConversationDisplayTitle::try_new(String::from("a\0b")),
+            Err(ImportedConversationDisplayTitleError::ContainsNul)
+        );
+    }
+
+    #[test]
+    fn display_title_construction_rejects_line_breaks() {
+        assert_eq!(
+            ImportedConversationDisplayTitle::try_new(String::from("a\nb")),
+            Err(ImportedConversationDisplayTitleError::ContainsLineBreak)
+        );
+        assert_eq!(
+            ImportedConversationDisplayTitle::try_new(String::from("a\rb")),
+            Err(ImportedConversationDisplayTitleError::ContainsLineBreak)
+        );
+    }
+
+    #[test]
+    fn display_title_construction_rejects_excess_scalars() {
+        assert_eq!(
+            ImportedConversationDisplayTitle::try_new("x".repeat(257)),
+            Err(ImportedConversationDisplayTitleError::ExceedsMaxScalars { scalars: 257 })
+        );
+    }
+
+    #[test]
+    fn display_title_construction_rejects_edge_whitespace() {
+        assert_eq!(
+            ImportedConversationDisplayTitle::try_new(String::from(" title")),
+            Err(ImportedConversationDisplayTitleError::UntrimmedEdgeWhitespace)
+        );
+        assert_eq!(
+            ImportedConversationDisplayTitle::try_new(String::from("title\t")),
+            Err(ImportedConversationDisplayTitleError::UntrimmedEdgeWhitespace)
+        );
+    }
+
+    /// Stored derived shapes reconstruct exactly through checked construction.
+    #[test]
+    fn display_title_construction_accepts_a_derived_shape() {
+        let title = ImportedConversationDisplayTitle::try_new(String::from("Fix the flaky import"))
+            .expect("derived shape is valid");
+        assert_eq!(title.as_str(), "Fix the flaky import");
+        assert_eq!(title.clone().into_string(), "Fix the flaky import");
     }
 }

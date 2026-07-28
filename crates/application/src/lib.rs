@@ -6,6 +6,7 @@
 mod conversation_import;
 mod create_session;
 mod create_session_from_imported_frontier;
+mod list_conversations;
 mod load_session;
 mod model_execution;
 mod operator_failure;
@@ -35,6 +36,11 @@ pub use create_session_from_imported_frontier::{
     CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
     CreateSessionFromImportedFrontierTransaction,
     UuidV7CreateSessionFromImportedFrontierIdGenerator,
+};
+pub use list_conversations::{
+    ConversationListCursor, ConversationListItem, ConversationListQuery,
+    ConversationListQueryError, ConversationLister, ConversationOriginFilter,
+    ConversationPageReader, ListConversationsService,
 };
 pub use load_session::{LoadSessionService, SessionReader};
 pub use model_execution::{

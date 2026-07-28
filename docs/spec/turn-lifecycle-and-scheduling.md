@@ -584,9 +584,11 @@ selections, and aliases), `ANTHROPIC_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, and
 configuration channels are
 [configuration-and-credentials](configuration-and-credentials.md) scope). It
 connects, acquires the single-daemon guard, fences the prior pool incarnation,
-migrates, completes recovery scan, binds the process socket, then concurrently
-admits protocol requests, dispatches the outbox, and schedules eligible work. On
-a database without the fence migration, the guarded first migration creates the
+migrates and resolves the one-time imported display-title backfill
+([conversation-import](conversation-import.md#derived-display-titles)),
+completes recovery scan, binds the process socket, then concurrently admits
+protocol requests, dispatches the outbox, and schedules eligible work. On a
+database without the fence migration, the guarded first migration creates the
 fence row before the daemon initializes its first fenced pool. No request,
 dispatch cursor advance, or scheduler pass occurs before recovery completes. Any
 phase failure is a failed startup with a classified, key-bearing log line and a
