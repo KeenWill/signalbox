@@ -28,6 +28,7 @@ mod daemon_tools;
 mod fenced_database;
 mod local_socket;
 mod process_runtime;
+mod session_template_configuration;
 mod single_hub;
 
 pub use configuration::{
@@ -41,6 +42,9 @@ pub use daemon_tools::{
 pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError};
+pub use session_template_configuration::{
+    ResolvedSessionTemplate, SessionTemplateConfiguration, SessionTemplateConfigurationError,
+};
 pub use signalbox_tools_basic::{
     CurrentTimeClock, CurrentTimeExecutor, CurrentTimeExecutorError, CurrentTimeTool,
     CurrentTimeToolConstructionError, EchoExecutor, EchoExecutorError, EchoTool,

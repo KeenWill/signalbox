@@ -11,7 +11,7 @@ use signalbox_domain::{
     CreateSession as DomainCreateSession, CreateSessionAppliedResult,
     CreateSessionPreparationFailure, DurableCommandId, PreparedCreateSession,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    TranscriptAncestry,
+    SessionTemplateProvenance, TranscriptAncestry,
 };
 
 /// Why a caller-supplied command identity cannot enter canonical construction.
@@ -48,6 +48,7 @@ impl Error for InvalidDurableCommandId {}
 pub struct CreateSessionRequest {
     command_id: DurableCommandId,
     initial_configuration_defaults: SessionConfigurationDefaults,
+    template_provenance: Option<SessionTemplateProvenance>,
 }
 
 impl CreateSessionRequest {
@@ -66,6 +67,28 @@ impl CreateSessionRequest {
         Ok(Self {
             command_id,
             initial_configuration_defaults,
+            template_provenance: None,
+        })
+    }
+
+    /// Validates a template-sourced request carrying one already-resolved
+    /// defaults copy and its immutable name/digest provenance.
+    pub fn try_new_from_template(
+        command_id: DurableCommandId,
+        template_provenance: SessionTemplateProvenance,
+        resolved_configuration_defaults: SessionConfigurationDefaults,
+    ) -> Result<Self, InvalidDurableCommandId> {
+        if command_id.as_uuid().is_nil() {
+            return Err(InvalidDurableCommandId::Nil);
+        }
+        if command_id.as_uuid().is_max() {
+            return Err(InvalidDurableCommandId::Max);
+        }
+
+        Ok(Self {
+            command_id,
+            initial_configuration_defaults: resolved_configuration_defaults,
+            template_provenance: Some(template_provenance),
         })
     }
 
@@ -77,6 +100,11 @@ impl CreateSessionRequest {
     /// Borrows the complete initial model-selection defaults.
     pub const fn initial_configuration_defaults(&self) -> &SessionConfigurationDefaults {
         &self.initial_configuration_defaults
+    }
+
+    /// Borrows immutable template provenance for template-sourced creation.
+    pub const fn template_provenance(&self) -> Option<&SessionTemplateProvenance> {
+        self.template_provenance.as_ref()
     }
 }
 
@@ -205,14 +233,26 @@ where
         request: CreateSessionRequest,
     ) -> Result<CreateSessionOutcome, CreateSessionError<Transaction::Error>> {
         let candidate_session = self.session_ids.next_session_id();
-        let command = DomainCreateSession::new(
-            request.command_id,
-            SessionCreationProvenance::new(
-                SessionCreationCause::OwnerInitiated,
-                TranscriptAncestry::None,
-            ),
-            request.initial_configuration_defaults,
+        let CreateSessionRequest {
+            command_id,
+            initial_configuration_defaults,
+            template_provenance,
+        } = request;
+        let provenance = SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::None,
         );
+        let command = match template_provenance {
+            Some(template_provenance) => DomainCreateSession::new_from_template(
+                command_id,
+                provenance,
+                template_provenance,
+                initial_configuration_defaults,
+            ),
+            None => {
+                DomainCreateSession::new(command_id, provenance, initial_configuration_defaults)
+            }
+        };
         let prepared = command
             .prepare(candidate_session)
             .map_err(|error| CreateSessionError::Preparation(error.failure()))?;

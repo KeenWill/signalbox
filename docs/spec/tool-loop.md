@@ -11,10 +11,11 @@ the failed-attempt operator event together with the credential-shaped code-host
 detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
 decision surface through PR #291 (`agent/turn-control-verbs`), and
 runner-protocol batch reconstitution through PR #260
-(`agent/runner-protocol-domain`). It owns logical tool requests, approval policy
-and decisions, physical tool attempts, result admission, intra-turn
-continuation, crash classification, the compiled registry, and the daemon-local
-catalog. Turn and attempt lifecycle law lives in
+(`agent/runner-protocol-domain`). Template-derived blanket creation was verified
+through PR #311 (`agent/session-templates-spec`). It owns logical tool requests,
+approval policy and decisions, physical tool attempts, result admission,
+intra-turn continuation, crash classification, the compiled registry, and the
+daemon-local catalog. Turn and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
 model-call staging and provider translation in
@@ -109,8 +110,9 @@ selected source makes unattended operation inspectable without laundering policy
 as human consent.
 
 The blanket is a field of each immutable `VersionedSessionConfigurationDefaults`
-value and is named `DangerousToolAutoApproval::{Disabled, ApproveAll}`. Safe
-session creation uses `Disabled`. Replacement installs a complete later defaults
+value and is named `DangerousToolAutoApproval::{Disabled, ApproveAll}`. Explicit
+session creation uses `Disabled`; template-derived creation copies the resolved
+template's configured blanket. Replacement installs a complete later defaults
 version through the existing `ReplaceSessionDefaults` command. Origin acceptance
 freezes the posture into `EffectiveConfiguration` alongside model selection;
 steering-derived work inherits its source turn's frozen value. A later defaults
@@ -717,14 +719,17 @@ reconstructing provider history in frontier order; it performs no per-entry
 database round trips while holding the scheduler lock.
 
 `DecideToolRequest` joins the owner-global durable-command registry as its own
-typed record family. Because adding the dangerous posture changes every
-defaults-bearing canonical command payload, new `CreateSession`,
-`CreateSessionFromImportedFrontier`, and `ReplaceSessionDefaults` records use
-kind-scoped storage version 2; their version-1 records reconstitute with
-`DangerousToolAutoApproval::Disabled`. `SubmitInput` remains version 1, and the
-new decision command begins at version 1; registry inspection validates the
-supported version set for the selected kind rather than applying one global
-version constant.
+typed record family. Adding the dangerous posture originally advanced each
+defaults-bearing command family to kind-scoped storage version 2; version-1
+records reconstitute with `DangerousToolAutoApproval::Disabled`. Later
+system-prompt and template provenance migrations advance the affected families
+independently. The current kind-scoped versions and their compatibility gates
+are owned by
+[identity and commands](identity-and-commands.md#durable-command-records) and
+[persistence protocol](persistence-protocol.md#relational-representation).
+`SubmitInput` and `DecideToolRequest` remain version 1; registry inspection
+validates the supported version set for the selected kind rather than applying
+one global version constant.
 
 ## Open edges
 

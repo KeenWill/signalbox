@@ -102,8 +102,8 @@ pub(crate) async fn inspect(
             }
         };
         let version_supported = match kind {
-            CommandKind::CreateSession
-            | CommandKind::CreateSessionFromImportedFrontier
+            CommandKind::CreateSession => matches!(version, 1..=4),
+            CommandKind::CreateSessionFromImportedFrontier
             | CommandKind::ReplaceSessionDefaults => matches!(version, 1..=3),
             CommandKind::ReplaceSessionMetadata
             | CommandKind::SubmitInput

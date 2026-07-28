@@ -49,6 +49,7 @@ let
   daemonHome = "${stateRoot}/home";
 
   daemonConfigFile = "${stateRoot}/signalboxd.toml";
+  daemonTemplateConfigFile = "${stateRoot}/session-templates.toml";
 
   # The daemon validates the socket's parent directory before binding: it must
   # be owned by the effective user and be mode exactly 0700, and no ancestor
@@ -140,6 +141,10 @@ let
   scrub = builtins.concatStringsSep " " (map (name: "-u ${name}") refusedVariables);
 
   openssl = "${pkgs.openssl}/bin/openssl";
+  # The client helper preserves its caller's directory, where rustup would not
+  # discover the workspace toolchain file.
+  workspaceRustToolchain =
+    (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain.channel;
 in
 
 {
@@ -162,6 +167,28 @@ in
   # .github/workflows/rust.yml.
   packages = [ pkgs.sccache ];
   env.RUSTC_WRAPPER = "sccache";
+
+  # The terminal client and the managed daemon share one socket without the
+  # developer having to derive its path from DEVENV_RUNTIME.
+  env.SIGNALBOX_SOCKET_PATH = daemonSocketPath;
+
+  # Build from the workspace so a caller project's Cargo configuration is not
+  # discovered. The subshell returns to the caller's directory before exec, so
+  # client arguments containing relative paths retain their expected base.
+  scripts.signalbox = {
+    description = "Run the Signalbox terminal client from the working tree.";
+    exec = ''
+      (
+        cd "$DEVENV_ROOT" || exit $?
+        unset CARGO_BUILD_TARGET
+        env RUSTUP_TOOLCHAIN=${shellArg workspaceRustToolchain} \
+          cargo build -q --manifest-path "$DEVENV_ROOT/Cargo.toml" \
+            --target-dir "$DEVENV_ROOT/target" \
+            -p signalbox-client --bin signalbox
+      ) || exit $?
+      exec "$DEVENV_ROOT/target/debug/signalbox" "$@"
+    '';
+  };
 
   languages.python = {
     enable = true;
@@ -325,6 +352,14 @@ in
            ${shellArg daemonConfigFile}
         chmod 644 ${shellArg daemonConfigFile}
       fi
+
+      if [ ! -f ${shellArg daemonTemplateConfigFile} ]; then
+        echo "dev instance: seeding" ${shellArg daemonTemplateConfigFile} \
+             "from config/session-templates.example.toml"
+        cp "$DEVENV_ROOT/config/session-templates.example.toml" \
+           ${shellArg daemonTemplateConfigFile}
+        chmod 644 ${shellArg daemonTemplateConfigFile}
+      fi
     '';
   };
 
@@ -408,6 +443,7 @@ in
         HOME=${shellArg daemonHome} \
         DATABASE_URL=${shellArg databaseUrl} \
         SIGNALBOX_CONFIG_FILE=${shellArg daemonConfigFile} \
+        SIGNALBOX_TEMPLATE_CONFIG_FILE=${shellArg daemonTemplateConfigFile} \
         ANTHROPIC_API_KEY_FILE="$key_file" \
         GITHUB_TOKEN_FILE="$token_file" \
         SIGNALBOX_SOCKET_PATH=${shellArg daemonSocketPath} \
