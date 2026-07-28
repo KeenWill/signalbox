@@ -204,6 +204,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "unsupported_item_marker_in_nonstandard_field" => {
+            // The marker is in a non-`text`/`message` field of an unmodeled
+            // item; every string leaf must still seed the lookbehind.
+            emit(
+                r#"{"type":"item.completed","item":{"id":"diag","type":"diagnostic","aggregated_output":"api_"}}"#,
+            );
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
         "unsupported_item_marker_beside_benign_field" => {
             // An unmodeled item carries a marker in one field and benign text
             // in another; the benign field must not erase the marker.

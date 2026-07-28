@@ -423,6 +423,24 @@ async fn inv_035_context_dependent_held_bytes_stay_in_the_dropped_chain() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a credential marker in a non-standard field of an unsupported
+/// item (not `text`/`message`) still seeds the lookbehind, so a final text
+/// completing it is suppressed.
+#[tokio::test]
+async fn inv_035_unsupported_item_nonstandard_field_seeds_the_lookbehind() {
+    let result = execute_scenario(
+        "unsupported_item_marker_in_nonstandard_field",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
 /// INV-035: an unsupported item's benign field must not erase the credential
 /// marker another field establishes, so a final text completing that marker is
 /// still suppressed.
