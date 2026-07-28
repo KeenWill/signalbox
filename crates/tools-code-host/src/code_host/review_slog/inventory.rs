@@ -211,18 +211,19 @@ pub(crate) fn author_class(actor_type: Option<&str>) -> ReviewAuthorClass {
 /// An escalation is current only when the exact last reply carries its marker.
 /// Otherwise the latest recognized fix or decline survives later
 /// non-disposition replies.
-pub(crate) fn disposition_class(reply_bodies: &[&str]) -> ReviewDispositionClass {
-    let Some(last_body) = reply_bodies.last() else {
+pub(crate) fn disposition_class(reply_evidence: &[(&str, bool)]) -> ReviewDispositionClass {
+    let Some((last_body, last_authorized)) = reply_evidence.last() else {
         return ReviewDispositionClass::Undispositioned;
     };
-    if last_body.contains(ESCALATION_MARKER) {
+    if *last_authorized && last_body.contains(ESCALATION_MARKER) {
         return ReviewDispositionClass::EscalationMarker;
     }
 
-    reply_bodies
+    reply_evidence
         .iter()
         .rev()
-        .find_map(|body| disposition_reply_class(body))
+        .filter(|(_, authorized)| *authorized)
+        .find_map(|(body, _)| disposition_reply_class(body))
         .unwrap_or(ReviewDispositionClass::Undispositioned)
 }
 
@@ -252,12 +253,22 @@ fn contains_commit_token(body: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// A disposition-shaped reply from an unaffiliated actor is not protocol
+    /// evidence.
+    #[test]
+    fn unauthorized_disposition_remains_undispositioned() {
+        assert_eq!(
+            disposition_class(&[("Fixed in commit `0123456789abcdef`", false)]),
+            ReviewDispositionClass::Undispositioned
+        );
+    }
+
     /// A fixing reply must name a commit before it can leave the
     /// undispositioned class.
     #[test]
     fn fixing_commit_is_classified_as_fix_named() {
         assert_eq!(
-            disposition_class(&["Fixed in commit `0123456789abcdef`"]),
+            disposition_class(&[("Fixed in commit `0123456789abcdef`", true)]),
             ReviewDispositionClass::FixNamed
         );
     }
@@ -266,7 +277,7 @@ mod tests {
     #[test]
     fn declined_reply_is_classified_as_declined() {
         assert_eq!(
-            disposition_class(&["Declined: the cited contract requires this shape."]),
+            disposition_class(&[("Declined: the cited contract requires this shape.", true)]),
             ReviewDispositionClass::Declined
         );
     }
@@ -275,7 +286,7 @@ mod tests {
     #[test]
     fn escalation_marker_is_classified_exactly() {
         assert_eq!(
-            disposition_class(&["Escalated without disposition"]),
+            disposition_class(&[("Escalated without disposition", true)]),
             ReviewDispositionClass::EscalationMarker
         );
     }
@@ -285,7 +296,7 @@ mod tests {
     #[test]
     fn narrative_reply_remains_undispositioned() {
         assert_eq!(
-            disposition_class(&["Thanks, I will inspect this."]),
+            disposition_class(&[("Thanks, I will inspect this.", true)]),
             ReviewDispositionClass::Undispositioned
         );
     }
@@ -295,7 +306,7 @@ mod tests {
     #[test]
     fn narrative_decline_mention_remains_undispositioned() {
         assert_eq!(
-            disposition_class(&["This should not be declined."]),
+            disposition_class(&[("This should not be declined.", true)]),
             ReviewDispositionClass::Undispositioned
         );
     }
@@ -304,7 +315,7 @@ mod tests {
     #[test]
     fn reasonless_decline_remains_undispositioned() {
         assert_eq!(
-            disposition_class(&["Declined:   "]),
+            disposition_class(&[("Declined:   ", true)]),
             ReviewDispositionClass::Undispositioned
         );
     }
@@ -314,7 +325,10 @@ mod tests {
     #[test]
     fn narrative_fix_token_remains_undispositioned() {
         assert_eq!(
-            disposition_class(&["The fixture 0123456 demonstrates the issue but names no fix."]),
+            disposition_class(&[(
+                "The fixture 0123456 demonstrates the issue but names no fix.",
+                true
+            )]),
             ReviewDispositionClass::Undispositioned
         );
     }
@@ -333,8 +347,8 @@ mod tests {
     fn informational_reply_preserves_latest_recognized_disposition() {
         assert_eq!(
             disposition_class(&[
-                "Fixed in commit `0123456789abcdef`",
-                "Thank you; that answers my question.",
+                ("Fixed in commit `0123456789abcdef`", true),
+                ("Thank you; that answers my question.", true),
             ]),
             ReviewDispositionClass::FixNamed
         );
@@ -345,9 +359,9 @@ mod tests {
     fn informational_reply_buries_no_escalation_marker() {
         assert_eq!(
             disposition_class(&[
-                "Declined: the cited contract requires this shape.",
-                "Escalated without disposition",
-                "The owner answered the pending question.",
+                ("Declined: the cited contract requires this shape.", true),
+                ("Escalated without disposition", true),
+                ("The owner answered the pending question.", true),
             ]),
             ReviewDispositionClass::Declined
         );

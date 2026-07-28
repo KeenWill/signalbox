@@ -616,9 +616,10 @@ The declarations and compact result objects are:
   child requests whose base names the request's head branch. Each child carries
   the same merge-forward and default-chain comparison for its level. Children
   are discovered in the request's head repository. After computing those
-  comparisons, the adapter re-reads the request and default branch and rejects
-  evidence if either revision snapshot changed. The child page carries
-  `children_truncated` and `children_next_cursor`.
+  comparisons, the adapter re-reads the request, default branch, and exact child
+  page and rejects evidence if any revision, child inventory, or child-page
+  completeness snapshot changed. The child page carries `children_truncated` and
+  `children_next_cursor`.
 - `change_request_thread_inventory` accepts `repository`, `number`, and an
   optional opaque GraphQL `cursor`. It returns the observed head revision and at
   most 100 review threads with exact resolution and outdated posture, path and
@@ -627,11 +628,13 @@ The declarations and compact result objects are:
   `escalation_marker` / `undispositioned` class. A thread without a reply is
   undispositioned. `fix_named` requires a reply beginning with `Fixed in commit`
   or `Fixed in commits`, followed by a space and a 7-to-40-hex commit token;
-  `declined` requires a reply beginning `Declined:` and a nonempty reason. The
-  latest recognized fix or decline survives later non-disposition replies, while
-  `escalation_marker` requires the actual last reply to carry the exact marker.
-  Classification rejects a thread whose comment history exceeds the 100-comment
-  read bound. The page carries `truncated` and `next_cursor`.
+  `declined` requires a reply beginning `Declined:` and a nonempty reason. Only
+  replies whose code-host association is `OWNER`, `MEMBER`, or `COLLABORATOR`
+  can supply disposition evidence. The latest recognized fix or decline survives
+  later non-disposition replies, while `escalation_marker` requires the actual
+  last reply to carry the exact marker. Classification rejects a thread whose
+  comment history exceeds the 100-comment read bound. The page carries
+  `truncated` and `next_cursor`.
 - `review_gate_check` accepts `repository`, `number`, and purpose
   `request_review_wave` or `declare_convergence`. It reads the same fresh typed
   evidence as the three slog tools, re-reading convergence last and using that
@@ -653,10 +656,12 @@ its argument counterpart uses, so those identities and continuations can be
 passed back as arguments. Convergence-state cursors identify a diagnostic
 truncation boundary; that tool and the gate remain indeterminate rather than
 performing an unbounded continuation scan. Every returned URL is one absolute
-credential-free HTTPS location. No result has more than 100 collection members
-or more than 512 KiB of encoded JSON. Every bounded slog list reports whether it
-is truncated and the matching continuation cursor; a verdict never silently
-treats a partial evidence page as complete.
+credential-free HTTPS location. Typed construction rejects aggregate convergence
+evidence whose overlapping bounded lists would exceed the shared encoded-result
+limit. No result has more than 100 collection members or more than 512 KiB of
+encoded JSON. Every bounded slog list reports whether it is truncated and the
+matching continuation cursor; a verdict never silently treats a partial evidence
+page as complete.
 
 The production adapter uses fixed GitHub REST and GraphQL endpoints. It disables
 ambient proxies, automatic redirects, protocol retries, and idle reuse; uses

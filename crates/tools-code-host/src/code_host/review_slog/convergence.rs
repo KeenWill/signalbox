@@ -4,7 +4,9 @@ use serde_json::{Value, json};
 
 use crate::code_host::{
     arguments::{valid_cursor, valid_opaque_id, valid_revision},
-    result::{MAX_RESULT_ITEMS, valid_path, valid_required_text, valid_text},
+    result::{
+        MAX_ENCODED_RESULT_BYTES, MAX_RESULT_ITEMS, valid_path, valid_required_text, valid_text,
+    },
 };
 
 const STARVATION_MARKER: &str = "reached your Codex usage limits";
@@ -357,7 +359,7 @@ impl ConvergenceStateResult {
         } else {
             ConvergenceVerdict::ConvergedWithEscalations
         };
-        Some(Self {
+        let result = Self {
             head_revision: fields.head_revision,
             mergeable_state: fields.mergeable_state,
             ci_rollup_state: fields.ci_rollup_state,
@@ -372,7 +374,9 @@ impl ConvergenceStateResult {
             threads_next_cursor: fields.threads_next_cursor,
             reviewer: fields.reviewer,
             verdict,
-        })
+        };
+        let encoded = serde_json::to_vec(&result.clone().into_value()).ok()?;
+        (encoded.len() <= MAX_ENCODED_RESULT_BYTES).then_some(result)
     }
 
     /// Returns the deterministic verdict.
@@ -470,6 +474,12 @@ pub(crate) struct ReviewerActivity {
     pub(crate) actor_type: Option<String>,
 }
 
+/// Whether the code host identifies an actor as a repository participant who
+/// can speak for the review protocol.
+pub(crate) fn authorized_association(association: &str) -> bool {
+    matches!(association, "OWNER" | "MEMBER" | "COLLABORATOR")
+}
+
 /// Merges review bodies and issue comments in exact code-host timestamp order.
 pub(crate) fn reviewer_verdict_evidence(
     head_revision: &str,
@@ -484,10 +494,7 @@ pub(crate) fn reviewer_verdict_evidence(
     let mut latest_starvation_at = None;
     let mut latest_review_request_at = None;
     for activity in activities {
-        let authorized_requester = matches!(
-            activity.author_association.as_str(),
-            "OWNER" | "MEMBER" | "COLLABORATOR"
-        );
+        let authorized_requester = authorized_association(&activity.author_association);
         if authorized_requester
             && activity
                 .body
@@ -783,6 +790,23 @@ mod tests {
             result.verdict(),
             ConvergenceVerdict::ConvergedWithEscalations
         );
+    }
+
+    /// Independently bounded overlapping lists cannot exceed the aggregate
+    /// encoded result budget.
+    #[test]
+    fn aggregate_convergence_result_over_budget_is_rejected() {
+        let thread = ReviewThreadIdentity::try_new(
+            String::from("PRRT_fixture"),
+            "a".repeat(4_096),
+            String::from("Finding"),
+        )
+        .expect("maximum-path fixture thread is admitted");
+        let mut fields = complete_fields();
+        fields.unresolved_threads = vec![thread.clone(); MAX_RESULT_ITEMS];
+        fields.undispositioned_threads = vec![thread; MAX_RESULT_ITEMS];
+
+        assert!(ConvergenceStateResult::try_new(fields).is_none());
     }
 
     /// A similarly named account cannot provide the reviewer verdict.

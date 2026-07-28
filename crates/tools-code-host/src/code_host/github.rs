@@ -16,7 +16,8 @@ use signalbox_tools_basic::{
 
 use super::result::absolute_https_url;
 use super::review_slog::{
-    ReviewerActivity, author_class, disposition_class, finding_title, reviewer_verdict_evidence,
+    ReviewerActivity, author_class, authorized_association, disposition_class, finding_title,
+    reviewer_verdict_evidence,
 };
 use super::{
     ChangeRequestCommentResult, ChangeRequestSummaryFields, ChangeRequestSummaryResult,
@@ -88,7 +89,7 @@ query Convergence($owner: String!, $name: String!, $number: Int!) {
         nodes {
           id isResolved isOutdated path line
           comments(first: 100) {
-            nodes { author { login __typename } body }
+            nodes { author { login __typename } authorAssociation body }
             pageInfo { hasNextPage }
           }
         }
@@ -126,7 +127,7 @@ query ThreadInventory($owner: String!, $name: String!, $number: Int!, $cursor: S
         nodes {
           id isResolved isOutdated path line
           comments(first: 100) {
-            nodes { author { login __typename } body }
+            nodes { author { login __typename } authorAssociation body }
             pageInfo { hasNextPage }
           }
         }
@@ -626,16 +627,19 @@ impl GitHubCodeHostTransport {
             ]),
         )?;
         let children_response = self
-            .send_authenticated(Method::GET, children_url, None, credential)
+            .send_authenticated(Method::GET, children_url.clone(), None, credential)
             .await?;
         let (children_value, completeness) =
             self.json_page(children_response, StatusCode::OK).await?;
         let child_values = children_value
             .as_array()
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-        let mut children = Vec::with_capacity(child_values.len());
-        for child_value in child_values {
-            let child = parse_stack_child(child_value)?;
+        let child_snapshot = child_values
+            .iter()
+            .map(parse_stack_child)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut children = Vec::with_capacity(child_snapshot.len());
+        for child in &child_snapshot {
             if child.base_ref != request.head_ref || child.base_revision != request.head_revision {
                 return Err(CodeHostTransportFailure::InvalidResponse);
             }
@@ -650,8 +654,8 @@ impl GitHubCodeHostTransport {
             children.push(
                 ChildStackState::try_new(
                     child.number,
-                    child.head_ref,
-                    child.head_revision,
+                    child.head_ref.clone(),
+                    child.head_revision.clone(),
                     child_base_commits_not_in_head,
                     main_commits_not_in_child_base,
                 )
@@ -678,11 +682,32 @@ impl GitHubCodeHostTransport {
             )?)?,
             "sha",
         )?;
+        let current_children_response = self
+            .send_authenticated(Method::GET, children_url, None, credential)
+            .await?;
+        let (current_children_value, current_completeness) = self
+            .json_page(current_children_response, StatusCode::OK)
+            .await?;
+        let current_child_values = current_children_value
+            .as_array()
+            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        let current_child_snapshot = current_child_values
+            .iter()
+            .map(parse_stack_child)
+            .collect::<Result<Vec<_>, _>>()?;
         ensure_stack_snapshot_unchanged(
-            &request,
-            &current_request,
-            default_revision.as_str(),
-            current_default_revision.as_str(),
+            StackSnapshot {
+                request: &request,
+                default_revision: default_revision.as_str(),
+                children: &child_snapshot,
+                completeness,
+            },
+            StackSnapshot {
+                request: &current_request,
+                default_revision: current_default_revision.as_str(),
+                children: &current_child_snapshot,
+                completeness: current_completeness,
+            },
         )?;
         StackStateResult::try_new(StackStateFields {
             number: number.get(),
@@ -1262,13 +1287,23 @@ fn parse_slog_thread(
         .ok_or(CodeHostTransportFailure::InvalidResponse)?;
     let first = required_object(first)?;
     let first_body = required_string(first, "body")?;
-    let reply_bodies = comment_nodes
+    let reply_evidence = comment_nodes
         .iter()
         .skip(1)
         .map(required_object)
-        .map(|comment| comment.and_then(|comment| required_string(comment, "body")))
+        .map(|comment| {
+            comment.and_then(|comment| {
+                Ok((
+                    required_string(comment, "body")?,
+                    authorized_association(&required_string(comment, "authorAssociation")?),
+                ))
+            })
+        })
         .collect::<Result<Vec<_>, _>>()?;
-    let reply_bodies = reply_bodies.iter().map(String::as_str).collect::<Vec<_>>();
+    let reply_evidence = reply_evidence
+        .iter()
+        .map(|(body, authorized)| (body.as_str(), *authorized))
+        .collect::<Vec<_>>();
     let title = finding_title(&first_body);
     let author_value = required(first, "author")?;
     let (author, actor_type) = match author_value {
@@ -1282,7 +1317,7 @@ fn parse_slog_thread(
     let id = required_string(object, "id")?;
     let path = required_string(object, "path")?;
     let resolved = required_bool(object, "isResolved")?;
-    let disposition = disposition_class(&reply_bodies);
+    let disposition = disposition_class(&reply_evidence);
     let identity = ReviewThreadIdentity::try_new(id.clone(), path.clone(), title.clone())
         .ok_or(CodeHostTransportFailure::InvalidResponse)?;
     let inventory = ReviewThreadInventoryItem::try_new(ReviewThreadInventoryFields {
@@ -1446,13 +1481,22 @@ fn parse_stack_request(
     })
 }
 
+struct StackSnapshot<'a> {
+    request: &'a StackRequestFacts,
+    default_revision: &'a str,
+    children: &'a [StackChildFacts],
+    completeness: CodeHostResultCompleteness,
+}
+
 fn ensure_stack_snapshot_unchanged(
-    initial_request: &StackRequestFacts,
-    current_request: &StackRequestFacts,
-    initial_default_revision: &str,
-    current_default_revision: &str,
+    initial: StackSnapshot<'_>,
+    current: StackSnapshot<'_>,
 ) -> Result<(), CodeHostTransportFailure> {
-    if initial_request != current_request || initial_default_revision != current_default_revision {
+    if initial.request != current.request
+        || initial.default_revision != current.default_revision
+        || initial.children != current.children
+        || initial.completeness != current.completeness
+    {
         return Err(CodeHostTransportFailure::InvalidResponse);
     }
     Ok(())
@@ -1903,7 +1947,20 @@ mod tests {
         .expect("current fixture request is admitted");
 
         assert_eq!(
-            ensure_stack_snapshot_unchanged(&initial, &current, DEFAULT_REVISION, DEFAULT_REVISION,),
+            ensure_stack_snapshot_unchanged(
+                StackSnapshot {
+                    request: &initial,
+                    default_revision: DEFAULT_REVISION,
+                    children: &[],
+                    completeness: CodeHostResultCompleteness::Complete,
+                },
+                StackSnapshot {
+                    request: &current,
+                    default_revision: DEFAULT_REVISION,
+                    children: &[],
+                    completeness: CodeHostResultCompleteness::Complete,
+                },
+            ),
             Err(CodeHostTransportFailure::InvalidResponse)
         );
     }
@@ -1929,8 +1986,105 @@ mod tests {
         let request = parse_stack_request(&value, 17).expect("fixture request is admitted");
 
         assert_eq!(
-            ensure_stack_snapshot_unchanged(&request, &request, INITIAL_DEFAULT, CURRENT_DEFAULT,),
+            ensure_stack_snapshot_unchanged(
+                StackSnapshot {
+                    request: &request,
+                    default_revision: INITIAL_DEFAULT,
+                    children: &[],
+                    completeness: CodeHostResultCompleteness::Complete,
+                },
+                StackSnapshot {
+                    request: &request,
+                    default_revision: CURRENT_DEFAULT,
+                    children: &[],
+                    completeness: CodeHostResultCompleteness::Complete,
+                },
+            ),
             Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// A changed child page invalidates comparisons made against the earlier
+    /// child inventory.
+    #[test]
+    fn stack_snapshot_rejects_changed_child_inventory() {
+        const DEFAULT_REVISION: &str = "1111111111111111111111111111111111111111";
+        const HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
+        let request = StackRequestFacts {
+            base_ref: String::from("main"),
+            base_revision: String::from(DEFAULT_REVISION),
+            head_ref: String::from("feature"),
+            head_revision: String::from(HEAD_REVISION),
+            head_repository: CodeHostRepository::try_new(String::from("owner/repository"))
+                .expect("fixture repository is admitted"),
+            default_ref: String::from("main"),
+        };
+        let initial = [StackChildFacts {
+            number: 18,
+            base_ref: String::from("feature"),
+            base_revision: String::from(HEAD_REVISION),
+            head_ref: String::from("child"),
+            head_revision: String::from("3333333333333333333333333333333333333333"),
+        }];
+        let current = [StackChildFacts {
+            number: 19,
+            base_ref: String::from("feature"),
+            base_revision: String::from(HEAD_REVISION),
+            head_ref: String::from("other-child"),
+            head_revision: String::from("4444444444444444444444444444444444444444"),
+        }];
+
+        assert_eq!(
+            ensure_stack_snapshot_unchanged(
+                StackSnapshot {
+                    request: &request,
+                    default_revision: DEFAULT_REVISION,
+                    children: &initial,
+                    completeness: CodeHostResultCompleteness::Complete,
+                },
+                StackSnapshot {
+                    request: &request,
+                    default_revision: DEFAULT_REVISION,
+                    children: &current,
+                    completeness: CodeHostResultCompleteness::Complete,
+                },
+            ),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// Disposition-shaped text from an unaffiliated reply cannot satisfy the
+    /// parsed inventory protocol.
+    #[test]
+    fn slog_thread_rejects_unauthorized_disposition_evidence() {
+        let value = serde_json::json!({
+            "id": "PRRT_fixture",
+            "isResolved": true,
+            "isOutdated": false,
+            "path": "src/lib.rs",
+            "line": 12,
+            "comments": {
+                "nodes": [
+                    {
+                        "author": {"login": "review-bot", "__typename": "Bot"},
+                        "authorAssociation": "NONE",
+                        "body": "Finding title"
+                    },
+                    {
+                        "author": {"login": "visitor", "__typename": "User"},
+                        "authorAssociation": "NONE",
+                        "body": "Fixed in commit `0123456789abcdef`"
+                    }
+                ],
+                "pageInfo": {"hasNextPage": false}
+            }
+        });
+
+        let thread = parse_slog_thread(&value).expect("fixture thread is admitted");
+
+        assert_eq!(
+            thread.inventory.disposition(),
+            ReviewDispositionClass::Undispositioned
         );
     }
 
