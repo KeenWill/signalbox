@@ -17,12 +17,12 @@ use signalbox_domain::AcceptedInputId;
 use signalbox_domain::{
     AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttemptState,
     DangerousToolAutoApproval, DecideToolRequest, EndedToolAttempt, FailedModelCallTurn,
-    FailedModelCallTurnIdentities, InitialToolApproval, ModelCallId, NormalizedToolArguments,
-    PreparedDecideToolRequest, SemanticTranscriptEntryId, SessionId, ToolArgumentsKind,
-    ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId, ToolAttemptObservation,
-    ToolBatch, ToolBatchPhase, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
-    ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest, ToolRequestId,
-    ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
+    FailedModelCallTurnIdentities, InitialToolApproval, IssuedExecutorFence, ModelCallId,
+    NormalizedToolArguments, PreparedDecideToolRequest, SemanticTranscriptEntryId, SessionId,
+    ToolArgumentsKind, ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId,
+    ToolAttemptObservation, ToolBatch, ToolBatchPhase, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest,
+    ToolRequestId, ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
 };
 
 /// Canonical JSON object used as a model-facing argument schema.
@@ -328,7 +328,7 @@ pub enum ToolCatalogValidationFailure {
 pub struct ToolExecutionInvocation {
     request: ToolRequest,
     definition: ToolDefinition,
-    correlation: ToolAttemptDispatchCorrelation,
+    fence: IssuedExecutorFence,
 }
 
 impl ToolExecutionInvocation {
@@ -346,7 +346,7 @@ impl ToolExecutionInvocation {
         .then_some(Self {
             request,
             definition,
-            correlation,
+            fence: authorized.executor_fence(),
         })
     }
 
@@ -362,13 +362,13 @@ impl ToolExecutionInvocation {
 
     /// Returns the complete durable dispatch fence.
     pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation {
-        self.correlation
+        self.fence.correlation()
     }
 
-    /// Binds returned executor evidence to the exact dispatch fence.
+    /// Binds returned executor evidence to the exact issued fence.
     pub fn bind(self, evidence: ToolExecutorEvidence) -> CorrelatedToolExecutorEvidence {
         CorrelatedToolExecutorEvidence {
-            correlation: self.correlation,
+            fence: self.fence,
             evidence,
         }
     }
@@ -391,14 +391,14 @@ pub enum ToolExecutorEvidence {
 /// Executor evidence carrying the exact issued dispatch fence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CorrelatedToolExecutorEvidence {
-    correlation: ToolAttemptDispatchCorrelation,
+    fence: IssuedExecutorFence,
     evidence: ToolExecutorEvidence,
 }
 
 impl CorrelatedToolExecutorEvidence {
     /// Returns the executor-supplied correlation.
     pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation {
-        self.correlation
+        self.fence.correlation()
     }
 
     /// Borrows returned evidence.
@@ -1448,7 +1448,7 @@ fn admit_executor_evidence(
         }
         ToolExecutorEvidence::Ambiguous => ToolAttemptObservation::Ambiguous,
     };
-    evidence.correlation.bind(observation)
+    evidence.fence.bind(observation)
 }
 
 /// The operator-visible signal one admitted tool observation warrants.

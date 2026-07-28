@@ -54,6 +54,7 @@ pub enum RunnerDomainError {
     ToolUnavailable,
     GrantRevoked,
     RegistrationChanged,
+    RegistrationInProgress,
     CorruptStoredFacts,
 }
 
@@ -305,6 +306,12 @@ impl CredentialProfilePolicy {
             .copied()
             .unwrap_or(CredentialToolApproval::SessionPolicy)
     }
+
+    pub fn approvals(&self) -> impl Iterator<Item = (&ToolName, CredentialToolApproval)> {
+        self.approvals
+            .iter()
+            .map(|(tool, approval)| (tool, *approval))
+    }
 }
 
 /// Closed workspace capabilities advertised by runners.
@@ -425,6 +432,7 @@ pub struct RunnerEnrollment {
     state: RunnerEnrollmentState,
     registration_revision: Arc<AtomicU64>,
     registration_active: Arc<AtomicBool>,
+    registration_preparation: Arc<AtomicBool>,
 }
 
 impl PartialEq for RunnerEnrollment {
@@ -434,6 +442,8 @@ impl PartialEq for RunnerEnrollment {
             && self.authentication == other.authentication
             && self.allowed_classes == other.allowed_classes
             && self.state == other.state
+            && self.registration_revision.load(Ordering::Acquire)
+                == other.registration_revision.load(Ordering::Acquire)
     }
 }
 
@@ -454,6 +464,7 @@ impl RunnerEnrollment {
             state: RunnerEnrollmentState::Active,
             registration_revision: Arc::new(AtomicU64::new(0)),
             registration_active: Arc::new(AtomicBool::new(true)),
+            registration_preparation: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -473,13 +484,28 @@ impl RunnerEnrollment {
         self.state
     }
 
+    pub fn allowed_classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass> {
+        self.allowed_classes.iter()
+    }
+
+    /// The last registration revision this enrollment authority issued, or
+    /// `None` while the enrollment is pristine and has issued none.
+    pub fn last_issued_registration_revision(&self) -> Option<RunnerGeneration> {
+        RunnerGeneration::try_from_u64(self.registration_revision.load(Ordering::Acquire))
+    }
+
     pub fn revoke(mut self) -> Result<Self, RunnerDomainError> {
+        self.revoke_in_place()?;
+        Ok(self)
+    }
+
+    pub fn revoke_in_place(&mut self) -> Result<(), RunnerDomainError> {
         if self.state != RunnerEnrollmentState::Active {
             return Err(RunnerDomainError::InvalidState);
         }
         self.state = RunnerEnrollmentState::Revoked;
         self.registration_active.store(false, Ordering::Release);
-        Ok(self)
+        Ok(())
     }
 
     pub fn register(
@@ -487,9 +513,25 @@ impl RunnerEnrollment {
         advertisement: RunnerAdvertisement,
         catalog: &RunnerCatalog,
     ) -> Result<ValidatedRunnerRegistration, RunnerDomainError> {
+        self.prepare_registration(advertisement, catalog)?.commit()
+    }
+
+    pub fn prepare_registration(
+        &self,
+        advertisement: RunnerAdvertisement,
+        catalog: &RunnerCatalog,
+    ) -> Result<PreparedRunnerRegistration, RunnerDomainError> {
         if self.state != RunnerEnrollmentState::Active {
             return Err(RunnerDomainError::EnrollmentRevoked);
         }
+        // At most one outstanding preparation exists per enrollment
+        // authority, so nothing can advance the shared registration revision
+        // between this snapshot and the preparation's commit: an adapter that
+        // commits durable rows first can then always advance the fence.
+        self.registration_preparation
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| RunnerDomainError::RegistrationInProgress)?;
+        let preparation = RegistrationPreparationGuard(Arc::clone(&self.registration_preparation));
         if let Some(class) = advertisement.classes.iter().find(|class| {
             !self.allowed_classes.contains(*class) || !catalog.classes.contains(*class)
         }) {
@@ -546,25 +588,26 @@ impl RunnerEnrollment {
             };
             profiles.insert(name, policy.clone());
         }
-        let prior_revision = self
-            .registration_revision
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |revision| {
-                revision.checked_add(1)
-            })
-            .map_err(|_| RunnerDomainError::GenerationExhausted)?;
-        let revision = RunnerGeneration::try_from_u64(prior_revision + 1)
+        let prior_revision = self.registration_revision.load(Ordering::Acquire);
+        let revision = prior_revision
+            .checked_add(1)
+            .and_then(RunnerGeneration::try_from_u64)
             .ok_or(RunnerDomainError::GenerationExhausted)?;
-        Ok(ValidatedRunnerRegistration {
-            enrollment: self.enrollment,
-            runner: self.runner,
-            authentication: self.authentication,
-            classes: advertisement.classes,
-            tools,
-            profiles,
-            workspaces: advertisement.workspaces,
-            revision,
-            current_revision: Arc::clone(&self.registration_revision),
-            enrollment_active: Arc::clone(&self.registration_active),
+        Ok(PreparedRunnerRegistration {
+            expected_revision: prior_revision,
+            preparation,
+            registration: ValidatedRunnerRegistration {
+                enrollment: self.enrollment,
+                runner: self.runner,
+                authentication: self.authentication,
+                classes: advertisement.classes,
+                tools,
+                profiles,
+                workspaces: advertisement.workspaces,
+                revision,
+                current_revision: Arc::clone(&self.registration_revision),
+                enrollment_active: Arc::clone(&self.registration_active),
+            },
         })
     }
 
@@ -612,7 +655,61 @@ impl RunnerEnrollment {
             registration_active: Arc::new(AtomicBool::new(
                 input.state == RunnerEnrollmentState::Active,
             )),
+            registration_preparation: Arc::new(AtomicBool::new(false)),
         })
+    }
+}
+
+/// Releases the enrollment-shared exclusive preparation fence when the
+/// prepared registration commits or is abandoned without committing.
+#[derive(Debug)]
+struct RegistrationPreparationGuard(Arc<AtomicBool>);
+
+impl Drop for RegistrationPreparationGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// One validated registration awaiting its authoritative commit point. It
+/// holds the enrollment's exclusive preparation fence, so no concurrent
+/// registration can advance the shared revision before this one commits or
+/// is abandoned.
+#[derive(Debug)]
+pub struct PreparedRunnerRegistration {
+    expected_revision: u64,
+    preparation: RegistrationPreparationGuard,
+    registration: ValidatedRunnerRegistration,
+}
+
+impl PreparedRunnerRegistration {
+    pub const fn registration(&self) -> &ValidatedRunnerRegistration {
+        &self.registration
+    }
+
+    pub fn commit(self) -> Result<ValidatedRunnerRegistration, RunnerDomainError> {
+        let Self {
+            expected_revision,
+            preparation,
+            registration,
+        } = self;
+        if !registration.enrollment_active.load(Ordering::Acquire) {
+            return Err(RunnerDomainError::EnrollmentRevoked);
+        }
+        registration
+            .current_revision
+            .compare_exchange(
+                expected_revision,
+                registration.revision.get(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| RunnerDomainError::RegistrationChanged)?;
+        // Release the preparation fence only after the shared revision has
+        // advanced, so a successor preparation always snapshots the committed
+        // revision.
+        drop(preparation);
+        Ok(registration)
     }
 }
 
@@ -707,6 +804,94 @@ impl ValidatedRunnerRegistration {
     pub fn tool_names(&self) -> impl Iterator<Item = &ToolName> {
         self.tools.keys()
     }
+
+    pub fn classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass> {
+        self.classes.iter()
+    }
+
+    pub fn tools(&self) -> impl Iterator<Item = &RunnerToolDeclaration> {
+        self.tools.values()
+    }
+
+    pub fn profiles(&self) -> impl Iterator<Item = &CredentialProfilePolicy> {
+        self.profiles.values()
+    }
+
+    pub fn workspaces(&self) -> impl Iterator<Item = WorkspaceCapability> + '_ {
+        self.workspaces.iter().copied()
+    }
+
+    pub fn reconstitute(
+        enrollment: &RunnerEnrollment,
+        catalog: &RunnerCatalog,
+        input: ValidatedRunnerRegistrationReconstitutionInput,
+    ) -> Result<Self, RunnerDomainError> {
+        if enrollment.enrollment != input.enrollment
+            || enrollment.runner != input.runner
+            || enrollment.authentication != input.authentication
+        {
+            return Err(RunnerDomainError::CorruptStoredFacts);
+        }
+        let revision = input.revision;
+        let advertisement = RunnerAdvertisement::new(
+            input.classes.clone(),
+            input.tools.iter().map(|tool| tool.name.clone()),
+            input.profiles.iter().map(|profile| profile.name.clone()),
+            input.workspaces.clone(),
+        );
+        let stored_tool_count = input.tools.len();
+        let stored_tools: BTreeMap<_, _> = input
+            .tools
+            .into_iter()
+            .map(|tool| (tool.name.clone(), tool))
+            .collect();
+        let stored_profile_count = input.profiles.len();
+        let stored_profiles: BTreeMap<_, _> = input
+            .profiles
+            .into_iter()
+            .map(|profile| (profile.name.clone(), profile))
+            .collect();
+        let historical_authority = RunnerEnrollment {
+            enrollment: enrollment.enrollment,
+            runner: enrollment.runner,
+            authentication: enrollment.authentication,
+            allowed_classes: enrollment.allowed_classes.clone(),
+            state: RunnerEnrollmentState::Active,
+            registration_revision: Arc::new(AtomicU64::new(0)),
+            registration_active: Arc::new(AtomicBool::new(true)),
+            registration_preparation: Arc::new(AtomicBool::new(false)),
+        };
+        let mut registration = historical_authority
+            .prepare_registration(advertisement, catalog)
+            .map_err(|_| RunnerDomainError::CorruptStoredFacts)?
+            .registration;
+        if stored_tools.len() != stored_tool_count
+            || stored_profiles.len() != stored_profile_count
+            || registration.classes != input.classes
+            || registration.tools != stored_tools
+            || registration.profiles != stored_profiles
+            || registration.workspaces != input.workspaces
+        {
+            return Err(RunnerDomainError::CorruptStoredFacts);
+        }
+        registration.revision = revision;
+        registration.current_revision = Arc::clone(&enrollment.registration_revision);
+        registration.enrollment_active = Arc::clone(&enrollment.registration_active);
+        Ok(registration)
+    }
+}
+
+/// Complete validated-registration facts loaded from canonical storage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatedRunnerRegistrationReconstitutionInput {
+    pub enrollment: RunnerEnrollmentId,
+    pub revision: RunnerGeneration,
+    pub runner: RunnerId,
+    pub authentication: RunnerAuthenticationId,
+    pub classes: BTreeSet<RunnerCapabilityClass>,
+    pub tools: Vec<RunnerToolDeclaration>,
+    pub profiles: Vec<CredentialProfilePolicy>,
+    pub workspaces: BTreeSet<WorkspaceCapability>,
 }
 
 /// Positive runner lease, placement, or grant generation.
@@ -917,6 +1102,18 @@ impl RunnerLease {
         self.credential_authorization.as_ref()
     }
 
+    pub const fn session(&self) -> SessionId {
+        self.dispatch.session()
+    }
+
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+
+    pub const fn effect(&self) -> RunnerToolEffectClass {
+        self.effect
+    }
+
     pub fn claim(mut self, correlation: RunnerLeaseCorrelation) -> Result<Self, RunnerDomainError> {
         if self.state != RunnerLeaseState::Offered {
             return Err(RunnerDomainError::InvalidState);
@@ -954,7 +1151,7 @@ impl RunnerLease {
             RunnerLeaseState::Claimed => RunnerLeaseState::LostClaimed,
             _ => return Err(RunnerDomainError::InvalidState),
         };
-        self.into_loss_consequence(false)
+        self.into_loss_consequence(None, false)
     }
 
     pub fn lose_unclaimed(
@@ -968,16 +1165,19 @@ impl RunnerLease {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
         self.state = RunnerLeaseState::LostUnclaimed;
-        self.into_loss_consequence(false)
+        self.into_loss_consequence(Some(proof.clone()), false)
     }
 
     fn into_loss_consequence(
         self,
+        no_execution: Option<RunnerLeaseNoExecutionProof>,
         retry_prepared: bool,
     ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
-        let claimed = match self.state {
-            RunnerLeaseState::LostUnclaimed => false,
-            RunnerLeaseState::LostExecutionPossible | RunnerLeaseState::LostClaimed => true,
+        let claimed = match (self.state, no_execution.is_some()) {
+            (RunnerLeaseState::LostUnclaimed, true) => false,
+            (RunnerLeaseState::LostExecutionPossible | RunnerLeaseState::LostClaimed, false) => {
+                true
+            }
             _ => return Err(RunnerDomainError::InvalidState),
         };
         if claimed && self.effect == RunnerToolEffectClass::SideEffecting {
@@ -1000,6 +1200,7 @@ impl RunnerLease {
                     claimed_attempt,
                     preparation: RunnerRetryPreparationGuard::new(retry_prepared),
                 }),
+                no_execution,
             },
         })
     }
@@ -1048,19 +1249,31 @@ impl RunnerLease {
     pub fn reconstitute_loss(
         input: RunnerLeaseReconstitutionInput,
         registration: &ValidatedRunnerRegistration,
-        no_execution: Option<&RunnerLeaseNoExecutionProof>,
+        no_execution: Option<RunnerLeaseCorrelation>,
     ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
         let retry_prepared = input.retry_prepared;
-        let lease = Self::reconstitute(input, registration)?;
-        let proof_matches =
-            no_execution.is_some_and(|proof| proof.correlation == lease.correlation());
-        match (lease.state, proof_matches, no_execution.is_some()) {
+        Self::reconstitute(input, registration)?
+            .into_reconstituted_loss(no_execution, retry_prepared)
+    }
+
+    pub fn into_reconstituted_loss(
+        self,
+        no_execution: Option<RunnerLeaseCorrelation>,
+        retry_prepared: bool,
+    ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
+        let proof_matches = no_execution
+            .as_ref()
+            .is_some_and(|correlation| *correlation == self.correlation());
+        match (self.state, proof_matches, no_execution.is_some()) {
             (RunnerLeaseState::LostUnclaimed, true, true)
             | (
                 RunnerLeaseState::LostExecutionPossible | RunnerLeaseState::LostClaimed,
                 false,
                 false,
-            ) => lease.into_loss_consequence(retry_prepared),
+            ) => self.into_loss_consequence(
+                no_execution.map(|correlation| RunnerLeaseNoExecutionProof { correlation }),
+                retry_prepared,
+            ),
             _ => Err(RunnerDomainError::InvalidState),
         }
     }
@@ -1115,6 +1328,7 @@ enum RunnerLeaseLossKind {
     RetryPermitted {
         lost: RunnerLease,
         retry: Box<RunnerLeaseRetryAuthority>,
+        no_execution: Option<RunnerLeaseNoExecutionProof>,
     },
     CrashClassificationRequired {
         lost: RunnerLease,
@@ -1145,9 +1359,16 @@ impl RunnerLeaseLoss {
         }
     }
 
+    pub const fn no_execution_proof(&self) -> Option<&RunnerLeaseNoExecutionProof> {
+        match &self.kind {
+            RunnerLeaseLossKind::RetryPermitted { no_execution, .. } => no_execution.as_ref(),
+            RunnerLeaseLossKind::CrashClassificationRequired { .. } => None,
+        }
+    }
+
     fn into_retry_parts(self) -> Option<(RunnerLease, RunnerLeaseRetryAuthority)> {
         match self.kind {
-            RunnerLeaseLossKind::RetryPermitted { lost, retry } => Some((lost, *retry)),
+            RunnerLeaseLossKind::RetryPermitted { lost, retry, .. } => Some((lost, *retry)),
             RunnerLeaseLossKind::CrashClassificationRequired { .. } => None,
         }
     }
@@ -1176,6 +1397,7 @@ pub struct RunnerClaimedAttemptReplacement {
     batch: ToolBatch,
     retired: EndedToolAttempt,
     authorization: RunnerToolAttemptAuthorization,
+    source: RunnerLeaseCorrelation,
 }
 
 impl RunnerClaimedAttemptReplacement {
@@ -1185,6 +1407,14 @@ impl RunnerClaimedAttemptReplacement {
 
     pub const fn retired(&self) -> &EndedToolAttempt {
         &self.retired
+    }
+
+    pub const fn source(&self) -> &RunnerLeaseCorrelation {
+        &self.source
+    }
+
+    pub const fn replacement(&self) -> ToolAttemptDispatchCorrelation {
+        self.authorization.authorized.correlation()
     }
 
     pub fn into_parts(self) -> (ToolBatch, EndedToolAttempt, RunnerToolAttemptAuthorization) {
@@ -1308,6 +1538,7 @@ impl RunnerLeaseRetryAuthority {
             batch: replacement.batch,
             retired: replacement.retired,
             authorization,
+            source: self.source.correlation.clone(),
         })
     }
 }
@@ -1422,6 +1653,14 @@ impl SessionRunnerPlacement {
 
     pub const fn revision(&self) -> RunnerGeneration {
         self.revision
+    }
+
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    pub const fn request(&self) -> &SessionRunnerPlacementRequest {
+        &self.request
     }
 
     pub fn pin_and_offer_lease(
@@ -2040,6 +2279,24 @@ impl CredentialProfileGrant {
         &self.profile
     }
 
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+
+    pub fn tools(&self) -> impl Iterator<Item = &ToolName> {
+        self.tools.iter()
+    }
+
+    pub fn approvals(&self) -> impl Iterator<Item = (&ToolName, CredentialToolApproval)> {
+        self.approvals
+            .iter()
+            .map(|(tool, approval)| (tool, *approval))
+    }
+
     fn reconstitution_facts(&self) -> CredentialProfileGrantReconstitutionInput {
         CredentialProfileGrantReconstitutionInput {
             session: self.session,
@@ -2433,6 +2690,7 @@ mod tests {
             state: RunnerEnrollmentState::Active,
             registration_revision: Arc::clone(&registration.current_revision),
             registration_active: Arc::clone(&registration.enrollment_active),
+            registration_preparation: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -2689,6 +2947,13 @@ mod tests {
         )
         .expect("the registration and authorized attempt satisfy placement");
         (registration, pin)
+    }
+
+    fn omit_runner_required_tool(placement: &mut SessionRunnerPlacement, omitted: &ToolName) {
+        let SessionRunnerPlacementState::Pinned(stored) = &mut placement.state else {
+            panic!("the fixture placement is pinned")
+        };
+        stored.runner_required_tools.remove(omitted);
     }
 
     fn offered(
@@ -3086,6 +3351,53 @@ mod tests {
         assert_eq!(
             enrollment.register(RunnerAdvertisement::new([], [], [], []), &catalog()),
             Err(RunnerDomainError::EnrollmentRevoked)
+        );
+    }
+
+    #[test]
+    fn s30_inv042_outstanding_preparation_excludes_concurrent_registration() {
+        let enrollment = enrollment();
+        let outstanding = enrollment
+            .prepare_registration(advertisement(), &catalog())
+            .expect("the pristine enrollment prepares its first registration");
+
+        assert_eq!(
+            enrollment.register(advertisement(), &catalog()),
+            Err(RunnerDomainError::RegistrationInProgress)
+        );
+        drop(outstanding);
+        let registration = enrollment
+            .register(advertisement(), &catalog())
+            .expect("an abandoned preparation releases the exclusive fence");
+        assert_eq!(registration.revision(), RunnerGeneration::one());
+    }
+
+    #[test]
+    fn s30_inv042_committed_preparation_releases_the_exclusive_fence() {
+        let enrollment = enrollment();
+        let first = enrollment
+            .prepare_registration(advertisement(), &catalog())
+            .expect("the pristine enrollment prepares its first registration")
+            .commit()
+            .expect("the sole outstanding preparation commits");
+
+        let second = enrollment
+            .register(advertisement(), &catalog())
+            .expect("a committed preparation releases the exclusive fence");
+        assert_eq!(Some(second.revision()), first.revision().checked_next());
+    }
+
+    #[test]
+    fn s30_inv042_enrollment_reports_its_last_issued_registration_revision() {
+        let enrollment = enrollment();
+        assert_eq!(enrollment.last_issued_registration_revision(), None);
+
+        let registration = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the pristine enrollment issues its first registration");
+        assert_eq!(
+            enrollment.last_issued_registration_revision(),
+            Some(registration.revision())
         );
     }
 
@@ -3840,20 +4152,49 @@ mod tests {
     }
 
     #[test]
-    fn s31_inv043_lease_reconstitution_rejects_cross_wired_credential_correlation() {
+    fn s31_inv043_inv045_lease_reconstitution_rejects_foreign_credential_session() {
         let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         let authorization = input
             .credential_authorization
-            .take()
-            .expect("the profiled fixture carries credential authorization");
-        let cross_wired = CredentialDispatchAuthorization {
-            session: session_id(SESSION + 1),
-            ..authorization
-        };
-        input.credential_authorization = Some(cross_wired.clone());
-        input.recorded_credential_authorization = Some(cross_wired);
+            .as_mut()
+            .expect("the fixture lease carries credential authorization");
+        authorization.session = session_id(SESSION + 1);
+        input.recorded_credential_authorization = input.credential_authorization.clone();
 
+        assert_eq!(
+            RunnerLease::reconstitute(input, &registration),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_inv045_lease_reconstitution_rejects_foreign_credential_runner() {
+        let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let mut input = lease_reconstitution_input(lease);
+        let authorization = input
+            .credential_authorization
+            .as_mut()
+            .expect("the fixture lease carries credential authorization");
+        authorization.runner = runner_id(REPLACEMENT_RUNNER);
+        input.recorded_credential_authorization = input.credential_authorization.clone();
+
+        assert_eq!(
+            RunnerLease::reconstitute(input, &registration),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_inv045_lease_reconstitution_rejects_foreign_credential_tool() {
+        let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let mut input = lease_reconstitution_input(lease);
+        let authorization = input
+            .credential_authorization
+            .as_mut()
+            .expect("the fixture lease carries credential authorization");
+        authorization.tool = tool("deploy");
+        input.recorded_credential_authorization = input.credential_authorization.clone();
         assert_eq!(
             RunnerLease::reconstitute(input, &registration),
             Err(RunnerDomainError::CorruptStoredFacts)
@@ -4066,6 +4407,23 @@ mod tests {
         let (registration, pin) = pinned("readonly");
         let corrupted = placement_without_required_tool(pin.placement, &tool("deploy"));
         let input = placement_reconstitution_input(corrupted);
+
+        assert_eq!(
+            SessionRunnerPlacement::reconstitute(
+                input,
+                session_id(SESSION),
+                Some(&registration),
+                None,
+            ),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
+    fn s30_inv044_placement_reconstitution_requires_complete_runner_only_set() {
+        let (registration, mut pin) = pinned("readonly");
+        omit_runner_required_tool(&mut pin.placement, &tool("deploy"));
+        let input = placement_reconstitution_input(pin.placement);
 
         assert_eq!(
             SessionRunnerPlacement::reconstitute(
@@ -5016,8 +5374,9 @@ mod tests {
             .generation();
         let input = borrowed_lease_reconstitution_input(loss.lost());
 
-        let restored = RunnerLease::reconstitute_loss(input, &registration, Some(&proof))
-            .expect("complete lost facts and proof restore the checked consequence");
+        let restored =
+            RunnerLease::reconstitute_loss(input, &registration, Some(proof.correlation().clone()))
+                .expect("complete lost facts and proof restore the checked consequence");
 
         assert_eq!(
             restored

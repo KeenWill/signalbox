@@ -1069,6 +1069,9 @@ pub(crate) async fn load_active_batch_from_connection(
     let requests = load_requests(connection, producing_call, session, turn).await?;
     let approvals = load_approvals(connection, producing_call).await?;
     let attempts = load_attempts(connection, producing_call).await?;
+    let retired_attempts = load_retired_attempts(connection, producing_call).await?;
+    let runner_authorized_attempts =
+        load_runner_authorized_attempts(connection, producing_call).await?;
     let phase_kind: String = required(&lifecycle, "active_phase_kind")?;
     let phase = match phase_kind.as_str() {
         "awaiting_tool_approval" => ToolBatchPhaseReconstitutionInput::AwaitingApproval {
@@ -1101,6 +1104,8 @@ pub(crate) async fn load_active_batch_from_connection(
         attempts,
         phase,
     )
+    .with_retired_attempts(retired_attempts)
+    .with_runner_authorized_attempts(runner_authorized_attempts)
     .reconstitute()
     .map(Some)
     .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
@@ -1146,6 +1151,7 @@ pub(crate) async fn load_recovery_batch_by_attempt(
     }
     let frontier =
         signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
+    let retired_attempts = load_retired_attempts(connection, producing_call).await?;
     ToolBatchReconstitutionInput::new(
         session,
         turn,
@@ -1158,6 +1164,7 @@ pub(crate) async fn load_recovery_batch_by_attempt(
             attempt: recovery_attempt,
         },
     )
+    .with_retired_attempts(retired_attempts)
     .reconstitute()
     .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
@@ -1781,7 +1788,7 @@ async fn load_attempts(
 ) -> Result<Vec<ReconstitutedToolAttempt>, ToolLoopRepositoryError> {
     let rows = sqlx::query(
         "SELECT attempt.*
-           FROM tool_attempt AS attempt
+           FROM runner_current_tool_attempt AS attempt
            JOIN tool_request AS request
              ON request.request_id = attempt.request_id
           WHERE request.producing_model_call_id = $1
@@ -1791,6 +1798,59 @@ async fn load_attempts(
     .fetch_all(&mut *connection)
     .await?;
     rows.into_iter().map(decode_attempt).collect()
+}
+
+/// Loads the round's physical-attempt identities that
+/// `runner_current_tool_attempt` hides as retired claimed-retry predecessors,
+/// so batch reconstitution restores the durable retired-identity inventory and
+/// keeps identity reuse a domain rejection rather than a key collision.
+async fn load_retired_attempts(
+    connection: &mut PgConnection,
+    producing_call: signalbox_domain::ModelCallId,
+) -> Result<Vec<ToolAttemptId>, ToolLoopRepositoryError> {
+    let attempts = sqlx::query_scalar::<_, Uuid>(
+        "SELECT attempt.attempt_id
+           FROM tool_attempt AS attempt
+           JOIN tool_request AS request
+             ON request.request_id = attempt.request_id
+          WHERE request.producing_model_call_id = $1
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM runner_current_tool_attempt AS current
+                 WHERE current.attempt_id = attempt.attempt_id
+            )
+          ORDER BY attempt.attempt_id",
+    )
+    .bind(producing_call.into_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
+    Ok(attempts
+        .into_iter()
+        .map(tool_attempt_id_from_uuid)
+        .collect())
+}
+
+async fn load_runner_authorized_attempts(
+    connection: &mut PgConnection,
+    producing_call: signalbox_domain::ModelCallId,
+) -> Result<Vec<ToolAttemptId>, ToolLoopRepositoryError> {
+    let attempts = sqlx::query_scalar::<_, Uuid>(
+        "SELECT DISTINCT generation.attempt_id
+           FROM runner_lease_generation AS generation
+           JOIN runner_current_tool_attempt AS attempt
+             ON attempt.attempt_id = generation.attempt_id
+           JOIN tool_request AS request
+             ON request.request_id = attempt.request_id
+          WHERE request.producing_model_call_id = $1
+          ORDER BY generation.attempt_id",
+    )
+    .bind(producing_call.into_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
+    Ok(attempts
+        .into_iter()
+        .map(tool_attempt_id_from_uuid)
+        .collect())
 }
 
 pub(crate) fn decode_attempt(

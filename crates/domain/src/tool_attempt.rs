@@ -333,6 +333,18 @@ pub struct ToolAttemptDispatchCorrelation {
 }
 
 impl ToolAttemptDispatchCorrelation {
+    /// Reconstitutes one exact dispatch fence from canonical durable facts.
+    pub const fn reconstitute(input: ToolAttemptDispatchCorrelationReconstitutionInput) -> Self {
+        Self {
+            session: input.session,
+            turn: input.turn,
+            issuing_attempt: input.issuing_attempt,
+            request: input.request,
+            attempt: input.attempt,
+            generation: input.generation,
+        }
+    }
+
     /// Returns the owning session.
     pub const fn session(&self) -> SessionId {
         self.session
@@ -362,14 +374,41 @@ impl ToolAttemptDispatchCorrelation {
     pub const fn generation(&self) -> ToolDispatchGeneration {
         self.generation
     }
+}
 
-    /// Binds one executor observation to this exact authorization.
+/// Complete canonical durable facts for one physical-attempt dispatch fence.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ToolAttemptDispatchCorrelationReconstitutionInput {
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub issuing_attempt: TurnAttemptId,
+    pub request: ToolRequestId,
+    pub attempt: ToolAttemptId,
+    pub generation: ToolDispatchGeneration,
+}
+
+/// One executor fence minted only by issued dispatch authority. Reconstituted
+/// correlation values compare and persist durable facts but cannot bind an
+/// observation: only evidence returned against issued authority reaches
+/// `CurrentToolAttempt::apply_terminal_observation`.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct IssuedExecutorFence {
+    correlation: ToolAttemptDispatchCorrelation,
+}
+
+impl IssuedExecutorFence {
+    /// Returns the complete fence value.
+    pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation {
+        self.correlation
+    }
+
+    /// Binds one executor observation to this exact issued fence.
     pub const fn bind(
         self,
         observation: ToolAttemptObservation,
     ) -> CorrelatedToolAttemptObservation {
         CorrelatedToolAttemptObservation {
-            correlation: self,
+            correlation: self.correlation,
             observation,
         }
     }
@@ -648,6 +687,13 @@ impl AuthorizedToolAttempt {
     /// Returns the executor correlation.
     pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation {
         self.correlation
+    }
+
+    /// Mints the executor fence this issued authority alone may bind.
+    pub const fn executor_fence(&self) -> IssuedExecutorFence {
+        IssuedExecutorFence {
+            correlation: self.correlation,
+        }
     }
 
     pub(crate) fn claim_runner_issuance(&self) -> bool {
@@ -1003,7 +1049,9 @@ mod tests {
         };
         let error = in_flight
             .clone()
-            .apply_terminal_observation(stale.bind(ToolAttemptObservation::Ambiguous))
+            .apply_terminal_observation(
+                IssuedExecutorFence { correlation: stale }.bind(ToolAttemptObservation::Ambiguous),
+            )
             .expect_err("a stale generation cannot advance the attempt");
 
         assert_eq!(
@@ -1024,9 +1072,11 @@ mod tests {
         let text = ToolResultText::try_new(String::from(r#"{"timezone":"UTC"}"#))
             .expect("bounded result is valid");
         let ended = in_flight
-            .apply_terminal_observation(correlation.bind(ToolAttemptObservation::Completed {
-                result: ToolResultContent::Text(text.clone()),
-            }))
+            .apply_terminal_observation(IssuedExecutorFence { correlation }.bind(
+                ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(text.clone()),
+                },
+            ))
             .expect("matching executor evidence can terminalize");
 
         assert!(matches!(
@@ -1073,9 +1123,11 @@ mod tests {
                 .expect("prepared work can be authorized");
             let (in_flight, correlation) = authorized.into_parts();
             let error = in_flight
-                .apply_terminal_observation(correlation.bind(ToolAttemptObservation::KnownFailed {
-                    error: ToolExecutionError::new(kind, None),
-                }))
+                .apply_terminal_observation(IssuedExecutorFence { correlation }.bind(
+                    ToolAttemptObservation::KnownFailed {
+                        error: ToolExecutionError::new(kind, None),
+                    },
+                ))
                 .expect_err("the executor cannot manufacture reserved evidence");
 
             assert_eq!(

@@ -151,9 +151,10 @@ pub use runner::{
     CredentialDispatchAuthorization, CredentialProfileChange, CredentialProfileGrant,
     CredentialProfileGrantReconstitutionInput, CredentialProfileGrantReplacement,
     CredentialProfileGrantState, CredentialProfileName, CredentialProfilePlacementReplacement,
-    CredentialProfilePolicy, CredentialToolApproval, PinnedRunnerPlacement, ProvisionedWorkspace,
-    RunnerAdvertisement, RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
-    RunnerCredentialGrantChange, RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment,
+    CredentialProfilePolicy, CredentialToolApproval, PinnedRunnerPlacement,
+    PreparedRunnerRegistration, ProvisionedWorkspace, RunnerAdvertisement, RunnerCapabilityClass,
+    RunnerCatalog, RunnerClaimedAttemptReplacement, RunnerCredentialGrantChange,
+    RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment,
     RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerLease,
     RunnerLeaseCorrelation, RunnerLeaseLoss, RunnerLeaseNoExecutionProof, RunnerLeaseOfferRequest,
     RunnerLeaseReconstitutionInput, RunnerLeaseRetryAuthority, RunnerLeaseState,
@@ -162,8 +163,8 @@ pub use runner::{
     RunnerToolModelDefinition, RunnerUnclaimedAttemptReauthorization, RunnerWorkingDirectory,
     SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
     SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
-    ValidatedRunnerRegistration, WorkingDirectorySelection, WorkspaceCapability,
-    WorkspaceRepositoryKey, WorkspaceRequirement,
+    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
+    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
 };
 pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{
@@ -213,12 +214,13 @@ pub use tool::{
 pub use tool_attempt::{
     ApprovedToolRequest, ApprovedToolRequestError, AuthorizedToolAttempt,
     CorrelatedToolAttemptObservation, CurrentToolAttempt, CurrentToolAttemptState,
-    EndedToolAttempt, ReconstitutedToolAttempt, ToolAttemptCrashOutcome,
-    ToolAttemptDispatchCorrelation, ToolAttemptDisposition, ToolAttemptEnd, ToolAttemptObservation,
-    ToolAttemptReconstitutionError, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
-    ToolAttemptTransitionError, ToolAttemptTransitionFailure, ToolDispatchGeneration,
-    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorDetailError,
-    ToolExecutionErrorDetailFailure, ToolExecutionErrorKind,
+    EndedToolAttempt, IssuedExecutorFence, ReconstitutedToolAttempt, ToolAttemptCrashOutcome,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptDisposition, ToolAttemptEnd, ToolAttemptObservation, ToolAttemptReconstitutionError,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolAttemptTransitionError,
+    ToolAttemptTransitionFailure, ToolDispatchGeneration, ToolExecutionError,
+    ToolExecutionErrorDetail, ToolExecutionErrorDetailError, ToolExecutionErrorDetailFailure,
+    ToolExecutionErrorKind,
 };
 pub use tool_execution::{
     AwaitingToolApproval, AwaitingToolRecovery, PreparedToolAttempt, PreparedToolBatchDecision,
