@@ -1248,7 +1248,7 @@ struct StreamFragment<C> {
 #[derive(Clone, Copy)]
 enum PendingBasis {
     RecomputableCandidate,
-    OpaqueCandidateAtZero,
+    OpaqueCandidateAtStoredOrigin,
     ContextContinuation,
 }
 
@@ -1257,19 +1257,46 @@ struct PendingStreamText<C> {
     text: String,
     next_rescan_len: usize,
     basis: PendingBasis,
+    candidate_start: usize,
 }
 
 impl<C> PendingStreamText<C> {
     fn candidate(fragments: Vec<StreamFragment<C>>, text: String) -> Self {
-        Self::after_scan(fragments, text, PendingBasis::RecomputableCandidate)
+        Self::candidate_from(fragments, text, 0)
+    }
+
+    fn candidate_from(
+        fragments: Vec<StreamFragment<C>>,
+        text: String,
+        candidate_start: usize,
+    ) -> Self {
+        Self::after_scan(
+            fragments,
+            text,
+            PendingBasis::RecomputableCandidate,
+            candidate_start,
+        )
     }
 
     fn opaque_candidate(fragments: Vec<StreamFragment<C>>, text: String) -> Self {
-        Self::after_scan(fragments, text, PendingBasis::OpaqueCandidateAtZero)
+        Self::opaque_candidate_from(fragments, text, 0)
+    }
+
+    fn opaque_candidate_from(
+        fragments: Vec<StreamFragment<C>>,
+        text: String,
+        candidate_start: usize,
+    ) -> Self {
+        Self::after_scan(
+            fragments,
+            text,
+            PendingBasis::OpaqueCandidateAtStoredOrigin,
+            candidate_start,
+        )
     }
 
     fn context_continuation(fragments: Vec<StreamFragment<C>>, text: String) -> Self {
-        Self::after_scan(fragments, text, PendingBasis::ContextContinuation)
+        Self::after_scan(fragments, text, PendingBasis::ContextContinuation, 0)
     }
 
     /// Builds held state after the initial unsafe-suffix detection, or after a
@@ -1277,17 +1304,25 @@ impl<C> PendingStreamText<C> {
     /// initial detection is not a rescan and is intentionally outside
     /// [`PendingRescanWork`]. A still-unresolved candidate is reclassified only
     /// after its byte length doubles; the geometric series bounds aggregate
-    /// rescan bytes while every intervening delta remains held. `basis`
-    /// records whether offset zero is already known to begin the candidate:
+    /// rescan bytes while every intervening delta remains held. `candidate_start`
+    /// preserves the unsafe suffix's origin while its whole observation is
+    /// held for fact fidelity; `basis` records whether that origin is opaque:
     /// recomputing that fact after the candidate terminates before a clean tail
     /// would otherwise forget why the bytes were held and release its value.
-    fn after_scan(fragments: Vec<StreamFragment<C>>, text: String, basis: PendingBasis) -> Self {
+    fn after_scan(
+        fragments: Vec<StreamFragment<C>>,
+        text: String,
+        basis: PendingBasis,
+        candidate_start: usize,
+    ) -> Self {
+        debug_assert!(candidate_start <= text.len());
         let next_rescan_len = text.len().saturating_mul(2).max(text.len() + 1);
         Self {
             fragments,
             text,
             next_rescan_len,
             basis,
+            candidate_start,
         }
     }
 
@@ -1837,6 +1872,15 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 correlation,
                 text: text.clone(),
             };
+            if text.len() <= MAX_PENDING_STREAM_BYTES {
+                let pending = if opaque_origin {
+                    PendingStreamText::opaque_candidate_from(vec![fragment], text, unsafe_start)
+                } else {
+                    PendingStreamText::candidate_from(vec![fragment], text, unsafe_start)
+                };
+                self.hold_or_suppress(pending);
+                return;
+            }
             let (safe, unsafe_fragments) = split_stream_fragments(vec![fragment], unsafe_start);
             self.emit_original(safe);
             let held_text = text[unsafe_start..].to_string();
@@ -1882,25 +1926,35 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
 
     fn resolve_scanned_pending(&mut self, pending: PendingStreamText<C>) {
         self.record_pending_rescan(pending.text.len());
-        let candidate = matches!(pending.basis, PendingBasis::OpaqueCandidateAtZero)
-            || stream_candidate_starts_at_zero(&pending.text);
+        let candidate = matches!(pending.basis, PendingBasis::OpaqueCandidateAtStoredOrigin)
+            || stream_candidate_starts_at_zero(&pending.text[pending.candidate_start..]);
         let unsafe_start = unsafe_stream_suffix_start(&pending.text);
         match (candidate, unsafe_start) {
-            (true, Some(0)) => {
+            (true, Some(unsafe_start)) if unsafe_start <= pending.candidate_start => {
                 let mut pending = pending;
                 pending.mark_scanned();
                 self.hold_or_suppress(pending);
             }
             (true, Some(unsafe_start)) => {
-                let (redacted, unsafe_fragments) =
-                    split_stream_fragments(pending.fragments, unsafe_start);
+                let (safe, candidate_and_tail) =
+                    split_stream_fragments(pending.fragments, pending.candidate_start);
+                let (redacted, unsafe_fragments) = split_stream_fragments(
+                    candidate_and_tail,
+                    unsafe_start - pending.candidate_start,
+                );
+                self.emit_original(safe);
                 self.emit_redacted(redacted);
                 self.hold_or_suppress(PendingStreamText::candidate(
                     unsafe_fragments,
                     pending.text[unsafe_start..].to_string(),
                 ));
             }
-            (true, None) => self.emit_redacted(pending.fragments),
+            (true, None) => {
+                let (safe, redacted) =
+                    split_stream_fragments(pending.fragments, pending.candidate_start);
+                self.emit_original(safe);
+                self.emit_redacted(redacted);
+            }
             (false, Some(unsafe_start)) => {
                 let (safe, unsafe_fragments) =
                     split_stream_fragments(pending.fragments, unsafe_start);
