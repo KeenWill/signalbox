@@ -78,7 +78,7 @@ impl TranscriptSnapshot {
         let mut spool = tempfile::tempfile()?;
         for message in messages {
             let frame =
-                ServerFrame::try_new_for_version(ProtocolVersion::Fourteen, request_id, message)
+                ServerFrame::try_new_for_version(ProtocolVersion::Nineteen, request_id, message)
                     .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
             append_frame(&mut spool, &frame)?;
         }

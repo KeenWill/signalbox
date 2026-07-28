@@ -78,7 +78,7 @@ impl Connection {
         delivery: RequestDelivery,
     ) -> Result<Self, ClientError> {
         let import_request = matches!(&request, ClientRequest::ImportConversation { .. });
-        let version = ProtocolVersion::Sixteen;
+        let version = ProtocolVersion::Nineteen;
         let frame = ClientFrame::try_new_for_version(version, request_id, request)
             .map_err(FrameEncodeError::Validation)?;
         let encoded = encode_client_line(&frame).map_err(|error| match error {
@@ -193,8 +193,11 @@ mod tests {
         assert_pre_admission_errors_are_admitted(ProtocolVersion::Ten)?;
         assert_pre_admission_errors_are_admitted(ProtocolVersion::Eleven)?;
         assert_pre_admission_errors_are_admitted(ProtocolVersion::Twelve)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Fourteen)?;
+        assert_pre_admission_errors_are_admitted(ProtocolVersion::Thirteen)?;
         assert_pre_admission_errors_are_admitted(ProtocolVersion::Sixteen)?;
+        assert_pre_admission_errors_are_admitted(ProtocolVersion::Seventeen)?;
+        assert_pre_admission_errors_are_admitted(ProtocolVersion::Eighteen)?;
+        assert_pre_admission_errors_are_admitted(ProtocolVersion::Nineteen)?;
         Ok(())
     }
 
@@ -212,8 +215,11 @@ mod tests {
         assert_application_error_is_rejected(ProtocolVersion::Ten)?;
         assert_application_error_is_rejected(ProtocolVersion::Eleven)?;
         assert_application_error_is_rejected(ProtocolVersion::Twelve)?;
-        assert_application_error_is_rejected(ProtocolVersion::Fourteen)?;
+        assert_application_error_is_rejected(ProtocolVersion::Thirteen)?;
         assert_application_error_is_rejected(ProtocolVersion::Sixteen)?;
+        assert_application_error_is_rejected(ProtocolVersion::Seventeen)?;
+        assert_application_error_is_rejected(ProtocolVersion::Eighteen)?;
+        assert_application_error_is_rejected(ProtocolVersion::Nineteen)?;
         Ok(())
     }
 

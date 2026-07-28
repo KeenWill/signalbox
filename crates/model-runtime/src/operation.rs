@@ -112,8 +112,9 @@ pub struct ModelOperation<C> {
     pub settings: ModelSettings,
     /// Tools the model may propose calling.
     pub tools: Vec<ToolDefinition>,
-    /// How the provider may choose among the declared tools; ignored by
-    /// adapters when `tools` is empty and no output contract is set.
+    /// How the provider may choose among the declared tools. `AnyTool` is
+    /// ignored by adapters when `tools` is empty and no output contract is
+    /// set; a named choice must match a declared ordinary tool.
     pub tool_choice: ToolChoice,
     /// A structured-output contract the response must satisfy, when the
     /// caller demands typed output.

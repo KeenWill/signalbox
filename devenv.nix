@@ -49,6 +49,7 @@ let
   daemonHome = "${stateRoot}/home";
 
   daemonConfigFile = "${stateRoot}/signalboxd.toml";
+  daemonTemplateConfigFile = "${stateRoot}/session-templates.toml";
 
   # The daemon validates the socket's parent directory before binding: it must
   # be owned by the effective user and be mode exactly 0700, and no ancestor
@@ -140,6 +141,10 @@ let
   scrub = builtins.concatStringsSep " " (map (name: "-u ${name}") refusedVariables);
 
   openssl = "${pkgs.openssl}/bin/openssl";
+  # The client helper preserves its caller's directory, where rustup would not
+  # discover the workspace toolchain file.
+  workspaceRustToolchain =
+    (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain.channel;
 in
 
 {
@@ -162,6 +167,48 @@ in
   # .github/workflows/rust.yml.
   packages = [ pkgs.sccache ];
   env.RUSTC_WRAPPER = "sccache";
+
+  # The terminal client and the managed daemon share one socket without the
+  # developer having to derive its path from DEVENV_RUNTIME.
+  env.SIGNALBOX_SOCKET_PATH = daemonSocketPath;
+
+  # Build from the workspace so a caller project's Cargo configuration is not
+  # discovered. The build and resolution run inside a command substitution, an
+  # implicit subshell, so its `cd` never leaks: the exec below still runs from
+  # the caller's original directory, and client arguments containing relative
+  # paths keep their expected base. The executable path comes from Cargo's own
+  # build output rather than an assumed target/debug: a developer with
+  # `build.target` in their Cargo configuration, or `CARGO_BUILD_TARGET` in the
+  # environment, gets the binary under target/<triple>/debug instead, and a
+  # hard-coded target/debug path would then either fail outright or silently
+  # exec a stale binary left over from an earlier build. Resolution and the
+  # matching refusal for a target this host cannot run follow the same
+  # approach as the dev-instance daemon launcher below, factored into
+  # tooling/resolve-cargo-bin.sh so it has its own regression coverage
+  # (tooling/test_resolve_cargo_bin.py).
+  #
+  # Known limitation, recorded rather than handled: the final `exec` below
+  # runs the resolved binary directly, not through `cargo run`, so it does not
+  # carry the runtime library search path `cargo run` adds. An ambient
+  # `-C prefer-dynamic` (from `RUSTFLAGS` or inherited Cargo configuration)
+  # then builds an executable this exec cannot start; it fails loudly with
+  # exit 127 naming the missing shared object, rather than the silent
+  # stale-binary failure this change fixes, so it is left as a known cost of
+  # an unusual global setting instead of reproducing `cargo run`'s
+  # environment here.
+  scripts.signalbox = {
+    description = "Run the Signalbox terminal client from the working tree.";
+    exec = ''
+      executable="$(
+        cd "$DEVENV_ROOT" || exit $?
+        env RUSTUP_TOOLCHAIN=${shellArg workspaceRustToolchain} \
+          "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
+            "$DEVENV_ROOT/Cargo.toml" "$DEVENV_ROOT/target" \
+            signalbox-client signalbox
+      )" || exit $?
+      exec "$executable" "$@"
+    '';
+  };
 
   languages.python = {
     enable = true;
@@ -325,6 +372,14 @@ in
            ${shellArg daemonConfigFile}
         chmod 644 ${shellArg daemonConfigFile}
       fi
+
+      if [ ! -f ${shellArg daemonTemplateConfigFile} ]; then
+        echo "dev instance: seeding" ${shellArg daemonTemplateConfigFile} \
+             "from config/session-templates.example.toml"
+        cp "$DEVENV_ROOT/config/session-templates.example.toml" \
+           ${shellArg daemonTemplateConfigFile}
+        chmod 644 ${shellArg daemonTemplateConfigFile}
+      fi
     '';
   };
 
@@ -408,6 +463,7 @@ in
         HOME=${shellArg daemonHome} \
         DATABASE_URL=${shellArg databaseUrl} \
         SIGNALBOX_CONFIG_FILE=${shellArg daemonConfigFile} \
+        SIGNALBOX_TEMPLATE_CONFIG_FILE=${shellArg daemonTemplateConfigFile} \
         ANTHROPIC_API_KEY_FILE="$key_file" \
         GITHUB_TOKEN_FILE="$token_file" \
         SIGNALBOX_SOCKET_PATH=${shellArg daemonSocketPath} \

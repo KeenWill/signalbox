@@ -49,14 +49,15 @@ use signalbox_domain::{
     ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult, ResolvedProviderTarget,
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
-    SessionSystemPrompt, StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities,
-    SubmitInput, SubmitInputAppliedResult, SubmitInputReconstitutionFailure,
-    SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome,
-    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure,
-    ToolCallProposal, ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName,
-    ToolRequestId, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
-    TurnConfigurationProvenance, TurnId, UserContent,
+    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, StoppedToolResponsePartIdentity,
+    StoppedToolRoundModelCallIdentities, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
+    ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId,
+    ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal, ToolEffectClass,
+    ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolResponsePartIdentity,
+    ToolResultContent, ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse,
+    TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -100,7 +101,7 @@ use signalbox_persistence::{
     },
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
 };
-use sqlx::{PgConnection, PgPool, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
+use sqlx::{PgConnection, PgPool, Row, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
@@ -8912,6 +8913,243 @@ async fn s01_inv002_inv008_inv012_application_session_services_use_postgres_adap
         CreateSessionError::Transaction(CreateSessionRepositoryError::Database(_))
     ));
 
+    drop(container);
+    Ok(())
+}
+
+/// INV-047: template creation durably copies the original bundle and its
+/// provenance; a same-command replay after a catalog edit returns that winner.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv047_template_creation_persists_copy_and_name_keyed_replay() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0x1601));
+    let winner = SessionId::from_uuid(Uuid::from_u128(0x1701));
+    let replay_candidate = SessionId::from_uuid(Uuid::from_u128(0x1702));
+    let name = SessionTemplateName::try_new("reviewer".to_owned())?;
+    let original_provenance = SessionTemplateProvenance::new(
+        name.clone(),
+        SessionTemplateContentDigest::from_bytes([0x21; 32]),
+    );
+    let edited_provenance = SessionTemplateProvenance::new(
+        name.clone(),
+        SessionTemplateContentDigest::from_bytes([0x22; 32]),
+    );
+    let original_defaults = SessionConfigurationDefaults::complete(
+        direct(0x1801),
+        signalbox_domain::DangerousToolAutoApproval::ApproveAll,
+        Some(SessionSystemPrompt::try_new(
+            "original reviewer prompt".to_owned(),
+        )?),
+    );
+    let edited_defaults = SessionConfigurationDefaults::complete(
+        alias(0x1802),
+        signalbox_domain::DangerousToolAutoApproval::Disabled,
+        Some(SessionSystemPrompt::try_new(
+            "edited reviewer prompt".to_owned(),
+        )?),
+    );
+    let original_request = CreateSessionRequest::try_new_from_template(
+        command_id,
+        original_provenance.clone(),
+        original_defaults.clone(),
+    )?;
+    let replay_after_edit = CreateSessionRequest::try_new_from_template(
+        command_id,
+        edited_provenance,
+        edited_defaults,
+    )?;
+    let mut service = CreateSessionService::new(
+        FixedSessionIds::new([winner, replay_candidate]),
+        CreateSessionRepository::new(pool.clone()),
+    );
+
+    let first = service.execute(original_request).await?;
+    let replay = service.execute(replay_after_edit).await?;
+
+    assert_eq!(first, replay);
+    let CreateSessionOutcome::Applied(replay_receipt) = replay else {
+        panic!("same-name replay must return the recorded receipt");
+    };
+    assert_eq!(replay_receipt.session(), winner);
+    assert_ne!(replay_receipt.session(), replay_candidate);
+
+    let stored = sqlx::query(
+        "SELECT s.template_name AS session_template_name,
+                s.template_content_digest AS session_template_content_digest,
+                c.template_name AS command_template_name,
+                c.template_content_digest AS command_template_content_digest,
+                d.storage_version AS registry_storage_version,
+                c.storage_version AS command_storage_version
+         FROM session AS s
+         JOIN create_session_command AS c
+           ON c.created_session_id = s.session_id
+         JOIN durable_command AS d USING (command_id)
+         WHERE s.session_id = $1",
+    )
+    .bind(winner.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let session_template_name: String = stored.try_get("session_template_name")?;
+    let session_template_content_digest: Vec<u8> =
+        stored.try_get("session_template_content_digest")?;
+    let command_template_name: String = stored.try_get("command_template_name")?;
+    let command_template_content_digest: Vec<u8> =
+        stored.try_get("command_template_content_digest")?;
+    let registry_storage_version: i16 = stored.try_get("registry_storage_version")?;
+    let command_storage_version: i16 = stored.try_get("command_storage_version")?;
+    assert_eq!(session_template_name, name.as_str());
+    assert_eq!(
+        session_template_content_digest,
+        original_provenance.content_digest().as_bytes()
+    );
+    assert_eq!(command_template_name, name.as_str());
+    assert_eq!(
+        command_template_content_digest,
+        original_provenance.content_digest().as_bytes()
+    );
+    assert_eq!(registry_storage_version, 4);
+    assert_eq!(command_storage_version, 4);
+
+    let loaded = LoadSessionService::new(SessionRepository::new(pool.clone()))
+        .execute(winner)
+        .await?
+        .expect("template-created session remains loadable");
+    assert_eq!(loaded.template_provenance(), Some(&original_provenance));
+    assert_eq!(
+        loaded.current_configuration_defaults().defaults(),
+        &original_defaults
+    );
+
+    sqlx::query(
+        "DROP TRIGGER create_session_command_is_append_only
+         ON create_session_command",
+    )
+    .execute(&pool)
+    .await?;
+    let mut disagreement = pool.begin().await?;
+    sqlx::query(
+        "UPDATE create_session_command
+         SET template_name = NULL,
+             template_content_digest = NULL
+         WHERE created_session_id = $1",
+    )
+    .bind(winner.into_uuid())
+    .execute(&mut *disagreement)
+    .await?;
+    let disagreement = disagreement
+        .commit()
+        .await
+        .expect_err("session provenance must bind back to its creation command");
+    let disagreement_error = disagreement
+        .as_database_error()
+        .expect("provenance disagreement must be a database error");
+    assert_eq!(disagreement_error.code().as_deref(), Some("23503"));
+    assert_eq!(
+        disagreement_error.constraint(),
+        Some("session_template_provenance_creation_fk")
+    );
+
+    sqlx::query(
+        "ALTER TABLE create_session_command
+         DROP CONSTRAINT create_session_command_initial_defaults_fk",
+    )
+    .execute(&pool)
+    .await?;
+    let promptless_schema = sqlx::query(
+        "UPDATE create_session_command
+         SET system_prompt = NULL
+         WHERE command_id = $1",
+    )
+    .bind(command_id.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("template provenance requires a command prompt");
+    let promptless_schema_error = promptless_schema
+        .as_database_error()
+        .expect("promptless template rejection must be a database error");
+    assert_eq!(promptless_schema_error.code().as_deref(), Some("23514"));
+    assert_eq!(
+        promptless_schema_error.constraint(),
+        Some("create_session_command_template_prompt_required")
+    );
+
+    sqlx::query(
+        "ALTER TABLE create_session_command
+         DROP CONSTRAINT create_session_command_template_prompt_required",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE create_session_command
+         SET system_prompt = NULL
+         WHERE command_id = $1",
+    )
+    .bind(command_id.into_uuid())
+    .execute(&pool)
+    .await?;
+    let promptless_reader = CreateSessionRepository::new(pool.clone())
+        .load(command_id)
+        .await
+        .expect_err("promptless template provenance must fail closed");
+    assert!(matches!(
+        promptless_reader,
+        CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Inconsistent(
+            "template creation without system prompt"
+        ))
+    ));
+
+    sqlx::query("DROP TRIGGER durable_command_is_append_only ON durable_command")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE create_session_command
+         DROP CONSTRAINT create_session_command_template_provenance_versioned,
+         DROP CONSTRAINT create_session_command_registry_fk",
+    )
+    .execute(&pool)
+    .await?;
+    let mut pre_version_four = pool.begin().await?;
+    sqlx::query(
+        "UPDATE durable_command
+         SET storage_version = 3
+         WHERE command_id = $1",
+    )
+    .bind(command_id.into_uuid())
+    .execute(&mut *pre_version_four)
+    .await?;
+    sqlx::query(
+        "UPDATE create_session_command
+         SET storage_version = 3
+         WHERE command_id = $1",
+    )
+    .bind(command_id.into_uuid())
+    .execute(&mut *pre_version_four)
+    .await?;
+    pre_version_four.commit().await?;
+    let pre_version_four = CreateSessionRepository::new(pool.clone())
+        .load(command_id)
+        .await
+        .expect_err("pre-version-four template provenance must fail closed");
+    assert!(matches!(
+        pre_version_four,
+        CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Inconsistent(
+            "pre-version-four template provenance"
+        ))
+    ));
+    let pre_version_four_session = SessionRepository::new(pool.clone())
+        .load_session(winner)
+        .await
+        .expect_err("session loading must reject pre-version-four template provenance");
+    assert!(matches!(
+        pre_version_four_session,
+        SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(
+            "pre-version-four template provenance"
+        ))
+    ));
+
+    pool.close().await;
     drop(container);
     Ok(())
 }

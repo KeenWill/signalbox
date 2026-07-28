@@ -25,7 +25,7 @@ projection and identity-before-terminal-evidence precedence were verified
 through PR #288 (`agent/audit-fix-docs-coherence`); the session system prompt on
 the prepared operation was verified through PR #286
 (`agent/session-system-prompt`). Provider-reported token evidence retention and
-exact commit-ambiguity comparison were verified through PR #301
+exact commit-ambiguity comparison were verified through this PR
 (`agent/token-usage`); the empty-thinking completion rule was verified through
 PR #305 (`agent/sonnet-streamed-tool-use`). Invariant tags cite
 [docs/invariants.md](../invariants.md).
