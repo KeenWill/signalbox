@@ -144,7 +144,9 @@ final class SessionSynchronizationTests: XCTestCase {
   }
 
   func testSteadyProviderTextDeltaPublishesWithoutAdvancingDurableCursor() throws {
-    var transport = try SynchronizationFixture.synchronizedTransport(cursor: 10)
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
     let delta = SignalboxProviderTextDelta(
       sessionID: try SynchronizationFixture.sessionID(),
       turnID: try SignalboxCanonicalUUID(validating: SynchronizationFixture.turn),
@@ -158,7 +160,10 @@ final class SessionSynchronizationTests: XCTestCase {
     )
 
     XCTAssertEqual(effects, [.publishProviderTextDelta(delta)])
-    XCTAssertEqual(transport.machine.phase, SynchronizationFixture.steady(cursor: 10))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.steady(cursor: SynchronizationFixture.initialCursor)
+    )
   }
 
   func testReplayPreservesFutureUnknownEvent() throws {

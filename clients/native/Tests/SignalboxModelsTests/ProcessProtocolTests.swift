@@ -19,7 +19,7 @@ final class ProcessProtocolTests: XCTestCase {
 
     XCTAssertEqual(
       String(decoding: encoded, as: UTF8.self),
-      #"{"request":{"session_id":"11111111-1111-4111-8111-111111111111","type":"read_transcript"},"request_id":"7","version":18}"#
+      #"{"request":{"session_id":"\#(sessionID)","type":"read_transcript"},"request_id":"7","version":18}"#
     )
   }
 
@@ -41,8 +41,8 @@ final class ProcessProtocolTests: XCTestCase {
         "request_id":"8",
         "message":{
           "type":"model_alias_summary",
-          "alias_id":"11111111-1111-4111-8111-111111111111",
-          "selection_id":"22222222-2222-4222-8222-222222222222"
+          "alias_id":"\(sessionID)",
+          "selection_id":"\(turnID)"
         }
       }
       """.utf8

@@ -47,7 +47,7 @@ final class ProcessProtocolClientTests: XCTestCase {
     )
   }
 
-  func testClientWritesOneNewlineTerminatedVersionFiveFrame() async throws {
+  func testClientWritesOneNewlineTerminatedVersionEighteenFrame() async throws {
     let connection = ScriptedProcessConnection(
       chunks: [
         Data(
