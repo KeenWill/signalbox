@@ -1082,7 +1082,7 @@ those tests.
 ## S34 — Set the session system prompt
 
 - **User intent:** Give one session standing instructions that every model call
-  receives, set at creation or replaced later, without templates or profiles.
+  receives, set at creation or replaced later.
 - **Durable commands:** `CreateSession` carries one optional bounded system
   prompt inside its complete initial defaults. `ReplaceSessionDefaults`
   compare-and-sets the caller-observed epoch and installs the complete
@@ -1103,9 +1103,38 @@ those tests.
   requiring version nine before mutation. Stale epochs, conflicting reuse,
   unknown catalog selections, and commit ambiguity retain their S33 outcomes.
 - **Required invariants:** INV-008, INV-012, INV-033, INV-046.
-- **Remaining questions:** Prompt composition — base, per-use-case, and
-  instruction-file contributions — and templates remain the open
-  configuration-category capability.
+- **Remaining questions:** Prompt composition from base, per-use-case, and
+  instruction-file contributions remains an open configuration-category
+  capability.
+
+## S35 — Create a session from a template
+
+- **User intent:** Start a session from one named, versioned bundle without
+  repeating its model, system prompt, or dangerous-tool posture.
+- **Durable commands:** The daemon resolves the name from its immutable startup
+  catalog, copies the resolved bundle into defaults version one, and records the
+  template name and content digest with the new session. The durable command's
+  template name is its caller-supplied equality fact; replay returns the
+  originally copied session even if a later daemon load sees edited template
+  content.
+- **State transitions:** No session → ordinary durable session with immutable
+  defaults version one plus optional template provenance. Editing the config and
+  restarting the daemon changes only later commands with new identities; no
+  existing defaults epoch or provenance record changes.
+- **Transient updates:** Template lookup and prompt-file loading are startup
+  configuration work, not session state.
+- **Owning component:** The daemon owns static configuration and resolution; the
+  domain owns provenance and command equality; Postgres stores the copied
+  defaults and provenance; protocol version eighteen exposes creation and
+  listing.
+- **Failure behavior:** Unknown names and invalid request composition fail
+  before command claim. Unreadable prompt files, invalid paths or prompts,
+  duplicate names, unknown model selections, and malformed or unknown config
+  fields are precise typed startup errors. Conflicting command reuse and commit
+  ambiguity retain S01 behavior.
+- **Required invariants:** INV-002, INV-008, INV-012, INV-033, INV-046, INV-047.
+- **Remaining questions:** Durable template objects, CRUD, agent authoring
+  tools, and richer prompt/tool composition are deferred.
 
 ## Coverage note
 

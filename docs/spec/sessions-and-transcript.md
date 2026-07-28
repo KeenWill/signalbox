@@ -250,8 +250,8 @@ truncating or rewriting, and equality is the exact ordered scalar sequence.
 Absence is typed `None`, never empty text. `CreateSession` and
 `CreateSessionFromImportedFrontier` carry the optional prompt inside their
 complete unversioned initial defaults, and `ReplaceSessionDefaults` replaces it
-only as part of the complete successor epoch — there is no prompt-only mutation,
-template, or named profile; the
+only as part of the complete successor epoch — there is no prompt-only mutation;
+the
 [bound-and-placement decision](../decisions.md#2026-07-26--bound-the-session-system-prompt-as-a-defaults-epoch-value)
 records the capacity and epoch-placement choice. Matching
 `octet_length(convert_to(system_prompt, 'UTF8'))` CHECK constraints protect the
@@ -273,6 +273,37 @@ the
 [no-transcript-boundary decision](../decisions.md#2026-07-26--deliver-system-prompt-changes-without-a-transcript-boundary).
 The `ModelIdentityChanged` boundary below remains keyed to the frozen direct
 model selection alone.
+
+### Session-template provenance
+
+An owner-initiated session may carry one optional immutable
+`SessionTemplateProvenance`, distinct from its creation cause and transcript
+ancestry. Presence pairs a validated `SessionTemplateName` with an exact 32-byte
+`SessionTemplateContentDigest`; absence denotes explicit creation. Template
+provenance never joins defaults replacement, origin freezing, model call
+preparation, imported continuation, or transcript content.
+
+For template creation, the daemon supplies a resolved bundle containing the
+model-selection request, system prompt, and dangerous-tool blanket. Domain
+creation establishes the ordinary defaults version one from that complete copy
+and seals the name/digest alongside the session. The stored session has no
+template lookup operation: every later consumer reads its durable defaults and
+provenance only (INV-047).
+
+Durable-command equality distinguishes the caller's two creation modes. An
+explicit command compares its complete caller-supplied defaults exactly. A
+template command compares the caller-supplied template name and ignores the
+daemon-resolved candidate bundle for equal replay, so the same command and name
+returns its first recorded session after a template edit. A different template
+name, or switching between explicit and template creation under one command
+identity, is conflicting reuse. First handling still stores and cross-checks the
+complete resolved defaults and digest; this replay rule cannot rewrite them.
+
+Migration `202607300101_session_template_provenance.sql` adds nullable
+name/digest pairs to `session` and `create_session_command`, with `MATCH FULL`
+shape, name validation, a 32-byte digest bound, append-only protection, and
+command/session agreement. Existing and explicit sessions backfill as absent; no
+applied migration is modified.
 
 `ReplaceSessionDefaults` carries exactly command identity, target session,
 expected current version, and the complete replacement; equality excludes only
@@ -755,7 +786,7 @@ edges of [model-call-execution](model-call-execution.md).
 - The 1 MiB content bound is a provisional owner floor; the resource-governance
   limit question stays open, and non-text content kinds remain unconstructible
   pending their owning decisions.
-- The session system prompt is one optional bounded string per session.
-  Composition from base, per-use-case, and instruction-file sources, templates,
-  and named profiles remain the open
+- The session system prompt remains one optional bounded string per defaults
+  epoch. Composition from base, per-use-case, and instruction-file sources and
+  richer named profiles remain the open
   [configuration-category capability](../open-questions.md#configuration-categories).

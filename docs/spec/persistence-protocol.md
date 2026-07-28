@@ -60,8 +60,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — thirty-six files, `202607180001` through
-`202607290201` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — thirty-seven files, `202607180001` through
+`202607300101` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -132,6 +132,15 @@ Implemented table families (across the forward-only migrations):
 
 Representation rules, all enforced in the schema:
 
+- Migration `202607300101` adds the optional session-template provenance pair
+  (`template_name`, `template_content_digest`) to `session` and
+  `create_session_command`. Both members are absent or present together; names
+  satisfy the domain's 1-through-128-byte lowercase ASCII grammar and digests
+  are exactly 32 bytes. The create-command row carries the same pair under a
+  foreign key to its created session, so command replay and checked
+  reconstitution cannot cross-wire provenance. Existing and explicit sessions
+  carry two nulls. Both tables retain their append-only guards; no template
+  catalog or mutable template object exists in Postgres (INV-047).
 - Migration `202607280303` adds the optional bounded `system_prompt` column to
   `session_defaults_version` and the three defaults-bearing command tables, each
   guarded by the 1,048,576-UTF-8-byte and nonempty CHECK constraints and, on

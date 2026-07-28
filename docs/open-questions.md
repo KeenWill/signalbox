@@ -146,16 +146,15 @@ identifiers refer to [scenarios.md](scenarios.md).
 ## Configuration categories
 
 - **Additional effective-configuration categories.** Prompt composition and
-  templates, custom parameters, instructions, tool enablement/configuration,
-  placement constraints, per-turn resources, and interpreting-policy selections
-  are unavailable baseline capabilities; a future subsystem decision must extend
-  the request, session-default, override, and effective-value algebras together
-  ([configuration-and-credentials](spec/configuration-and-credentials.md)). The
-  one implemented slice is the optional bounded session-level system prompt
-  inside defaults epochs
-  ([sessions-and-transcript](spec/sessions-and-transcript.md)); everything
-  composed or derived beyond that one string stays blocked here. (S02, S05,
-  S13–S16, S34)
+  custom parameters, instructions, tool enablement/configuration, placement
+  constraints, per-turn resources, and interpreting-policy selections remain
+  unavailable; a future subsystem decision must extend the request,
+  session-default, override, and effective-value algebras together
+  ([configuration-and-credentials](spec/configuration-and-credentials.md)).
+  Static copy-on-create session templates compose only the already-implemented
+  model selection, bounded system prompt, and dangerous-tool blanket; every
+  richer composition or configuration category stays blocked here. (S02, S05,
+  S13–S16, S34, S35)
 
 ## Model fallback and provenance
 

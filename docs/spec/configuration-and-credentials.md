@@ -18,19 +18,23 @@ code-host result redaction are verified through PR #270
 (`agent/tool-batch-tier1`). The per-turn pinning behavior at a mid-session
 defaults boundary was verified through PR #272 (`agent/mid-session-model`). The
 credential-file value narrowing and the credential-shaped code-host detail were
-verified through PR #285 (`agent/dev-instance-code-host-credential`). Invariant
-law lives in [docs/invariants.md](../invariants.md), cited here by tag.
+verified through PR #285 (`agent/dev-instance-code-host-credential`). Static
+copy-on-create session templates are implemented by the session-templates stack.
+Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
+tag.
 
 ## Process configuration
 
-`signalboxd` reads exactly five deployment values from the process environment
-at startup:
+`signalboxd` reads exactly six deployment values from the process environment at
+startup:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
   channel is explicitly provisional; the database-credential delivery decision
   remains open (see Open edges).
 - `SIGNALBOX_CONFIG_FILE` — path to the static model/alias catalog (below).
+- `SIGNALBOX_TEMPLATE_CONFIG_FILE` — path to the static session-template catalog
+  (below).
 - `ANTHROPIC_API_KEY_FILE` — path to the file holding the current Anthropic API
   key value.
 - `GITHUB_TOKEN_FILE` — path to the file holding the current GitHub code-host
@@ -69,19 +73,20 @@ check confines the URL it is given to a local cluster, so the refusals above are
 what stand between a production cluster and ambient configuration, not that
 path's name.
 
-A missing or empty value, an unreadable or invalid catalog file, or a failed
-Anthropic or GitHub transport construction fails startup at the `Configuration`
-phase, before any database contact. Startup and shutdown logs carry the phase,
-an operator failure class, and small typed fields where present (session and
-turn ids, recovered-turn count, grace-window seconds) — never configuration
-values, paths, or URLs. The typed configuration error does not survive to the
-log: `run_hub` collapses every catalog-parse and adapter-construction variant
-(and likewise connection and migration errors) into a generic `Infrastructure`
-class carrying only its phase, so an operator cannot distinguish an unreadable
-catalog from an unknown field, bad version, or invalid limit (see Open edges).
-The three file paths are accepted without I/O at configuration time; only the
-catalog file is actually read during startup. Neither credential file is read at
-startup (see credential lifecycle below).
+A missing or empty value, an unreadable or invalid model or template catalog, an
+invalid or unreadable referenced prompt file, or a failed Anthropic or GitHub
+transport construction fails startup at the `Configuration` phase, before any
+database contact. Startup and shutdown logs carry the phase, an operator failure
+class, and small typed fields where present (session and turn ids,
+recovered-turn count, grace-window seconds) — never configuration values, paths,
+or URLs. The typed configuration error does not survive to the log: `run_hub`
+collapses every catalog-parse and adapter-construction variant (and likewise
+connection and migration errors) into a generic `Infrastructure` class carrying
+only its phase, so an operator cannot distinguish an unreadable catalog from an
+unknown field, bad version, or invalid limit (see Open edges). The four
+deployment paths are accepted without I/O at environment parsing time; both
+catalogs and every template prompt file are read during startup. Neither
+credential file is read at startup (see credential lifecycle below).
 
 The deployed daemon supplies no Anthropic endpoint or timeout knob; it
 constructs the adapter with its defaults. The
@@ -153,6 +158,64 @@ the catalog now resolves that selection to a different target. The startup-scan
 restart path instead rebuilds its target catalog from the stored calls
 themselves, deliberately not from configuration — part of why recovery of
 acknowledged work is configuration-independent (INV-034).
+
+## The static session-template catalog
+
+The file named by `SIGNALBOX_TEMPLATE_CONFIG_FILE` is a separate versioned TOML
+document (`config/session-templates.example.toml` is the checked-in example). It
+is read once at startup, after the model catalog, and never reread within a
+process. Its root requires exactly `version = 1` and an optional array of
+`[[templates]]` tables; a version-only document is a valid empty catalog.
+Unknown root and table fields, a mistyped templates value, duplicate names, and
+every invalid field fail as precise sanitized
+`SessionTemplateConfigurationError` variants without including file paths,
+prompt content, or document text.
+
+Each template table carries exactly:
+
+- `name` — 1 through 128 ASCII bytes matching `[a-z0-9][a-z0-9._-]*`, unique in
+  the document;
+- `version` — a positive `u64` bundle version;
+- exactly one of `model` or `alias` — the canonical UUID of a direct selection
+  or alias present in the already-validated model catalog;
+- exactly one of `system_prompt` or `system_prompt_file`; and
+- `dangerous_tool_auto_approval` — the required Boolean encoding of the complete
+  `Disabled`/`ApproveAll` blanket.
+
+An inline prompt is the exact TOML string value. A prompt-file reference is
+either a relative path resolved from the template document's parent directory,
+or `$HOME/` followed by a relative suffix resolved from the process's `HOME` at
+load. Every component after either root must be normal and nonempty: absolute
+paths, `.` or `..`, another `$`, any other variable spelling, and an unavailable
+home for a `$HOME/` reference fail typed validation. The file must be readable
+UTF-8 and its complete contents must construct the same nonempty, U+0000-free,
+1,048,576-byte-bounded `SessionSystemPrompt` as an inline value. There is no
+newline trimming or interpolation.
+
+One valid table becomes an immutable resolved bundle containing the exact model
+request, system prompt, and dangerous-tool blanket. Its content digest is
+domain-separated SHA-256 over length-framed canonical values: template version,
+the direct-or-alias tag and UUID bytes, the blanket tag, and the exact resolved
+prompt bytes. The name and source form are excluded: an inline and file-backed
+prompt with the same version and bundle have the same digest, while changing any
+copied value or the template version changes it. The daemon exposes only sorted
+name/version summaries to clients; clients never receive prompt text or parse
+this file.
+
+Creation by template name resolves against this process-lifetime catalog and
+copies the complete bundle into the session's immutable defaults version one.
+The session separately records the template name and content digest; it retains
+no live catalog reference. An edit therefore requires a daemon restart and
+affects only creation commands first handled under the new catalog. Equal replay
+of an already handled command and template name returns the original copied
+session rather than comparing against the current bundle (INV-047).
+
+Why: a separate file lets operators change the reusable creation surface without
+mixing it into immutable model-identity definitions, while one load boundary
+keeps validation fail-closed. Config-relative paths make a catalog directory
+portable; explicit `$HOME/` supports machine-local long prompts without
+committing a machine's absolute home path. Copying preserves ordinary defaults
+epoch authority and makes configuration edits forward-only.
 
 ## Model-selection validation
 

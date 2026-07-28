@@ -39,9 +39,14 @@ adds protocol version thirteen, verified through PR #302
 (`agent/mid-turn-steering`). Versions fourteen and fifteen remain allocated to
 concurrent protocol stacks. The unified conversation-listing surface adds
 version sixteen for the single read-only `list_conversations` request, verified
-through PR #304 (`agent/unified-conversation-listing`). The implementation here
-speaks versions one through thirteen and sixteen, and its terminal client
-selects version sixteen. Its `search` verb over version four's metadata list was
+through PR #304 (`agent/unified-conversation-listing`). The concurrently
+commissioned context-compaction stack takes version seventeen. The
+session-template stack therefore takes version eighteen for daemon-side
+copy-on-create resolution and template listing; every earlier admitted version
+retains its closed vocabulary. Until the version-seventeen stack lands, this
+implementation speaks versions one through thirteen, sixteen, and eighteen, with
+fourteen, fifteen, and seventeen unsupported, and its terminal client selects
+version eighteen. Its `search` verb over version four's metadata list was
 verified through PR #283 (`agent/session-search-cli`; terminal client surface
 only). This page's version-four last-writer member spelling was verified through
 PR #288 (`agent/audit-fix-docs-coherence`). This page is the normative boundary
@@ -158,7 +163,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1` through `13`, or `16`;
+- `version`: JSON integer `1` through `13`, `16`, or `18`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -170,18 +175,18 @@ and members with the wrong JSON type fail explicitly (INV-033). A frame may
 contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
-spellings decode to the same name. A version other than one through thirteen or
-sixteen produces an `unsupported_version` error naming the supported versions,
-then the server closes the connection. Every response uses the request's
-admitted version; when no version can be admitted, the server error uses version
-one as the pre-admission fallback. A client speaking a version above one admits
-that version-one fallback only for `malformed_frame` or `unsupported_version`,
-then applies the ordinary request-identity check; every other response-version
-mismatch fails locally. A server error uses `request_id = "0"` only when the
-incoming frame prevents recovery of a valid nonzero identity; zero is never a
-valid client identity or success-response identity. Leading zeroes, a plus sign,
-whitespace, and any spelling other than the shortest ASCII decimal form are
-invalid.
+spellings decode to the same name. A version other than one through thirteen,
+sixteen, or eighteen produces an `unsupported_version` error naming the
+supported versions, then the server closes the connection. Every response uses
+the request's admitted version; when no version can be admitted, the server
+error uses version one as the pre-admission fallback. A client speaking a
+version above one admits that version-one fallback only for `malformed_frame` or
+`unsupported_version`, then applies the ordinary request-identity check; every
+other response-version mismatch fails locally. A server error uses
+`request_id = "0"` only when the incoming frame prevents recovery of a valid
+nonzero identity; zero is never a valid client identity or success-response
+identity. Leading zeroes, a plus sign, whitespace, and any spelling other than
+the shortest ASCII decimal form are invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -197,7 +202,9 @@ that variant.
 | Type                                    | Version         | Additional required members                                                                                                                                                                                                                                          | Meaning                                                                                                                                                                                                                                           |
 | --------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `create_session`                        | 1+              | `command_id` (canonical UUID string), `initial_model_selection` (selection object); version nine and above also require `system_prompt` (string or null)                                                                                                             | Create an owner-initiated session with no ancestry and establish defaults version one.                                                                                                                                                            |
+| `create_session_from_template`          | 18              | `command_id` (canonical UUID string), `template_name` (template-name string)                                                                                                                                                                                         | Resolve one daemon-held template and copy its complete bundle into an owner-initiated session's defaults version one.                                                                                                                             |
 | `list_sessions`                         | 1+              | none                                                                                                                                                                                                                                                                 | Read all current sessions as legacy summaries, ordered by session identity.                                                                                                                                                                       |
+| `list_templates`                        | 18              | none                                                                                                                                                                                                                                                                 | Read every available template's name and version in name order.                                                                                                                                                                                   |
 | `submit_input`                          | 1+; delivery 13 | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string, or null only for version-thirteen steering), and optional version-thirteen `delivery`                                             | Submit exact owner text with the selected closed delivery intent; omitting `delivery` retains `StartWhenNoActiveTurn`.                                                                                                                            |
 | `read_transcript`                       | 1+              | `session_id` (canonical UUID string)                                                                                                                                                                                                                                 | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                                                                                                    |
 | `follow_session`                        | 1+              | `session_id` (canonical UUID string)                                                                                                                                                                                                                                 | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session; versions twelve and above additionally receive ephemeral provider-text deltas. |
@@ -212,6 +219,14 @@ that variant.
 | `decide_tool_request`                   | 8               | `command_id`, `session_id`, and `tool_request_id` (canonical UUID strings), `decision` (a decision object below)                                                                                                                                                     | Supply the owner decision for one pending tool request through the canonical decision command.                                                                                                                                                    |
 | `read_session_defaults`                 | 9               | `session_id` (canonical UUID string), `defaults_version` (canonical decimal string or null)                                                                                                                                                                          | Read one complete immutable defaults epoch: the current one for null, otherwise exactly the named one.                                                                                                                                            |
 | `list_conversations`                    | 16              | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                  | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                    |
+
+Version eighteen's `template_name` uses the same 1-through-128-byte lowercase
+ASCII grammar as the configuration catalog. The daemon resolves it before domain
+construction; an unknown name is `invalid_request` and claims no command
+identity. No create-from-template request carries model, prompt, or approval
+members, so the wire has no override or partial-template shape. Existing
+`create_session` remains explicit creation and never consults the template
+catalog.
 
 Version thirteen adds one optional closed `delivery` object to `submit_input`.
 Its exact variants are `start_when_idle {}`,
@@ -567,9 +582,10 @@ request.
 
 Message objects carry a required string `type` and reject fields not admitted by
 that variant. Every accepted non-review mutation request — `create_session`,
-`create_session_from_imported_frontier`, `submit_input`, `reconcile_turn`,
-`stop_turn`, `decide_tool_request`, `replace_session_metadata`,
-`replace_session_defaults`, or `import_conversation` — produces exactly one of:
+`create_session_from_template`, `create_session_from_imported_frontier`,
+`submit_input`, `reconcile_turn`, `stop_turn`, `decide_tool_request`,
+`replace_session_metadata`, `replace_session_defaults`, or `import_conversation`
+— produces exactly one of:
 
 - `session_created` with `session_id`;
 - `input_submitted` with `session_id`, `accepted_input_id`,
@@ -617,6 +633,14 @@ A successful `list_review_findings` response is
 finding-identity order, then `review_findings_end { finding_count }`. The client
 validates the selected run, ordering, and terminal count before presenting the
 list.
+
+A successful `list_templates` response is `templates_start`, zero or more
+`template_summary { name, version }` messages in strictly increasing UTF-8 name
+order, then `templates_end { template_count }`. `version` and `template_count`
+are canonical decimal strings. The sequence is one immutable in-memory catalog
+snapshot and becomes authoritative only after ordering and count validation; the
+terminal client buffers no prompt or bundle content because none crosses the
+protocol.
 
 Versions twelve and above additionally admit
 `provider_text_delta { session_id, turn_id, model_call_id, part_index, content }`
@@ -1153,7 +1177,7 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack uses version sixteen; version four's
+The `signalbox` binary in this stack uses version eighteen; version four's
 single-session metadata read and metadata replacement remain core protocol and
 daemon capabilities without terminal-client UX, while its paginated metadata
 list is the `search` verb below. Older clients remain supported for
@@ -1161,9 +1185,10 @@ representations admitted by their declared version as described above. The
 client accepts a global `--socket <path>` override or reads
 `SIGNALBOX_SOCKET_PATH`, and provides:
 
-- `create (--model <selection-uuid> | --alias <alias-uuid>) [--system-prompt-file <path>] [--command-id <uuid>]`;
+- `create ((--model <selection-uuid> | --alias <alias-uuid>) [--system-prompt-file <path>] | --template <name>) [--command-id <uuid>]`;
 - `continue <imported-conversation-uuid> --through-position <positive-decimal> --relationship <resume|fork> (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;
 - `list`;
+- `templates`;
 - `search [--title <substring>] [--tag <tag>]... [--include-archived] [--limit <decimal>] [--after <session-uuid>]`;
 - `conversations [--title <substring>] [--origin <native|imported|all>] [--include-archived] [--limit <decimal>] [--after <native|imported>:<uuid>]`;
 - `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
@@ -1267,6 +1292,16 @@ no-successor, receipt-only completion semantics explicit; queueing remains a
 `send` option because it still creates and waits for a separate reply-bearing
 turn.
 
+`create --template NAME` sends only the name and command identity and validates
+the ordinary `session_created` receipt. Clap rejects combining it with
+`--model`, `--alias`, or `--system-prompt-file` before socket I/O; explicit
+flags never override template values. The choice keeps one invocation's complete
+creation defaults under either client control or daemon configuration, not both.
+The `templates` verb sends one `list_templates` request, validates strict name
+order and the terminal count, and prints one `name=<name> version=<decimal>`
+line per summary. Template prompt text, model selection, approval posture, and
+digest do not cross this listing surface.
+
 `--system-prompt-file` likewise carries a path, never prompt content in a
 process argument: the client reads one bounded file snapshot before socket I/O
 and rejects an empty, oversized, non-UTF-8, or U+0000-bearing prompt locally,
@@ -1309,19 +1344,21 @@ current system prompt, prints the version and posture, and changes only the
 requested fields. Thus every client-generated or server-discovered scalar
 recovery value is visible before its commit can become ambiguous; the
 content-sized prompt is deliberately never echoed. Exact replay also requires
-the original selection, imported-conversation, or session arguments and, for
-`send`, `steer`, `reconcile`, and `stop`, the exact standard-input content; the
-client does not echo that potentially sensitive input or synthesize a shell
-command. Its ambiguity diagnostic directs the user to retry the original command
-with those arguments and input plus any printed recovery values. For recovery,
-the user supplies the printed command identity. An ordinary `send` and
-`reconcile` also require the exact `--defaults-version`; `send --queue` requires
-defaults version and the exact expected `--turn`; `steer` requires that turn but
-no defaults version; and `stop` requires command identity, defaults version, and
-the exact expected `--turn`, because a stopped turn cannot be rediscovered once
-the first handling terminalizes it. `model` instead requires all three printed
-facts — command identity, defaults version, and dangerous-tool posture — plus
-the original prompt option: a re-supplied `--system-prompt-file` or
+the original selection, template name, imported-conversation, or session
+arguments and, for `send`, `steer`, `reconcile`, and `stop`, the exact
+standard-input content; the client does not echo that potentially sensitive
+input or synthesize a shell command. Template recovery deliberately needs no
+digest or copied values: equal replay uses the original command and name. Its
+ambiguity diagnostic directs the user to retry the original command with those
+arguments and input plus any printed recovery values. For recovery, the user
+supplies the printed command identity. An ordinary `send` and `reconcile` also
+require the exact `--defaults-version`; `send --queue` requires defaults version
+and the exact expected `--turn`; `steer` requires that turn but no defaults
+version; and `stop` requires command identity, defaults version, and the exact
+expected `--turn`, because a stopped turn cannot be rediscovered once the first
+handling terminalizes it. `model` instead requires all three printed facts —
+command identity, defaults version, and dangerous-tool posture — plus the
+original prompt option: a re-supplied `--system-prompt-file` or
 `--clear-system-prompt` is re-read or re-applied exactly, while a copied-forward
 prompt is re-read from the immutable epoch the printed defaults version names,
 so the retried payload is byte-exact under concurrent replacements without
@@ -1330,7 +1367,7 @@ silently substitutes a new command identity for an ambiguous attempt. It uses a
 fresh nonzero request identity per connection, validates that a defaults receipt
 is the exact successor carrying the requested selection, copied posture, and
 exact replacement prompt, validates that a decision receipt echoes the exact
-request and decision it sent, renders only known version-sixteen messages, and
+request and decision it sent, renders only known version-eighteen messages, and
 exits nonzero on protocol or application errors other than the follow-specific
 `resync_required` control case, which reconnects for a fresh snapshot.
 
