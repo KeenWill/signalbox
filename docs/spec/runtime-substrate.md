@@ -648,6 +648,41 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   intended CLI control surface while credential-shaped reflection still fails
   closed.
 
+### Codex CLI shape-redaction scope
+
+The singular `token` name and composite names ending in singular `token` are
+credential-bearing while plural usage counters such as `input_tokens` and
+`output_tokens` are not. A recognized credential-bearing long option followed by
+horizontal whitespace consumes its following token value. A password in a URL
+authority's `user:password@host` userinfo or a curl user credential is consumed
+through its authority or credential boundary. A double-quoted credential key
+remains subject to the raw assignment scan whenever malformed JSON prevents the
+structural JSON scanner from claiming it.
+
+For any delta fragmentation of one text stream, including Unicode-escaped
+markers, the concatenated streamed output is never less redacted than the
+stateless scan of the concatenated provider text. Fail-closed suppression is
+absorbing for the sink's lifetime: usage reports, other fact boundaries, and
+terminal flushes never re-enable provider-controlled bytes. Streamed
+lookbehind's 64-KiB memory bound is independent of its work bound. An unresolved
+held prefix is fully classified when first held, only after its length at least
+doubles thereafter, and once more when it crosses the cap. Before absorbing
+suppression begins, one continuously unresolved candidate therefore presents at
+most 196,608 aggregate held bytes (three times 64 KiB) per classifier. Each
+round invokes two top-level whole-buffer classifiers, bounding their cumulative
+input at 393,216 bytes (six times 64 KiB), independent of delta count. The
+66,000 one-byte continuation shape performs thirteen rounds: 188,387 aggregate
+held bytes and 376,774 charged classifier-input bytes.
+
+This is a text-shape contract, not cross-field semantic correlation. It does not
+associate a credential name in one structural position with a value in another:
+examples outside the contract include CSV header/value rows, SQL column/`VALUES`
+positions, XML element content or sibling elements, name/value objects encoded
+as array siblings, and Kubernetes or Actions `name:`/`value:` pairs. A
+format-aware boundary must sanitize those forms before they become independent
+text units. Why: named credential-shaped reflection fails closed without
+claiming general secret detection.
+
 ## Operator failure taxonomy
 
 `crates/application/src/operator_failure.rs` defines the one closed

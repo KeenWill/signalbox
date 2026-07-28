@@ -10,6 +10,43 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-28 — Bound Codex stream-redaction work and name its shape limit
+
+**Context.** The Codex adapter retains up to 64 KiB of an incomplete credential
+candidate so provider-chosen delta boundaries cannot expose its value. Repeating
+the full held-buffer classification after each one-byte delta made that bounded
+memory state an unbounded quadratic-work path. The shape contract also omitted
+common reflected forms — singular `token` names, credential-valued long options,
+and URL userinfo — while leaving unclear whether it correlated credential names
+and values stored in separate structural positions.
+
+**Decision.** Keep the 64-KiB hold. Fully classify an unresolved held prefix
+when it is first held, only after its length at least doubles thereafter, and
+once more when it crosses the cap. Before absorbing suppression begins, one
+continuously unresolved candidate therefore presents at most 196,608 aggregate
+held bytes (three times 64 KiB) per classifier. Each round invokes two top-level
+whole-buffer classifiers, bounding their cumulative input at 393,216 bytes (six
+times 64 KiB), independent of delta count. The 66,000 one-byte continuation
+shape performs thirteen rounds: 188,387 aggregate held bytes and 376,774 charged
+classifier-input bytes. Once fail-closed suppression begins, it is absorbing for
+the sink's lifetime; usage, boundary, and finish events cannot re-enable
+provider bytes. Extend the shape contract as specified in
+[runtime-substrate](spec/runtime-substrate.md#codex-cli-shape-redaction-scope),
+while explicitly accepting that the text scanner does not correlate a credential
+name with a value stored in a separate structural position.
+
+**Rejected alternatives.** Retaining the existing per-delta whole-buffer scan
+keeps quadratic work below the memory cap. A wall-clock cutoff is load-dependent
+and makes ordinary tests nondeterministic. Truncating the held candidate or
+re-enabling output after a usage event can release the same credential the sink
+had already decided it could not classify safely. Promising cross-field semantic
+correlation would overstate a text-shaped scanner; those formats need a
+format-aware boundary instead.
+
+**Affects.** INV-035, the Codex CLI credential contract in
+[runtime-substrate](spec/runtime-substrate.md), and
+`crates/model-runtime-codex-cli/src/redaction.rs`.
+
 ## 2026-07-27 — Drop empty thinking parts instead of failing completions closed
 
 **Context.** Claude 5-family models run adaptive thinking by default, and with
