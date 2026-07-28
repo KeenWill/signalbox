@@ -5,7 +5,8 @@ The check is deterministic and offline. It verifies:
 
 1. every relative file citation in an invariant Enforcement cell resolves to a
    repository file; a code-spanned test name bound to a cited file must appear
-   in that file,
+   in that file, every ``INV-NNN``-tagged enforcement citation contains that
+   tag, and every Rust test file carrying an INV tag is cited by that row,
 2. every relative Markdown link in ``docs/**/*.md`` and the root ``AGENTS.md``
    resolves inside the repository, including GitHub-style heading fragments,
 3. every H2 in ``docs/decisions.md`` is a valid dated entry and entry dates are
@@ -17,11 +18,17 @@ The check is deterministic and offline. It verifies:
    but it must render as more than whitespace and quote markers, may name code
    in backticks without the span's parentheses closing the reference, and may
    not leave the reference's own block. ``docs/spec/README.md`` states this
-   format; this check enforces it.
+   format; this check enforces it and verifies that each historical token
+   names the exact source branch of a PR merge commit on the first-parent
+   history of the protected integration branch.
+   Tokens for one in-flight PR may instead match the checked-out branch locally
+   or the pull-request number and head branch in the GitHub Actions event. An
+   event build also accepts unmerged verification identities inherited from the
+   event's exact base commit.
 
-External links, semantic freshness of verification references, and reverse
-discovery of every INV-tagged test are deliberately outside this check. Run
-from any directory; exits nonzero with one stable line per violation.
+External links and semantic freshness beyond reachability are outside this
+check. Run from any directory; exits nonzero with one stable line per
+violation.
 
 The input domain is mdformat-canonical Markdown: CI enforces ``mdformat
 --check`` over the same files before this check runs, so shapes that
@@ -35,9 +42,13 @@ out of scope while that gate holds.
 from __future__ import annotations
 
 import html
+import json
+import os
 import re
 import string
+import subprocess
 import sys
+import tomllib
 import unicodedata
 from dataclasses import dataclass
 from datetime import date
@@ -224,6 +235,169 @@ NATURAL_TEST_BINDING = re.compile(
     r"[ \t]+in\b",
     re.IGNORECASE,
 )
+INVARIANT_TAG = re.compile(
+    r"(?<![^\W_])INV[-_]?(?P<number>[0-9]{3})(?![^\W_])",
+    re.IGNORECASE,
+)
+def _unicode_mark_class() -> str:
+    """Return a character class of the marks Rust's XID_Continue admits.
+
+    Python's ``\\w`` covers XID_Start and the letters, digits, and connectors
+    of XID_Continue but omits the combining marks, so decomposed identifiers
+    such as ``cafe`` followed by U+0301 would otherwise end early. The class is
+    derived from the interpreter's own Unicode data rather than transcribed.
+    """
+    marks = [
+        code
+        for code in range(0x300, sys.maxunicode + 1)
+        if unicodedata.category(chr(code)) in ("Mn", "Mc")
+    ]
+    ranges: list[tuple[int, int]] = []
+    for code in marks:
+        if ranges and code == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], code)
+        else:
+            ranges.append((code, code))
+    return "".join(
+        re.escape(chr(first))
+        if first == last
+        else f"{re.escape(chr(first))}-{re.escape(chr(last))}"
+        for first, last in ranges
+    )
+
+
+RUST_IDENTIFIER_MARKS = _unicode_mark_class()
+RUST_IDENTIFIER_PATTERN = (
+    rf"(?:r#)?(?![0-9])[^\W{RUST_IDENTIFIER_MARKS}]"
+    rf"[\w{RUST_IDENTIFIER_MARKS}]*"
+)
+RUST_ATTRIBUTE_OPEN = r"#[ \t\r\n]*\["
+RUST_CHARACTER_LITERAL = re.compile(
+    r"'(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,6}\}|.)|[^\\\r\n])'"
+)
+RUST_TEST_DECLARATION = re.compile(
+    r"(?P<prefix>(?:"
+    r"^[ \t]*///[^\n]*(?:\n|$)"
+    r"|^[ \t]*/\*\*(?:[^*]|\*(?!/))*\*/[ \t]*(?:\n|$)"
+    rf"|^[ \t]*{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t]*(?:\n|$)"
+    r"|^[ \t]*//(?!/)[^\n]*(?:\n|$)"
+    r"|^[ \t]*/\*(?!\*)(?:[^*]|\*(?!/))*\*/[ \t]*(?:\n|$)"
+    r"|^[ \t]*(?:\n|$)"
+    # An attribute may also share the declaration's line, so this last
+    # alternative ends the prefix without consuming a line break.
+    rf"|^[ \t]*{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t]*"
+    r")+)"
+    r"[ \t]*(?:pub(?:\([^)]*\))?[ \t\r\n]+)?"
+    r"(?:(?:const|async|unsafe)[ \t\r\n]+)*"
+    r'(?:extern(?:[ \t\r\n]+"[^"\n]*")?[ \t\r\n]+)?'
+    rf"fn[ \t\r\n]+(?P<name>{RUST_IDENTIFIER_PATTERN})",
+    re.MULTILINE,
+)
+# Rust resolves an attribute path case-sensitively, so a distinct macro
+# named `Test` is not the built-in attribute.
+RUST_TEST_ATTRIBUTE = re.compile(
+    rf"{RUST_ATTRIBUTE_OPEN}[ \t\r\n]*(?:::[ \t\r\n]*)?"
+    rf"(?:{RUST_IDENTIFIER_PATTERN}[ \t\r\n]*::[ \t\r\n]*)*"
+    r"(?:r#)?test(?=[ \t\r\n(\]])[^\]]*\]"
+)
+RUST_ATTRIBUTE = re.compile(
+    rf"{RUST_ATTRIBUTE_OPEN}(?P<meta>[^\]]*)\]", re.DOTALL
+)
+RUST_CFG_META = re.compile(
+    r"^cfg[ \t\r\n]*\((?P<body>.*)\)[ \t\r\n]*$", re.DOTALL
+)
+RUST_CFG_ATTR_META = re.compile(
+    r"^cfg_attr[ \t\r\n]*\((?P<body>.*)\)[ \t\r\n]*$", re.DOTALL
+)
+RUST_CFG_PREDICATE = re.compile(
+    r"^(?P<operator>all|any|not)[ \t\r\n]*"
+    r"\((?P<body>.*)\)[ \t\r\n]*$",
+    re.DOTALL,
+)
+RUST_TEST_META = re.compile(
+    r"^(?:::[ \t\r\n]*)?"
+    rf"(?:{RUST_IDENTIFIER_PATTERN}[ \t\r\n]*::[ \t\r\n]*)*"
+    r"(?:r#)?test(?=[ \t\r\n(]|$)"
+)
+RUST_META_NAME = re.compile(
+    rf"{RUST_IDENTIFIER_PATTERN}(?=[ \t\r\n(]|$)"
+)
+RUST_META_ITEM = re.compile(
+    rf"(?:::)?(?:{RUST_IDENTIFIER_PATTERN}[ \t\r\n]*::[ \t\r\n]*)*"
+    rf"{RUST_IDENTIFIER_PATTERN}"
+)
+RUST_USE_ITEM = re.compile(
+    rf"(?P<attributes>(?:{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t\r\n]*)*)"
+    r"(?P<visibility>\bpub(?:\([^)]*\))?[ \t\r\n]+)?"
+    r"\buse\b(?P<body>[^;]*);",
+    re.DOTALL,
+)
+RUST_TEST_ALIAS = re.compile(
+    rf"\btest[ \t\r\n]+as[ \t\r\n]+(?P<alias>{RUST_IDENTIFIER_PATTERN})"
+)
+RUST_CRATE_IMPORT = re.compile(
+    rf"\bcrate[ \t\r\n]*::[ \t\r\n]*(?P<name>{RUST_IDENTIFIER_PATTERN})"
+    r"(?![ \t\r\n]*(?:::|as\b))"
+)
+RUST_CRATE_GROUP = re.compile(r"\bcrate[ \t\r\n]*::[ \t\r\n]*\{")
+RUST_BARE_IDENTIFIER = re.compile(RUST_IDENTIFIER_PATTERN)
+RUST_RAW_STRING_OPEN = re.compile(r'(?:br|rb|cr|r)(?P<hashes>#{0,255})"')
+RUST_INLINE_MODULE = re.compile(
+    rf"(?P<attributes>(?:{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t\r\n]*)*)"
+    rf"\b(?:pub(?:\([^)]*\))?[ \t\r\n]+)?"
+    rf"mod[ \t\r\n]+(?P<name>{RUST_IDENTIFIER_PATTERN})[ \t\r\n]*\{{"
+)
+RUST_OUT_OF_LINE_MODULE = re.compile(
+    rf"(?P<attributes>(?:{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t\r\n]*)*)"
+    rf"\b(?:pub(?:\([^)]*\))?[ \t\r\n]+)?"
+    rf"mod[ \t\r\n]+(?P<name>{RUST_IDENTIFIER_PATTERN})[ \t\r\n]*;"
+)
+RUST_PATH_META = re.compile(
+    r"^path[ \t\r\n]*=[ \t\r\n]*"
+    r"(?:\"(?P<plain>[^\"\n]*)\"|r(?P<hashes>\#*)\"(?P<raw>.*?)\"(?P=hashes))$",
+    re.DOTALL,
+)
+RUST_CRATE_ROOT_NAMES = ("mod.rs", "lib.rs", "main.rs")
+RUST_HARNESS_PREDICATE = "test"
+RUST_MACRO_RULES = re.compile(
+    rf"\bmacro_rules![ \t\r\n]*(?P<name>{RUST_IDENTIFIER_PATTERN})"
+    r"[ \t\r\n]*(?P<opening>[\(\[\{])"
+)
+RUST_INCLUDE_OPEN = re.compile(
+    rf"(?P<attributes>(?:{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t\r\n]*)*)"
+    r"\binclude![ \t\r\n]*(?P<opening>[\(\[\{])"
+)
+RUST_STRING_LITERAL = re.compile(
+    r"[ \t\r\n]*"
+    r"(?:\"(?P<plain>[^\"\n]*)\"|r(?P<hashes>\#*)\"(?P<raw>.*?)\"(?P=hashes))",
+    re.DOTALL,
+)
+RUST_PROC_MACRO_ATTRIBUTE = re.compile(
+    rf"{RUST_ATTRIBUTE_OPEN}[ \t\r\n]*proc_macro(?:_attribute|_derive)?"
+    r"(?=[ \t\r\n(\]])[^\]]*\]"
+)
+RUST_MACRO_INVOCATION = re.compile(
+    rf"\b(?P<name>{RUST_IDENTIFIER_PATTERN})![ \t\r\n]*(?P<opening>[\(\[\{{])"
+)
+RUST_FORWARDED_ATTRIBUTE = re.compile(
+    rf"{RUST_ATTRIBUTE_OPEN}[^\]]*\$[^\]]*\]", re.DOTALL
+)
+RUST_METAVARIABLE = re.compile(rf"\$(?P<name>{RUST_IDENTIFIER_PATTERN})")
+RUST_METAVARIABLE_BINDING = re.compile(
+    rf"\$(?P<name>{RUST_IDENTIFIER_PATTERN})[ \t\r\n]*:"
+    rf"[ \t\r\n]*{RUST_IDENTIFIER_PATTERN}"
+)
+RUST_METAVARIABLE_REPETITION = re.compile(r"\$[ \t\r\n]*[\(\[\{]")
+PULL_REQUEST_MERGE = re.compile(
+    r"^Merge pull request #(?P<number>[1-9][0-9]*) from "
+    r"[^/\s]+/(?P<branch>[^\r\n]+)$",
+    re.MULTILINE,
+)
+INTEGRATION_BRANCH = "main"
+INTEGRATION_REFS = (
+    f"refs/remotes/origin/{INTEGRATION_BRANCH}",
+    f"refs/heads/{INTEGRATION_BRANCH}",
+)
 
 
 @dataclass(frozen=True, order=True)
@@ -240,12 +414,46 @@ class Violation:
 
 
 @dataclass(frozen=True)
+class InlineModule:
+    """One brace-delimited `mod name { ... }` and its build state."""
+
+    opening: int
+    closing: int
+    name: str
+    disabled: bool
+
+
+@dataclass(frozen=True)
+class ScopedTestAlias:
+    """One local `test` attribute name and the block that can see it."""
+
+    opening: int
+    closing: int
+    name: str
+
+
+@dataclass(eq=False)
+class RustSource:
+    """One repository Rust file, read and lexically prepared once."""
+
+    path: Path
+    label: str
+    text: str
+    code: str
+    delimiters: dict[int, int]
+    invocations: dict[str, list[int]]
+    aliases: list[ScopedTestAlias]
+    module_prefixes: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True)
 class MarkdownLink:
     """One parsed inline link or reference-definition destination."""
 
     label: str
     destination: str
     offset: int
+    definition_offset: int | None = None
 
 
 def repository_path(root: Path, path: Path) -> str:
@@ -264,6 +472,631 @@ def mask_range(buffer: list[str], start: int, end: int) -> None:
     for index in range(start, end):
         if buffer[index] not in "\r\n":
             buffer[index] = " "
+
+
+def rust_block_comment_end(text: str, start: int) -> int:
+    """Return the end of one possibly nested Rust block comment."""
+    end = start + 2
+    depth = 1
+    while end < len(text) and depth:
+        if text.startswith("/*", end):
+            depth += 1
+            end += 2
+        elif text.startswith("*/", end):
+            depth -= 1
+            end += 2
+        else:
+            end += 1
+    return end
+
+
+def rust_outer_line_doc_at(text: str, index: int) -> bool:
+    """Return whether ``index`` begins an outer line documentation comment."""
+    return text.startswith("///", index) and not text.startswith("////", index)
+
+
+def rust_outer_block_doc_at(text: str, index: int) -> bool:
+    """Return whether ``index`` begins an outer block documentation comment."""
+    return text.startswith("/**", index) and not text.startswith("/***", index)
+
+
+def mask_rust_non_code(
+    text: str,
+    *,
+    preserve_doc_comments: bool = False,
+    preserve_literals: bool = False,
+) -> str:
+    """Mask Rust comments and literals while preserving offsets and newlines.
+
+    ``preserve_literals`` keeps string and character literals readable while
+    still removing comments, which is what a caller inspecting what a macro
+    writes into its output needs.
+    """
+    buffer = list(text)
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index + 2)
+            end = len(text) if end == -1 else end
+            if (
+                not preserve_doc_comments
+                or not rust_outer_line_doc_at(text, index)
+            ):
+                mask_range(buffer, index, end)
+            index = end
+            continue
+        if text.startswith("/*", index):
+            end = rust_block_comment_end(text, index)
+            if (
+                not preserve_doc_comments
+                or not rust_outer_block_doc_at(text, index)
+            ):
+                mask_range(buffer, index, end)
+            index = end
+            continue
+
+        token_boundary = index == 0 or not (
+            text[index - 1].isalnum() or text[index - 1] == "_"
+        )
+        raw = RUST_RAW_STRING_OPEN.match(text, index) if token_boundary else None
+        if raw is not None:
+            closer = '"' + raw.group("hashes")
+            end = text.find(closer, raw.end())
+            end = len(text) if end == -1 else end + len(closer)
+            if not preserve_literals:
+                mask_range(buffer, index, end)
+            index = end
+            continue
+
+        quote_start = index
+        if token_boundary and text.startswith(("b\"", "c\""), index):
+            quote_start += 1
+        if text[quote_start : quote_start + 1] == '"':
+            end = quote_start + 1
+            while end < len(text):
+                if text[end] == "\\":
+                    end = min(end + 2, len(text))
+                elif text[end] == '"':
+                    end += 1
+                    break
+                else:
+                    end += 1
+            if not preserve_literals:
+                mask_range(buffer, index, end)
+            index = end
+            continue
+
+        char_start = index + 1 if text.startswith("b'", index) else index
+        if token_boundary and text[char_start : char_start + 1] == "'":
+            # A quote also opens a lifetime or a loop label, which must not
+            # swallow the source up to the next unrelated quote, so only a
+            # closer in character-literal position ends the token.
+            end = RUST_CHARACTER_LITERAL.match(text, char_start)
+            if end is None:
+                index += 1
+                continue
+            if not preserve_literals:
+                mask_range(buffer, index, end.end())
+            index = end.end()
+            continue
+
+        index += 1
+    return "".join(buffer)
+
+
+def rust_doc_comments(prefix: str) -> list[str]:
+    """Return attached outer Rust doc comments, including nested block docs."""
+    metadata = mask_rust_non_code(prefix, preserve_doc_comments=True)
+    comments: list[str] = []
+    index = 0
+    while index < len(metadata):
+        line_start = metadata.rfind("\n", 0, index) + 1
+        at_line_indent = not metadata[line_start:index].strip()
+        if at_line_indent and rust_outer_line_doc_at(metadata, index):
+            end = metadata.find("\n", index + 3)
+            end = len(metadata) if end == -1 else end
+            comments.append(prefix[index:end])
+            index = end
+            continue
+        if at_line_indent and rust_outer_block_doc_at(metadata, index):
+            end = rust_block_comment_end(metadata, index)
+            comments.append(prefix[index:end])
+            index = end
+            continue
+        index += 1
+    return comments
+
+
+def split_rust_meta_items(body: str) -> list[str]:
+    """Split one attribute argument list at top-level commas."""
+    items: list[str] = []
+    start = 0
+    depth = 0
+    for index, character in enumerate(body):
+        if character in "([{":
+            depth += 1
+        elif character in ")]}" and depth:
+            depth -= 1
+        elif character == "," and depth == 0:
+            items.append(body[start:index])
+            start = index + 1
+    items.append(body[start:])
+    return items
+
+
+def rust_cfg_truth(meta: str) -> bool | None:
+    """Evaluate cfg predicates whose truth the harness build already fixes.
+
+    The catalog is checked against what `cargo test` registers, so the bare
+    `test` predicate is true here; every other configuration name stays
+    unknown unless a build-independent combinator settles it.
+    """
+    meta = meta.strip()
+    if meta == RUST_HARNESS_PREDICATE:
+        return True
+    predicate = RUST_CFG_PREDICATE.fullmatch(meta)
+    if predicate is None:
+        return None
+    body = predicate.group("body")
+    items = [] if not body.strip() else split_rust_meta_items(body)
+    values = [rust_cfg_truth(item) for item in items]
+    operator = predicate.group("operator")
+    if operator == "not":
+        if len(values) != 1 or values[0] is None:
+            return None
+        return not values[0]
+    if operator == "all":
+        if False in values:
+            return False
+        if all(value is True for value in values):
+            return True
+        return None
+    if True in values:
+        return True
+    if all(value is False for value in values):
+        return False
+    return None
+
+
+def rust_exported_test_aliases(code: str) -> frozenset[str]:
+    """Return the names this file re-exports a `test` attribute under.
+
+    Only a `pub use` rename is reachable as `crate::<name>` from another
+    module of the same crate, which is the one import shape resolved here.
+    """
+    return frozenset(
+        alias.group("alias")
+        for item in RUST_USE_ITEM.finditer(code)
+        if item.group("visibility") is not None
+        and not rust_item_is_disabled(item.group("attributes"))
+        for alias in RUST_TEST_ALIAS.finditer(item.group("body"))
+    )
+
+
+def rust_crate_import_names(body: str) -> set[str]:
+    """Return the names one `use` body imports directly from the crate root.
+
+    Both `use crate::name;` and a `use crate::{...}` group count, and in the
+    group only an item that is exactly one identifier — never a qualified
+    path, a rename, or a nested group — names the root's own item.
+    """
+    names = {match.group("name") for match in RUST_CRATE_IMPORT.finditer(body)}
+    delimiters = rust_matching_delimiters(body)
+    for group in RUST_CRATE_GROUP.finditer(body):
+        opening = group.end() - 1
+        closing = delimiters.get(opening)
+        if closing is None:
+            continue
+        for item in split_rust_meta_items(body[opening + 1 : closing]):
+            if RUST_BARE_IDENTIFIER.fullmatch(item.strip()) is not None:
+                names.add(item.strip())
+    return names
+
+
+def rust_test_attribute_aliases(
+    code: str, exported: frozenset[str] = frozenset()
+) -> list[ScopedTestAlias]:
+    """Return each local name a `use` item gives an imported `test` attribute.
+
+    ``use tokio::test as async_test;`` registers tests under `#[async_test]`.
+    An alias reaches only the block its `use` item sits in, and everything
+    nested inside it, so a sibling module may bind the same local name to
+    something else without being read as a test. A `use crate::<name>;` whose
+    name this file's own crate root re-exports as a `test` attribute carries
+    that reading in, which is how a re-exported alias arrives; any longer or
+    renamed path is left alone, since its target is not this resolution's to
+    decide.
+    """
+    delimiters = rust_matching_delimiters(code)
+    blocks = sorted(
+        (opening, closing)
+        for opening, closing in delimiters.items()
+        if code[opening] == "{"
+    )
+    aliases: list[ScopedTestAlias] = []
+    for item in RUST_USE_ITEM.finditer(code):
+        if rust_item_is_disabled(item.group("attributes")):
+            continue
+        enclosing = [
+            (opening, closing)
+            for opening, closing in blocks
+            if opening < item.start() < closing
+        ]
+        opening, closing = (
+            max(enclosing) if enclosing else (-1, len(code))
+        )
+        body = item.group("body")
+        names = {
+            alias.group("alias")
+            for alias in RUST_TEST_ALIAS.finditer(body)
+        }
+        names.update(
+            name
+            for name in rust_crate_import_names(body)
+            if name in exported
+        )
+        for name in sorted(names):
+            aliases.append(ScopedTestAlias(opening, closing, name))
+    return aliases
+
+
+def rust_visible_test_aliases(
+    aliases: list[ScopedTestAlias], offset: int
+) -> frozenset[str]:
+    """Return the alias names in scope at one declaration offset."""
+    return frozenset(
+        alias.name
+        for alias in aliases
+        if alias.opening < offset < alias.closing
+    )
+
+
+def rust_meta_names_test(meta: str, aliases: frozenset[str]) -> bool:
+    """Return whether one meta names `test` by path or by an imported alias."""
+    if RUST_TEST_META.match(meta) is not None:
+        return True
+    name = RUST_META_NAME.match(meta)
+    return name is not None and name.group(0) in aliases
+
+
+def rust_meta_applies_test(
+    meta: str, aliases: frozenset[str] = frozenset()
+) -> bool:
+    """Return whether one direct or recursively conditional meta is `test`."""
+    meta = meta.strip()
+    if rust_meta_names_test(meta, aliases):
+        return True
+    cfg_attr = RUST_CFG_ATTR_META.fullmatch(meta)
+    if cfg_attr is None:
+        return False
+    items = split_rust_meta_items(cfg_attr.group("body"))
+    if not items or rust_cfg_truth(items[0]) is False:
+        return False
+    return any(rust_meta_applies_test(item, aliases) for item in items[1:])
+
+
+def rust_top_level_meta_items(text: str) -> list[str]:
+    """Return the path-headed meta items appearing at the top nesting level.
+
+    A matcher whose argument separators cannot be attributed leaves the whole
+    token sequence as one candidate, so each top-level item is offered on its
+    own; tokens nested inside a delimited group belong to their own item and
+    are never lifted out of it.
+    """
+    delimiters = rust_matching_delimiters(text)
+    items: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] == "#":
+            probe = index + 1
+            while probe < len(text) and text[probe] in " \t\r\n":
+                probe += 1
+            closing = (
+                delimiters.get(probe)
+                if probe < len(text) and text[probe] == "["
+                else None
+            )
+            if closing is None:
+                index += 1
+                continue
+            # An attribute group's contents are metadata in their own right,
+            # so a `#[test]` written into an invocation is read, not skipped.
+            items.extend(
+                rust_top_level_meta_items(text[probe + 1 : closing])
+            )
+            index = closing + 1
+            continue
+        if text[index] in "([{":
+            closing = delimiters.get(index)
+            index = len(text) if closing is None else closing + 1
+            continue
+        match = RUST_META_ITEM.match(text, index)
+        if match is None:
+            index += 1
+            continue
+        end = match.end()
+        probe = end
+        while probe < len(text) and text[probe] in " \t\r\n":
+            probe += 1
+        if probe < len(text) and text[probe] in "([{":
+            closing = delimiters.get(probe)
+            if closing is not None:
+                end = closing + 1
+        items.append(text[match.start() : end])
+        index = end
+    return items
+
+
+def rust_attributes_apply_test(
+    prefix: str, aliases: frozenset[str] = frozenset()
+) -> bool:
+    """Return whether an attached attribute applies a test attribute."""
+    for attribute in RUST_ATTRIBUTE.finditer(prefix):
+        if rust_meta_applies_test(attribute.group("meta"), aliases):
+            return True
+    return False
+
+
+def rust_meta_module_paths(meta: str) -> list[str]:
+    """Return the module files one meta names, directly or under `cfg_attr`.
+
+    The subject of this check is the test build, so a `cfg_attr` whose
+    condition is not build-independently false is read as applied — the same
+    reading `cfg_attr(test, test)` already gets. Conditions this checker
+    cannot settle, such as a target predicate, therefore each contribute a
+    candidate rather than the first one shadowing the rest.
+    """
+    meta = meta.strip()
+    direct = RUST_PATH_META.fullmatch(meta)
+    if direct is not None:
+        plain = direct.group("plain")
+        return [direct.group("raw") if plain is None else plain]
+    cfg_attr = RUST_CFG_ATTR_META.fullmatch(meta)
+    if cfg_attr is None:
+        return []
+    items = split_rust_meta_items(cfg_attr.group("body"))
+    if not items or rust_cfg_truth(items[0]) is False:
+        return []
+    found: list[str] = []
+    for item in items[1:]:
+        found.extend(rust_meta_module_paths(item))
+    return found
+
+
+def rust_module_path_attributes(attributes: str) -> list[str]:
+    """Return every module file one attached attribute run may name."""
+    found: list[str] = []
+    for attribute in RUST_ATTRIBUTE.finditer(attributes):
+        for path in rust_meta_module_paths(attribute.group("meta")):
+            if path not in found:
+                found.append(path)
+    return found
+
+
+def rust_meta_disables_item(meta: str) -> bool:
+    """Return whether one active meta universally disables its item."""
+    meta = meta.strip()
+    cfg = RUST_CFG_META.fullmatch(meta)
+    if cfg is not None:
+        return rust_cfg_truth(cfg.group("body")) is False
+    cfg_attr = RUST_CFG_ATTR_META.fullmatch(meta)
+    if cfg_attr is None:
+        return False
+    items = split_rust_meta_items(cfg_attr.group("body"))
+    if not items or rust_cfg_truth(items[0]) is not True:
+        return False
+    return any(rust_meta_disables_item(item) for item in items[1:])
+
+
+def rust_item_is_disabled(prefix: str) -> bool:
+    """Return whether attached cfg metadata disables an item in every build."""
+    for attribute in RUST_ATTRIBUTE.finditer(prefix):
+        if rust_meta_disables_item(attribute.group("meta")):
+            return True
+    return False
+
+
+def rust_inline_module_spans(code: str) -> list[InlineModule]:
+    """Return brace-delimited inline module spans from masked Rust code."""
+    stack: list[int] = []
+    closing_brace: dict[int, int] = {}
+    for index, character in enumerate(code):
+        if character == "{":
+            stack.append(index)
+        elif character == "}" and stack:
+            closing_brace[stack.pop()] = index
+
+    spans: list[InlineModule] = []
+    for module in RUST_INLINE_MODULE.finditer(code):
+        opening = code.rfind("{", module.start(), module.end())
+        closing = closing_brace.get(opening)
+        if closing is not None:
+            spans.append(
+                InlineModule(
+                    opening,
+                    closing,
+                    module.group("name"),
+                    rust_item_is_disabled(module.group("attributes")),
+                )
+            )
+    return spans
+
+
+def rust_matching_delimiters(code: str) -> dict[int, int]:
+    """Return matching Rust delimiter offsets from masked source."""
+    stack: list[tuple[str, int]] = []
+    pairs: dict[int, int] = {}
+    opening_for = {")": "(", "]": "[", "}": "{"}
+    for index, character in enumerate(code):
+        if character in "([{":
+            stack.append((character, index))
+        elif character in ")]}" and stack:
+            opening, offset = stack[-1]
+            if opening == opening_for[character]:
+                stack.pop()
+                pairs[offset] = index
+    return pairs
+
+
+def rust_macro_rule_spans(
+    code: str, body_start: int, body_end: int, delimiters: dict[int, int]
+) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """Return the matcher and transcriber spans of each `macro_rules` rule.
+
+    An empty result means the definition does not read as a plain sequence of
+    ``(matcher) => {transcriber};`` rules, which callers treat as unknown
+    rather than as a definition without rules.
+    """
+    rules: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    index = body_start
+    while index < body_end:
+        while index < body_end and code[index] in " \t\r\n;":
+            index += 1
+        if index >= body_end:
+            return rules
+        if code[index] not in "([{":
+            return []
+        matcher_end = delimiters.get(index)
+        if matcher_end is None or matcher_end >= body_end:
+            return []
+        matcher = (index + 1, matcher_end)
+        index = matcher_end + 1
+        while index < body_end and code[index] in " \t\r\n":
+            index += 1
+        if not code.startswith("=>", index):
+            return []
+        index += 2
+        while index < body_end and code[index] in " \t\r\n":
+            index += 1
+        if index >= body_end or code[index] not in "([{":
+            return []
+        transcriber_end = delimiters.get(index)
+        if transcriber_end is None or transcriber_end >= body_end:
+            return []
+        rules.append((matcher, (index + 1, transcriber_end)))
+        index = transcriber_end + 1
+    return rules
+
+
+def rust_forwarded_metavariables(transcriber: str) -> set[str]:
+    """Return the metavariable names one transcriber places inside attributes."""
+    names: set[str] = set()
+    for attribute in RUST_FORWARDED_ATTRIBUTE.finditer(transcriber):
+        for metavariable in RUST_METAVARIABLE.finditer(attribute.group(0)):
+            names.add(metavariable.group("name"))
+    return names
+
+
+def rust_matcher_argument_positions(matcher: str) -> dict[str, int] | None:
+    """Return each metavariable's argument position in a plain list matcher.
+
+    ``None`` means the matcher does not read as a comma-separated list whose
+    metavariable fragments are exactly one binding each, so no position can be
+    attributed to a forwarded metavariable.
+    """
+    if RUST_METAVARIABLE_REPETITION.search(matcher) is not None:
+        return None
+    positions: dict[str, int] = {}
+    if not matcher.strip():
+        return positions
+    for position, fragment in enumerate(split_rust_meta_items(matcher)):
+        binding = RUST_METAVARIABLE_BINDING.fullmatch(fragment.strip())
+        if binding is None:
+            if RUST_METAVARIABLE.search(fragment) is not None:
+                return None
+            continue
+        if binding.group("name") in positions:
+            return None
+        positions[binding.group("name")] = position
+    return positions
+
+
+def rust_forwarded_argument_positions(
+    code: str, body_start: int, body_end: int, delimiters: dict[int, int]
+) -> set[int] | None:
+    """Return the invocation positions a macro forwards into its attributes.
+
+    ``None`` means the binding between a forwarded metavariable and one
+    invocation argument is not determinable, so every argument is inspected.
+    """
+    rules = rust_macro_rule_spans(code, body_start, body_end, delimiters)
+    if not rules:
+        return None
+    positions: set[int] = set()
+    for (matcher_start, matcher_end), (body_open, body_close) in rules:
+        forwarded = rust_forwarded_metavariables(code[body_open:body_close])
+        if not forwarded:
+            continue
+        bound = rust_matcher_argument_positions(
+            code[matcher_start:matcher_end]
+        )
+        if bound is None:
+            return None
+        for metavariable in forwarded:
+            if metavariable not in bound:
+                return None
+            positions.add(bound[metavariable])
+    return positions
+
+
+def rust_macro_invocation_applies_test(
+    definition: RustSource,
+    name: str,
+    definition_start: int,
+    body_opening: int,
+    sites: list[RustSource],
+) -> bool:
+    """Return whether a forwarding macro is invoked with test metadata.
+
+    A macro is invocable from any file that can name it, so every repository
+    source is a candidate call site, not only the one that defines it.
+    """
+    code = definition.code
+    definition_end = definition.delimiters.get(body_opening)
+    if definition_end is None:
+        return False
+    definition_body = code[definition_start:definition_end]
+    if RUST_FORWARDED_ATTRIBUTE.search(definition_body) is None:
+        return False
+    forwarded_positions = rust_forwarded_argument_positions(
+        code, body_opening + 1, definition_end, definition.delimiters
+    )
+    for site in sites:
+        for opening in site.invocations.get(name, ()):
+            if site is definition and (
+                definition_start <= opening < definition_end
+            ):
+                continue
+            closing = site.delimiters.get(opening)
+            if closing is None:
+                continue
+            body = site.code[opening + 1 : closing]
+            arguments = split_rust_meta_items(body)
+            if forwarded_positions is None:
+                candidates = rust_top_level_meta_items(body)
+            else:
+                candidates = [
+                    arguments[position]
+                    for position in sorted(forwarded_positions)
+                    if position < len(arguments)
+                ]
+            aliases = rust_visible_test_aliases(site.aliases, opening)
+            if any(
+                rust_meta_applies_test(candidate, aliases)
+                for candidate in candidates
+            ):
+                return True
+    return False
+
+
+def rust_enclosing_modules(
+    spans: list[InlineModule], offset: int
+) -> list[InlineModule]:
+    """Return outer-to-inner inline modules enclosing one declaration."""
+    return sorted(
+        (span for span in spans if span.opening < offset < span.closing),
+        key=lambda span: span.opening,
+    )
 
 
 def strip_block_quote_containers(line: str) -> str:
@@ -970,11 +1803,44 @@ def extract_reference_links(
                 MarkdownLink(
                     label=label,
                     destination=definition.destination,
-                    offset=definition.offset,
+                    offset=index,
+                    definition_offset=definition.offset,
                 )
             )
         index = end
     return links
+
+
+def mask_markdown_link_constructs(text: str) -> str:
+    """Blank every link construct, leaving the prose that separates them.
+
+    A tagged claim is made by the prose or by one link's own label, so the
+    prose scan must not read a neighbouring label as if it were prose.
+    Offsets are preserved so link positions stay comparable.
+    """
+    buffer = list(text)
+    index = 0
+    while index < len(text):
+        if text[index] != "[" or is_escaped(text, index):
+            index += 1
+            continue
+        inline = parse_inline_link_at(text, index)
+        if inline is not None:
+            mask_range(buffer, index, inline[1] + 1)
+            index = inline[1] + 1
+            continue
+        label_end = find_closing_bracket(text, index)
+        if label_end is None:
+            index += 1
+            continue
+        end = label_end + 1
+        if end < len(text) and text[end] == "[":
+            reference_end = find_closing_bracket(text, end)
+            if reference_end is not None:
+                end = reference_end + 1
+        mask_range(buffer, index, end)
+        index = end
+    return "".join(buffer)
 
 
 def extract_resolved_links(
@@ -1307,14 +2173,442 @@ def named_tests(
     return bindings
 
 
+def rust_test_invariant_tags(
+    text: str,
+    module_prefixes: tuple[tuple[str, ...], ...] = ((),),
+    aliases: list[ScopedTestAlias] | None = None,
+) -> list[tuple[str, int]]:
+    """Return distinct INV tags and declaration lines from Rust tests.
+
+    Every module path under which the harness registers this file's tests is
+    read, so a file included under more than one active module name carries
+    the tags of each of them.
+    """
+    found: dict[str, int] = {}
+    code = mask_rust_non_code(text)
+    module_spans = rust_inline_module_spans(code)
+    if aliases is None:
+        aliases = rust_test_attribute_aliases(code)
+    for declaration in RUST_TEST_DECLARATION.finditer(code):
+        raw_prefix = text[
+            declaration.start("prefix") : declaration.end("prefix")
+        ]
+        code_prefix = declaration.group("prefix")
+        visible = rust_visible_test_aliases(aliases, declaration.start())
+        if (
+            RUST_TEST_ATTRIBUTE.search(code_prefix) is None
+            and not rust_attributes_apply_test(code_prefix, visible)
+        ):
+            continue
+        if rust_item_is_disabled(code_prefix):
+            continue
+        enclosing = rust_enclosing_modules(module_spans, declaration.start())
+        if any(module.disabled for module in enclosing):
+            continue
+        doc_comments = "\n".join(rust_doc_comments(raw_prefix))
+        module_names = [module.name for module in enclosing]
+        declaration_line = line_number(text, declaration.start("name"))
+        for module_prefix in module_prefixes:
+            material = "\n".join(
+                [
+                    doc_comments,
+                    *module_prefix,
+                    *module_names,
+                    declaration.group("name"),
+                ]
+            )
+            for tag in INVARIANT_TAG.finditer(material):
+                invariant = f"INV-{tag.group('number')}"
+                found.setdefault(invariant, declaration_line)
+    return sorted(found.items())
+
+
+def rust_module_file(directories: list[Path], relatives: list[str]) -> Path | None:
+    """Return the first candidate file one directory and name pair resolves."""
+    for directory in directories:
+        for relative in relatives:
+            # Normalized lexically so a `..` in `#[path]` still names the same
+            # entry the file scan produced, without resolving symlinks.
+            candidate = Path(os.path.normpath(directory / relative))
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def rust_module_children(
+    declaring: Path,
+    name: str,
+    attributes: str,
+    inline: tuple[str, ...] = (),
+) -> list[Path]:
+    """Resolve one out-of-line `mod name;` declaration to its source files.
+
+    Child modules of a crate root or a `mod.rs` live beside their declaring
+    file; children of any other file live in a directory named for it. Both
+    directories are offered in that order so the resolution needs no crate
+    metadata, and a declaration nested in inline modules resolves under a
+    directory named for each of them, exactly as the compiler descends.
+
+    A declaration whose `#[path]` attributes name several files — one per
+    target configuration, say — keeps every one that exists, since which the
+    build selects is not this checker's to decide. Without such an attribute
+    the conventional pair is an either/or and the first match wins.
+    """
+    if declaring.name in RUST_CRATE_ROOT_NAMES:
+        directories = [declaring.parent]
+    else:
+        directories = [declaring.parent / declaring.stem, declaring.parent]
+    directories = [directory.joinpath(*inline) for directory in directories]
+    explicit = rust_module_path_attributes(attributes)
+    if not explicit:
+        conventional = rust_module_file(
+            directories, [f"{name}.rs", f"{name}/mod.rs"]
+        )
+        return [] if conventional is None else [conventional]
+    found: list[Path] = []
+    for relative in explicit:
+        candidate = rust_module_file(directories, [relative])
+        if candidate is not None and candidate not in found:
+            found.append(candidate)
+    return found
+
+
+def rust_module_graph(
+    sources: list[RustSource], target_roots: frozenset[Path] = frozenset()
+) -> tuple[dict[Path, tuple[tuple[str, ...], ...]], dict[Path, set[Path]]]:
+    """Return each file's out-of-line module paths and the roots reaching it.
+
+    A file several active declarations reach keeps every one of those paths,
+    since the harness registers its tests once under each. Paths are visited
+    breadth-first from the files no declaration reaches, and a path never
+    revisits a file it already contains, so only simple paths are walked and
+    a cyclic declaration terminates instead of growing forever. Recording each
+    path once keeps the result independent of filesystem iteration order.
+    """
+    children: dict[Path, list[tuple[tuple[str, ...], Path]]] = {}
+    declared: set[Path] = set()
+    for source in sources:
+        module_spans = rust_inline_module_spans(source.code)
+        for module in RUST_OUT_OF_LINE_MODULE.finditer(source.code):
+            # Masking preserves offsets but blanks string literals, so the
+            # `#[path]` destination is read back from the raw source.
+            attributes = source.text[
+                module.start("attributes") : module.end("attributes")
+            ]
+            if rust_item_is_disabled(module.group("attributes")):
+                continue
+            enclosing = rust_enclosing_modules(
+                module_spans, module.start("name")
+            )
+            if any(item.disabled for item in enclosing):
+                continue
+            inline = tuple(item.name for item in enclosing)
+            for child in rust_module_children(
+                source.path, module.group("name"), attributes, inline
+            ):
+                if child == source.path:
+                    continue
+                children.setdefault(source.path, []).append(
+                    ((*inline, module.group("name")), child)
+                )
+                declared.add(child)
+        for include in RUST_INCLUDE_OPEN.finditer(source.code):
+            # Masking blanks the literal, so the destination is read raw
+            # from the offset the masked scan located.
+            literal = RUST_STRING_LITERAL.match(
+                source.text, include.end("opening")
+            )
+            if literal is None:
+                continue
+            plain = literal.group("plain")
+            relative = literal.group("raw") if plain is None else plain
+            if rust_item_is_disabled(include.group("attributes")):
+                continue
+            enclosing = rust_enclosing_modules(
+                module_spans, include.end("opening")
+            )
+            if any(item.disabled for item in enclosing):
+                continue
+            # `include!` splices into the module that includes it, so the
+            # included file carries that module path with no new segment.
+            included = Path(
+                os.path.normpath(source.path.parent / relative)
+            )
+            if not included.is_file() or included == source.path:
+                continue
+            children.setdefault(source.path, []).append(
+                (tuple(item.name for item in enclosing), included)
+            )
+            declared.add(included)
+
+    prefixes: dict[Path, list[tuple[str, ...]]] = {}
+    roots: dict[Path, set[Path]] = {}
+    # Where the repository declares Cargo targets, they are the only roots:
+    # a source-shaped fixture no target reaches is not a crate. A tree with
+    # no manifest at all keeps the plain reading, every undeclared file a
+    # root of its own.
+    if target_roots:
+        seeds = [
+            source.path for source in sources if source.path in target_roots
+        ]
+    else:
+        seeds = [
+            source.path
+            for source in sources
+            if source.path not in declared
+        ]
+    pending: list[tuple[Path, tuple[str, ...], frozenset[Path], Path]] = [
+        (path, (), frozenset({path}), path) for path in seeds
+    ]
+    while pending:
+        path, prefix, walked, root = pending.pop(0)
+        roots.setdefault(path, set()).add(root)
+        recorded = prefixes.setdefault(path, [])
+        if prefix in recorded:
+            continue
+        recorded.append(prefix)
+        for names, child in children.get(path, []):
+            if child in walked:
+                continue
+            pending.append(
+                (child, (*prefix, *names), walked | {child}, root)
+            )
+    return (
+        {path: tuple(paths) for path, paths in prefixes.items()},
+        roots,
+    )
+
+
+CARGO_TARGET_TABLES = ("bin", "test", "bench", "example")
+CARGO_TARGET_DIRECTORIES = ("src/bin", "tests", "benches", "examples")
+CARGO_CONVENTIONAL_ROOTS = ("src/lib.rs", "src/main.rs", "build.rs")
+
+
+def cargo_target_roots(root: Path) -> list[Path]:
+    """Return the Rust files Cargo compiles as a target root.
+
+    Discovery starts from what Cargo builds, so a source-shaped fixture no
+    target reaches is not read as a crate of its own. The conventional layout
+    is enumerated directly and each manifest's explicit `path` entries are
+    added, which together cover every target Cargo resolves without invoking
+    it.
+    """
+    roots: set[Path] = set()
+    for manifest in sorted(root.rglob("Cargo.toml")):
+        if ".git" in manifest.parts or "target" in manifest.parts:
+            continue
+        package = manifest.parent
+        for relative in CARGO_CONVENTIONAL_ROOTS:
+            roots.add(package / relative)
+        for directory in CARGO_TARGET_DIRECTORIES:
+            roots.update((package / directory).glob("*.rs"))
+            roots.update((package / directory).glob("*/main.rs"))
+        try:
+            declared = tomllib.loads(
+                manifest.read_text(encoding="utf-8", errors="replace")
+            )
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        tables: list[dict[str, object]] = []
+        library = declared.get("lib")
+        if isinstance(library, dict):
+            tables.append(library)
+        for name in CARGO_TARGET_TABLES:
+            entries = declared.get(name)
+            if isinstance(entries, list):
+                tables.extend(
+                    entry for entry in entries if isinstance(entry, dict)
+                )
+        for table in tables:
+            path = table.get("path")
+            if isinstance(path, str):
+                roots.add(Path(os.path.normpath(package / path)))
+    return sorted(path for path in roots if path.is_file())
+
+
+def rust_sources(root: Path) -> list[RustSource]:
+    """Read and lexically prepare every repository Rust file exactly once.
+
+    Module paths and test-attribute aliases are resolved in a second pass,
+    because a `pub use` rename in a crate root names an attribute the modules
+    beneath it import.
+    """
+    paths = [
+        path
+        for path in sorted(root.rglob("*.rs"))
+        if ".git" not in path.parts and "target" not in path.parts
+    ]
+    prepared: list[RustSource] = []
+    for path in paths:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        code = mask_rust_non_code(text)
+        invocations: dict[str, list[int]] = {}
+        for invocation in RUST_MACRO_INVOCATION.finditer(code):
+            invocations.setdefault(invocation.group("name"), []).append(
+                invocation.start("opening")
+            )
+        prepared.append(
+            RustSource(
+                path=path,
+                label=repository_path(root, path),
+                text=text,
+                code=code,
+                delimiters=rust_matching_delimiters(code),
+                invocations=invocations,
+                aliases=[],
+                module_prefixes=((),),
+            )
+        )
+    target_roots = frozenset(cargo_target_roots(root))
+    prefixes, roots = rust_module_graph(prepared, target_roots)
+    reachable = set(prefixes)
+    prepared = [source for source in prepared if source.path in reachable]
+    exported = {
+        source.path: rust_exported_test_aliases(source.code)
+        for source in prepared
+    }
+    for source in prepared:
+        source.module_prefixes = prefixes.get(source.path, ((),))
+        visible: set[str] = set()
+        for reachable_root in roots.get(source.path, {source.path}):
+            visible.update(exported.get(reachable_root, frozenset()))
+        source.aliases = rust_test_attribute_aliases(
+            source.code, frozenset(visible)
+        )
+    return prepared
+
+
+def rust_invariant_test_files(
+    sources: list[RustSource],
+) -> dict[tuple[str, str], int]:
+    """Discover every repository Rust test file carrying an INV tag."""
+    found: dict[tuple[str, str], int] = {}
+    for source in sources:
+        tags = rust_test_invariant_tags(
+            source.text,
+            source.module_prefixes,
+            source.aliases,
+        )
+        for invariant, line in tags:
+            found[(invariant, source.label)] = line
+    return found
+
+
+def rust_proc_macro_test_generators(source: RustSource) -> list[int]:
+    """Return the offsets of procedural macros that spell a test attribute.
+
+    A procedural macro assembles its output in ordinary Rust, so only a test
+    attribute written out in the definition — in a `quote!` body or a string
+    it parses — is visible here. One assembled from separate tokens is not
+    decidable from source and is out of this check's reach.
+    """
+    offsets: list[int] = []
+    for declaration in RUST_TEST_DECLARATION.finditer(source.code):
+        if RUST_PROC_MACRO_ATTRIBUTE.search(declaration.group("prefix")) is None:
+            continue
+        opening = source.code.find("{", declaration.end("name"))
+        closing = source.delimiters.get(opening) if opening >= 0 else None
+        if closing is None:
+            continue
+        # Comments are removed but literals kept: a generator writes its
+        # output into literals, and only mentions it in comments.
+        body = mask_rust_non_code(
+            source.text[opening:closing], preserve_literals=True
+        )
+        if RUST_TEST_ATTRIBUTE.search(body) is not None:
+            offsets.append(declaration.start())
+    return offsets
+
+
+def check_rust_test_generation(sources: list[RustSource]) -> list[Violation]:
+    """Reject macros whose expanded tests cannot be registered from source."""
+    violations: list[Violation] = []
+    for source in sources:
+        for offset in rust_proc_macro_test_generators(source):
+            violations.append(
+                Violation(
+                    source.label,
+                    line_number(source.text, offset),
+                    "invariant-test-generation",
+                    "this procedural macro spells a test attribute in its "
+                    "expansion; write explicit test declarations so invariant "
+                    "registration remains mechanically visible",
+                )
+            )
+    definition_counts: dict[str, int] = {}
+    for source in sources:
+        for macro in RUST_MACRO_RULES.finditer(source.code):
+            name = macro.group("name")
+            definition_counts[name] = definition_counts.get(name, 0) + 1
+    for source in sources:
+        code = source.code
+        for macro in RUST_MACRO_RULES.finditer(code):
+            opening = macro.start("opening")
+            closing = source.delimiters.get(opening)
+            if closing is None:
+                continue
+            aliases = rust_visible_test_aliases(source.aliases, opening)
+            # A matcher may consume a test attribute the expansion never
+            # emits, so only what each rule expands to is read directly; an
+            # unparsed rule list falls back to the whole definition body.
+            rules = rust_macro_rule_spans(
+                code, opening + 1, closing, source.delimiters
+            )
+            body = code[opening + 1 : closing]
+            emitted = (
+                "\n".join(code[start:end] for _, (start, end) in rules)
+                if rules
+                else body
+            )
+            if (
+                RUST_TEST_ATTRIBUTE.search(emitted) is None
+                and not rust_attributes_apply_test(emitted, aliases)
+                and not rust_macro_invocation_applies_test(
+                    source,
+                    macro.group("name"),
+                    macro.start(),
+                    opening,
+                    # One definition of a name owns every invocation of it in
+                    # the repository. Where a name is defined more than once,
+                    # which definition a call site reaches is a visibility
+                    # question this check does not answer, so only the
+                    # definition's own file is read.
+                    sources
+                    if definition_counts[macro.group("name")] == 1
+                    else [source],
+                )
+            ):
+                continue
+            violations.append(
+                Violation(
+                    source.label,
+                    line_number(source.text, macro.start()),
+                    "invariant-test-generation",
+                    f"`macro_rules! {macro.group('name')}` emits or forwards "
+                    "a test attribute; write explicit test declarations so "
+                    "invariant registration remains mechanically visible",
+                )
+            )
+    return violations
+
+
 def check_invariant_citations(
-    root: Path,
+    root: Path, sources: list[RustSource]
 ) -> tuple[list[Violation], set[tuple[int, str]]]:
     source = root / INVARIANTS
     text = mask_block_content(source.read_text(encoding="utf-8"))
     definitions = reference_definitions(text)
     violations: list[Violation] = []
     enforcement_links: set[tuple[int, str]] = set()
+    catalog_pairs: set[tuple[str, str]] = set()
+    target_text_cache: dict[Path, str] = {
+        entry.path: entry.text for entry in sources
+    }
+    rust_test_files = rust_invariant_test_files(sources)
+    declared_tags_by_file: dict[str, set[str]] = {}
+    for invariant_and_path in rust_test_files:
+        invariant, source_label = invariant_and_path
+        declared_tags_by_file.setdefault(source_label, set()).add(invariant)
 
     for number, line in enumerate(text.splitlines(), start=1):
         if not re.match(r"^\|[ \t]*INV-[0-9]{3}[ \t]*\|", line):
@@ -1332,16 +2626,55 @@ def check_invariant_citations(
             continue
         invariant = cells[0]
         enforcement = cells[4]
+        tagged_marker = re.compile(
+            rf"(?i)(?<![A-Za-z0-9]){re.escape(invariant)}-tagged(?![A-Za-z0-9])",
+        )
         citation_enforcement = mask_inline_code(enforcement)
-        for link in extract_resolved_links(citation_enforcement, definitions):
+        resolved_links = sorted(
+            extract_resolved_links(citation_enforcement, definitions),
+            key=lambda link: link.offset,
+        )
+        citation_prose = mask_markdown_link_constructs(citation_enforcement)
+        tagged_destinations: set[str] = set()
+        tagged_active = False
+        preceding_offset = 0
+        for link in resolved_links:
+            intervening = citation_prose[preceding_offset : link.offset]
+            last_marker = max(
+                (match.start() for match in tagged_marker.finditer(intervening)),
+                default=-1,
+            )
+            last_boundary = max(
+                (
+                    match.start()
+                    for match in re.finditer(r"[.;](?=[ \t]|$)", intervening)
+                ),
+                default=-1,
+            )
+            if last_marker >= 0 or last_boundary >= 0:
+                tagged_active = last_marker > last_boundary
+            # A marker inside one link label claims that link alone, so it
+            # never carries into the prose or the links that follow.
+            label_has_marker = tagged_marker.search(
+                mask_inline_code(link.label)
+            ) is not None
+            if tagged_active or label_has_marker:
+                tagged_destinations.add(link.destination)
+            preceding_offset = link.offset + 1
+
+        for link in resolved_links:
             resolved = resolve_relative_target(root, source, link.destination)
             if resolved is None:
                 continue
             target, _ = resolved
             enforcement_links.add((number, link.destination))
-            enforcement_links.add(
-                (line_number(text, link.offset), link.destination)
-            )
+            if link.definition_offset is not None:
+                enforcement_links.add(
+                    (
+                        line_number(text, link.definition_offset),
+                        link.destination,
+                    )
+                )
             if not is_inside(root, target):
                 violations.append(
                     Violation(
@@ -1362,6 +2695,24 @@ def check_invariant_citations(
                         f"`{link.destination}`",
                     )
                 )
+            else:
+                target_label = repository_path(root, target)
+                catalog_pairs.add((invariant, target_label))
+                declared_tags = declared_tags_by_file.get(target_label, set())
+                if (
+                    link.destination in tagged_destinations
+                    and invariant not in declared_tags
+                ):
+                    violations.append(
+                        Violation(
+                            INVARIANTS.as_posix(),
+                            number,
+                            "invariant-tag",
+                            f"{invariant} cites `{target_label}` as tagged "
+                            f"enforcement, but the file contains no {invariant} tag "
+                            "in a test name or attached doc comment",
+                        )
+                    )
 
         for test_name, link in named_tests(enforcement, definitions):
             resolved = resolve_relative_target(root, source, link.destination)
@@ -1371,7 +2722,11 @@ def check_invariant_citations(
             if not is_inside(root, target) or not target.is_file():
                 continue
             terminal_name = test_name.rsplit("::", 1)[-1]
-            target_text = target.read_text(encoding="utf-8", errors="replace")
+            if target not in target_text_cache:
+                target_text_cache[target] = target.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            target_text = target_text_cache[target]
             if not re.search(rf"\b{re.escape(terminal_name)}\b", target_text):
                 violations.append(
                     Violation(
@@ -1383,6 +2738,20 @@ def check_invariant_citations(
                         f"`{terminal_name}`",
                     )
                 )
+
+    for pair, line in rust_test_files.items():
+        if pair in catalog_pairs:
+            continue
+        invariant, source_label = pair
+        violations.append(
+            Violation(
+                source_label,
+                line,
+                "invariant-registration",
+                f"{invariant}-tagged tests in `{source_label}` are not cited "
+                f"by the {invariant} Enforcement cell",
+            )
+        )
 
     return violations, enforcement_links
 
@@ -1596,8 +2965,186 @@ def verification_is_negated(text: str, offset: int) -> bool:
     return VERIFICATION_NEGATION.search(preceding) is not None
 
 
+def git_command(
+    root: Path, *arguments: str
+) -> subprocess.CompletedProcess[str] | None:
+    """Run one read-only Git command, or return ``None`` without a Git binary.
+
+    A checkout without Git reports a deterministic violation rather than
+    aborting, so the checker fails the same way it fails on any other missing
+    provenance.
+    """
+    try:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+
+
+def integration_history_ref(root: Path) -> str | None:
+    """Return the protected integration ref this checkout resolves, if any."""
+    for reference in INTEGRATION_REFS:
+        result = git_command(
+            root, "rev-parse", "--verify", "--quiet", f"{reference}^{{commit}}"
+        )
+        if result is None:
+            return None
+        if result.returncode == 0 and result.stdout.strip():
+            return reference
+    return None
+
+
+def integration_pull_request_branches(
+    root: Path,
+) -> tuple[dict[int, set[str]], str | None]:
+    """Read GitHub merge subjects from the integration first-parent history.
+
+    Provenance is read only from the protected branch's own first-parent
+    chain, which no branch under review can extend: a merge a head branch
+    contributes is reachable from ``HEAD`` but never appears there.
+    """
+    if git_command(root, "rev-parse", "--git-dir") is None:
+        return {}, "`git` is not available in this environment"
+    reference = integration_history_ref(root)
+    if reference is None:
+        return {}, (
+            f"no `{INTEGRATION_BRANCH}` integration branch resolves in this "
+            "checkout"
+        )
+    result = git_command(
+        root, "log", "--first-parent", reference, "--format=%H%x1f%P%x1f%s%x1e"
+    )
+    if result is None:
+        return {}, "`git` is not available in this environment"
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "git log failed without diagnostics"
+        return {}, detail
+    branches: dict[int, set[str]] = {}
+    for record in result.stdout.split("\x1e"):
+        fields = record.lstrip("\n").split("\x1f", maxsplit=2)
+        if len(fields) != 3:
+            continue
+        _, parents, subject = fields
+        if len(parents.split()) != 2:
+            continue
+        merge = PULL_REQUEST_MERGE.fullmatch(subject)
+        if merge is None:
+            continue
+        number = int(merge.group("number"))
+        branches.setdefault(number, set()).add(merge.group("branch"))
+    return branches, None
+
+
+def current_checkout_branch(root: Path) -> str | None:
+    """Return the symbolic checkout branch, or ``None`` for detached HEAD."""
+    result = git_command(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if result is None or result.returncode != 0:
+        return None
+    branch = result.stdout.strip()
+    return branch or None
+
+
+def github_pull_request_event(
+) -> tuple[tuple[int, str] | None, str | None, str | None]:
+    """Read the current PR identity and exact base commit from its event."""
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    if event_path is None:
+        return None, None, None
+    try:
+        payload = json.loads(Path(event_path).read_text(encoding="utf-8"))
+        number = payload["number"]
+        branch = payload["pull_request"]["head"]["ref"]
+        base_sha = payload["pull_request"].get("base", {}).get("sha")
+        if type(number) is not int or not isinstance(branch, str) or not branch:
+            raise ValueError("pull-request number or head branch has the wrong type")
+        if base_sha is not None and (
+            not isinstance(base_sha, str)
+            or re.fullmatch(r"[0-9a-fA-F]{40}", base_sha) is None
+        ):
+            raise ValueError("pull-request base SHA has the wrong type or shape")
+    except (
+        OSError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        AttributeError,
+    ) as error:
+        return None, None, str(error)
+    return (number, branch), base_sha, None
+
+
+def verification_reference_identities(text: str) -> set[tuple[int, str]]:
+    """Return positive verification identities from one specification page."""
+    text = mask_block_content(text)
+    code_ranges = inline_code_ranges(text)
+    identities: set[tuple[int, str]] = set()
+    for reference in VERIFICATION_LEAD.finditer(text):
+        candidate_start = reference.start("pr")
+        if offset_in_ranges(reference.start(), code_ranges) or offset_in_ranges(
+            candidate_start, code_ranges
+        ):
+            continue
+        if verification_is_negated(text, reference.start()):
+            continue
+        token = PR_TOKEN.match(text, candidate_start)
+        if token is not None:
+            identities.add((int(token.group(1)), token.group(2)))
+    return identities
+
+
+def renamed_from(root: Path, base_sha: str | None) -> dict[str, str]:
+    """Map each renamed path at `HEAD` to the name it had at the base commit."""
+    if base_sha is None:
+        return {}
+    result = git_command(
+        root, "diff", "--name-status", "-M", base_sha, "HEAD"
+    )
+    if result is None or result.returncode != 0:
+        return {}
+    renames: dict[str, str] = {}
+    for record in result.stdout.splitlines():
+        fields = record.split("\t")
+        if len(fields) != 3 or not fields[0].startswith("R"):
+            continue
+        renames[fields[2]] = fields[1]
+    return renames
+
+
+def inherited_verification_identities(
+    root: Path,
+    source: Path,
+    base_sha: str | None,
+    renames: dict[str, str] | None = None,
+) -> set[tuple[int, str]]:
+    """Read identities already present in this page at the event base commit.
+
+    A page a stacked child renames is read under the name it had at the base,
+    so the base's own verification survives the move.
+    """
+    if base_sha is None:
+        return set()
+    source_label = repository_path(root, source)
+    base_label = (renames or {}).get(source_label, source_label)
+    result = git_command(root, "show", f"{base_sha}:{base_label}")
+    if result is None or result.returncode != 0:
+        return set()
+    return verification_reference_identities(result.stdout)
+
+
 def check_spec_verification_references(root: Path) -> list[Violation]:
     violations: list[Violation] = []
+    integration_branches, history_error = integration_pull_request_branches(root)
+    event_pull_request, event_base_sha, event_error = github_pull_request_event()
+    github_event_present = "GITHUB_EVENT_PATH" in os.environ
+    checkout_branch = current_checkout_branch(root)
+    base_renames = renamed_from(root, event_base_sha)
+    in_flight_identity: tuple[int, str] | None = None
     specification_index = (root / SPEC_DIR / "README.md").resolve()
     for source in sorted((root / SPEC_DIR).rglob("*.md")):
         if source.resolve() == specification_index:
@@ -1605,6 +3152,9 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
         text = mask_block_content(source.read_text(encoding="utf-8"))
         source_label = repository_path(root, source)
         code_ranges = inline_code_ranges(text)
+        inherited_identities = inherited_verification_identities(
+            root, source, event_base_sha, base_renames
+        )
         valid_reference = False
 
         for reference in VERIFICATION_LEAD.finditer(text):
@@ -1618,6 +3168,61 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
             token = PR_TOKEN.match(text, candidate_start)
             if token is not None:
                 valid_reference = True
+                number = int(token.group(1))
+                branch = token.group(2)
+                line = line_number(text, candidate_start)
+                historical_match = (
+                    number in integration_branches
+                    and branch in integration_branches[number]
+                )
+                event_match = event_pull_request == (number, branch)
+                local_match = (
+                    not github_event_present and branch == checkout_branch
+                )
+                inherited_match = (number, branch) in inherited_identities
+                in_flight_match = (
+                    number not in integration_branches
+                    and (event_match or local_match)
+                )
+                if historical_match or inherited_match:
+                    continue
+                if in_flight_match:
+                    candidate_identity = (number, branch)
+                    if in_flight_identity is None:
+                        in_flight_identity = candidate_identity
+                    if in_flight_identity == candidate_identity:
+                        continue
+                if history_error is not None:
+                    message = (
+                        f"cannot inspect the `{INTEGRATION_BRANCH}` "
+                        f"integration history: {history_error}"
+                    )
+                elif event_error is not None:
+                    message = f"cannot inspect GitHub pull-request event: {event_error}"
+                elif in_flight_match:
+                    message = "only one unmerged verification PR identity is permitted"
+                elif number not in integration_branches:
+                    message = (
+                        f"PR #{number} has no merge commit in the "
+                        f"`{INTEGRATION_BRANCH}` integration history"
+                    )
+                else:
+                    actual = ", ".join(
+                        f"`{candidate}`"
+                        for candidate in sorted(integration_branches[number])
+                    )
+                    message = (
+                        f"PR #{number} names branch `{branch}`, but its "
+                        f"`{INTEGRATION_BRANCH}` merge commit names {actual}"
+                    )
+                violations.append(
+                    Violation(
+                        source_label,
+                        line,
+                        "spec-verification-history",
+                        message,
+                    )
+                )
                 continue
             violations.append(
                 Violation(
@@ -1647,11 +3252,15 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
 def run_checks(root: Path = ROOT) -> list[Violation]:
     root = root.resolve()
     heading_anchors.cache_clear()
-    invariant_failures, enforcement_links = check_invariant_citations(root)
+    sources = rust_sources(root)
+    invariant_failures, enforcement_links = check_invariant_citations(
+        root, sources
+    )
     failures = invariant_failures
     failures.extend(check_relative_links(root, enforcement_links))
     failures.extend(check_decision_order(root))
     failures.extend(check_spec_verification_references(root))
+    failures.extend(check_rust_test_generation(sources))
     return sorted(set(failures))
 
 
