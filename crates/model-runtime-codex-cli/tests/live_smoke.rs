@@ -198,22 +198,30 @@ fn spawn_error_is_retryable(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(26)
 }
 
-/// Awaits the probe under a timeout; a hung executable fails the gate promptly
-/// and dropping the timed-out future drops the (kill-on-drop) child. Factored
-/// so a short bound can be injected in tests.
+/// A `--version` banner is a line of tens of bytes; anything past this bound
+/// is not a version and is never buffered.
+const MAX_PROBE_STDOUT_BYTES: usize = 4096;
+
+/// Awaits the probe under a timeout with its stdout read only up to
+/// `MAX_PROBE_STDOUT_BYTES`; a hung executable or one flooding stdout fails
+/// the gate promptly (killing the probe's process group) instead of holding
+/// the smoke slot or buffering an unbounded stream into memory. Factored so a
+/// short bound can be injected in tests.
 async fn probe_output_bounded(
-    child: tokio::process::Child,
+    mut child: tokio::process::Child,
     executable: &std::path::Path,
     bound: Duration,
 ) -> std::process::Output {
     let group = child.id();
-    match tokio::time::timeout(bound, child.wait_with_output()).await {
-        Ok(result) => result.unwrap_or_else(|error| {
-            panic!(
-                "`{} --version` could not be awaited: {error}",
-                executable.display()
-            )
-        }),
+    match tokio::time::timeout(bound, bounded_probe_output(&mut child)).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(failure)) => {
+            // The child may still be producing when reading fails or
+            // overflows; kill its whole group before failing the gate so a
+            // flooding launcher (or its native subprocess) cannot linger.
+            kill_probe_group(group);
+            panic!("`{} --version` {failure}", executable.display());
+        }
         Err(_) => {
             // The timed-out future drops the child, whose kill-on-drop kills
             // and reaps the direct launcher; additionally signal its whole
@@ -226,6 +234,49 @@ async fn probe_output_bounded(
             );
         }
     }
+}
+
+/// Reads the child's stdout to the version-probe byte bound, then awaits its
+/// exit. A producer that exceeds the bound is reported without buffering the
+/// remainder — `wait_with_output` would collect the entire stream, letting a
+/// fast producer consume unbounded memory before the timeout fires. Closing
+/// the taken stdout handle after the bounded read denies an over-producing
+/// child anywhere to write (a pipe with no reader), so it cannot grow the
+/// buffer past the bound while the exit wait runs.
+async fn bounded_probe_output(
+    child: &mut tokio::process::Child,
+) -> Result<std::process::Output, String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut stdout = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let mut buffer = vec![0_u8; MAX_PROBE_STDOUT_BYTES + 1];
+        let mut filled = 0_usize;
+        while filled < buffer.len() {
+            match pipe.read(&mut buffer[filled..]).await {
+                Ok(0) => break,
+                Ok(read) => filled += read,
+                Err(error) => return Err(format!("stdout could not be read: {error}")),
+            }
+        }
+        if filled > MAX_PROBE_STDOUT_BYTES {
+            return Err(format!(
+                "printed more than {MAX_PROBE_STDOUT_BYTES} bytes; refusing to \
+                 buffer an unbounded version banner"
+            ));
+        }
+        buffer.truncate(filled);
+        stdout = buffer;
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|error| format!("could not be awaited: {error}"))?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    })
 }
 
 /// SIGKILLs the probe's process group so a launcher's native subprocess is
@@ -387,6 +438,122 @@ async fn version_probe_times_out_on_a_hanging_child() {
         child,
         std::path::Path::new("hanging-probe"),
         Duration::from_millis(50),
+    )
+    .await;
+}
+
+/// The timeout path kills the probe's whole process group, not just the
+/// direct launcher: a launcher that spawned a native descendant (as the Node
+/// CLI shim does) leaves that descendant in the group, and only the group
+/// signal reaches it — kill-on-drop alone would strand it. The descendant's
+/// pid is recorded by the launcher and observed to die after the timeout
+/// panics, so `kill_probe_group` regressing to a no-op fails this test.
+#[cfg(unix)]
+#[tokio::test]
+async fn version_probe_timeout_kills_probe_descendants() {
+    let directory = tempfile::tempdir().expect("descendant fixture directory is created");
+    let pid_file = directory.path().join("descendant-pid");
+    let script = format!(
+        "#!/bin/sh\nsleep 60 &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
+        pid_file.display()
+    );
+    let executable = version_probe_fixture(directory.path(), &script);
+    let mut command = tokio::process::Command::new(&executable);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .process_group(0);
+    let child = command
+        .spawn()
+        .expect("the descendant-spawning launcher spawns");
+    let descendant = read_recorded_descendant(&pid_file).await;
+
+    let probe = tokio::spawn(probe_output_bounded_owned(
+        child,
+        std::path::PathBuf::from("descendant-probe"),
+        Duration::from_millis(50),
+    ))
+    .await;
+
+    let panic_message = probe
+        .expect_err("the timed-out probe panics")
+        .into_panic()
+        .downcast::<String>()
+        .expect("the probe panic carries its message");
+    assert!(panic_message.contains("did not exit within"));
+    assert_process_exits(descendant).await;
+}
+
+/// `probe_output_bounded` with owned arguments, so the probe future can be
+/// spawned as a task whose panic is observed rather than aborting the test.
+#[cfg(unix)]
+async fn probe_output_bounded_owned(
+    child: tokio::process::Child,
+    executable: std::path::PathBuf,
+    bound: Duration,
+) -> std::process::Output {
+    probe_output_bounded(child, &executable, bound).await
+}
+
+/// Polls the launcher's pid record until it is written, bounded.
+#[cfg(unix)]
+async fn read_recorded_descendant(pid_file: &std::path::Path) -> rustix::process::Pid {
+    const RECORD_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let deadline = std::time::Instant::now() + RECORD_TIMEOUT;
+    loop {
+        if let Ok(record) = std::fs::read_to_string(pid_file)
+            && let Ok(raw) = record.trim().parse::<i32>()
+        {
+            return rustix::process::Pid::from_raw(raw).expect("the recorded pid is nonzero");
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the launcher never recorded its descendant pid"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Asserts the process exits within a bounded observation window.
+#[cfg(unix)]
+async fn assert_process_exits(pid: rustix::process::Pid) {
+    const PROCESS_EXIT_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let deadline = std::time::Instant::now() + PROCESS_EXIT_OBSERVATION_TIMEOUT;
+    while rustix::process::test_kill_process(pid).is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the probe descendant remains alive after the timeout cleanup"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A probe that floods stdout is stopped at the byte bound and fails the gate
+/// with the overflow diagnostic — not buffered whole until the timeout, which
+/// let a fast producer consume unbounded memory before failing.
+#[cfg(unix)]
+#[tokio::test]
+#[should_panic(expected = "printed more than")]
+async fn version_probe_bounds_a_flooding_stdout() {
+    let directory = tempfile::tempdir().expect("flood fixture directory is created");
+    let executable = version_probe_fixture(directory.path(), "#!/bin/sh\nexec yes codex-flood\n");
+    let mut command = tokio::process::Command::new(&executable);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .process_group(0);
+    let child = command.spawn().expect("the flooding probe spawns");
+
+    let _ = probe_output_bounded(
+        child,
+        std::path::Path::new("flooding-probe"),
+        Duration::from_secs(30),
     )
     .await;
 }
