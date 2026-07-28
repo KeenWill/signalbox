@@ -465,9 +465,10 @@ async fn version_probe_timeout_kills_probe_descendants() {
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .process_group(0);
-    let child = command
-        .spawn()
-        .expect("the descendant-spawning launcher spawns");
+    // Route through the shared retry: a freshly written fixture can be
+    // transiently `ETXTBSY` while a concurrent test thread holds an inherited
+    // write descriptor across its fork/exec, so a direct spawn would flake.
+    let child = spawn_probe(&mut command, &executable).await;
     let descendant = read_recorded_descendant(&pid_file).await;
 
     let probe = tokio::spawn(probe_output_bounded_owned(
@@ -548,7 +549,9 @@ async fn version_probe_bounds_a_flooding_stdout() {
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .process_group(0);
-    let child = command.spawn().expect("the flooding probe spawns");
+    // Shared retry, as above: tolerate a transient `ETXTBSY` on the
+    // freshly written fixture under parallel test execution.
+    let child = spawn_probe(&mut command, &executable).await;
 
     let _ = probe_output_bounded(
         child,
