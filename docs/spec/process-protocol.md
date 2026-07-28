@@ -510,9 +510,11 @@ twelve retains every earlier admitted request and adds no request variant.
 Version thirteen retains every earlier admitted request and adds only the
 optional delivery member on `submit_input` plus its steering receipt. Version
 sixteen retains every earlier admitted request and adds only the read-only
-`list_conversations`; versions fourteen and fifteen remain reserved by
-concurrent stacks and unsupported here. A metadata request carried under version
-one, two, or three, an import request carried under version one through four, a
+`list_conversations`. Version eighteen retains every request admitted by version
+sixteen and adds only `create_session_from_template` and `list_templates`;
+versions fourteen, fifteen, and seventeen remain reserved by concurrent stacks
+and unsupported here. A metadata request carried under version one, two, or
+three, an import request carried under version one through four, a
 defaults-replacement request carried under version one through five, a
 reconciliation request carried under version one through six, a turn-control
 request carried under version one through seven, a defaults read carried under
@@ -520,11 +522,12 @@ version one through eight, an imported-frontier creation request carried under
 any version one through nine, a review request carried under any version one
 through ten, a delivery-bearing submit carried under any version before
 thirteen, or a unified-listing request carried under any version one through
-twelve, is classified as `malformed_frame` because its supported version does
-not admit that request variant; it never reaches application construction. A
-version-one `submit_input`, `read_transcript`, or `follow_session` request that
-selects imported ancestry returns a version-one `unsupported_version` error
-naming version two before mutation or snapshot construction.
+twelve, or a template request carried under any version before eighteen, is
+classified as `malformed_frame` because its supported version does not admit
+that request variant; it never reaches application construction. A version-one
+`submit_input`, `read_transcript`, or `follow_session` request that selects
+imported ancestry returns a version-one `unsupported_version` error naming
+version two before mutation or snapshot construction.
 
 Versions four and above also inherit every transcript, turn-state, entry, and
 event shape admitted by version three, including the imported representations
