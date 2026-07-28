@@ -194,15 +194,42 @@ impl<C: Clone> EventDecoder<C> {
                         // its string-valued fields into the match-only
                         // lookbehind, exactly as the reasoning and error
                         // branches do for the shapes the typed variants model.
-                        if let Some(item) = value.get("item").and_then(Value::as_object) {
-                            // Only content-bearing fields — never the `id`/
-                            // `type` metadata, which are not credential text and
-                            // whose bytes could otherwise break a marker the
-                            // content carries.
-                            for field in ["text", "message"] {
-                                if let Some(content) = item.get(field).and_then(Value::as_str) {
-                                    sink.extend_dropped_context(content);
-                                }
+                        // Only content-bearing fields — never the `id`/`type`
+                        // metadata, which are not credential text and whose
+                        // bytes could otherwise break a marker the content
+                        // carries. The adapter has no ordering semantics for an
+                        // unmodeled item's fields, so a benign field must not
+                        // erase a marker another field establishes: benign
+                        // fields are fed first and marker-bearing fields last,
+                        // and two independent markers we cannot chain jointly
+                        // fail closed.
+                        let contents: Vec<&str> = value
+                            .get("item")
+                            .and_then(Value::as_object)
+                            .into_iter()
+                            .flat_map(|item| {
+                                ["text", "message"]
+                                    .into_iter()
+                                    .filter_map(|field| item.get(field).and_then(Value::as_str))
+                            })
+                            .collect();
+                        let markers = contents
+                            .iter()
+                            .filter(|content| !trailing_credential_context(content).is_empty())
+                            .count();
+                        if markers > 1 {
+                            sink.suppress_remaining();
+                        } else {
+                            for content in contents
+                                .iter()
+                                .filter(|c| trailing_credential_context(c).is_empty())
+                                .chain(
+                                    contents
+                                        .iter()
+                                        .filter(|c| !trailing_credential_context(c).is_empty()),
+                                )
+                            {
+                                sink.extend_dropped_context(content);
                             }
                         }
                     }

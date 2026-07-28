@@ -906,48 +906,63 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         if self.suppressing {
             return;
         }
-        // Dropped bytes never appear in output, so they can neither safely
-        // separate the held stream text from future emitted bytes (a released
-        // `api_` stays adjacent to a later emitted `key=value`, reconstructing
-        // the credential) nor be scanned in isolation from a held marker they
-        // complete (`Authorization` held, `:` dropped). The held text is
-        // always an unsafe credential candidate, so it is resolved now: its
-        // own credential-clean prefix is emitted, its unsafe trailing
-        // candidate is suppressed, and that candidate is folded into the
-        // dropped chain. A future delta is then matched as `held-unsafe ++
-        // dropped ++ delta`, catching a credential completed by the dropped
-        // bytes or the delta, while no released prefix can reconstruct one
-        // beside later output.
-        let mut carried = String::new();
+        // Chronological chain: the existing `dropped_context` preceded the
+        // currently held stream text (pending is resolved on every dropped
+        // item, so any held text was held *after* the last one), which
+        // precedes these new dropped bytes. So the order is
+        // `dropped_context ++ pending.text ++ dropped`.
+        //
+        // The held text is evaluated *in that context* — it can be
+        // credential-clean alone yet unsafe as a continuation of an earlier
+        // dropped marker (dropped `api_`, held `key`). Its clean-in-context
+        // prefix is emitted and the unsafe remainder suppressed (dropped bytes
+        // never reach output, so a released prefix would sit adjacent to a
+        // later emitted value and reconstruct the credential). The suppressed
+        // remainder carries in the emitted-adjacency chain (so a held `api_`
+        // still redacts a later `key=value` even when an unrelated dropped
+        // item broke the internal candidate) and in the dropped chain (so a
+        // marker completed by the dropped bytes or a future delta is caught).
+        let mut chain = std::mem::take(&mut self.dropped_context);
+        let pending_start = chain.len();
         if let Some(pending) = self.pending.take() {
-            let held_unsafe = trailing_credential_context(&pending.text);
-            let clean_len = pending.text.len() - held_unsafe.len();
-            let (safe, unsafe_fragments) = split_stream_fragments(pending.fragments, clean_len);
+            chain.push_str(&pending.text);
+            let unsafe_suffix = trailing_credential_context(&chain);
+            let unsafe_start = chain.len() - unsafe_suffix.len();
+            let clean_in_pending = unsafe_start
+                .saturating_sub(pending_start)
+                .min(pending.text.len());
+            let (safe, unsafe_fragments) =
+                split_stream_fragments(pending.fragments, clean_in_pending);
             self.emit_original(safe);
             self.emit_redacted(unsafe_fragments);
-            // The suppressed marker still marks the value a future delta will
-            // supply: even though its bytes are redacted, the provider sent a
-            // credential whose value must be redacted too (as a single-delta
-            // `api_key=value` would be). Carry it in the emitted-adjacency
-            // chain, which joins future deltas directly (skipping the dropped
-            // bytes that never reach output), so `api_` held + `key=value`
-            // later still suppresses the value.
+            let held_unsafe = &pending.text[clean_in_pending..];
             if !held_unsafe.is_empty() {
                 let mut merged = std::mem::take(&mut self.emitted_context);
                 merged.push_str(held_unsafe);
                 self.emitted_context = trailing_credential_context(&merged).to_string();
             }
-            carried.push_str(held_unsafe);
+            // Only the unsafe tail of `dropped_context ++ pending.text`
+            // carries forward; the emitted clean prefix must not double-count.
+            chain = chain[unsafe_start..].to_string();
         }
-        carried.push_str(&self.dropped_context);
-        carried.push_str(dropped);
-        let context = trailing_credential_context(&carried);
+        chain.push_str(dropped);
+        let context = trailing_credential_context(&chain);
         if context.len() > MAX_PENDING_STREAM_BYTES {
             self.suppressing = true;
             self.dropped_context = String::new();
             return;
         }
         self.dropped_context = context.to_string();
+    }
+
+    /// Fails closed: suppresses all subsequent emitted output. Used when the
+    /// adapter cannot safely reason about content it does not model (an
+    /// unsupported item carrying multiple independent credential markers).
+    pub(crate) fn suppress_remaining(&mut self) {
+        self.pending = None;
+        self.dropped_context = String::new();
+        self.emitted_context = String::new();
+        self.suppressing = true;
     }
 
     /// Starts recording every emitted final-text byte, so terminal evidence
