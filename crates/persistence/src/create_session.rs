@@ -566,6 +566,12 @@ fn decode_complete(
             CreateSessionCorruption::Inconsistent("pre-version-four template provenance").into(),
         );
     }
+    if command_template_provenance.is_some() && command_defaults.system_prompt().is_none() {
+        return Err(CreateSessionCorruption::Inconsistent(
+            "template creation without system prompt",
+        )
+        .into());
+    }
     let command = match command_template_provenance {
         Some(template_provenance) => signalbox_domain::CreateSession::new_from_template(
             command_id,

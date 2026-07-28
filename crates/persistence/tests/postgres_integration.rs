@@ -8931,6 +8931,55 @@ async fn inv047_template_creation_persists_copy_and_name_keyed_replay() -> Resul
         Some("session_template_provenance_creation_fk")
     );
 
+    sqlx::query(
+        "ALTER TABLE create_session_command
+         DROP CONSTRAINT create_session_command_initial_defaults_fk",
+    )
+    .execute(&pool)
+    .await?;
+    let promptless_schema = sqlx::query(
+        "UPDATE create_session_command
+         SET system_prompt = NULL
+         WHERE command_id = $1",
+    )
+    .bind(command_id.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("template provenance requires a command prompt");
+    let promptless_schema_error = promptless_schema
+        .as_database_error()
+        .expect("promptless template rejection must be a database error");
+    assert_eq!(promptless_schema_error.code().as_deref(), Some("23514"));
+    assert_eq!(
+        promptless_schema_error.constraint(),
+        Some("create_session_command_template_prompt_required")
+    );
+
+    sqlx::query(
+        "ALTER TABLE create_session_command
+         DROP CONSTRAINT create_session_command_template_prompt_required",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE create_session_command
+         SET system_prompt = NULL
+         WHERE command_id = $1",
+    )
+    .bind(command_id.into_uuid())
+    .execute(&pool)
+    .await?;
+    let promptless_reader = CreateSessionRepository::new(pool.clone())
+        .load(command_id)
+        .await
+        .expect_err("promptless template provenance must fail closed");
+    assert!(matches!(
+        promptless_reader,
+        CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Inconsistent(
+            "template creation without system prompt"
+        ))
+    ));
+
     sqlx::query("DROP TRIGGER durable_command_is_append_only ON durable_command")
         .execute(&pool)
         .await?;

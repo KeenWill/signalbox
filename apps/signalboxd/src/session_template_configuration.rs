@@ -9,6 +9,7 @@ use std::{
     str::FromStr,
 };
 
+use rustix::fs::{Mode, OFlags, open};
 use signalbox_domain::{
     DangerousToolAutoApproval, DirectModelSelection, ModelAlias, ModelSelectionRequest,
     SessionConfigurationDefaults, SessionSystemPrompt, SessionTemplateContentDigest,
@@ -207,7 +208,13 @@ fn parse_template(
 }
 
 fn read_prompt_file(path: &Path) -> Result<String, SessionTemplateConfigurationError> {
-    let file = fs::File::open(path).map_err(|_| SessionTemplateConfigurationError::ReadPrompt)?;
+    let file = open(
+        path,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(fs::File::from)
+    .map_err(|_| SessionTemplateConfigurationError::ReadPrompt)?;
     let metadata = file
         .metadata()
         .map_err(|_| SessionTemplateConfigurationError::ReadPrompt)?;
@@ -238,7 +245,6 @@ fn resolve_prompt_path(
     home: &dyn Fn() -> Option<PathBuf>,
 ) -> Result<PathBuf, SessionTemplateConfigurationError> {
     if reference.is_empty()
-        || reference.contains('\\')
         || reference
             .split('/')
             .any(|component| component.is_empty() || component == "." || component == "..")
@@ -304,7 +310,12 @@ fn optional_uuid(
 ) -> Result<Option<Uuid>, SessionTemplateConfigurationError> {
     optional_string(table, key)?
         .map(|value| {
-            Uuid::parse_str(value).map_err(|_| SessionTemplateConfigurationError::InvalidIdentity)
+            let identity = Uuid::parse_str(value)
+                .map_err(|_| SessionTemplateConfigurationError::InvalidIdentity)?;
+            if identity.hyphenated().to_string() != value {
+                return Err(SessionTemplateConfigurationError::InvalidIdentity);
+            }
+            Ok(identity)
         })
         .transpose()
 }
@@ -546,6 +557,39 @@ dangerous_tool_auto_approval = false
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn inv047_unix_relative_prompt_file_accepts_backslash_in_component() {
+        let temporary = tempfile::tempdir().expect("temporary deployment root");
+        let prompt_path = temporary.path().join(r"review\guide.txt");
+        fs::write(&prompt_path, INLINE_PROMPT).expect("synthetic prompt is written");
+        let catalog = inline_catalog("").replace(
+            &format!("system_prompt = \"{INLINE_PROMPT}\""),
+            r"system_prompt_file = 'review\guide.txt'",
+        );
+        let configuration = SessionTemplateConfiguration::parse_at(
+            &catalog,
+            &temporary.path().join("session-templates.toml"),
+            None,
+            &models(),
+        )
+        .expect("a Unix backslash path component is admitted");
+        let name = SessionTemplateName::try_new(TEMPLATE_NAME.to_owned())
+            .expect("fixture template name is admitted");
+        let template = configuration
+            .resolve(&name)
+            .expect("configured template resolves");
+
+        assert_eq!(
+            template
+                .defaults()
+                .system_prompt()
+                .expect("template prompt is required")
+                .as_str(),
+            INLINE_PROMPT
+        );
+    }
+
     #[test]
     fn oversized_prompt_file_returns_precise_typed_failure() {
         let temporary = tempfile::tempdir().expect("temporary deployment root");
@@ -624,14 +668,23 @@ dangerous_tool_auto_approval = false
     }
 
     #[test]
-    fn invalid_catalog_shapes_return_distinct_typed_failures() {
-        let unknown_field = SessionTemplateConfiguration::parse_at(
+    fn unknown_catalog_field_returns_precise_typed_failure() {
+        let result = SessionTemplateConfiguration::parse_at(
             &inline_catalog("unexpected = true"),
             Path::new("deployment/session-templates.toml"),
             None,
             &models(),
         );
-        let conflicting_prompt = SessionTemplateConfiguration::parse_at(
+
+        assert_eq!(
+            result.expect_err("unknown template field is rejected"),
+            SessionTemplateConfigurationError::UnknownField
+        );
+    }
+
+    #[test]
+    fn conflicting_prompt_sources_return_precise_typed_failure() {
+        let result = SessionTemplateConfiguration::parse_at(
             &inline_catalog("system_prompt_file = \"prompt.txt\""),
             Path::new("deployment/session-templates.toml"),
             None,
@@ -639,22 +692,14 @@ dangerous_tool_auto_approval = false
         );
 
         assert_eq!(
-            unknown_field.expect_err("unknown template field is rejected"),
-            SessionTemplateConfigurationError::UnknownField
-        );
-        assert_eq!(
-            conflicting_prompt.expect_err("dual prompt sources are rejected"),
+            result.expect_err("dual prompt sources are rejected"),
             SessionTemplateConfigurationError::ConflictingPrompt
         );
     }
 
     #[test]
-    fn unknown_model_and_unavailable_home_return_typed_failures() {
+    fn unknown_model_selection_returns_precise_typed_failure() {
         let unknown_model = inline_catalog("").replace(ALIAS_ID, TARGET_ID);
-        let missing_home = inline_catalog("").replace(
-            &format!("system_prompt = \"{INLINE_PROMPT}\""),
-            "system_prompt_file = \"$HOME/prompts/reviewer.txt\"",
-        );
 
         assert_eq!(
             SessionTemplateConfiguration::parse_at(
@@ -666,6 +711,15 @@ dangerous_tool_auto_approval = false
             .expect_err("unknown alias is rejected"),
             SessionTemplateConfigurationError::UnknownModelSelection
         );
+    }
+
+    #[test]
+    fn unavailable_home_returns_precise_typed_failure() {
+        let missing_home = inline_catalog("").replace(
+            &format!("system_prompt = \"{INLINE_PROMPT}\""),
+            "system_prompt_file = \"$HOME/prompts/reviewer.txt\"",
+        );
+
         assert_eq!(
             SessionTemplateConfiguration::parse_at(
                 &missing_home,
@@ -675,6 +729,69 @@ dangerous_tool_auto_approval = false
             )
             .expect_err("home reference requires HOME"),
             SessionTemplateConfigurationError::MissingHome
+        );
+    }
+
+    #[test]
+    fn noncanonical_model_identity_returns_precise_typed_failure() {
+        let noncanonical_model = inline_catalog("").replace(
+            &format!("alias = \"{ALIAS_ID}\""),
+            &format!("model = \"{}\"", SELECTION_ID.replace("-", "")),
+        );
+
+        assert_eq!(
+            SessionTemplateConfiguration::parse_at(
+                &noncanonical_model,
+                Path::new("deployment/session-templates.toml"),
+                None,
+                &models(),
+            )
+            .expect_err("noncanonical model identity is rejected"),
+            SessionTemplateConfigurationError::InvalidIdentity
+        );
+    }
+
+    #[test]
+    fn noncanonical_alias_identity_returns_precise_typed_failure() {
+        let unhyphenated_alias = inline_catalog("").replace(ALIAS_ID, &ALIAS_ID.replace("-", ""));
+
+        assert_eq!(
+            SessionTemplateConfiguration::parse_at(
+                &unhyphenated_alias,
+                Path::new("deployment/session-templates.toml"),
+                None,
+                &models(),
+            )
+            .expect_err("unhyphenated alias identity is rejected"),
+            SessionTemplateConfigurationError::InvalidIdentity
+        );
+    }
+
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn inv047_fifo_prompt_source_is_rejected_without_blocking() {
+        let temporary = tempfile::tempdir().expect("temporary deployment root");
+        let prompt_path = temporary.path().join("prompt.fifo");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &prompt_path,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .expect("synthetic prompt FIFO is created");
+        let catalog = inline_catalog("").replace(
+            &format!("system_prompt = \"{INLINE_PROMPT}\""),
+            "system_prompt_file = \"prompt.fifo\"",
+        );
+        let result = SessionTemplateConfiguration::parse_at(
+            &catalog,
+            &temporary.path().join("session-templates.toml"),
+            None,
+            &models(),
+        );
+
+        assert_eq!(
+            result.expect_err("FIFO prompt source is rejected"),
+            SessionTemplateConfigurationError::ReadPrompt
         );
     }
 }

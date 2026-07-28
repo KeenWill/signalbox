@@ -224,6 +224,18 @@ fn decode_complete(
 ) -> Result<Session, SessionRepositoryError> {
     let ancestry: String = required(&row, "stored_ancestry")?;
     if ancestry == "imported_conversation" {
+        if row
+            .try_get::<Option<String>, _>("stored_template_name")?
+            .is_some()
+            || row
+                .try_get::<Option<Vec<u8>>, _>("stored_template_digest")?
+                .is_some()
+        {
+            return Err(SessionCorruption::Inconsistent(
+                "imported session has template provenance",
+            )
+            .into());
+        }
         return create_session_from_imported_frontier::reconstitute_bounded_current(
             requested_session,
             row,

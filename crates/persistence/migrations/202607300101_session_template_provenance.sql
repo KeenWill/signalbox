@@ -72,6 +72,8 @@ ALTER TABLE create_session_command
             storage_version >= 4
             OR (template_name IS NULL AND template_content_digest IS NULL)
         ),
+    ADD CONSTRAINT create_session_command_template_prompt_required
+        CHECK (template_name IS NULL OR system_prompt IS NOT NULL),
     ADD CONSTRAINT create_session_command_template_provenance_key
         UNIQUE (
             created_session_id,

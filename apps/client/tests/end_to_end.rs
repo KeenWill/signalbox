@@ -375,12 +375,12 @@ fn required_environment(name: &'static str) -> Result<OsString, Box<dyn Error>> 
     })
 }
 
-/// INV-047: the shipped client lists daemon-owned templates, creates from one
+/// S35 / INV-047: the shipped client lists daemon-owned templates, creates from one
 /// resolved startup snapshot, and a catalog edit plus daemon reload changes
 /// only later sessions while both copies retain exact provenance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv047_terminal_template_create_is_copy_on_create_across_daemon_reload()
+async fn s35_inv047_terminal_template_create_is_copy_on_create_across_daemon_reload()
 -> Result<(), Box<dyn Error>> {
     const TEMPLATE_NAME: &str = "reviewer";
     const ORIGINAL_TEMPLATE_VERSION: u64 = 1;
