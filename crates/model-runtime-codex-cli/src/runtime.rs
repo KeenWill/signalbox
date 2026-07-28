@@ -18,7 +18,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWri
 use tokio::process::{Child, Command};
 
 use crate::config::CodexCliConfig;
-use crate::event::EventDecoder;
+use crate::event::{DecodeFailureClass, EventDecoder};
 use crate::redaction::RedactingSink;
 use crate::translate::{TranslationError, translate};
 use crate::wire::OUTPUT_SCHEMA;
@@ -60,6 +60,58 @@ const PROCESS_GROUP_SUPERVISION_SUPPORTED: bool = cfg!(all(
         target_os = "wasi"
     ))
 ));
+
+/// Every pinned-CLI feature that can add a model-visible tool, external
+/// interaction, instruction source, or delegated execution surface outside
+/// the declared `ModelOperation` tools. The version-bump smoke classifies the
+/// CLI's complete feature inventory so a new unclassified feature fails that
+/// gate before this list can silently become incomplete.
+///
+/// Exported so the compatibility smoke can prove that its pinned feature
+/// classification and the invocation's hard disables remain the same set.
+pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
+    "apps",
+    "artifact",
+    "auth_elicitation",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "code_mode",
+    "code_mode_buffered_exec",
+    "code_mode_host",
+    "code_mode_only",
+    "computer_use",
+    "current_time_reminder",
+    "default_mode_request_user_input",
+    "deferred_executor",
+    "enable_mcp_apps",
+    "exec_permission_approvals",
+    "executor_capability_discovery",
+    "external_agent_memory_import",
+    "goals",
+    "guardian_approval",
+    "hooks",
+    "image_generation",
+    "in_app_browser",
+    "memories",
+    "multi_agent",
+    "multi_agent_v2",
+    "plugin_sharing",
+    "plugins",
+    "realtime_conversation",
+    "remote_plugin",
+    "request_permissions_tool",
+    "shell_snapshot",
+    "shell_tool",
+    "skill_mcp_dependency_install",
+    "skill_search",
+    "standalone_web_search",
+    "token_budget",
+    "tool_call_mcp_elicitation",
+    "tool_suggest",
+    "unified_exec",
+    "workspace_dependencies",
+];
 
 /// Codex CLI protocol snapshot covered by this adapter's offline fixtures.
 ///
@@ -407,13 +459,22 @@ async fn execute_process<C: Clone + Send + Sync>(
         .arg("--ephemeral")
         .arg("--ignore-user-config")
         .arg("--ignore-rules")
-        .arg("--strict-config")
-        .arg("--disable")
-        .arg("shell_tool")
-        .arg("--disable")
-        .arg("unified_exec")
-        .arg("--disable")
-        .arg("skill_search")
+        .arg("--strict-config");
+    for feature in DISABLED_CODEX_CLI_CAPABILITY_FEATURES {
+        command.arg("--disable").arg(feature);
+    }
+    command
+        // Feature flags are not the complete control surface. These config
+        // values close the independent web, configured MCP, ambient-skill, and
+        // agent gates so no prompt sentence is asked to carry capability authority.
+        .arg("--config")
+        .arg("agents.enabled=false")
+        .arg("--config")
+        .arg("skills.include_instructions=false")
+        .arg("--config")
+        .arg("mcp_servers={}")
+        .arg("--config")
+        .arg("web_search=\"disabled\"")
         .arg("--config")
         .arg("project_doc_max_bytes=0")
         .arg("--sandbox")
@@ -573,6 +634,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         match next {
             ProcessStep::Line(Ok(Some(line))) => {
                 if let Err(error) = decoder.push(&line, &mut redacting_sink) {
+                    let class = error.class();
                     // Serde details quote provider-controlled bytes, and both
                     // that library's prose and the adapter's own wrapper sit
                     // between a held credential marker and the continuation the
@@ -587,7 +649,12 @@ async fn execute_process<C: Clone + Send + Sync>(
                     force_kill(&mut child).await;
                     abort_stderr_task(&mut stderr_task).await;
                     redacting_sink.finish();
-                    return decoder.provider_error(&detail);
+                    return match class {
+                        DecodeFailureClass::ProviderDecode => decoder.provider_error(&detail),
+                        DecodeFailureClass::StreamProtocolViolation => {
+                            decoder.boundary_loss(LossCause::StreamProtocolViolation { detail })
+                        }
+                    };
                 }
                 if !decoder.terminal_observed() && already_fired(cancellation) {
                     // Work-first: an already-exited leader's status is

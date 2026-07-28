@@ -22,5 +22,5 @@ mod wire;
 pub use config::CodexCliConfig;
 pub use runtime::{
     CodexCliConstructionError, CodexCliPreparedRequest, CodexCliRuntime,
-    SUPPORTED_CODEX_CLI_VERSION,
+    DISABLED_CODEX_CLI_CAPABILITY_FEATURES, SUPPORTED_CODEX_CLI_VERSION,
 };

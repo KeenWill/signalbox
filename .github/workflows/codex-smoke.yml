@@ -90,8 +90,16 @@ jobs:
             || { echo "the codex-smoke environment provides no API key"; exit 1; }
           mkdir -p "${CODEX_HOME}"
           chmod 700 "${CODEX_HOME}"
+          # GNU timeout creates a separate process group unless --foreground
+          # is requested. Its managed shell deliberately remains live after
+          # TERM so the five-second KILL phase still reaches a native descendant
+          # even when the direct CLI launcher exits during the grace period.
+          # The shell and CLI receive the key only on stdin, never in argv or
+          # either child environment.
           printenv CODEX_SMOKE_API_KEY \
-            | tooling/codex-cli/node_modules/.bin/codex login --with-api-key
+            | env -u CODEX_SMOKE_API_KEY timeout --signal=TERM --kill-after=5s 30s \
+                sh -c 'trap "while :; do sleep 1; done" TERM; "$@"' sh \
+                tooling/codex-cli/node_modules/.bin/codex login --with-api-key
       # The test asserts the executable's reported version against the
       # adapter's supported-version constant before spending anything, so a
       # drifted binary fails closed instead of producing compatibility evidence

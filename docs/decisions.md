@@ -58,6 +58,66 @@ credential meaning, so coverage stays with the enumerated key families.
 [runtime-substrate](spec/runtime-substrate.md), and
 `crates/model-runtime-codex-cli/src/redaction.rs`.
 
+## 2026-07-28 — Fail closed at the Codex CLI's declared input and capability boundaries
+
+**Context.** The Codex adapter projected JSONL through serde's last-value-wins
+object representation, so repeated provider members could overwrite evidence
+before classification. Its specification also claimed descendant-lifetime
+supervision beyond the process group the adapter can control. Finally, the
+invocation disabled three CLI features while prompt prose asked the model not to
+use other built-ins; the pinned CLI exposes a larger, evolving feature registry.
+Ambiguous provider input and undeclared capabilities both need mechanical
+boundaries, while a process can deliberately leave its inherited group.
+
+**Decision.** Repeated JSON object members in either the JSONL event or its
+escaped response envelope are stream-protocol violations; additive tolerance
+covers unknown members, never repeated ones. A duplicate is ambiguous by
+construction, and ambiguous provider input is refused rather than resolved by
+choosing a winner, matching the native client's repeated-member rule. Adapter
+supervision contains exactly the process group it creates; host isolation, owned
+by the runner sandbox in build-out, contains a descendant that deliberately
+leaves that group. Every feature in the pinned CLI inventory is classified.
+Features that can add a model-visible tool, external interaction, instruction
+source, or delegated execution outside the declared tools are explicitly
+disabled, with independent agent, ambient skill-instruction, MCP-server, and
+web-search controls. The pre-spend version smoke compares the complete name,
+stage, and default inventory so a version bump cannot add an unclassified
+feature, and verifies the skill control against an isolated synthetic skill that
+the pinned CLI otherwise injects. Prompt prose is not a capability boundary.
+
+**Rejected alternatives.** Keeping serde's last or first occurrence would
+silently choose among contradictory evidence. Claiming process-tree containment
+would promise control the adapter does not possess; adding host isolation inside
+this adapter would cross the runner boundary. Prompt-only restrictions, or
+testing only today's enabled features, would let a CLI default or version bump
+widen the tool surface without review.
+
+**Affects.** `crates/model-runtime-codex-cli/src/event.rs`,
+`crates/model-runtime-codex-cli/src/runtime.rs`, its process and compatibility
+tests, and [runtime-substrate](spec/runtime-substrate.md) (Codex CLI provider
+adapter and version smoke). The runner sandbox remains the owner of stronger
+host containment.
+
+## 2026-07-28 — Bound the Codex compatibility-smoke login
+
+**Context.** The gated compatibility smoke bounded its build, version probe,
+model exchange, and whole job, but its non-interactive CLI login could consume
+the entire twenty-minute job slot if the launcher or a descendant hung.
+
+**Decision.** Give login thirty seconds, then send `TERM` to the command's
+process group and allow five seconds before `KILL`. A managed shell remains live
+through that grace even when the direct CLI launcher exits on `TERM`, so the
+`KILL` phase still reaches surviving group members. The key remains stdin-only,
+absent from the timeout and CLI child environments and never placed in argv.
+
+**Rejected alternatives.** Relying only on the job timeout would hold the sole
+smoke concurrency slot too long. Reusing the four-minute model-exchange bound
+would conflate a local authentication setup command with a billable provider
+turn. Killing only the direct launcher could strand its native descendant.
+
+**Affects.** `.github/workflows/codex-smoke.yml` and the operational duration of
+the non-merge-gating, manually dispatched compatibility smoke.
+
 ## 2026-07-28 — Load versioned session templates and copy them at creation
 
 **Context.** Session creation can already set a model selection and one bounded
