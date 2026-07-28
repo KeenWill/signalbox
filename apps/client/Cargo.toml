@@ -23,12 +23,13 @@ clap = { version = "4.6.4", default-features = false, features = [
 signalbox-process-protocol = { path = "../../crates/process-protocol" }
 rustix = { version = "1.1.4", default-features = false, features = [
     "fs",
+    "process",
     "std",
 ] }
 tempfile = "3.27.0"
 tokio = { version = "1.53.0", default-features = false, features = [
     "fs",
-    "io-std",
+    "sync",
     "io-util",
     "macros",
     "net",

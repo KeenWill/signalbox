@@ -14,6 +14,7 @@ use std::{
     time::Duration,
 };
 
+use rustix::process::{Pid, Signal, kill_process};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
@@ -48,8 +49,8 @@ use testcontainers_modules::{
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines},
-    process::{ChildStdout, Command},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines},
+    process::Command,
     sync::watch,
     task::JoinHandle,
     time::timeout,
@@ -448,11 +449,14 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     }
 }
 
-async fn read_through(
-    lines: &mut Lines<BufReader<ChildStdout>>,
+async fn read_through<R>(
+    lines: &mut Lines<R>,
     rendered: &mut Vec<String>,
     needle: &str,
-) -> Result<String, Box<dyn Error>> {
+) -> Result<String, Box<dyn Error>>
+where
+    R: AsyncBufRead + Unpin,
+{
     timeout(Duration::from_secs(20), async {
         loop {
             let line = lines
@@ -466,7 +470,11 @@ async fn read_through(
         }
     })
     .await
-    .map_err(|_| io::Error::other(format!("chat did not print {needle}")))?
+    .map_err(|_| {
+        io::Error::other(format!(
+            "chat did not print {needle}; rendered={rendered:?}"
+        ))
+    })?
     .map_err(Into::into)
 }
 
@@ -541,7 +549,7 @@ async fn chat_streams_and_approves_one_scripted_tool_turn() -> Result<(), Box<dy
     assert!(status.success(), "chat failed: {stderr}");
     assert!(stderr.contains("command_id="));
     assert!(stderr.contains("defaults_version="));
-    assert!(stderr.contains("no turn is running"));
+    assert!(stderr.contains("no turn is queued or running"));
     assert!(
         line_position(&rendered, "provider_text_delta")?
             < line_position(&rendered, "assistant_tool_use")?
@@ -565,10 +573,11 @@ async fn chat_streams_and_approves_one_scripted_tool_turn() -> Result<(), Box<dy
     fixture.stop().await
 }
 
-/// S07 / INV-029: while the interactive loop follows an active queued turn, its
-/// independent request path first steers that exact turn, then `:stop`
-/// atomically cancels it and admits exact successor content without closing the
-/// follow connection.
+/// S07 / INV-029: the interactive loop keeps accepted work queued until the
+/// durable activation event. Its independent request path then steers that
+/// exact active turn before `:stop` atomically cancels it and admits exact
+/// successor content without closing the follow connection.
+///
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn chat_steers_then_stops_one_active_turn() -> Result<(), Box<dyn Error>> {
@@ -602,13 +611,16 @@ async fn chat_steers_then_stops_one_active_turn() -> Result<(), Box<dyn Error>> 
 
     read_through(&mut lines, &mut rendered, "state=ready").await?;
     input.write_all(INITIAL_INPUT_LINE.as_bytes()).await?;
-    let streaming = read_through(&mut lines, &mut rendered, "state=streaming turn=").await?;
-    let stopped_turn = streaming
+    let queued = read_through(&mut lines, &mut rendered, "state=queued turn=").await?;
+    let stopped_turn = queued
         .split_once(" turn=")
-        .ok_or_else(|| io::Error::other("streaming state omitted its turn"))?
+        .ok_or_else(|| io::Error::other("queued state omitted its turn"))?
         .1;
     Uuid::parse_str(stopped_turn)?;
     activate_turn(&fixture.pool, Uuid::parse_str(&session_id)?).await?;
+    let streaming = read_through(&mut lines, &mut rendered, "state=streaming turn=").await?;
+    assert!(streaming.contains(&format!("turn={stopped_turn}")));
+
     input.write_all(STEERING_INPUT_LINE.as_bytes()).await?;
     let expected_source = format!("source_turn={stopped_turn}");
     let steering = read_through(&mut lines, &mut rendered, &expected_source).await?;
@@ -630,10 +642,82 @@ async fn chat_steers_then_stops_one_active_turn() -> Result<(), Box<dyn Error>> 
     assert!(status.success(), "chat failed: {stderr}");
     assert!(stopped.contains(&format!("stopped_turn={stopped_turn}")));
     assert!(stderr.contains(&format!("turn={stopped_turn}")));
-    assert!(stderr.contains(&format!("turn {successor_turn} remains running")));
+    assert!(stderr.contains(&format!("turn {successor_turn} remains queued")));
     assert!(
         line_position(&rendered, "accepted_input=")? < line_position(&rendered, "stopped_turn=")?
     );
+    assert!(
+        line_position(&rendered, "state=queued turn=")?
+            < line_position(&rendered, "state=streaming turn=")?
+    );
+
+    fixture.stop().await
+}
+
+/// Ctrl-C remains responsive while the terminal-input worker is blocked on an open
+/// stdin pipe: the first interrupt offers the existing stop command and the second
+/// exits without cancelling the daemon turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn chat_ctrl_c_exits_with_blocked_stdin_and_active_turn() -> Result<(), Box<dyn Error>> {
+    let fixture = RunningIdleFixture::start().await?;
+    let session_id = fixture.create_session().await?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_signalbox"))
+        .kill_on_drop(true)
+        .env_remove("SIGNALBOX_SOCKET_PATH")
+        .arg("--socket")
+        .arg(fixture.socket_directory.socket())
+        .arg("chat")
+        .arg(&session_id)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut input = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("chat stdin was not piped"))?;
+    let output = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("chat stdout was not piped"))?;
+    let errors = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("chat stderr was not piped"))?;
+    let process_id = child
+        .id()
+        .and_then(|id| i32::try_from(id).ok())
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| io::Error::other("chat process omitted a valid process identity"))?;
+    let mut lines = BufReader::new(output).lines();
+    let mut rendered = Vec::new();
+    let mut error_lines = BufReader::new(errors).lines();
+    let mut rendered_errors = Vec::new();
+
+    read_through(&mut lines, &mut rendered, "state=ready").await?;
+    input.write_all(INITIAL_INPUT_LINE.as_bytes()).await?;
+    read_through(&mut lines, &mut rendered, "state=queued turn=").await?;
+    activate_turn(&fixture.pool, Uuid::parse_str(&session_id)?).await?;
+    read_through(&mut lines, &mut rendered, "state=streaming turn=").await?;
+    kill_process(process_id, Signal::INT)?;
+    read_through(
+        &mut error_lines,
+        &mut rendered_errors,
+        "press Ctrl-C again to exit leaving it running",
+    )
+    .await?;
+    kill_process(process_id, Signal::INT)?;
+    read_through(
+        &mut error_lines,
+        &mut rendered_errors,
+        "remains running in the daemon",
+    )
+    .await?;
+
+    let status = timeout(Duration::from_secs(20), child.wait()).await??;
+    drop(input);
+    assert!(status.success(), "chat failed: {rendered_errors:?}");
 
     fixture.stop().await
 }

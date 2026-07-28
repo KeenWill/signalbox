@@ -1,24 +1,124 @@
-use std::fmt;
+use std::{
+    fmt,
+    io::{self, BufRead as _},
+    pin::Pin,
+    task::{Context, Poll},
+};
 
+#[cfg(test)]
+use signalbox_process_protocol::CanonicalU64;
 use signalbox_process_protocol::{
     CanonicalUuid, ClientRequest, ErrorCode, InputContent, ModelSelection, ServerMessage,
     SessionEvent, ToolDecision, TurnState,
 };
-use tokio::io::{AsyncBufRead, AsyncBufReadExt as _};
+use tokio::{
+    io::{AsyncBufRead, AsyncBufReadExt as _, AsyncRead, ReadBuf},
+    sync::mpsc,
+};
 use uuid::Uuid;
 
 use crate::{
     MAX_INPUT_CONTENT_BYTES, ModelSystemPromptChoice, SubmitInputReceipt, command_identity,
-    connection::ProcessClient, decide, error::ClientError, presentation::Output, read_snapshot,
-    replace_session_model, resolve_defaults_version, steer, stop_turn, submit_input,
-    terminal_snapshot_selection, transcript, transcript::SnapshotIdentitySet,
+    connection::ProcessClient,
+    decide,
+    error::ClientError,
+    presentation::{ChatTurnStatus, Output},
+    read_snapshot, replace_session_model, resolve_defaults_version, steer, stop_turn, submit_input,
+    terminal_snapshot_selection, transcript,
+    transcript::SnapshotIdentitySet,
 };
 
 const MAX_CHAT_LINE_BYTES: usize = MAX_INPUT_CONTENT_BYTES + ":steer ".len();
+const TERMINAL_INPUT_CHANNEL_CAPACITY: usize = 1;
 
 const COMMANDS: &str = ":stop TEXT | :steer TEXT | :approve ID | :deny ID REASON | \
     :transcript | :model ALIAS-UUID | :quit";
 
+pub(crate) struct TerminalInput {
+    receiver: mpsc::Receiver<io::Result<Vec<u8>>>,
+    chunk: Vec<u8>,
+    consumed: usize,
+}
+
+pub(crate) fn terminal_input() -> io::Result<TerminalInput> {
+    let (sender, receiver) = mpsc::channel(TERMINAL_INPUT_CHANNEL_CAPACITY);
+    std::thread::Builder::new()
+        .name(String::from("signalbox-chat-stdin"))
+        .spawn(move || read_terminal_input(sender))?;
+
+    Ok(TerminalInput {
+        receiver,
+        chunk: Vec::new(),
+        consumed: 0,
+    })
+}
+
+fn read_terminal_input(sender: mpsc::Sender<io::Result<Vec<u8>>>) {
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    loop {
+        let available = match input.fill_buf() {
+            Ok(available) => available,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                let _ = sender.blocking_send(Err(error));
+                return;
+            }
+        };
+        if available.is_empty() {
+            return;
+        }
+        let consumed = available.len();
+        let chunk = available.to_vec();
+        input.consume(consumed);
+        if sender.blocking_send(Ok(chunk)).is_err() {
+            return;
+        }
+    }
+}
+
+impl AsyncRead for TerminalInput {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let available = match AsyncBufRead::poll_fill_buf(self.as_mut(), context) {
+            Poll::Ready(Ok(available)) => available,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Pending => return Poll::Pending,
+        };
+        let copied = available.len().min(buffer.remaining());
+        buffer.put_slice(&available[..copied]);
+        AsyncBufRead::consume(self, copied);
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncBufRead for TerminalInput {
+    fn poll_fill_buf(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+        let this = self.get_mut();
+        loop {
+            if this.consumed < this.chunk.len() {
+                return Poll::Ready(Ok(&this.chunk[this.consumed..]));
+            }
+            match this.receiver.poll_recv(context) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    this.chunk = chunk;
+                    this.consumed = 0;
+                }
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error)),
+                Poll::Ready(None) => return Poll::Ready(Ok(&[])),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+
+    fn consume(self: Pin<&mut Self>, amount: usize) {
+        let this = self.get_mut();
+        this.consumed = this.consumed.saturating_add(amount).min(this.chunk.len());
+    }
+}
 #[derive(Debug, Eq, PartialEq)]
 enum LineRead {
     Line(String),
@@ -121,10 +221,89 @@ impl fmt::Display for ChatSyntaxError {
     }
 }
 
+#[derive(Debug, Default)]
+struct ChatTurns {
+    awaited_turn: Option<CanonicalUuid>,
+    active_turn: Option<CanonicalUuid>,
+}
+
+impl ChatTurns {
+    fn status(&self) -> Option<ChatTurnStatus> {
+        if let Some(turn_id) = self.active_turn {
+            return Some(ChatTurnStatus::Active(turn_id));
+        }
+        self.awaited_turn.map(ChatTurnStatus::Queued)
+    }
+
+    fn awaiting_reply(&self) -> bool {
+        self.awaited_turn.is_some()
+    }
+
+    fn active_turn(&self) -> Option<CanonicalUuid> {
+        self.active_turn
+    }
+
+    fn queued(&mut self, turn_id: CanonicalUuid) {
+        self.awaited_turn = Some(turn_id);
+        self.active_turn = None;
+    }
+
+    fn accepted(&mut self, turn_id: CanonicalUuid) {
+        if self.awaited_turn.is_none() {
+            self.queued(turn_id);
+        }
+    }
+
+    fn activated(&mut self, turn_id: CanonicalUuid) -> bool {
+        if self.awaited_turn.is_none() || self.awaited_turn == Some(turn_id) {
+            self.awaited_turn = Some(turn_id);
+            self.active_turn = Some(turn_id);
+            return true;
+        }
+        false
+    }
+
+    fn terminalized(&mut self, turn_id: CanonicalUuid) -> bool {
+        if self.active_turn == Some(turn_id) {
+            self.active_turn = None;
+        }
+        if self.awaited_turn == Some(turn_id) {
+            self.awaited_turn = None;
+            return true;
+        }
+        false
+    }
+
+    fn resynchronize(
+        &mut self,
+        snapshot: &mut crate::transcript::TranscriptSnapshot,
+    ) -> Result<(), ClientError> {
+        match snapshot.active_turn()? {
+            Some(turn_id) => {
+                self.awaited_turn = Some(turn_id);
+                self.active_turn = Some(turn_id);
+            }
+            None => {
+                self.active_turn = None;
+                if let Some(awaited_turn) = self.awaited_turn
+                    && !matches!(
+                        snapshot.turn_state(awaited_turn)?,
+                        Some(TurnState::Queued { .. })
+                    )
+                {
+                    self.awaited_turn = None;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InterruptAction {
     OfferStop,
-    ExitRunning,
+    ExitActive,
+    ExitQueued,
     ExitIdle,
 }
 
@@ -134,13 +313,14 @@ struct InterruptState {
 }
 
 impl InterruptState {
-    fn received(&mut self, active_turn: Option<CanonicalUuid>) -> InterruptAction {
-        match (active_turn, self.offered_stop) {
-            (Some(_), false) => {
+    fn received(&mut self, status: Option<ChatTurnStatus>) -> InterruptAction {
+        match (status, self.offered_stop) {
+            (Some(ChatTurnStatus::Active(_)), false) => {
                 self.offered_stop = true;
                 InterruptAction::OfferStop
             }
-            (Some(_), true) => InterruptAction::ExitRunning,
+            (Some(ChatTurnStatus::Active(_)), true) => InterruptAction::ExitActive,
+            (Some(ChatTurnStatus::Queued(_)), _) => InterruptAction::ExitQueued,
             (None, _) => InterruptAction::ExitIdle,
         }
     }
@@ -162,16 +342,17 @@ where
     let mut lines = BoundedLines::new(input);
     let mut displayed_entries = SnapshotIdentitySet::new()?;
     let mut interrupts = InterruptState::default();
+    let mut turns = ChatTurns::default();
 
     'resubscribe: loop {
         let mut connection = client
             .request(ClientRequest::FollowSession { session_id })
             .await?;
         let mut snapshot = read_snapshot(&mut connection, session_id).await?;
-        let mut active_turn = snapshot.active_turn()?;
+        turns.resynchronize(&mut snapshot)?;
         let mut observed_cursor = snapshot.cursor();
         output.followed_snapshot(&mut snapshot, &mut displayed_entries)?;
-        output.chat_started(session_id, active_turn, COMMANDS)?;
+        output.chat_started(session_id, turns.status(), COMMANDS)?;
 
         loop {
             tokio::select! {
@@ -187,8 +368,7 @@ where
                             }
                             observed_cursor = cursor.value();
                             output.event(observed_cursor, session_id, &event)?;
-                            let active_terminalized =
-                                update_active_from_event(&mut active_turn, &event);
+                            let turn_effect = update_turns_from_event(&mut turns, &event);
                             if let Some(selection) = terminal_snapshot_selection(&event) {
                                 let mut refreshed = transcript(client, session_id).await?;
                                 output.terminal_material(
@@ -198,9 +378,13 @@ where
                                 )?;
                                 render_approval_wait(output, &mut refreshed, &event)?;
                             }
-                            if active_terminalized {
-                                interrupts.reset();
-                                output.chat_ready(session_id)?;
+                            match turn_effect {
+                                TurnEventEffect::Activated(turn_id) => output.chat_activated(turn_id)?,
+                                TurnEventEffect::Ready => {
+                                    interrupts.reset();
+                                    output.chat_ready(session_id)?;
+                                }
+                                TurnEventEffect::None => {}
                             }
                             output.flush()?;
                         }
@@ -241,7 +425,7 @@ where
                             continue;
                         }
                         LineRead::Eof => {
-                            output.chat_exiting(active_turn)?;
+                            output.chat_exiting(turns.status())?;
                             return Ok(());
                         }
                     };
@@ -254,30 +438,30 @@ where
                     };
                     match action {
                         ChatInput::Submit(content) => {
-                            let Some(_) = active_turn else {
-                                match submit(client, output, session_id, content).await {
-                                    Ok(turn_id) => {
-                                        active_turn = Some(turn_id);
-                                        interrupts.reset();
-                                        output.chat_submitted(turn_id)?;
-                                    }
-                                    Err(error) => output.error(&error)?,
-                                }
+                            if turns.awaiting_reply() {
+                                output.chat_usage(
+                                    "a turn is queued or active; use an in-loop command",
+                                    COMMANDS,
+                                )?;
                                 continue;
-                            };
-                            output.chat_usage(
-                                "a turn is already active; use an in-loop command",
-                                COMMANDS,
-                            )?;
+                            }
+                            match submit(client, output, session_id, content).await {
+                                Ok(turn_id) => {
+                                    turns.queued(turn_id);
+                                    interrupts.reset();
+                                    output.chat_queued(turn_id)?;
+                                }
+                                Err(error) => output.error(&error)?,
+                            }
                         }
                         ChatInput::Stop(content) => {
-                            let Some(turn_id) = active_turn else {
+                            let Some(turn_id) = turns.active_turn() else {
                                 output.chat_usage("the session has no active turn to stop", COMMANDS)?;
                                 continue;
                             };
                             match stop(client, output, session_id, turn_id, content).await {
                                 Ok(successor_turn_id) => {
-                                    active_turn = Some(successor_turn_id);
+                                    turns.queued(successor_turn_id);
                                     interrupts.reset();
                                     output.chat_stopped(turn_id, successor_turn_id)?;
                                 }
@@ -285,7 +469,7 @@ where
                             }
                         }
                         ChatInput::Steer(content) => {
-                            let Some(turn_id) = active_turn else {
+                            let Some(turn_id) = turns.active_turn() else {
                                 output.chat_usage(
                                     "the session has no active turn to steer",
                                     COMMANDS,
@@ -350,7 +534,7 @@ where
                             }
                         }
                         ChatInput::Quit => {
-                            output.chat_exiting(active_turn)?;
+                            output.chat_exiting(turns.status())?;
                             return Ok(());
                         }
                     }
@@ -358,10 +542,10 @@ where
                 }
                 interrupt = tokio::signal::ctrl_c() => {
                     interrupt.map_err(ClientError::Io)?;
-                    match interrupts.received(active_turn) {
+                    match interrupts.received(turns.status()) {
                         InterruptAction::OfferStop => output.chat_interrupt_offered(COMMANDS)?,
-                        InterruptAction::ExitRunning => {
-                            output.chat_exiting(active_turn)?;
+                        InterruptAction::ExitActive | InterruptAction::ExitQueued => {
+                            output.chat_exiting(turns.status())?;
                             return Ok(());
                         }
                         InterruptAction::ExitIdle => {
@@ -427,37 +611,41 @@ async fn stop(
     .await
 }
 
-fn update_active_from_event(active_turn: &mut Option<CanonicalUuid>, event: &SessionEvent) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TurnEventEffect {
+    None,
+    Activated(CanonicalUuid),
+    Ready,
+}
+
+fn update_turns_from_event(turns: &mut ChatTurns, event: &SessionEvent) -> TurnEventEffect {
     match event {
-        SessionEvent::InputAccepted { turn_id, .. }
-        | SessionEvent::TurnActivated { turn_id, .. }
-            if active_turn.is_none() || *active_turn == Some(*turn_id) =>
-        {
-            *active_turn = Some(*turn_id);
-            false
+        SessionEvent::InputAccepted { turn_id, .. } => {
+            turns.accepted(*turn_id);
+            TurnEventEffect::None
+        }
+        SessionEvent::TurnActivated { turn_id, .. } => {
+            if turns.activated(*turn_id) {
+                TurnEventEffect::Activated(*turn_id)
+            } else {
+                TurnEventEffect::None
+            }
         }
         SessionEvent::TurnCompleted { turn_id, .. }
         | SessionEvent::TurnFailed { turn_id, .. }
         | SessionEvent::TurnRefused { turn_id, .. }
         | SessionEvent::TurnCancelled { turn_id, .. }
         | SessionEvent::TurnReconciliationRequired { turn_id, .. }
-        | SessionEvent::TurnToolReconciliationRequired { turn_id, .. }
-            if *active_turn == Some(*turn_id) =>
-        {
-            *active_turn = None;
-            true
+        | SessionEvent::TurnToolReconciliationRequired { turn_id, .. } => {
+            if turns.terminalized(*turn_id) {
+                TurnEventEffect::Ready
+            } else {
+                TurnEventEffect::None
+            }
         }
-        SessionEvent::InputAccepted { .. }
-        | SessionEvent::TurnActivated { .. }
-        | SessionEvent::SessionCreated {}
+        SessionEvent::SessionCreated {}
         | SessionEvent::ModelCallTransition { .. }
-        | SessionEvent::ToolBatchTransition { .. }
-        | SessionEvent::TurnCompleted { .. }
-        | SessionEvent::TurnFailed { .. }
-        | SessionEvent::TurnRefused { .. }
-        | SessionEvent::TurnCancelled { .. }
-        | SessionEvent::TurnReconciliationRequired { .. }
-        | SessionEvent::TurnToolReconciliationRequired { .. } => false,
+        | SessionEvent::ToolBatchTransition { .. } => TurnEventEffect::None,
     }
 }
 
@@ -546,6 +734,38 @@ mod tests {
     use super::*;
 
     const REQUEST: &str = "00000000-0000-0000-0000-000000000123";
+
+    #[tokio::test]
+    async fn terminal_input_reads_async_channel_chunks() {
+        const INPUT: &str = "first line\nsecond line\n";
+        const FIRST_LINE: &str = "first line";
+        const SECOND_LINE: &str = "second line";
+        let (sender, receiver) = mpsc::channel(TERMINAL_INPUT_CHANNEL_CAPACITY);
+        sender
+            .send(Ok(Vec::from(INPUT.as_bytes())))
+            .await
+            .expect("fixture receiver remains open");
+        drop(sender);
+        let input = TerminalInput {
+            receiver,
+            chunk: Vec::new(),
+            consumed: 0,
+        };
+        let mut lines = BoundedLines::new(input);
+
+        assert_eq!(
+            lines.next_line().await.expect("fixture line read"),
+            LineRead::Line(String::from(FIRST_LINE))
+        );
+        assert_eq!(
+            lines.next_line().await.expect("fixture line read"),
+            LineRead::Line(String::from(SECOND_LINE))
+        );
+        assert_eq!(
+            lines.next_line().await.expect("fixture end read"),
+            LineRead::Eof
+        );
+    }
 
     #[tokio::test]
     async fn bounded_lines_admits_an_exact_bound_and_strips_its_newline() {
@@ -660,18 +880,69 @@ mod tests {
     }
 
     #[test]
+    fn turn_controls_activate_only_on_turn_activated() {
+        const TURN_IDENTITY: u128 = 11;
+        const ACCEPTED_INPUT_IDENTITY: u128 = 12;
+        const ATTEMPT_IDENTITY: u128 = 13;
+        const FIRST_ACCEPTANCE_POSITION: u64 = 1;
+        const QUEUED_OWNER_INPUT: &str = "queued owner input";
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(TURN_IDENTITY));
+        let mut turns = ChatTurns::default();
+
+        assert_eq!(
+            update_turns_from_event(
+                &mut turns,
+                &SessionEvent::InputAccepted {
+                    accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                        ACCEPTED_INPUT_IDENTITY,
+                    )),
+                    turn_id,
+                    acceptance_position: CanonicalU64::new(FIRST_ACCEPTANCE_POSITION),
+                    content: InputContent::new(String::from(QUEUED_OWNER_INPUT)),
+                }
+            ),
+            TurnEventEffect::None
+        );
+        assert_eq!(turns.status(), Some(ChatTurnStatus::Queued(turn_id)));
+        assert_eq!(turns.active_turn(), None);
+        assert_eq!(
+            update_turns_from_event(
+                &mut turns,
+                &SessionEvent::TurnActivated {
+                    turn_id,
+                    current_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(ATTEMPT_IDENTITY)),
+                }
+            ),
+            TurnEventEffect::Activated(turn_id)
+        );
+
+        assert_eq!(turns.status(), Some(ChatTurnStatus::Active(turn_id)));
+    }
+    #[test]
     fn first_interrupt_offers_stop_and_second_exits_without_stopping() {
         const ACTIVE_TURN_IDENTITY: u128 = 1;
         let active_turn = CanonicalUuid::from_uuid(Uuid::from_u128(ACTIVE_TURN_IDENTITY));
         let mut state = InterruptState::default();
 
         assert_eq!(
-            state.received(Some(active_turn)),
+            state.received(Some(ChatTurnStatus::Active(active_turn))),
             InterruptAction::OfferStop
         );
         assert_eq!(
-            state.received(Some(active_turn)),
-            InterruptAction::ExitRunning
+            state.received(Some(ChatTurnStatus::Active(active_turn))),
+            InterruptAction::ExitActive
+        );
+    }
+
+    #[test]
+    fn queued_interrupt_exits_without_offering_stop() {
+        const QUEUED_TURN_IDENTITY: u128 = 2;
+        let queued_turn = CanonicalUuid::from_uuid(Uuid::from_u128(QUEUED_TURN_IDENTITY));
+        let mut state = InterruptState::default();
+
+        assert_eq!(
+            state.received(Some(ChatTurnStatus::Queued(queued_turn))),
+            InterruptAction::ExitQueued
         );
     }
 
@@ -684,28 +955,37 @@ mod tests {
         const TERMINAL_FRONTIER_IDENTITY: u128 = 5;
         let old_turn = CanonicalUuid::from_uuid(Uuid::from_u128(OLD_TURN_IDENTITY));
         let successor_turn = CanonicalUuid::from_uuid(Uuid::from_u128(SUCCESSOR_TURN_IDENTITY));
-        let mut active_turn = Some(successor_turn);
+        let mut turns = ChatTurns::default();
+        turns.queued(successor_turn);
 
-        assert!(!update_active_from_event(
-            &mut active_turn,
-            &SessionEvent::TurnActivated {
-                turn_id: old_turn,
-                current_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(OLD_ATTEMPT_IDENTITY)),
-            }
-        ));
-        assert_eq!(active_turn, Some(successor_turn));
-        assert!(!update_active_from_event(
-            &mut active_turn,
-            &SessionEvent::TurnCancelled {
-                turn_id: old_turn,
-                cancellation_entry_id: CanonicalUuid::from_uuid(Uuid::from_u128(
-                    CANCELLATION_ENTRY_IDENTITY,
-                )),
-                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(
-                    TERMINAL_FRONTIER_IDENTITY
-                )),
-            }
-        ));
-        assert_eq!(active_turn, Some(successor_turn));
+        assert_eq!(
+            update_turns_from_event(
+                &mut turns,
+                &SessionEvent::TurnActivated {
+                    turn_id: old_turn,
+                    current_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                        OLD_ATTEMPT_IDENTITY
+                    )),
+                }
+            ),
+            TurnEventEffect::None
+        );
+        assert_eq!(turns.status(), Some(ChatTurnStatus::Queued(successor_turn)));
+        assert_eq!(
+            update_turns_from_event(
+                &mut turns,
+                &SessionEvent::TurnCancelled {
+                    turn_id: old_turn,
+                    cancellation_entry_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                        CANCELLATION_ENTRY_IDENTITY,
+                    )),
+                    terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                        TERMINAL_FRONTIER_IDENTITY
+                    )),
+                }
+            ),
+            TurnEventEffect::None
+        );
+        assert_eq!(turns.status(), Some(ChatTurnStatus::Queued(successor_turn)));
     }
 }

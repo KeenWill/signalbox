@@ -1192,30 +1192,34 @@ resynchronized follow snapshot replace transient display state with the durable
 transcript, and later provider-text deltas remain ephemeral presentation exactly
 as they do for `follow`.
 
-A line without the `:` prefix submits exact nonempty line content only while no
-turn is active. The closed in-loop command set is `:stop TEXT`, `:steer TEXT`,
-`:approve ID`, `:deny ID REASON`, `:transcript`, `:model ALIAS-UUID`, and
-`:quit`. These map to the existing `stop_turn`, configuration-free steering
-`submit_input`, `decide_tool_request`, `read_transcript`, and
-`replace_session_defaults` requests, or local exit; ordinary input maps to
-start-when-idle `submit_input`. `:stop` requires successor text because the
-interrupt request cannot represent a standalone cancellation. `:steer` requires
-an active turn, binds the exact turn currently observed by the loop, and prints
-the existing typed steering receipt without waiting for a successor turn.
-`:model` changes only the alias selection and copies the observed dangerous-tool
-posture and system prompt into the forward-only successor defaults epoch. Tool
-proposals and projected results are reread and presented at their durable
-transition, and an approval wait prints its exact request identity. All
-process-derived text, including live deltas and tool content, uses the same
-terminal-safe escaping as the other client verbs unless the invocation selected
-`--raw-output`.
+A line without the `:` prefix submits exact nonempty line content only while the
+loop awaits neither a queued nor active reply. The returned `input_submitted`
+receipt marks that turn queued; only its durable `turn_activated` event enables
+active-turn controls and changes the displayed state to streaming. The closed
+in-loop command set is `:stop TEXT`, `:steer TEXT`, `:approve ID`,
+`:deny ID REASON`, `:transcript`, `:model ALIAS-UUID`, and `:quit`. These map to
+the existing `stop_turn`, configuration-free steering `submit_input`,
+`decide_tool_request`, `read_transcript`, and `replace_session_defaults`
+requests, or local exit; ordinary input maps to start-when-idle `submit_input`.
+`:stop` requires successor text because the interrupt request cannot represent a
+standalone cancellation. `:steer` requires an active turn, binds the exact turn
+currently observed by the loop, and prints the existing typed steering receipt
+without waiting for a successor turn. `:model` changes only the alias selection
+and copies the observed dangerous-tool posture and system prompt into the
+forward-only successor defaults epoch. Tool proposals and projected results are
+reread and presented at their durable transition, and an approval wait prints
+its exact request identity. All process-derived text, including live deltas and
+tool content, uses the same terminal-safe escaping as the other client verbs
+unless the invocation selected `--raw-output`.
 
 While a turn is active, the first Ctrl-C leaves the daemon turn running and
 prints the `:stop TEXT` choice. A second Ctrl-C exits the client and explicitly
 reports that the turn remains running. `:quit` and standard-input EOF use the
-same honest exit report. Once the followed turn terminalizes, the client
-presents its exact durable terminal material and accepts another ordinary input
-line.
+same honest exit report. While a turn is queued, Ctrl-C, `:quit`, or
+standard-input EOF exits immediately and reports that the turn remains queued;
+active-only `:stop` and `:steer` remain unavailable until activation. Once the
+followed turn terminalizes, the client presents its exact durable terminal
+material and accepts another ordinary input line.
 
 `list` remains the complete unfiltered version-one summary sequence. `search` is
 the separate verb for version four's `list_session_metadata`, whose filters,

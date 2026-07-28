@@ -105,6 +105,12 @@ enum TextField {
     DelimitedOnLine,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChatTurnStatus {
+    Queued(CanonicalUuid),
+    Active(CanonicalUuid),
+}
+
 pub(crate) struct Output<'a> {
     stdout: &'a mut dyn Write,
     stderr: &'a mut dyn Write,
@@ -127,13 +133,17 @@ impl<'a> Output<'a> {
     pub(crate) fn chat_started(
         &mut self,
         session_id: CanonicalUuid,
-        active_turn: Option<CanonicalUuid>,
+        status: Option<ChatTurnStatus>,
         commands: &str,
     ) -> io::Result<()> {
-        match active_turn {
-            Some(turn_id) => writeln!(
+        match status {
+            Some(ChatTurnStatus::Active(turn_id)) => writeln!(
                 self.stdout,
                 "chat session={session_id} state=following turn={turn_id} commands={commands}"
+            )?,
+            Some(ChatTurnStatus::Queued(turn_id)) => writeln!(
+                self.stdout,
+                "chat session={session_id} state=queued turn={turn_id} commands={commands}"
             )?,
             None => writeln!(
                 self.stdout,
@@ -148,7 +158,12 @@ impl<'a> Output<'a> {
         self.stdout.flush()
     }
 
-    pub(crate) fn chat_submitted(&mut self, turn_id: CanonicalUuid) -> io::Result<()> {
+    pub(crate) fn chat_queued(&mut self, turn_id: CanonicalUuid) -> io::Result<()> {
+        writeln!(self.stdout, "chat state=queued turn={turn_id}")?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_activated(&mut self, turn_id: CanonicalUuid) -> io::Result<()> {
         writeln!(self.stdout, "chat state=streaming turn={turn_id}")?;
         self.stdout.flush()
     }
@@ -160,7 +175,7 @@ impl<'a> Output<'a> {
     ) -> io::Result<()> {
         writeln!(
             self.stdout,
-            "chat state=streaming stopped_turn={stopped_turn_id} successor_turn={successor_turn_id}"
+            "chat state=queued stopped_turn={stopped_turn_id} successor_turn={successor_turn_id}"
         )?;
         self.stdout.flush()
     }
@@ -191,13 +206,17 @@ impl<'a> Output<'a> {
         self.stderr.flush()
     }
 
-    pub(crate) fn chat_exiting(&mut self, active_turn: Option<CanonicalUuid>) -> io::Result<()> {
-        match active_turn {
-            Some(turn_id) => writeln!(
+    pub(crate) fn chat_exiting(&mut self, status: Option<ChatTurnStatus>) -> io::Result<()> {
+        match status {
+            Some(ChatTurnStatus::Active(turn_id)) => writeln!(
                 self.stderr,
                 "chat: exiting; turn {turn_id} remains running in the daemon"
             ),
-            None => writeln!(self.stderr, "chat: exiting; no turn is running"),
+            Some(ChatTurnStatus::Queued(turn_id)) => writeln!(
+                self.stderr,
+                "chat: exiting; turn {turn_id} remains queued in the daemon"
+            ),
+            None => writeln!(self.stderr, "chat: exiting; no turn is queued or running"),
         }?;
         self.stderr.flush()
     }

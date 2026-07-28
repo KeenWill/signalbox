@@ -196,7 +196,7 @@ pub async fn run_terminal(
         let mut stdout = std::io::stdout().lock();
         let mut stderr = std::io::stderr().lock();
         let mut output = Output::new(&mut stdout, &mut stderr, raw_output);
-        let input = tokio::io::BufReader::new(tokio::io::stdin());
+        let input = chat::terminal_input()?;
         chat::run(&mut client, &mut output, session_id, input).await
     }
     .await;
