@@ -792,12 +792,19 @@ ten through twelve have no typed detail for either case and keep the undetailed
 `not_found` their closed message vocabulary already admits, distinguished only
 by its non-normative message. Thirteen and fourteen are reserved rather than
 admitted, so no frame ever reaches this mapping under them. The
-`turn_not_awaiting_reconciliation` and `tool_request_not_in_session` details
-report refusals made before command recording, so unlike every other `rejected`
-detail they name no durable command result and have no replay projection; a
-caller that repeats the request observes the current state, not a recorded
-outcome. Other error codes have no `detail`. An equal replay returns the same
-success or rejection projection as the first handling.
+`turn_not_awaiting_reconciliation`, `tool_request_not_in_session`,
+`imported_conversation_not_found`, and `imported_frontier_position_out_of_range`
+details report refusals made before command recording, so unlike every other
+`rejected` detail they name no durable command result and have no replay
+projection; a caller that repeats the request observes the current state, not a
+recorded outcome. The two imported details leave the command identity unclaimed
+— the daemon refuses them before the creation service runs, and the service's
+own misses likewise claim nothing, as
+[sessions-and-transcript](sessions-and-transcript.md#create-from-an-imported-frontier)
+states — so the same command identity remains available for a corrected
+conversation or position rather than becoming a conflicting reuse. Other error
+codes have no `detail`. An equal replay returns the same success or rejection
+projection as the first handling.
 
 The error-code set in all admitted versions is:
 

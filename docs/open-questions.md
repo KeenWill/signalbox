@@ -71,8 +71,12 @@ identifiers refer to [scenarios.md](scenarios.md).
   the single-conversation inspection read is implemented in
   [conversation-import](spec/conversation-import.md#imported-conversation-inspection).
   File watching, source-size admission beyond the inherited process-frame bound,
-  discovery or listing across imported conversations, raw-record access, and any
-  authorization beyond the owner-private local socket remain undecided. (S28)
+  raw-record access, and any authorization beyond the owner-private local socket
+  remain undecided. Listing across imported conversations is implemented by the
+  unified conversation listing in
+  [process protocol](spec/process-protocol.md#client-requests); filesystem
+  discovery of unimported sources beyond the explicit directory scan is not.
+  (S28)
 
 ## Delegation
 
