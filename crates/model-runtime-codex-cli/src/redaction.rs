@@ -3169,13 +3169,26 @@ fn json_credential_value_at_start(text: &str) -> Option<usize> {
         .and_then(|(start, value_start)| (start == 1).then_some(value_start - 1))
 }
 
+/// The position of the last double quote still open at the end of the text.
+///
+/// A quoted key is held wherever it appears, not only where JSON would admit
+/// one. A credential member reached through diagnostic prose — `detail: "`
+/// then `client_secret":"…"` — is claimed by the raw assignment scanner once
+/// rejoined, so gating on JSON eligibility released exactly the opener that
+/// scanner needed and let the value arrive as a clean-looking delta. Whether
+/// the quote sits after `{`, after `,`, or after prose does not change that a
+/// still-open string may be a key being spelled.
+///
+/// The earliest quote is returned, so the hold covers every later reading of
+/// the same fragment. Quote parity alone would not do: malformed text such as
+/// `{"x,"client_sec` pairs its quotes differently from the reading under
+/// which the credential key is claimed, and the earlier opener is the one
+/// that must survive.
 fn unterminated_json_key_start(text: &str) -> Option<usize> {
     let mut offset = 0;
     while let Some(relative_start) = text[offset..].find('"') {
         let start = offset + relative_start;
-        if (start == 0 || json_key_can_start_at(text, start))
-            && quoted_value_end(text, start + 1, '"') == text.len()
-        {
+        if quoted_value_end(text, start + 1, '"') == text.len() {
             return Some(start);
         }
         offset = start + 1;
@@ -3188,17 +3201,21 @@ fn unterminated_json_key_start(text: &str) -> Option<usize> {
 /// optional whitespace. The stateless member scan accepts whitespace between
 /// key and colon, so streamed text split there could otherwise release the
 /// key and let a later delta deliver the value unredacted.
+///
+/// Like the opener scan above, this does not require a JSON-eligible key
+/// position: the same key spelled after prose is still claimed by the raw
+/// assignment scanner once its value arrives, and the key must survive the
+/// split for that to happen. A quote whose string never closes ends this
+/// scan rather than the whole search, since a later quote may still open a
+/// complete key.
 fn json_credential_key_awaiting_colon(text: &str) -> Option<usize> {
     let mut offset = 0;
     while let Some(relative_start) = text[offset..].find('"') {
         let start = offset + relative_start;
-        if !(start == 0 || json_key_can_start_at(text, start)) {
-            offset = start + 1;
-            continue;
-        }
         let key_end = quoted_value_end(text, start + 1, '"');
         if key_end == text.len() {
-            return None;
+            offset = start + 1;
+            continue;
         }
         let encoded_key = &text[start..=key_end];
         if let Ok(key) = serde_json::from_str::<String>(encoded_key)
@@ -3772,14 +3789,15 @@ mod tests {
     }
 
     /// The JSON-key suffix scan stays linear on text ending in many
-    /// backslash-escaped quotes: an escaped quote cannot begin a JSON key, and
-    /// the eligibility check short-circuits before the quoted-value walk, so no
-    /// position rescans the remaining suffix. A quadratic scan would not finish.
+    /// backslash-escaped quotes. The scan no longer requires a JSON-eligible
+    /// key position, so the first quote is reported rather than none; what
+    /// keeps it linear is that it returns there instead of rescanning the
+    /// suffix from every later quote. A quadratic scan would not finish.
     #[test]
     fn json_key_suffix_scan_is_linear_on_repeated_escaped_quotes() {
         let hostile = format!("prose {}", "\\\"".repeat(500_000));
 
-        assert_eq!(unterminated_json_key_start(&hostile), None);
+        assert_eq!(unterminated_json_key_start(&hostile), Some(7));
     }
 
     /// INV-035: a private-key PEM block standing on its own — no `private_key=`

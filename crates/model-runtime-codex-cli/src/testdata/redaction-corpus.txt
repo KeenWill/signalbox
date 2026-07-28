@@ -128,3 +128,20 @@ thread_api_key=<|SEED|>SYNTHETIC-SECRET-C7.
 note \u0061pi_key=<|SEED|>SYNTHETIC-SECRET-C8.
 note \u0061pi_key=<|DROP|>SYNTHETIC-SECRET-C9.
 dropped api_key=<|DROP|>SYNTHETIC-SECRET-D0.
+{"client_secret":"SYNTHETIC-SECRET-12"<|D|>}
+{"bearerToken":"SYNTHETIC-SECRET-24"<|D|>}
+"<|D|>api_key" = "SYNTHETIC-SECRET-40"
+{'<|D|>client_secret': 'SYNTHETIC-SECRET-55'}
+Config { client_secret<|D|>: "SYNTHETIC-SECRET-56" }
+GET /v1 HTTP/1.1<|CR|><|NL|>X-Api-Key<|D|>: SYNTHETIC-SECRET-57<|CR|><|NL|>
+{"a<|D|>"b,"client_secret":"SYNTHETIC-SECRET-77"}
+{"detail":<|D|>"{\"client_secret\":\"SYNTHETIC-SECRET-78\"}"}
+detail: "<|D|>client_secret":"SYNTHETIC-SECRET-79"
+{"api_key":"benign","api_key":"SYNTHETIC-SECRET-80"<|D|>}
+{"api_key":"SYNTHETIC-SECRET-81"<|D|>,"api_key":"benign"}
+{"x,"api_key":"SYNTHETIC-SECRET-82"<|D|>,"z":1}
+warn: bad value<|D|> ", "client_secret":"SYNTHETIC-SECRET-83"
+{"log":<|D|>"...truncated,"client_secret":"SYNTHETIC-SECRET-84"}
+{"\u0061<|D|>pi_key":"SYNTHETIC-SECRET-86"}
+{"secret":{"a":1},"api_key":"SYNTHETIC-SECRET-95"<|D|>}
+{"api_key":["a"],"client_secret":"SYNTHETIC-SECRET-99"<|D|>}

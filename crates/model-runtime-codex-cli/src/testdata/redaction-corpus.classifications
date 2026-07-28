@@ -128,3 +128,20 @@
 128 | REDACTED | runtime-substrate.md INV-035: escaped emitted provider-id lookbehind governs later terminal text.
 129 | REDACTED | runtime-substrate.md INV-035: escaped dropped lookbehind governs later terminal text.
 130 | REDACTED | runtime-substrate.md INV-035: dropped lookbehind governs later terminal text.
+131 | REDACTED | runtime-substrate.md INV-035: structural close in a later delta cannot release a credential member.
+132 | REDACTED | runtime-substrate.md INV-035: structural close in a later delta cannot release a token member.
+133 | REDACTED | runtime-substrate.md INV-035: a quoted key opened at the delta end stays held.
+134 | REDACTED | runtime-substrate.md INV-035: a single-quoted key opened at the delta end stays held.
+135 | REDACTED | runtime-substrate.md INV-035: a bare credential name split before its separator stays held.
+136 | REDACTED | runtime-substrate.md INV-035: a header credential name split before its separator stays held.
+137 | REDACTED | runtime-substrate.md INV-035: a malformed-prefix quoted key split at its opener stays held.
+138 | REDACTED | runtime-substrate.md INV-035: an escaped nested credential member split before its value stays held.
+139 | KNOWN-FAILING | redaction.rs::delta_against_context: a quoted key after a released clean prefix is split from its value and released.
+140 | REDACTED | runtime-substrate.md INV-035: structural close in a later delta cannot release a duplicate member.
+141 | REDACTED | runtime-substrate.md INV-035: a later duplicate member cannot release an earlier credential.
+142 | REDACTED | runtime-substrate.md INV-035: a malformed-prefix member split before its tail stays held.
+143 | KNOWN-FAILING | redaction.rs::delta_against_context: a quoted key after a released clean prefix is split from its value and released.
+144 | REDACTED | runtime-substrate.md INV-035: a truncated-log credential member split before its value stays held.
+145 | REDACTED | runtime-substrate.md INV-035: an escaped credential name split inside its escape stays held.
+146 | REDACTED | runtime-substrate.md INV-035: structural close after a balanced container cannot release a member.
+147 | REDACTED | runtime-substrate.md INV-035: structural close after a balanced array cannot release a member.

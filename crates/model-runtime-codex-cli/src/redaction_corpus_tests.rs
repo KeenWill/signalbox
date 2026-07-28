@@ -5,8 +5,8 @@ use super::{RedactingSink, redact_json, redact_text};
 const CORPUS: &str = include_str!("testdata/redaction-corpus.txt");
 const CLASSIFICATIONS: &str = include_str!("testdata/redaction-corpus.classifications");
 const SYNTHETIC_SECRET_MARKER: &str = "SYNTHETIC-SECRET";
-const CORPUS_LINE_COUNT: usize = 130;
-const EXPECTED_REDACTED_COUNT: usize = 102;
+const CORPUS_LINE_COUNT: usize = 147;
+const EXPECTED_REDACTED_COUNT: usize = 117;
 const EXPECTED_ACCEPTED_UNCOVERED_COUNT: usize = 28;
 const CORRELATION: u8 = 7;
 const BOUNDARY_FRAGMENT: &str = "{}";
@@ -17,67 +17,14 @@ const SOAK_GENERATIVE_CASES: usize = 32_768;
 /// included. Enumerating the single-split class exhaustively is what keeps
 /// it closed: sampling split points misses the specific boundary a held
 /// state mishandles, which is how three boundary defects reached review.
-const EXHAUSTIVE_SINGLE_SPLIT_CASES: usize = 5_418;
+const EXHAUSTIVE_SINGLE_SPLIT_CASES: usize = 6_230;
 /// The enumerated cases whose joined line `redact_text` actually redacts, so
 /// the stateful path is held to a nonvacuous obligation. The remainder are
 /// the accepted-uncovered lines, enumerated but unguarded.
-const EXHAUSTIVE_SINGLE_SPLIT_GUARDED_CASES: usize = 4_352;
+const EXHAUSTIVE_SINGLE_SPLIT_GUARDED_CASES: usize = 5_164;
 /// Every ordered pair of UTF-8 boundaries of every corpus line.
 const EXHAUSTIVE_TWO_SPLIT_CASES: usize = 127_567;
 const EXHAUSTIVE_TWO_SPLIT_GUARDED_CASES: usize = 105_743;
-/// Corpus lines the single-split enumeration still finds diverging, recorded
-/// rather than hidden. All three plant a double-quoted `client_secret` member
-/// inside surrounding text (line 78 through JSON string escapes), and all
-/// three release the value only when an earlier delta already emitted a clean
-/// prefix — the divergence is in emitted-context resolution, not in the
-/// boundary helpers this pull request repairs. Escalated to the owner; the set
-/// and its case count are pinned so any movement fails this test.
-const OPEN_SINGLE_SPLIT_DIVERGENCE_LINES: [usize; 3] = [78, 79, 83];
-const OPEN_SINGLE_SPLIT_DIVERGENCE_CASES: usize = 25;
-/// The residue split by split, so a repaired fragmentation cannot be cancelled
-/// by a newly exposed one on the same line.
-const OPEN_SINGLE_SPLIT_DIVERGENCE: [(usize, usize); 25] = [
-    (78, 12),
-    (78, 16),
-    (78, 19),
-    (79, 2),
-    (79, 3),
-    (79, 4),
-    (79, 5),
-    (79, 7),
-    (79, 11),
-    (79, 12),
-    (79, 13),
-    (79, 14),
-    (79, 17),
-    (79, 18),
-    (79, 19),
-    (79, 20),
-    (79, 21),
-    (83, 2),
-    (83, 3),
-    (83, 5),
-    (83, 7),
-    (83, 8),
-    (83, 12),
-    (83, 15),
-    (83, 17),
-];
-/// The escalated divergence measured one delta deeper. These lines are not
-/// accepted-uncovered — `redact_text` redacts every one of them — and this is
-/// not a limit the pull request claims. It is the current measurement of the
-/// open defect, recorded so its reach is a fact in the tree rather than a
-/// number in a review comment: a clean prefix released by an earlier delta
-/// defeats the held-state decision for a credential the joined line redacts.
-const MEASURED_TWO_SPLIT_DIVERGENCE_LINES: [usize; 16] = [
-    36, 41, 56, 57, 72, 73, 77, 78, 79, 80, 82, 83, 84, 112, 113, 117,
-];
-const MEASURED_TWO_SPLIT_DIVERGENCE_CASES: usize = 1_069;
-/// The two-split residue is far too large to pin case by case, so it is
-/// pinned as a canonical digest of the same inventory instead.
-const MEASURED_TWO_SPLIT_DIVERGENCE_DIGEST: u64 = 8_047_131_395_358_659_687;
-const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
 const ASCII_NOISE: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_-";
@@ -86,6 +33,11 @@ const ASCII_NOISE: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_-";
 enum CorpusStatus {
     Redacted,
     AcceptedUncovered,
+    /// The shape is covered by the contract and the implementation leaks it.
+    /// A known failure is never a passing classification: it is carried here
+    /// only so the ledger names it, and the corpus test fails while any
+    /// remains.
+    KnownFailing,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,7 +95,15 @@ struct CorpusSummary {
     lines: usize,
     redacted: usize,
     accepted_uncovered: usize,
+    known_failing: Vec<KnownFailure>,
     mismatches: Vec<ClassificationMismatch>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct KnownFailure {
+    line: usize,
+    reason: String,
+    surviving_channels: Vec<&'static str>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -160,42 +120,6 @@ struct SplitSummary {
     cases: usize,
     guarded_cases: usize,
     leaks: Vec<SplitLeak>,
-}
-
-impl SplitSummary {
-    fn leaking_lines(&self) -> Vec<usize> {
-        let mut lines = self.leaks.iter().map(|leak| leak.line).collect::<Vec<_>>();
-        lines.sort_unstable();
-        lines.dedup();
-        lines
-    }
-
-    /// The exact divergent fragmentations, canonically ordered. A line set and
-    /// a case count are not enough on their own: repairing one split while
-    /// exposing another on the same line leaves both unchanged, so the pinned
-    /// residue could move without failing anything.
-    fn divergent_splits(&self) -> Vec<(usize, Vec<usize>)> {
-        let mut inventory = self
-            .leaks
-            .iter()
-            .map(|leak| (leak.line, leak.splits.clone()))
-            .collect::<Vec<_>>();
-        inventory.sort_unstable();
-        inventory
-    }
-
-    /// A canonical digest of `divergent_splits`, for a residue too large to
-    /// pin case by case. Any added, removed, or moved split changes it.
-    fn divergent_splits_digest(&self) -> u64 {
-        let mut digest = FNV_OFFSET_BASIS;
-        for (line, splits) in self.divergent_splits() {
-            for byte in format!("{line}:{splits:?};").bytes() {
-                digest ^= u64::from(byte);
-                digest = digest.wrapping_mul(FNV_PRIME);
-            }
-        }
-        digest
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -365,6 +289,7 @@ fn parse_expectation_line(encoded: &str, expected_line: usize) -> CorpusExpectat
     {
         "REDACTED" => CorpusStatus::Redacted,
         "ACCEPTED-UNCOVERED" => CorpusStatus::AcceptedUncovered,
+        "KNOWN-FAILING" => CorpusStatus::KnownFailing,
         unknown => panic!("unknown corpus classification `{unknown}`"),
     };
     let reason = fields
@@ -571,6 +496,7 @@ fn run_corpus() -> CorpusSummary {
     let expectations = corpus_expectations();
     let mut redacted = 0;
     let mut accepted_uncovered = 0;
+    let mut known_failing = Vec::new();
     let mut mismatches = Vec::new();
     let corpus_lines: Vec<&str> = CORPUS.lines().collect();
     assert_eq!(
@@ -586,9 +512,19 @@ fn run_corpus() -> CorpusSummary {
         );
         let outputs = outputs_for(decode_corpus_line(encoded));
         let actual = status_for(&outputs);
+        if expectation.status == CorpusStatus::KnownFailing {
+            known_failing.push(KnownFailure {
+                line: expectation.line,
+                reason: expectation.reason,
+                surviving_channels: surviving_channels(&outputs),
+            });
+            continue;
+        }
         match actual {
             CorpusStatus::Redacted => redacted += 1,
-            CorpusStatus::AcceptedUncovered => accepted_uncovered += 1,
+            CorpusStatus::AcceptedUncovered | CorpusStatus::KnownFailing => {
+                accepted_uncovered += 1;
+            }
         }
         if actual != expectation.status {
             mismatches.push(ClassificationMismatch {
@@ -601,9 +537,10 @@ fn run_corpus() -> CorpusSummary {
         }
     }
     CorpusSummary {
-        lines: redacted + accepted_uncovered,
+        lines: redacted + accepted_uncovered + known_failing.len(),
         redacted,
         accepted_uncovered,
+        known_failing,
         mismatches,
     }
 }
@@ -1104,6 +1041,13 @@ fn redaction_corpus_classification_is_exact() {
         summary.accepted_uncovered,
         EXPECTED_ACCEPTED_UNCOVERED_COUNT
     );
+    assert!(
+        summary.known_failing.is_empty(),
+        "KNOWN-FAILING: the contract covers these shapes and the sink leaks \
+         them. This is a defect ledger, never an accepted classification, and \
+         this assertion stays red until the ledger is empty: {:#?}",
+        summary.known_failing
+    );
 }
 
 #[test]
@@ -1121,10 +1065,6 @@ fn deterministic_generator_replays_the_pinned_seed() {
 /// `redact_text` removes from the joined line. This class is enumerated, not
 /// sampled — a sampled split point is exactly what a boundary defect hides
 /// behind — so no single-delta boundary in the committed corpus is untested.
-///
-/// The lines named by `OPEN_SINGLE_SPLIT_DIVERGENCE_LINES` are the escalated
-/// residue: they are enumerated and pinned, not excluded, so the divergence
-/// stays visible and any change to it fails here.
 #[test]
 fn stateful_equals_stateless_for_every_single_corpus_split() {
     let summary = run_exhaustive_single_splits();
@@ -1132,20 +1072,10 @@ fn stateful_equals_stateless_for_every_single_corpus_split() {
     assert_eq!(summary.lines, CORPUS_LINE_COUNT);
     assert_eq!(summary.cases, EXHAUSTIVE_SINGLE_SPLIT_CASES);
     assert_eq!(summary.guarded_cases, EXHAUSTIVE_SINGLE_SPLIT_GUARDED_CASES);
-    assert_eq!(
-        summary.leaking_lines(),
-        OPEN_SINGLE_SPLIT_DIVERGENCE_LINES.to_vec(),
-        "single-split divergence left the escalated lines: {:#?}",
+    assert!(
+        summary.leaks.is_empty(),
+        "single-split enumeration emitted markers the joined line redacts: {:#?}",
         summary.leaks
-    );
-    assert_eq!(summary.leaks.len(), OPEN_SINGLE_SPLIT_DIVERGENCE_CASES);
-    assert_eq!(
-        summary
-            .divergent_splits()
-            .into_iter()
-            .map(|(line, splits)| (line, splits[0]))
-            .collect::<Vec<_>>(),
-        OPEN_SINGLE_SPLIT_DIVERGENCE.to_vec()
     );
 }
 
@@ -1166,32 +1096,22 @@ fn suppression_is_absorbing_for_generated_event_sequences() {
     assert_suppression_is_absorbing(GENERATOR_SEED, DEFAULT_GENERATIVE_CASES);
 }
 
-/// Measures — does not accept — how far the escalated divergence reaches once
-/// a second delta boundary exists. The two-split space is still small enough
-/// to enumerate whole, and enumerating it is what shows the single-split
-/// residue is the visible edge of one defect rather than three odd lines: a
-/// clean prefix released by an earlier delta defeats the held-state decision
-/// for many more shapes here than at one split. The pinned set is the current
-/// measurement of an open defect awaiting owner direction, so any movement in
-/// either direction fails and must be re-reported.
+/// Exhaustive two-split coverage for STATEFUL-EQUALS-STATELESS. The
+/// single-split class runs by default; the two-split class is the same
+/// construction one delta deeper and is still small enough to enumerate
+/// whole, so the soak enumerates it rather than sampling it.
 #[test]
-#[ignore = "exhaustive two-split enumeration of the escalated divergence"]
-fn two_split_divergence_measures_the_escalated_defect() {
+#[ignore = "exhaustive two-split redaction enumeration"]
+fn stateful_equals_stateless_for_every_two_corpus_splits() {
     let summary = run_exhaustive_two_splits();
 
     assert_eq!(summary.lines, CORPUS_LINE_COUNT);
     assert_eq!(summary.cases, EXHAUSTIVE_TWO_SPLIT_CASES);
     assert_eq!(summary.guarded_cases, EXHAUSTIVE_TWO_SPLIT_GUARDED_CASES);
-    assert_eq!(
-        summary.leaking_lines(),
-        MEASURED_TWO_SPLIT_DIVERGENCE_LINES.to_vec(),
-        "the measured two-split divergence moved: {:#?}",
+    assert!(
+        summary.leaks.is_empty(),
+        "two-split enumeration emitted markers the joined line redacts: {:#?}",
         summary.leaks
-    );
-    assert_eq!(summary.leaks.len(), MEASURED_TWO_SPLIT_DIVERGENCE_CASES);
-    assert_eq!(
-        summary.divergent_splits_digest(),
-        MEASURED_TWO_SPLIT_DIVERGENCE_DIGEST
     );
 }
 
