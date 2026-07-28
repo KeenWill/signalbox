@@ -961,15 +961,17 @@ fn credential_identifier_could_extend_to_credential(identifier: &str) -> bool {
         .map_or((false, lower.as_str()), |separator| {
             (true, &lower[separator + 1..])
         });
-    if tail.is_empty() {
-        return false;
-    }
+    // A name ending at its own separator has an empty tail but is not thereby
+    // unable to extend: normalization drops separators, so the characters
+    // before it still decide the joined name (`mysql_p_` normalizes to
+    // `mysqlp`, which the next delta can complete into `mysqlpwd`). Only the
+    // `key` test below needs a tail, since an empty one is no evidence of it.
     ["token", "password", "passwd", "pwd", "passphrase"]
         .iter()
         .any(|shape| {
             (1..shape.len()).any(|prefix_length| normalized.ends_with(&shape[..prefix_length]))
         })
-        || (qualified && tail.len() < "key".len() && "key".starts_with(tail))
+        || (qualified && !tail.is_empty() && tail.len() < "key".len() && "key".starts_with(tail))
 }
 
 fn redact_after_marker(text: &str, marker: &str) -> String {
@@ -2628,14 +2630,21 @@ fn space_separated_flag_unsafe_start(text: &str) -> Option<usize> {
     earliest
 }
 
+/// Whether the text begins a URL whose userinfo may carry a password.
+///
+/// The scheme may be absent rather than malformed: a fragment ending in a
+/// partial `://` marker is held from that marker, so the candidate rejoined
+/// from it begins at the separator with its scheme already released. An empty
+/// scheme prefix is therefore a candidate on the same terms as a well-formed
+/// one — it is vacuously all scheme characters — and requiring at least one
+/// would release the password that arrives after it.
 fn url_userinfo_candidate(text: &str) -> bool {
     url_userinfo_unsafe_start(text) == Some(0)
         || (redact_url_userinfo_passwords(text) != text
             && text.find("://").is_some_and(|separator| {
-                separator > 0
-                    && text[..separator].bytes().all(|byte| {
-                        byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')
-                    })
+                text[..separator]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
             }))
 }
 
@@ -3019,9 +3028,23 @@ fn identifier_assignment_unsafe_start_with_claims(
 /// A single quote at the end of a key position may open a non-JSON quoted
 /// assignment whose name arrives in the next delta. Holding only the quote is
 /// conservative and reversible: a clean completion releases it byte-exact.
+///
+/// The opener is equally unfinished once its first name characters have
+/// arrived: `'c` is as much an open `'client_secret'` as a bare `'` is, and a
+/// delta ending there must hold from the quote so the rejoined assignment is
+/// recognized instead of emitted with its opener already released.
 fn trailing_single_quoted_key_opener(text: &str) -> Option<usize> {
     let trimmed = text.trim_end_matches([' ', '\t']);
-    let (start, quote) = trimmed.char_indices().next_back()?;
+    // Step back over the partial name. A closing quote is not a name
+    // character, so a key that has already closed stops this scan at its own
+    // quote and fails the opener test below rather than reopening.
+    let name_start = trimmed
+        .char_indices()
+        .rev()
+        .take_while(|(_, character)| is_quoted_key_character(*character))
+        .last()
+        .map_or(trimmed.len(), |(start, _)| start);
+    let (start, quote) = trimmed[..name_start].char_indices().next_back()?;
     if quote != '\'' {
         return None;
     }
@@ -3032,6 +3055,13 @@ fn trailing_single_quoted_key_opener(text: &str) -> Option<usize> {
             character.is_whitespace() || matches!(character, '{' | '[' | '(' | ',')
         })
         .then_some(start)
+}
+
+/// A character a quoted credential key may be spelled with. A trailing run of
+/// these after an opening quote is a name still being spelled, not a closed
+/// one, so the assignment it may begin is still in progress.
+fn is_quoted_key_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
 }
 
 /// Whether escape decoding exposed an unsafe suffix away from original offset
@@ -4182,6 +4212,51 @@ mod tests {
             r#"{"x,"client_sec"#,
             &format!(r#"ret":"{PLANTED_SYNTHETIC_SECRET}"}}"#),
         );
+    }
+
+    /// INV-035: a single-quoted key split after its opening quote and first
+    /// name characters stays held, so the rejoined assignment is recognized.
+    #[test]
+    fn inv_035_stream_redacts_a_partial_single_quoted_key_split() {
+        assert_two_delta_split_redacts(
+            "prefix 'c",
+            &format!("lient_secret': '{PLANTED_SYNTHETIC_SECRET}'"),
+        );
+    }
+
+    /// A single-quoted opener whose partial name proves harmless releases
+    /// byte-exact once the next delta completes it.
+    #[test]
+    fn partial_single_quoted_keys_remain_byte_exact() {
+        assert_two_delta_split_is_byte_exact("note 'lab", "el' is plain");
+    }
+
+    /// INV-035: a URL split before its `://` separator keeps the rejoined
+    /// candidate, whose scheme was released with the earlier delta.
+    #[test]
+    fn inv_035_stream_redacts_a_url_split_before_its_separator() {
+        assert_two_delta_split_redacts(
+            "postgres:",
+            &format!("//user:{PLANTED_SYNTHETIC_SECRET}@host"),
+        );
+    }
+
+    /// INV-035: a normalized credential name split at one of its separators
+    /// stays held, since normalization drops the separator and the name can
+    /// still extend into a covered family.
+    #[test]
+    fn inv_035_stream_redacts_a_name_split_at_its_separator() {
+        assert_two_delta_split_redacts(
+            "prefix MYSQL_P_",
+            &format!("W_D = {PLANTED_SYNTHETIC_SECRET} tail"),
+        );
+    }
+
+    /// A name held at its separator releases byte-exact when the next delta
+    /// proves it harmless.
+    #[test]
+    fn names_held_at_a_separator_remain_byte_exact() {
+        assert_two_delta_split_is_byte_exact("prefix REGION_", "NAME = us-east tail");
     }
 
     /// The trailing credential context is the unsafe suffix; a clean-ending
