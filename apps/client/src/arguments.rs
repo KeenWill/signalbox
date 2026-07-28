@@ -45,10 +45,13 @@ pub(crate) enum Command {
     },
     Continue {
         imported_conversation_id: CanonicalUuid,
-        through_position: CanonicalU64,
+        through_position: ThroughPositionArgument,
         relationship: ImportedSessionRelationship,
         selection: ModelSelection,
         command_id: Option<CommandId>,
+    },
+    Imported {
+        imported_conversation_id: CanonicalUuid,
     },
     List,
     Templates,
@@ -205,6 +208,8 @@ enum CliCommand {
     Create(CreateArguments),
     /// Create a live session from an imported conversation boundary.
     Continue(ContinueArguments),
+    /// Print one imported conversation's selectable entry positions.
+    Imported(ImportedArguments),
     /// List current sessions.
     List,
     /// List available session templates.
@@ -435,9 +440,10 @@ struct ContinueArguments {
     /// Imported conversation to continue from.
     #[arg(value_name = "IMPORTED_CONVERSATION", value_parser = canonical_uuid)]
     imported_conversation_id: CanonicalUuid,
-    /// Inclusive positive imported entry position.
-    #[arg(long, value_name = "DECIMAL", value_parser = positive_canonical_u64)]
-    through_position: CanonicalU64,
+    /// Inclusive positive imported entry position, or `latest` for the
+    /// imported conversation's final entry.
+    #[arg(long, value_name = "DECIMAL|latest", value_parser = through_position)]
+    through_position: ThroughPositionArgument,
     /// Record whether this session resumes or forks the imported boundary.
     #[arg(long, value_enum)]
     relationship: ImportedRelationshipArgument,
@@ -452,10 +458,31 @@ struct ContinueArguments {
     command_id: Option<CommandId>,
 }
 
+#[derive(Debug, ClapArgs)]
+struct ImportedArguments {
+    /// Imported conversation to inspect.
+    #[arg(value_name = "IMPORTED_CONVERSATION", value_parser = canonical_uuid)]
+    imported_conversation_id: CanonicalUuid,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ImportedRelationshipArgument {
     Resume,
     Fork,
+}
+
+/// What the required `--through-position` value selects.
+///
+/// The flag stays required: an imported boundary is never guessed. `latest` is
+/// an explicit sentinel the client resolves against the imported conversation's
+/// own entry count before it constructs the durable command, so the wire
+/// request always carries a concrete position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ThroughPositionArgument {
+    /// Continue through this exact inclusive imported position.
+    Exact(CanonicalU64),
+    /// Continue through the imported conversation's final entry.
+    Latest,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -810,6 +837,9 @@ pub(crate) fn parse(
             },
             command_id: arguments.command_id,
         },
+        CliCommand::Imported(arguments) => Command::Imported {
+            imported_conversation_id: arguments.imported_conversation_id,
+        },
         CliCommand::List => Command::List,
         CliCommand::Templates => Command::Templates,
         CliCommand::Search(arguments) => {
@@ -1162,6 +1192,18 @@ fn positive_canonical_u64(value: &str) -> Result<CanonicalU64, String> {
     Ok(parsed)
 }
 
+/// The exact sentinel selecting an imported conversation's final entry.
+const LATEST_IMPORTED_POSITION: &str = "latest";
+
+fn through_position(value: &str) -> Result<ThroughPositionArgument, String> {
+    if value == LATEST_IMPORTED_POSITION {
+        return Ok(ThroughPositionArgument::Latest);
+    }
+    positive_canonical_u64(value)
+        .map(ThroughPositionArgument::Exact)
+        .map_err(|error| format!("{error}, or the exact text `{LATEST_IMPORTED_POSITION}`"))
+}
+
 fn review_line_number(value: &str) -> Result<CanonicalU64, String> {
     let parsed = positive_canonical_u64(value)?;
     if parsed.value() > u64::from(u32::MAX) {
@@ -1198,7 +1240,7 @@ mod tests {
     use super::{
         Arguments, Command, ConversationsPageRequest, DangerousToolAutoApprovalArgument,
         ImportSourceArgument, ParseOutcome, SendDeliveryArgument, SessionMetadataPageRequest,
-        UsageError, parse,
+        ThroughPositionArgument, UsageError, parse,
     };
 
     #[derive(Clone, Copy)]
@@ -2028,7 +2070,88 @@ mod tests {
             .map(Into::into),
         );
 
-        assert_continue_parse(parsed, 2);
+        assert_continue_parse(parsed, ThroughPositionArgument::Exact(CanonicalU64::new(2)));
+    }
+
+    #[test]
+    fn continue_maps_the_latest_sentinel_without_naming_a_position() {
+        let parsed = parse(
+            [
+                "continue",
+                "00000000-0000-0000-0000-000000000001",
+                "--through-position",
+                "latest",
+                "--relationship",
+                "resume",
+                "--model",
+                "00000000-0000-0000-0000-000000000002",
+            ]
+            .map(Into::into),
+        );
+
+        assert_continue_parse(parsed, ThroughPositionArgument::Latest);
+    }
+
+    #[test]
+    fn continue_rejects_a_sentinel_spelling_other_than_latest() {
+        let conversation = "00000000-0000-0000-0000-000000000001";
+        let model = "00000000-0000-0000-0000-000000000002";
+        assert!(
+            parse(
+                [
+                    "continue",
+                    conversation,
+                    "--through-position",
+                    "Latest",
+                    "--relationship",
+                    "resume",
+                    "--model",
+                    model,
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn continue_still_requires_an_explicit_through_position() {
+        let conversation = "00000000-0000-0000-0000-000000000001";
+        let model = "00000000-0000-0000-0000-000000000002";
+        assert!(
+            parse(
+                [
+                    "continue",
+                    conversation,
+                    "--relationship",
+                    "resume",
+                    "--model",
+                    model,
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn imported_maps_one_conversation_identity() {
+        let parsed = parse(["imported", "00000000-0000-0000-0000-000000000001"].map(Into::into))
+            .expect("the canonical imported conversation identity parses");
+
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the successful imported parse runs the client");
+        };
+        let Command::Imported {
+            imported_conversation_id,
+        } = arguments.command
+        else {
+            panic!("the successful imported parse selects imported");
+        };
+        assert_eq!(
+            imported_conversation_id,
+            CanonicalUuid::from_uuid(Uuid::from_u128(1))
+        );
     }
 
     #[test]
@@ -2130,7 +2253,10 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_continue_parse(parsed: Result<ParseOutcome, UsageError>, expected_position: u64) {
+    fn assert_continue_parse(
+        parsed: Result<ParseOutcome, UsageError>,
+        expected_position: ThroughPositionArgument,
+    ) {
         let Ok(ParseOutcome::Run(arguments)) = parsed else {
             panic!("the successful continue parse runs the client");
         };
@@ -2142,7 +2268,7 @@ mod tests {
         else {
             panic!("the successful continue parse selects continue");
         };
-        assert_eq!(through_position.value(), expected_position);
+        assert_eq!(through_position, expected_position);
         assert_eq!(relationship, ImportedSessionRelationship::Resume);
     }
 

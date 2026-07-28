@@ -59,10 +59,18 @@ pub const INPUT_DELIVERY_PROTOCOL_VERSION: u64 = 13;
 
 /// The unified conversation-listing protocol version.
 ///
-/// Version thirteen is allocated by input delivery; version fourteen remains
-/// reserved by concurrent protocol work, and fifteen by the imported-conversation
-/// inspection stack.
+/// Version thirteen is allocated by input delivery; versions fourteen and
+/// fifteen remain reserved by concurrent protocol work.
 pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
+
+/// The imported-conversation inspection protocol version.
+///
+/// This surface reserved fifteen while sixteen was still unclaimed, but sixteen
+/// shipped first. Numbering the inspection request below an already-closed
+/// vocabulary would retroactively admit it in version-sixteen frames, so this
+/// version sits above sixteen instead. Fourteen and fifteen remain reserved and
+/// unadmitted here.
+pub const IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION: u64 = 17;
 
 /// The daemon-resolved session-template protocol version.
 pub const SESSION_TEMPLATE_PROTOCOL_VERSION: u64 = 18;
@@ -98,6 +106,8 @@ pub enum ProtocolVersion {
     Thirteen,
     /// Unified conversation-listing vocabulary.
     Sixteen,
+    /// Imported-conversation inspection vocabulary.
+    Seventeen,
     /// Daemon-resolved session-template creation and listing vocabulary.
     Eighteen,
 }
@@ -120,6 +130,7 @@ impl ProtocolVersion {
             Self::Twelve => PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
             Self::Thirteen => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::Sixteen => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
+            Self::Seventeen => IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
             Self::Eighteen => SESSION_TEMPLATE_PROTOCOL_VERSION,
         }
     }
@@ -140,6 +151,7 @@ impl ProtocolVersion {
             PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION => Some(Self::Twelve),
             INPUT_DELIVERY_PROTOCOL_VERSION => Some(Self::Thirteen),
             UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION => Some(Self::Sixteen),
+            IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION => Some(Self::Seventeen),
             SESSION_TEMPLATE_PROTOCOL_VERSION => Some(Self::Eighteen),
             _ => None,
         }
@@ -195,6 +207,13 @@ pub const MAX_SESSION_METADATA_REQUIRED_TAGS: usize = 256;
 
 /// Maximum UTF-8 bytes in one session system prompt.
 pub const MAX_SYSTEM_PROMPT_UTF8_BYTES: usize = 1_048_576;
+
+/// Maximum UTF-8 bytes in one imported-entry text preview.
+///
+/// An inspection row is a scannable line, not the entry's content authority:
+/// the transcript snapshot already carries attested imported text in full, and
+/// the immutable aggregate remains the authority for everything else.
+pub const MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES: usize = 256;
 
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1665,6 +1684,14 @@ pub enum ClientRequest {
         /// Exact complete source bytes.
         source: ConversationImportSource,
     },
+    /// Read one immutable imported conversation's complete entry inventory.
+    ///
+    /// The read exposes the ordinals `create_session_from_imported_frontier`
+    /// consumes; it creates nothing and seeds nothing.
+    ReadImportedConversation {
+        /// Immutable imported conversation to inspect.
+        imported_conversation_id: CanonicalUuid,
+    },
     /// Create a live session from one inclusive imported entry boundary.
     CreateSessionFromImportedFrontier {
         /// Durable mutation identity.
@@ -1853,6 +1880,9 @@ impl ClientRequest {
             Self::ReadSessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::CreateSessionFromImportedFrontier { .. } => {
                 IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION
+            }
+            Self::ReadImportedConversation { .. } => {
+                IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
             }
             Self::SubmitInput {
                 delivery: Some(_), ..
@@ -2209,6 +2239,27 @@ pub enum RejectionDetail {
         /// Last representable epoch.
         current: CanonicalU64,
     },
+    /// No imported conversation had the named identity.
+    ///
+    /// The absent target is an imported conversation, never a session: an
+    /// imported conversation is durable record and creates no session.
+    ImportedConversationNotFound {
+        /// Absent imported conversation.
+        imported_conversation_id: CanonicalUuid,
+    },
+    /// The named imported conversation exists but has no such position.
+    ///
+    /// Imported positions are the one-based contiguous sequence
+    /// `1..=last_position`; the identity was valid and only the ordinal was
+    /// outside it.
+    ImportedFrontierPositionOutOfRange {
+        /// Imported conversation whose positions bound the request.
+        imported_conversation_id: CanonicalUuid,
+        /// Exact position the caller named.
+        requested_position: CanonicalU64,
+        /// Greatest selectable position on that conversation.
+        last_position: CanonicalU64,
+    },
 }
 
 impl RejectionDetail {
@@ -2225,6 +2276,10 @@ impl RejectionDetail {
             | Self::ToolRequestAlreadyResolved { .. }
             | Self::ToolRequestNotEarliestUndecided { .. }
             | Self::ToolRequestNotInSession { .. } => TURN_CONTROL_PROTOCOL_VERSION,
+            Self::ImportedConversationNotFound { .. }
+            | Self::ImportedFrontierPositionOutOfRange { .. } => {
+                IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
+            }
             Self::SessionNotFound { .. }
             | Self::ActiveTurnPresent { .. }
             | Self::DefaultsVersionMismatch { .. }
@@ -2686,7 +2741,14 @@ pub enum ImportedSourceSpeaker {
     },
 }
 
-/// Conservative kind projection for imported content without rendered text.
+/// Closed discriminator naming one imported entry's normalized content
+/// variant.
+///
+/// The transcript snapshot reaches the `Text` arm only for absent or
+/// unattested text, because attested text takes the separate text-entry
+/// message there. An imported-conversation inspection row has no such split
+/// and uses `Text` for every `Text` content, carrying attestation in its
+/// preview member instead.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImportedContentKind {
@@ -2694,7 +2756,7 @@ pub enum ImportedContentKind {
     SourceEvent,
     /// One source-defined message block.
     SourceMessageBlock,
-    /// Text whose value was absent or unattested.
+    /// Imported text content.
     Text,
     /// One imported tool call.
     ToolCall,
@@ -2708,6 +2770,87 @@ pub enum ImportedContentKind {
     Document,
     /// A typed absence for message content.
     MessageContentAbsent,
+}
+
+/// A bounded leading excerpt of one imported entry's exact attested text.
+///
+/// The preview is the entry's exact leading Unicode scalar sequence cut at a
+/// scalar boundary, never a summary, replacement, or re-encoding. It is a
+/// recognition aid for choosing a position; the immutable imported aggregate
+/// remains the authority for complete content.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawImportedTextPreview")]
+pub struct ImportedTextPreview {
+    /// Exact leading scalars, at most
+    /// [`MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES`] of UTF-8.
+    preview: String,
+    /// Whether exact text remains beyond the emitted scalars.
+    truncated: bool,
+}
+
+/// The undecoded wire shape of a preview, before its bound and truncation
+/// marker are checked.
+///
+/// Deserializing through this raw shape keeps the checked type unconstructible
+/// from an invalid frame, so a direct `ImportedTextPreview` deserialization
+/// cannot bypass the validation an embedded one performs.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawImportedTextPreview {
+    preview: String,
+    truncated: bool,
+}
+
+impl TryFrom<RawImportedTextPreview> for ImportedTextPreview {
+    type Error = FrameValidationError;
+
+    fn try_from(raw: RawImportedTextPreview) -> Result<Self, Self::Error> {
+        let preview = Self {
+            preview: raw.preview,
+            truncated: raw.truncated,
+        };
+        preview.validate()?;
+        Ok(preview)
+    }
+}
+
+impl ImportedTextPreview {
+    /// Constructs the bounded preview of one exact attested text.
+    ///
+    /// The cut lands on a Unicode scalar boundary, so the preview is always a
+    /// prefix of the source text rather than a truncated encoding.
+    pub fn of_exact_text(text: &str) -> Self {
+        let mut end = MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self {
+            preview: text[..end].to_owned(),
+            truncated: end < text.len(),
+        }
+    }
+
+    /// Returns the exact emitted leading scalars.
+    pub fn preview(&self) -> &str {
+        &self.preview
+    }
+
+    /// Returns whether exact text remains beyond the emitted scalars.
+    pub const fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    fn validate(&self) -> Result<(), FrameValidationError> {
+        if self.preview.len() > MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES {
+            return Err(FrameValidationError::ImportedTextPreviewShape);
+        }
+        // Every nonempty text yields at least one scalar inside the bound, so
+        // an empty preview cannot be the cut prefix of a longer text.
+        if self.truncated && self.preview.is_empty() {
+            return Err(FrameValidationError::ImportedTextPreviewShape);
+        }
+        Ok(())
+    }
 }
 
 /// Non-text semantic transcript entry.
@@ -3188,6 +3331,35 @@ pub enum ServerMessage {
         /// Existing durable imported-conversation identity.
         imported_conversation_id: CanonicalUuid,
     },
+    /// Begins one imported-conversation entry sequence.
+    ImportedConversationStart {
+        /// Inspected imported conversation.
+        imported_conversation_id: CanonicalUuid,
+    },
+    /// One imported entry as the inspection projection presents it.
+    ImportedConversationEntry {
+        /// One-based imported position, exactly the ordinal
+        /// `create_session_from_imported_frontier` consumes.
+        position: CanonicalU64,
+        /// Immutable imported entry identity.
+        imported_entry_id: CanonicalUuid,
+        /// Exact source-speaker attestation.
+        source_speaker: ImportedSourceSpeaker,
+        /// Normalized content variant.
+        content_kind: ImportedContentKind,
+        /// Bounded preview of exact attested text, or null when this entry
+        /// carries no exact attested text.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        text_preview: Option<ImportedTextPreview>,
+    },
+    /// Completes one imported-conversation entry sequence.
+    ImportedConversationEnd {
+        /// Inspected imported conversation.
+        imported_conversation_id: CanonicalUuid,
+        /// Number of preceding entries, equal to the greatest selectable
+        /// position.
+        entry_count: CanonicalU64,
+    },
     /// Begins one transcript snapshot sequence.
     TranscriptSnapshotStart {
         /// Selected session.
@@ -3395,6 +3567,11 @@ impl ServerMessage {
             | Self::ReviewFindingsStart { .. }
             | Self::ReviewFindingItem { .. }
             | Self::ReviewFindingsEnd { .. } => REVIEW_WORKFLOW_PROTOCOL_VERSION,
+            Self::ImportedConversationStart { .. }
+            | Self::ImportedConversationEntry { .. }
+            | Self::ImportedConversationEnd { .. } => {
+                IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
+            }
             Self::ToolRequestDecided { .. } => TURN_CONTROL_PROTOCOL_VERSION,
             Self::TemplatesStart {} | Self::TemplateSummary { .. } | Self::TemplatesEnd { .. } => {
                 SESSION_TEMPLATE_PROTOCOL_VERSION
@@ -3478,6 +3655,25 @@ impl ServerMessage {
                 ..
             } if last_writer.is_none() && !metadata.is_initial() => {
                 return Err(FrameValidationError::MetadataShape);
+            }
+            Self::ImportedConversationEntry {
+                position,
+                content_kind,
+                text_preview,
+                ..
+            } => {
+                if position.value() == 0 {
+                    return Err(FrameValidationError::ImportedConversationEntryShape);
+                }
+                if let Some(preview) = text_preview {
+                    // Only `Text` content has an exact attested text to
+                    // preview, so a preview on any other kind contradicts the
+                    // kind it accompanies.
+                    if *content_kind != ImportedContentKind::Text {
+                        return Err(FrameValidationError::ImportedConversationEntryShape);
+                    }
+                    preview.validate()?;
+                }
             }
             _ => {}
         }
@@ -3568,6 +3764,22 @@ impl ServerFrame {
                 {
                     return Err(FrameValidationError::UncorrelatedApplicationError);
                 }
+                if let Some(RejectionDetail::ImportedFrontierPositionOutOfRange {
+                    requested_position,
+                    last_position,
+                    ..
+                }) = detail.value()
+                {
+                    // An imported conversation's positions are the contiguous
+                    // sequence `1..=last_position`, so a nonpositive bound or a
+                    // requested ordinal inside that range contradicts the
+                    // rejection the detail states.
+                    if last_position.value() == 0
+                        || requested_position.value() <= last_position.value()
+                    {
+                        return Err(FrameValidationError::ImportedFrontierRangeShape);
+                    }
+                }
                 if (*code == ErrorCode::Rejected) != detail.value().is_some() {
                     return Err(FrameValidationError::ErrorDetailShape);
                 }
@@ -3632,6 +3844,14 @@ pub enum FrameValidationError {
     SystemPromptShape,
     /// An imported-frontier request carried a nonpositive position.
     ImportedFrontierShape,
+    /// An imported-conversation entry carried a nonpositive position.
+    ImportedConversationEntryShape,
+    /// An imported text preview exceeded its bound or contradicted its own
+    /// truncation marker.
+    ImportedTextPreviewShape,
+    /// An out-of-range imported rejection stated a range its own requested
+    /// position falls inside, or an empty selectable range.
+    ImportedFrontierRangeShape,
     /// A submit-input delivery carried forbidden or missing correlated fields.
     InputDeliveryShape,
     /// A template name or positive version carried an invalid shape.
@@ -3655,6 +3875,11 @@ impl fmt::Display for FrameValidationError {
             }
             Self::SystemPromptShape => "version-nine frame omits its required system-prompt member",
             Self::ImportedFrontierShape => "imported frontier position is not positive",
+            Self::ImportedConversationEntryShape => {
+                "imported conversation entry position is not positive"
+            }
+            Self::ImportedTextPreviewShape => "imported text preview shape is inconsistent",
+            Self::ImportedFrontierRangeShape => "imported frontier rejection range is inconsistent",
             Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
             Self::TemplateShape => "session-template frame shape is inconsistent",
         })
@@ -3710,7 +3935,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1 through 13, 16, and 18",
+                "process-protocol version is unsupported; supported versions are 1 through 13 and 16 through 18",
             ),
         }
     }
@@ -3934,6 +4159,7 @@ fn probe_header(
             | "12"
             | "13"
             | "16"
+            | "17"
             | "18"
     ) {
         return Err(FrameDecodeError {
@@ -4052,6 +4278,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "12" => Some(ProtocolVersion::Twelve),
         "13" => Some(ProtocolVersion::Thirteen),
         "16" => Some(ProtocolVersion::Sixteen),
+        "17" => Some(ProtocolVersion::Seventeen),
         "18" => Some(ProtocolVersion::Eighteen),
         _ => None,
     }
@@ -4097,10 +4324,12 @@ mod tests {
         ConversationCursor, ConversationImportFormat, ConversationImportSource, ConversationOrigin,
         ConversationOriginFilter, ConversationSummary, CurrentModelCall, CurrentModelCallState,
         ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
-        FrameDecodeErrorKind, FrameEncodeError, FrameValidationError, ImportedContentKind,
+        FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
+        IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION, ImportedContentKind,
         ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
-        ImportedSpeaker, InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
-        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_JSON_CONTAINER_DEPTH,
+        ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+        MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
+        MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
         MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
@@ -4193,7 +4422,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1 through 13, 16, and 18")
+                .contains("supported versions are 1 through 13 and 16 through 18")
         );
     }
 
@@ -5334,6 +5563,327 @@ mod tests {
         Ok(())
     }
 
+    /// INV-033: version seventeen admits the imported-conversation read with its
+    /// exact closed request shape, and version eleven does not.
+    #[test]
+    fn inv033_version_seventeen_imported_conversation_read_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let request_value = ClientRequest::ReadImportedConversation {
+            imported_conversation_id: uuid(5),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Eleven,
+                request_id,
+                request_value.clone(),
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request_id,
+            request_value,
+        )?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":17,\"request_id\":\"1\",\"request\":{\"type\":\"read_imported_conversation\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: an imported-conversation entry carries its position, exact
+    /// attestation, content kind, and bounded preview in one closed shape.
+    #[test]
+    fn inv033_version_seventeen_imported_conversation_entry_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::ImportedConversationEntry {
+            position: CanonicalU64::new(2),
+            imported_entry_id: uuid(6),
+            source_speaker: ImportedSourceSpeaker::Attested {
+                speaker: ImportedSpeaker::Assistant,
+            },
+            content_kind: ImportedContentKind::Text,
+            text_preview: Some(ImportedTextPreview::of_exact_text("imported answer")),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::Eleven, request(1)?, message.clone()),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+
+        let frame =
+            ServerFrame::try_new_for_version(ProtocolVersion::Seventeen, request(1)?, message)?;
+        let encoded = encode_server_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":17,\"request_id\":\"1\",\"message\":{\"type\":\"imported_conversation_entry\",\"position\":\"2\",\"imported_entry_id\":\"00000000-0000-0000-0000-000000000006\",\"source_speaker\":{\"type\":\"attested\",\"speaker\":\"assistant\"},\"content_kind\":\"text\",\"text_preview\":{\"preview\":\"imported answer\",\"truncated\":false}}}\n"
+        );
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// An entry whose content carries no exact attested text states that
+    /// absence as an explicit null rather than an empty preview.
+    #[test]
+    fn inv033_imported_conversation_entry_states_an_absent_preview_as_null()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request(1)?,
+            ServerMessage::ImportedConversationEntry {
+                position: CanonicalU64::new(1),
+                imported_entry_id: uuid(6),
+                source_speaker: ImportedSourceSpeaker::NotAttested {},
+                content_kind: ImportedContentKind::SourceEvent,
+                text_preview: None,
+            },
+        )?;
+        let encoded = encode_server_line(&frame)?;
+
+        assert!(String::from_utf8(encoded.clone())?.contains("\"text_preview\":null"));
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// An imported-conversation entry position is one-based, so zero is not a
+    /// selectable ordinal on the wire.
+    #[test]
+    fn inv033_imported_conversation_entry_rejects_zero_position()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request(1)?,
+            ServerMessage::ImportedConversationEntry {
+                position: CanonicalU64::new(0),
+                imported_entry_id: uuid(6),
+                source_speaker: ImportedSourceSpeaker::NotAttested {},
+                content_kind: ImportedContentKind::SourceEvent,
+                text_preview: None,
+            },
+        );
+
+        assert_eq!(
+            frame,
+            Err(FrameValidationError::ImportedConversationEntryShape)
+        );
+        Ok(())
+    }
+
+    /// A preview cuts on a Unicode scalar boundary, so it is always an exact
+    /// prefix of the source text and never a split encoding.
+    #[test]
+    fn imported_text_preview_cuts_on_a_scalar_boundary() {
+        // 86 three-byte scalars are 258 bytes, so the 256-byte bound falls
+        // inside the 86th scalar and the preview keeps only the first 85.
+        let text = "\u{4e00}".repeat(86);
+        let preview = ImportedTextPreview::of_exact_text(&text);
+
+        assert_eq!(preview.preview(), "\u{4e00}".repeat(85));
+        assert!(preview.truncated());
+        assert!(text.starts_with(preview.preview()));
+    }
+
+    /// Text inside the bound is previewed exactly and is not marked truncated.
+    #[test]
+    fn imported_text_preview_retains_exact_text_within_its_bound() {
+        let preview = ImportedTextPreview::of_exact_text("imported question");
+
+        assert_eq!(preview.preview(), "imported question");
+        assert!(!preview.truncated());
+    }
+
+    /// Attested empty text previews as exact empty text, distinguishing it
+    /// from an entry that carries no attested text at all.
+    #[test]
+    fn imported_text_preview_retains_attested_empty_text() {
+        let preview = ImportedTextPreview::of_exact_text("");
+
+        assert_eq!(preview.preview(), "");
+        assert!(!preview.truncated());
+    }
+
+    /// A preview deserialized on its own is checked exactly as an embedded one
+    /// is, so no consumer can hold a bounded preview that violates its bound.
+    #[test]
+    fn imported_text_preview_validates_on_direct_deserialization() {
+        let oversized = format!(
+            "{{\"preview\":\"{}\",\"truncated\":false}}",
+            "a".repeat(MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES + 1)
+        );
+
+        assert!(serde_json::from_str::<ImportedTextPreview>(&oversized).is_err());
+        assert!(
+            serde_json::from_str::<ImportedTextPreview>(r#"{"preview":"","truncated":true}"#)
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::from_str::<ImportedTextPreview>(r#"{"preview":"ab","truncated":true}"#)
+                .expect("a bounded truncated preview decodes"),
+            ImportedTextPreview {
+                preview: String::from("ab"),
+                truncated: true,
+            }
+        );
+    }
+
+    /// A truncation marker over an empty preview contradicts the scalar cut,
+    /// which always keeps at least one scalar of nonempty text.
+    #[test]
+    fn inv033_imported_text_preview_rejects_truncated_empty_text()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request(1)?,
+            ServerMessage::ImportedConversationEntry {
+                position: CanonicalU64::new(1),
+                imported_entry_id: uuid(6),
+                source_speaker: ImportedSourceSpeaker::NotAttested {},
+                content_kind: ImportedContentKind::Text,
+                text_preview: Some(ImportedTextPreview {
+                    preview: String::new(),
+                    truncated: true,
+                }),
+            },
+        );
+
+        assert_eq!(frame, Err(FrameValidationError::ImportedTextPreviewShape));
+        Ok(())
+    }
+
+    /// A preview states an entry's exact attested text, so attaching one to a
+    /// kind that has no such text is a contradictory frame rather than extra
+    /// information the client may present.
+    #[test]
+    fn inv033_imported_conversation_entry_rejects_a_preview_on_nontext_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request(1)?,
+            ServerMessage::ImportedConversationEntry {
+                position: CanonicalU64::new(1),
+                imported_entry_id: uuid(6),
+                source_speaker: ImportedSourceSpeaker::NotAttested {},
+                content_kind: ImportedContentKind::ToolCall,
+                text_preview: Some(ImportedTextPreview::of_exact_text("lookup")),
+            },
+        );
+
+        assert_eq!(
+            frame,
+            Err(FrameValidationError::ImportedConversationEntryShape)
+        );
+        Ok(())
+    }
+
+    /// A requested ordinal inside the stated range contradicts the rejection
+    /// carrying it, so the frame is refused rather than rendered.
+    #[test]
+    fn inv033_imported_range_rejection_refuses_a_selectable_requested_position()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the command was rejected by current durable state"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::ImportedFrontierPositionOutOfRange {
+                        imported_conversation_id: uuid(5),
+                        requested_position: CanonicalU64::new(2),
+                        last_position: CanonicalU64::new(2),
+                    },
+                ),
+            },
+        );
+
+        assert_eq!(frame, Err(FrameValidationError::ImportedFrontierRangeShape));
+        Ok(())
+    }
+
+    /// An imported conversation is nonempty, so a zero selectable bound cannot
+    /// describe one.
+    #[test]
+    fn inv033_imported_range_rejection_refuses_an_empty_selectable_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the command was rejected by current durable state"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::ImportedFrontierPositionOutOfRange {
+                        imported_conversation_id: uuid(5),
+                        requested_position: CanonicalU64::new(1),
+                        last_position: CanonicalU64::new(0),
+                    },
+                ),
+            },
+        );
+
+        assert_eq!(frame, Err(FrameValidationError::ImportedFrontierRangeShape));
+        Ok(())
+    }
+
+    /// INV-033: an out-of-range imported position is a rejection naming the
+    /// conversation's selectable range, never the absent-session `not_found`.
+    #[test]
+    fn inv033_version_seventeen_names_the_imported_position_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::Error {
+            code: ErrorCode::Rejected,
+            message: String::from("the command was rejected by current durable state"),
+            detail: ErrorDetail::rejected(RejectionDetail::ImportedFrontierPositionOutOfRange {
+                imported_conversation_id: uuid(5),
+                requested_position: CanonicalU64::new(999_999),
+                last_position: CanonicalU64::new(2),
+            }),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::Eleven, request(1)?, message.clone()),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+
+        let frame =
+            ServerFrame::try_new_for_version(ProtocolVersion::Seventeen, request(1)?, message)?;
+        let encoded = encode_server_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":17,\"request_id\":\"1\",\"message\":{\"type\":\"error\",\"code\":\"rejected\",\"message\":\"the command was rejected by current durable state\",\"detail\":{\"type\":\"imported_frontier_position_out_of_range\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\",\"requested_position\":\"999999\",\"last_position\":\"2\"}}}\n"
+        );
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: an absent imported conversation names an imported conversation
+    /// as the missing target.
+    #[test]
+    fn inv033_version_seventeen_names_the_absent_imported_conversation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the command was rejected by current durable state"),
+                detail: ErrorDetail::rejected(RejectionDetail::ImportedConversationNotFound {
+                    imported_conversation_id: uuid(5),
+                }),
+            },
+        )?;
+        let encoded = encode_server_line(&frame)?;
+
+        assert!(
+            String::from_utf8(encoded.clone())?
+                .contains("\"type\":\"imported_conversation_not_found\"")
+        );
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
     /// INV-033: version ten retains every earlier request unchanged.
     #[test]
     fn inv033_version_ten_retains_the_earlier_request_vocabulary()
@@ -6049,14 +6599,17 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the admitted set is one through thirteen, sixteen, and eighteen;
-    /// fourteen and fifteen remain reserved by earlier stacks and seventeen by
-    /// concurrent compaction.
+    /// INV-033: the admitted set is one through thirteen and sixteen through
+    /// eighteen; fourteen and fifteen remain reserved and unsupported.
     #[test]
     fn inv033_version_eighteen_completes_the_admitted_set() {
         assert_eq!(
             ProtocolVersion::Nine.as_u64(),
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            ProtocolVersion::Seventeen.as_u64(),
+            IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
         );
         assert_eq!(
             ProtocolVersion::Sixteen.as_u64(),
@@ -6081,7 +6634,10 @@ mod tests {
             ProtocolVersion::from_u64(16),
             Some(ProtocolVersion::Sixteen)
         );
-        assert_eq!(ProtocolVersion::from_u64(17), None);
+        assert_eq!(
+            ProtocolVersion::from_u64(17),
+            Some(ProtocolVersion::Seventeen)
+        );
         assert_eq!(
             ProtocolVersion::from_u64(18),
             Some(ProtocolVersion::Eighteen)

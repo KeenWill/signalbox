@@ -34,26 +34,28 @@ use signalbox_domain::{
     AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextFrontierId,
     DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestRejectedResult,
     DecideToolRequestResult, DeliveryRequest, DirectModelSelection, DurableCommandId,
-    ImportedConversationFormat, ImportedConversationId,
-    ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedTranscriptPosition,
-    ModelAlias, ModelSelectionOverride, ModelSelectionRequest, PerInputConfigurationChoices,
-    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
-    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult, ReviewChangeRequestNumber,
-    ReviewConfidence, ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
-    ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkId,
-    ReviewExternalObjectKind, ReviewFinding, ReviewFindingContent, ReviewFindingDiffSide,
-    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
-    ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal,
-    ReviewFindingRef, ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass,
-    ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
-    ReviewPassRef, ReviewPassResult, ReviewPassState, ReviewPassTurnEvidence,
-    ReviewPassTurnOutcome, ReviewPolicy, ReviewProducedFindings, ReviewRun, ReviewRunEvidence,
-    ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject,
-    ReviewText, ReviewWorkflowKind, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
-    SessionMetadataLastWriter, SessionMetadataSnapshot, SessionTemplateName,
-    SessionTemplateProvenance, SubmitInput, SubmitInputAppliedResult, SubmitInputRejectedResult,
-    SubmitInputResult, ToolApprovalDecision, ToolDenialReason, ToolRequestId, TurnId, UserContent,
+    ImportedConversation, ImportedConversationFormat, ImportedConversationId,
+    ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
+    ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
+    ImportedTranscriptPosition, ModelAlias, ModelSelectionOverride, ModelSelectionRequest,
+    PerInputConfigurationChoices, ReplaceSessionDefaultsRejectedResult,
+    ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
+    ReplaceSessionMetadataResult, ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal,
+    ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
+    ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
+    ReviewFinding, ReviewFindingContent, ReviewFindingDiffSide, ReviewFindingEvent,
+    ReviewFindingEventKind, ReviewFindingEventResult, ReviewFindingEventResultKind,
+    ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal, ReviewFindingRef,
+    ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence,
+    ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassResult,
+    ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
+    ReviewProducedFindings, ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunRef,
+    ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
+    ReviewWorkflowKind, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionId, SessionMetadataContent, SessionMetadataLastWriter, SessionMetadataSnapshot,
+    SessionTemplateName, SessionTemplateProvenance, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision, ToolDenialReason,
+    ToolRequestId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{ProviderTextDelta, ProviderTextDeltaSink};
 use signalbox_persistence::{
@@ -93,13 +95,15 @@ use signalbox_process_protocol::{
     ConversationOriginFilter as WireConversationOriginFilter,
     ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
     ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
-    FrameDecodeErrorKind, FrameEncodeError, IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
-    ImportedContentKind, ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
+    FrameDecodeErrorKind, FrameEncodeError, IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
+    IMPORTED_TRANSCRIPT_PROTOCOL_VERSION, ImportedContentKind,
+    ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
-    ImportedSpeaker, InputContent, InputDelivery, MAX_FRAME_BYTES, MetadataActor,
-    MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection,
-    PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId,
-    ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
+    ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
+    MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState,
+    ModelSelection as WireModelSelection, PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
+    ProtocolVersion, RejectionDetail, RequestId, ReviewDiffSide as WireReviewDiffSide,
+    ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingDisposition as WireReviewFindingDisposition, ReviewFindingInput,
     ReviewFindingSnapshot, ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle,
     ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot,
@@ -753,6 +757,27 @@ where
                     initial_model_selection,
                 },
                 &services.pool,
+            )
+            .await
+        }
+        ClientRequest::ReadImportedConversation {
+            imported_conversation_id,
+        } => {
+            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
+                Arc::clone(&services.snapshot_reader_budget),
+                &mut shutdown,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            handle_read_imported_conversation(
+                writer,
+                version,
+                request_id,
+                imported_conversation_id,
+                &services.pool,
+                snapshot_permit,
             )
             .await
         }
@@ -3081,7 +3106,7 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::NotFound),
+                imported_conversation_not_found(version, wire_request.conversation),
             )
             .await;
         }
@@ -3115,10 +3140,16 @@ where
             writer,
             version,
             request_id,
-            ProtocolError::without_detail(ErrorCode::NotFound),
+            imported_position_out_of_range(
+                version,
+                wire_request.conversation,
+                through_position,
+                last_imported_position(&conversation),
+            ),
         )
         .await;
     };
+    let last_position = last_imported_position(&conversation);
     let request = CreateSessionFromImportedFrontierRequest::try_new(
         command_id,
         frontier,
@@ -3150,15 +3181,26 @@ where
             )
             .await
         }
-        Ok(
-            CreateSessionFromImportedFrontierOutcome::ImportedConversationNotFound { .. }
-            | CreateSessionFromImportedFrontierOutcome::ImportedFrontierNotFound { .. },
-        ) => {
+        Ok(CreateSessionFromImportedFrontierOutcome::ImportedConversationNotFound { .. }) => {
             write_error(
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::NotFound),
+                imported_conversation_not_found(version, wire_request.conversation),
+            )
+            .await
+        }
+        Ok(CreateSessionFromImportedFrontierOutcome::ImportedFrontierNotFound { .. }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                imported_position_out_of_range(
+                    version,
+                    wire_request.conversation,
+                    through_position,
+                    last_position,
+                ),
             )
             .await
         }
@@ -3202,6 +3244,241 @@ where
                 ProtocolError::without_detail(ErrorCode::Internal),
             )
             .await
+        }
+    }
+}
+
+/// Returns the greatest selectable imported position on a loaded aggregate.
+///
+/// An imported conversation's normalized entry sequence is nonempty and its
+/// positions are contiguous from one, so the entry count is that bound.
+fn last_imported_position(conversation: &ImportedConversation) -> u64 {
+    conversation
+        .entries()
+        .last()
+        .map_or(0, |entry| entry.position().as_u64())
+}
+
+/// Names the absent target as an imported conversation rather than a session.
+///
+/// Versions below the inspection version have no typed detail for this
+/// rejection, so they keep the undetailed `not_found` their closed message
+/// vocabulary already admits; only its non-normative message sharpens.
+fn imported_conversation_not_found(
+    version: ProtocolVersion,
+    imported_conversation_id: CanonicalUuid,
+) -> ProtocolError {
+    if version.as_u64() < IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION {
+        return ProtocolError::imported_conversation_absent();
+    }
+    ProtocolError::rejected(RejectionDetail::ImportedConversationNotFound {
+        imported_conversation_id,
+    })
+}
+
+/// Distinguishes a valid identity carrying an out-of-range position from an
+/// absent identity, naming the conversation's selectable range.
+fn imported_position_out_of_range(
+    version: ProtocolVersion,
+    imported_conversation_id: CanonicalUuid,
+    requested_position: CanonicalU64,
+    last_position: u64,
+) -> ProtocolError {
+    if version.as_u64() < IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION {
+        return ProtocolError::imported_position_absent();
+    }
+    // Imported positions are the contiguous sequence `1..=last_position`, so a
+    // position this handler could not resolve is always beyond a positive
+    // bound. A loaded aggregate that contradicts that is corrupt, and the
+    // closed wire shape has no way to state the contradiction.
+    if last_position == 0 || requested_position.value() <= last_position {
+        return ProtocolError::without_detail(ErrorCode::Internal);
+    }
+    ProtocolError::rejected(RejectionDetail::ImportedFrontierPositionOutOfRange {
+        imported_conversation_id,
+        requested_position,
+        last_position: CanonicalU64::new(last_position),
+    })
+}
+
+async fn handle_read_imported_conversation<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    imported_conversation_id: CanonicalUuid,
+    pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let conversation_id = ImportedConversationId::from_uuid(imported_conversation_id.into_uuid());
+    let load = ImportedConversationRepository::new(pool.clone())
+        .load(conversation_id)
+        .await;
+    let conversation = match load {
+        Ok(Some(conversation)) => conversation,
+        Ok(None) => {
+            drop(snapshot_permit);
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::imported_conversation_absent(),
+            )
+            .await;
+        }
+        Err(ImportedConversationRepositoryError::Database(_)) => {
+            drop(snapshot_permit);
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await;
+        }
+        Err(
+            ImportedConversationRepositoryError::IdentityCollision(_)
+            | ImportedConversationRepositoryError::Corruption(_),
+        ) => {
+            drop(snapshot_permit);
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await;
+        }
+    };
+    let spool_result =
+        spool_imported_conversation(&conversation, imported_conversation_id, version, request_id)
+            .await;
+    drop(conversation);
+    drop(snapshot_permit);
+    let mut spool = match spool_result {
+        Ok(spool) => spool,
+        Err(error) => return write_snapshot_spool_error(writer, version, request_id, error).await,
+    };
+    write_spooled_file(writer, &mut spool).await
+}
+
+async fn spool_imported_conversation(
+    conversation: &ImportedConversation,
+    imported_conversation_id: CanonicalUuid,
+    version: ProtocolVersion,
+    request_id: RequestId,
+) -> Result<tokio::fs::File, SnapshotSpoolError> {
+    let standard_file = tempfile::tempfile().map_err(SnapshotSpoolError::Io)?;
+    let mut file = tokio::fs::File::from_std(standard_file);
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::ImportedConversationStart {
+            imported_conversation_id,
+        },
+    )
+    .await?;
+    let mut entry_count = 0_u64;
+    for entry in conversation.entries() {
+        write_spool_message(
+            &mut file,
+            version,
+            request_id,
+            ServerMessage::ImportedConversationEntry {
+                position: CanonicalU64::new(entry.position().as_u64()),
+                imported_entry_id: wire_uuid(entry.identity().into_uuid()),
+                source_speaker: wire_imported_speaker_attestation(entry.source_speaker()),
+                content_kind: wire_imported_content_kind(process_imported_content_kind(
+                    entry.content(),
+                )),
+                text_preview: imported_text_preview(entry.content()),
+            },
+        )
+        .await?;
+        entry_count = entry_count
+            .checked_add(1)
+            .ok_or(SnapshotSpoolError::EncodeInvariant)?;
+    }
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::ImportedConversationEnd {
+            imported_conversation_id,
+            entry_count: CanonicalU64::new(entry_count),
+        },
+    )
+    .await?;
+    file.flush().await.map_err(SnapshotSpoolError::Io)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(SnapshotSpoolError::Io)?;
+    Ok(file)
+}
+
+/// Maps one entry's normalized content to the conservative wire kind through
+/// the same content-variant classification the transcript projection uses.
+const fn process_imported_content_kind(
+    content: &ImportedTranscriptContent,
+) -> ProcessImportedContentKind {
+    match content {
+        ImportedTranscriptContent::SourceEvent { .. } => ProcessImportedContentKind::SourceEvent,
+        ImportedTranscriptContent::SourceMessageBlock { .. } => {
+            ProcessImportedContentKind::SourceMessageBlock
+        }
+        ImportedTranscriptContent::Text(_) => ProcessImportedContentKind::Text,
+        ImportedTranscriptContent::ToolCall { .. } => ProcessImportedContentKind::ToolCall,
+        ImportedTranscriptContent::ToolResult { .. } => ProcessImportedContentKind::ToolResult,
+        ImportedTranscriptContent::Thinking { .. } => ProcessImportedContentKind::Thinking,
+        ImportedTranscriptContent::RedactedThinking { .. } => {
+            ProcessImportedContentKind::RedactedThinking
+        }
+        ImportedTranscriptContent::Document { .. } => ProcessImportedContentKind::Document,
+        ImportedTranscriptContent::MessageContentAbsent(_) => {
+            ProcessImportedContentKind::MessageContentAbsent
+        }
+    }
+}
+
+/// Previews exactly the text the transcript projection already carries in
+/// full; every other imported content stays behind its kind alone.
+fn imported_text_preview(content: &ImportedTranscriptContent) -> Option<ImportedTextPreview> {
+    match content {
+        ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text)) => {
+            Some(ImportedTextPreview::of_exact_text(text.as_str()))
+        }
+        ImportedTranscriptContent::Text(
+            ImportedSourceAttestation::AttestedAbsent | ImportedSourceAttestation::NotAttested,
+        )
+        | ImportedTranscriptContent::SourceEvent { .. }
+        | ImportedTranscriptContent::SourceMessageBlock { .. }
+        | ImportedTranscriptContent::ToolCall { .. }
+        | ImportedTranscriptContent::ToolResult { .. }
+        | ImportedTranscriptContent::Thinking { .. }
+        | ImportedTranscriptContent::RedactedThinking { .. }
+        | ImportedTranscriptContent::Document { .. }
+        | ImportedTranscriptContent::MessageContentAbsent(_) => None,
+    }
+}
+
+const fn wire_imported_speaker_attestation(
+    attestation: &ImportedSourceAttestation<DomainImportedSpeaker>,
+) -> ImportedSourceSpeaker {
+    match attestation {
+        ImportedSourceAttestation::NotAttested => ImportedSourceSpeaker::NotAttested {},
+        ImportedSourceAttestation::AttestedAbsent => ImportedSourceSpeaker::AttestedAbsent {},
+        ImportedSourceAttestation::Attested(DomainImportedSpeaker::User) => {
+            ImportedSourceSpeaker::Attested {
+                speaker: ImportedSpeaker::User,
+            }
+        }
+        ImportedSourceAttestation::Attested(DomainImportedSpeaker::Assistant) => {
+            ImportedSourceSpeaker::Attested {
+                speaker: ImportedSpeaker::Assistant,
+            }
         }
     }
 }
@@ -6640,13 +6917,34 @@ impl ProtocolError {
         }
     }
 
+    /// No imported conversation has the named identity. The absent read target
+    /// is never a session; the wire code remains the shared `not_found`.
+    const fn imported_conversation_absent() -> Self {
+        Self {
+            code: ErrorCode::NotFound,
+            message: "the requested imported conversation was not found",
+            detail: ErrorDetail::none(),
+        }
+    }
+
+    /// The named imported conversation exists and only its position was out of
+    /// range. Versions below the inspection version carry no typed detail
+    /// naming the range, so they get this message alone.
+    const fn imported_position_absent() -> Self {
+        Self {
+            code: ErrorCode::NotFound,
+            message: "the requested position is outside the imported conversation's positions",
+            detail: ErrorDetail::none(),
+        }
+    }
+
     const fn without_detail(code: ErrorCode) -> Self {
         Self {
             code,
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1 through 13, and 16"
+                    "the protocol version is unsupported; supported versions: 1 through 13, 16, and 17"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
@@ -7401,7 +7699,7 @@ mod tests {
         assert!(
             ProtocolError::without_detail(ErrorCode::UnsupportedVersion)
                 .message
-                .contains("1 through 13, and 16")
+                .contains("1 through 13, 16, and 17")
         );
     }
 

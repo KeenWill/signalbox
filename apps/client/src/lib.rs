@@ -11,11 +11,13 @@ use std::{
 
 use arguments::{
     Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome, ReviewCommand,
-    SendDeliveryArgument, SystemPromptArgument,
+    SendDeliveryArgument, SystemPromptArgument, ThroughPositionArgument,
 };
 use connection::ProcessClient;
 use error::ClientError;
-use presentation::{ConversationRow, Output, SessionMetadataRow, SnapshotSelection};
+use presentation::{
+    ConversationRow, ImportedEntryRow, Output, SessionMetadataRow, SnapshotSelection,
+};
 use rustix::{
     fd::OwnedFd,
     fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fstat, openat, statat},
@@ -183,6 +185,7 @@ async fn execute(
         } => Some(PreparedImport::Scan(collect_import_paths(path)?)),
         Command::Create { .. }
         | Command::Continue { .. }
+        | Command::Imported { .. }
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -222,6 +225,7 @@ async fn execute(
         | Command::Transcript { .. }
         | Command::Follow { .. }
         | Command::Continue { .. }
+        | Command::Imported { .. }
         | Command::Review(_)
         | Command::Import { .. } => None,
     };
@@ -271,6 +275,9 @@ async fn execute(
             )
             .await
         }
+        Command::Imported {
+            imported_conversation_id,
+        } => imported(&mut client, &mut output, imported_conversation_id).await,
         Command::List => list(&mut client, &mut output).await,
         Command::Templates => list_templates(&mut client, &mut output).await,
         Command::Search(page) => search(&mut client, &mut output, page).await,
@@ -606,7 +613,7 @@ async fn continue_imported(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
     imported_conversation_id: CanonicalUuid,
-    through_position: CanonicalU64,
+    through_position: ThroughPositionArgument,
     relationship: signalbox_process_protocol::ImportedSessionRelationship,
     selection: ModelSelection,
     command_id: Option<CommandId>,
@@ -618,6 +625,20 @@ async fn continue_imported(
             &command_id.into_uuid().hyphenated().to_string(),
         )?;
     }
+    // An imported conversation is immutable, so its final position is stable:
+    // resolving the sentinel here and sending the concrete ordinal keeps the
+    // durable command byte-exact under replay.
+    let through_position = match through_position {
+        ThroughPositionArgument::Exact(position) => position,
+        ThroughPositionArgument::Latest => {
+            // The reader already rejects an empty inventory, so the resolved
+            // count is a selectable position.
+            let entry_count =
+                read_imported_conversation(client, imported_conversation_id, |_| Ok(())).await?;
+            output.resolved_through_position(entry_count)?;
+            CanonicalU64::new(entry_count)
+        }
+    };
     let mut connection = client
         .mutation_request(ClientRequest::CreateSessionFromImportedFrontier {
             command_id,
@@ -1082,6 +1103,122 @@ async fn scan_conversations(
         Err(ClientError::ScanIncomplete {
             skipped_files: summary.skipped,
         })
+    }
+}
+
+/// Prints one imported conversation's selectable positions and its total.
+///
+/// The complete sequence is spooled and validated before presentation, so the
+/// wire's intentionally unbounded entry sequence never becomes unbounded client
+/// memory.
+async fn imported(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    imported_conversation_id: CanonicalUuid,
+) -> Result<(), ClientError> {
+    let mut spool = tempfile::tempfile()?;
+    let entry_count = read_imported_conversation(client, imported_conversation_id, |frame| {
+        spool.write_all(&encode_server_line(frame)?)?;
+        Ok(())
+    })
+    .await?;
+    spool.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(spool);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        match decode_server_line(&line)?.message() {
+            ServerMessage::ImportedConversationEntry {
+                position,
+                imported_entry_id,
+                source_speaker,
+                content_kind,
+                text_preview,
+            } => output.imported_conversation_entry(&ImportedEntryRow {
+                position: position.value(),
+                imported_entry_id: *imported_entry_id,
+                source_speaker: *source_speaker,
+                content_kind: *content_kind,
+                text_preview: text_preview.as_ref(),
+            })?,
+            _ => {
+                return Err(ClientError::Protocol(
+                    "imported-entry spool contained a non-entry frame",
+                ));
+            }
+        }
+        line.clear();
+    }
+    output.imported_conversation_entry_count(entry_count)?;
+    Ok(())
+}
+
+/// Reads one imported conversation's complete entry sequence, returning its
+/// validated entry count, which is also its greatest selectable position.
+async fn read_imported_conversation(
+    client: &mut ProcessClient,
+    imported_conversation_id: CanonicalUuid,
+    mut consume: impl FnMut(&ServerFrame) -> Result<(), ClientError>,
+) -> Result<u64, ClientError> {
+    let mut connection = client
+        .request(ClientRequest::ReadImportedConversation {
+            imported_conversation_id,
+        })
+        .await?;
+    match connection.message().await? {
+        ServerMessage::ImportedConversationStart {
+            imported_conversation_id: started,
+        } if started == imported_conversation_id => {}
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(code, message, detail)),
+        _ => {
+            return Err(ClientError::Protocol(
+                "imported conversation did not begin with its start frame",
+            ));
+        }
+    }
+    let mut entry_count = 0_u64;
+    loop {
+        let frame = connection.frame().await?;
+        match frame.message() {
+            ServerMessage::ImportedConversationEntry { position, .. } => {
+                let expected = entry_count
+                    .checked_add(1)
+                    .ok_or(ClientError::Protocol("imported entry count overflowed"))?;
+                if position.value() != expected {
+                    return Err(ClientError::Protocol(
+                        "imported entry positions were not the contiguous sequence from one",
+                    ));
+                }
+                consume(&frame)?;
+                entry_count = expected;
+            }
+            ServerMessage::ImportedConversationEnd {
+                imported_conversation_id: ended,
+                entry_count: declared,
+            } if *ended == imported_conversation_id && declared.value() == entry_count => {
+                // An imported conversation's normalized entry sequence is
+                // nonempty, so an empty inventory is never a valid read of one.
+                if entry_count == 0 {
+                    return Err(ClientError::Protocol(
+                        "imported conversation reported no entries",
+                    ));
+                }
+                return Ok(entry_count);
+            }
+            ServerMessage::Error {
+                code,
+                message,
+                detail,
+            } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+            _ => {
+                return Err(ClientError::Protocol(
+                    "imported conversation sequence or count was invalid",
+                ));
+            }
+        }
     }
 }
 
@@ -2684,12 +2821,13 @@ mod tests {
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ConversationOriginFilter, ConversationSummary, FrameEncodeError, InputContent,
-        InputDelivery, ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion,
-        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewPassKind,
-        ReviewPassLifecycle, ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot,
-        ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
-        ToolDecision, TurnState, decode_client_line, encode_server_line,
+        ConversationOriginFilter, ConversationSummary, FrameEncodeError, ImportedContentKind,
+        ImportedSessionRelationship, ImportedSourceSpeaker, InputContent, InputDelivery,
+        ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion, ReviewFindingInput,
+        ReviewFindingSnapshot, ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle,
+        ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow,
+        ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState,
+        decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -2701,12 +2839,12 @@ mod tests {
     use super::{
         ConversationsPageRequest, MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
         MAX_REVIEW_FINDINGS_PER_RUN, ProcessClient, ReviewCommand, SessionMetadataPageRequest,
-        SnapshotSelection, SubmitInputReceipt, TurnTerminal, TurnWaitMode, await_turn_terminal,
-        collect_import_paths, conversations, create, decide, model_call_recovery_transition,
-        open_scanned_import_source, read_input, read_system_prompt_file, reconcile_turn, review,
-        run, search, session_recovery_transition, socket_path, stop_turn, submit_input,
-        terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
-        tool_recovery_transition,
+        SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument, TurnTerminal, TurnWaitMode,
+        await_turn_terminal, collect_import_paths, continue_imported, conversations, create,
+        decide, imported, model_call_recovery_transition, open_scanned_import_source, read_input,
+        read_system_prompt_file, reconcile_turn, review, run, search, session_recovery_transition,
+        socket_path, stop_turn, submit_input, terminal_event_state, terminal_snapshot_selection,
+        terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -3573,6 +3711,249 @@ mod tests {
         ));
         assert!(stdout.is_empty());
         assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    /// S28: the inspection read is the client's source of selectable
+    /// positions, so a gap in the emitted sequence is rejected before any row
+    /// can suggest a position the daemon did not emit.
+    #[tokio::test]
+    async fn imported_rejects_noncontiguous_positions_before_writing_rows()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let imported_conversation_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::ReadImportedConversation {
+                    imported_conversation_id,
+                }
+            );
+            let frame = |message| {
+                ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
+                    .map_err(io::Error::other)
+            };
+            let entry = |position| ServerMessage::ImportedConversationEntry {
+                position: CanonicalU64::new(position),
+                imported_entry_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::from(
+                    100 - position,
+                ))),
+                source_speaker: ImportedSourceSpeaker::NotAttested {},
+                content_kind: ImportedContentKind::SourceEvent,
+                text_preview: None,
+            };
+            let mut response = Vec::new();
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ImportedConversationStart {
+                    imported_conversation_id,
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(entry(1))?).map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(entry(3))?).map_err(io::Error::other)?,
+            );
+            writer.write_all(&response).await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let result = imported(&mut client, &mut output, imported_conversation_id).await;
+
+        assert!(matches!(
+            result,
+            Err(ClientError::Protocol(
+                "imported entry positions were not the contiguous sequence from one"
+            ))
+        ));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    /// S28: an imported conversation's normalized entry sequence is nonempty,
+    /// so an empty inventory contradicts the record the daemon claims to be
+    /// reading. The shared reader fails closed on it rather than printing a
+    /// conversation with no selectable position.
+    #[tokio::test]
+    async fn imported_rejects_an_empty_entry_inventory() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let imported_conversation_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::ReadImportedConversation {
+                    imported_conversation_id,
+                }
+            );
+            let frame = |message| {
+                ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
+                    .map_err(io::Error::other)
+            };
+            let mut response = Vec::new();
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ImportedConversationStart {
+                    imported_conversation_id,
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ImportedConversationEnd {
+                    imported_conversation_id,
+                    entry_count: CanonicalU64::new(0),
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            writer.write_all(&response).await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let result = imported(&mut client, &mut output, imported_conversation_id).await;
+
+        assert!(matches!(
+            result,
+            Err(ClientError::Protocol(
+                "imported conversation reported no entries"
+            ))
+        ));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    /// S28: `latest` resolves against the imported conversation's own declared
+    /// entry count and reaches the wire as that concrete ordinal, so the
+    /// durable command an exact replay reconstructs is unchanged.
+    #[tokio::test]
+    async fn continue_resolves_latest_to_a_concrete_wire_position() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let imported_conversation_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(2))?;
+        let selection_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::ReadImportedConversation {
+                    imported_conversation_id,
+                }
+            );
+            let frame = |message| {
+                ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
+                    .map_err(io::Error::other)
+            };
+            let entry = |position| ServerMessage::ImportedConversationEntry {
+                position: CanonicalU64::new(position),
+                imported_entry_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::from(
+                    100 - position,
+                ))),
+                source_speaker: ImportedSourceSpeaker::NotAttested {},
+                content_kind: ImportedContentKind::SourceEvent,
+                text_preview: None,
+            };
+            let mut response = Vec::new();
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ImportedConversationStart {
+                    imported_conversation_id,
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(entry(1))?).map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(entry(2))?).map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ImportedConversationEnd {
+                    imported_conversation_id,
+                    entry_count: CanonicalU64::new(2),
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            writer.write_all(&response).await?;
+
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::CreateSessionFromImportedFrontier {
+                    command_id,
+                    imported_conversation_id,
+                    through_position: CanonicalU64::new(2),
+                    relationship: ImportedSessionRelationship::Resume,
+                    initial_model_selection: ModelSelection::Direct { selection_id },
+                }
+            );
+            let response = ServerFrame::try_new_for_version(
+                request.version(),
+                request.request_id(),
+                ServerMessage::SessionCreated { session_id },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        continue_imported(
+            &mut client,
+            &mut output,
+            imported_conversation_id,
+            ThroughPositionArgument::Latest,
+            ImportedSessionRelationship::Resume,
+            ModelSelection::Direct { selection_id },
+            Some(command_id),
+        )
+        .await?;
+
+        assert_eq!(String::from_utf8(stdout)?, format!("{session_id}\n"));
+        assert_eq!(String::from_utf8(stderr)?, "through_position=2\n");
         server.await??;
         Ok(())
     }
