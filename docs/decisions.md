@@ -21,17 +21,19 @@ selected operational key names, credential-valued long options, and URL userinfo
 — while leaving unclear whether it correlated credential names and values stored
 in separate structural positions.
 
-**Decision.** Keep the 64-KiB hold. Fully classify an unresolved held prefix
-when it is first held, only after its length at least doubles thereafter, and
-once more when it crosses the cap. Before absorbing suppression begins, one
-continuously unresolved candidate therefore presents at most 196,608 aggregate
-held bytes (three times 64 KiB) per classifier. Each round invokes two top-level
-whole-buffer classifiers, bounding their cumulative input at 393,216 bytes (six
-times 64 KiB), independent of delta count. The 66,000 one-byte continuation
-shape performs thirteen rounds: 188,387 aggregate held bytes and 376,774 charged
-classifier-input bytes. Once fail-closed suppression begins, it is absorbing for
-the sink's lifetime; usage, boundary, and finish events cannot re-enable
-provider bytes. Extend normalized-name coverage to the `token`,
+**Decision.** Keep the 64-KiB hold. One initial unsafe-suffix classification
+decides whether a prefix is held; it is not charged as reclassification. After a
+hold at length L, reclassify only when the held length reaches at least twice L;
+crossing the cap forces one final reclassification. Each post-hold round invokes
+the two top-level whole-buffer classifiers. For one continuously unresolved
+candidate, the held lengths presented to each classifier sum to at most 196,608
+bytes (three times 64 KiB), so cumulative reclassification input is at most
+393,216 bytes (six times 64 KiB), independent of delta count. The 66,000
+one-byte continuation shape performs its initial unsafe-suffix classification
+once, then thirteen reclassification rounds: 188,387 aggregate held bytes and
+376,774 charged rescanned bytes. Once fail-closed suppression begins, it is
+absorbing for the sink's lifetime; usage, boundary, and finish events cannot
+re-enable provider bytes. Extend normalized-name coverage to the `token`,
 passphrase/`passwd`/`pwd`, and explicitly named signing, encryption, SSH, HMAC,
 and license-key families — not arbitrary names ending in `key` — together with
 the option and userinfo shapes specified in

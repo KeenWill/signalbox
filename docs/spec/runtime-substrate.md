@@ -677,15 +677,18 @@ markers, the concatenated streamed output is never less redacted than the
 stateless scan of the concatenated provider text. Fail-closed suppression is
 absorbing for the sink's lifetime: usage reports, other fact boundaries, and
 terminal flushes never re-enable provider-controlled bytes. Streamed
-lookbehind's 64-KiB memory bound is independent of its work bound. An unresolved
-held prefix is fully classified when first held, only after its length at least
-doubles thereafter, and once more when it crosses the cap. Before absorbing
-suppression begins, one continuously unresolved candidate therefore presents at
-most 196,608 aggregate held bytes (three times 64 KiB) per classifier. Each
-round invokes two top-level whole-buffer classifiers, bounding their cumulative
-input at 393,216 bytes (six times 64 KiB), independent of delta count. The
-66,000 one-byte continuation shape performs thirteen rounds: 188,387 aggregate
-held bytes and 376,774 charged classifier-input bytes.
+lookbehind's 64-KiB memory bound is independent of its work bound. One initial
+unsafe-suffix classification decides whether a prefix is held; it is not charged
+as reclassification. After a hold at length L, reclassification occurs only when
+the held length reaches at least twice L, while crossing the cap forces one
+final round. Each post-hold round invokes the two top-level whole-buffer
+classifiers. For one continuously unresolved candidate, the held lengths
+presented to each classifier sum to at most 196,608 bytes (three times 64 KiB),
+so cumulative reclassification input is at most 393,216 bytes (six times 64
+KiB), independent of delta count. The 66,000 one-byte continuation shape
+performs its initial unsafe-suffix classification once, then thirteen
+reclassification rounds: 188,387 aggregate held bytes and 376,774 charged
+rescanned bytes.
 
 This is a text-shape contract, not cross-field semantic correlation. It does not
 associate a credential name in one structural position with a value in another:
