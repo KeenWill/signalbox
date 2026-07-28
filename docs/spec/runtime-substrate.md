@@ -428,13 +428,19 @@ an unavailable control into a closed failure instead of silently relaxing this
 invocation boundary. Before spawn it clears the parent environment, then copies
 only its explicit home/Codex-home, executable and temporary path, XDG,
 locale/terminal, certificate, and proxy allowlist; unrelated service variables
-do not reach the CLI. It neither resumes nor persists a Codex thread. Why: a
-fresh ephemeral invocation keeps provider session state out of memory, and the
-caller supplies the complete conversation frontier instead of an in-memory
-resume pointer. The read-only sandbox and working root are the adapter's
-filesystem boundary; Unix process-group supervision bounds descendant lifetime,
-so construction rejects hosts where that supervision is unavailable. Stronger
-host isolation is later composition work, not an adapter claim.
+do not reach the CLI. A proxy variable whose URL authority embeds userinfo
+(`scheme://user:secret@host`) is refused before `SendCommenced` as
+`ProvenUnsent(ConnectFailed)` naming only the variable — the CLI could reflect
+its proxy configuration in output the adapter can only shape-redact, so an
+inherited proxy credential never reaches the child; a proxy value that is not
+UTF-8 cannot be verified credential-free and is refused the same way. It neither
+resumes nor persists a Codex thread. Why: a fresh ephemeral invocation keeps
+provider session state out of memory, and the caller supplies the complete
+conversation frontier instead of an in-memory resume pointer. The read-only
+sandbox and working root are the adapter's filesystem boundary; Unix
+process-group supervision bounds descendant lifetime, so construction rejects
+hosts where that supervision is unavailable. Stronger host isolation is later
+composition work, not an adapter claim.
 
 `SendCommenced` immediately precedes spawn. Spawn failure is
 `ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.
