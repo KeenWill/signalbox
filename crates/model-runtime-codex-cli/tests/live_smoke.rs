@@ -58,6 +58,13 @@ const DEFAULT_MODEL: &str = "gpt-5.1-codex-mini";
 const CODEX_SMOKE_WORKFLOW: &str = include_str!("../../../.github/workflows/codex-smoke.yml");
 const LOGIN_TIMEOUT_INVOCATION: &str =
     "env -u CODEX_SMOKE_API_KEY timeout --signal=TERM --kill-after=5s 30s";
+const LOGIN_TERM_HOLD_COMMAND: &str = r#"trap "while :; do sleep 1; done" TERM; "$@""#;
+const LOGIN_TIMEOUT_DESCENDANT_FIXTURE: &str = r#"#!/bin/sh
+pid_file=$1
+sh -c 'trap "" TERM; printf "%s\n" "$$" > "$1"; while :; do sleep 1; done' sh "$pid_file" &
+trap 'exit 0' TERM
+wait
+"#;
 
 /// Exact built-in feature inventory reported by the pinned CLI. Stage and
 /// default are part of the snapshot: a newly enabled feature is classification
@@ -660,8 +667,54 @@ fn pinned_feature_classification_matches_the_runtime_hard_disables() {
 /// job-level timeout cannot substitute for this local cleanup boundary.
 #[test]
 fn compatibility_smoke_login_has_a_process_group_timeout() {
-    assert!(CODEX_SMOKE_WORKFLOW.contains(LOGIN_TIMEOUT_INVOCATION));
-    assert!(CODEX_SMOKE_WORKFLOW.contains("| env -u CODEX_SMOKE_API_KEY timeout"));
+    assert!(
+        CODEX_SMOKE_WORKFLOW.contains(LOGIN_TIMEOUT_INVOCATION),
+        "the smoke login no longer carries the thirty-second TERM and five-second KILL bound"
+    );
+    assert!(
+        CODEX_SMOKE_WORKFLOW.contains("| env -u CODEX_SMOKE_API_KEY timeout"),
+        "the smoke login no longer removes the key from the timeout environment"
+    );
+    assert!(
+        CODEX_SMOKE_WORKFLOW.contains(LOGIN_TERM_HOLD_COMMAND),
+        "the timeout command no longer keeps its managed supervisor alive through the KILL grace"
+    );
+}
+
+/// If the direct login launcher exits on TERM while its native descendant ignores
+/// TERM, the managed shell stays alive until GNU timeout sends KILL to the
+/// entire command group. Without that hold-open trap, timeout cancels its KILL
+/// timer as soon as the launcher exits and strands the recorded descendant.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn login_timeout_kills_descendant_when_launcher_exits_on_term() {
+    let directory = tempfile::tempdir().expect("login-timeout fixture directory is created");
+    let pid_file = directory.path().join("descendant-pid");
+    let launcher = version_probe_fixture(directory.path(), LOGIN_TIMEOUT_DESCENDANT_FIXTURE);
+    let mut command = tokio::process::Command::new("timeout");
+    command
+        .arg("--signal=TERM")
+        .arg("--kill-after=1s")
+        .arg("0.5s")
+        .arg("sh")
+        .arg("-c")
+        .arg(LOGIN_TERM_HOLD_COMMAND)
+        .arg("sh")
+        .arg("sh")
+        .arg(launcher)
+        .arg(&pid_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let status = command
+        .status()
+        .await
+        .expect("the bounded synthetic login launcher runs");
+    let descendant = read_recorded_descendant(&pid_file).await;
+
+    assert!(!status.success(), "the synthetic login must time out");
+    assert_process_exits(descendant).await;
 }
 
 /// Writes an executable version-probe script and returns its path.

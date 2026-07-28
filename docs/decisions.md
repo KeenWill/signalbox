@@ -55,7 +55,9 @@ model exchange, and whole job, but its non-interactive CLI login could consume
 the entire twenty-minute job slot if the launcher or a descendant hung.
 
 **Decision.** Give login thirty seconds, then send `TERM` to the command's
-process group and allow five seconds before `KILL`. The key remains stdin-only,
+process group and allow five seconds before `KILL`. A managed shell remains live
+through that grace even when the direct CLI launcher exits on `TERM`, so the
+`KILL` phase still reaches surviving group members. The key remains stdin-only,
 absent from the timeout and CLI child environments and never placed in argv.
 
 **Rejected alternatives.** Relying only on the job timeout would hold the sole

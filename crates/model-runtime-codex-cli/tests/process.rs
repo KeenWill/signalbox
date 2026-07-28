@@ -455,6 +455,22 @@ async fn duplicate_event_members_are_stream_protocol_violations() {
     assert!(detail.contains("duplicate"));
 }
 
+/// Repeated members stay ambiguous at nested object depth; the validation walk
+/// cannot stop at the event envelope before serde projects its child objects.
+#[tokio::test]
+async fn nested_duplicate_event_members_are_stream_protocol_violations() {
+    let result = execute_scenario(
+        "nested_duplicate_unknown_event_member",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let detail = stream_protocol_violation(&boundary_loss(&result.evidence).cause);
+    assert!(detail.contains("duplicate"));
+}
+
 /// INV-035: a marker-bearing object field that sorts before a benign sibling
 /// (so a key-sorted concatenation would drop the marker) still governs the
 /// following final text — sibling fields are seeded as independent units.

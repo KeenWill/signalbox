@@ -18,7 +18,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWri
 use tokio::process::{Child, Command};
 
 use crate::config::CodexCliConfig;
-use crate::event::EventDecoder;
+use crate::event::{DecodeFailureClass, EventDecoder};
 use crate::redaction::RedactingSink;
 use crate::translate::{TranslationError, translate};
 use crate::wire::OUTPUT_SCHEMA;
@@ -632,7 +632,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         match next {
             ProcessStep::Line(Ok(Some(line))) => {
                 if let Err(error) = decoder.push(&line, &mut redacting_sink) {
-                    let stream_protocol_violation = error.is_stream_protocol_violation();
+                    let class = error.class();
                     // Serde details quote provider-controlled bytes, and both
                     // that library's prose and the adapter's own wrapper sit
                     // between a held credential marker and the continuation the
@@ -647,11 +647,12 @@ async fn execute_process<C: Clone + Send + Sync>(
                     force_kill(&mut child).await;
                     abort_stderr_task(&mut stderr_task).await;
                     redacting_sink.finish();
-                    if stream_protocol_violation {
-                        return decoder
-                            .boundary_loss(LossCause::StreamProtocolViolation { detail });
-                    }
-                    return decoder.provider_error(&detail);
+                    return match class {
+                        DecodeFailureClass::ProviderDecode => decoder.provider_error(&detail),
+                        DecodeFailureClass::StreamProtocolViolation => {
+                            decoder.boundary_loss(LossCause::StreamProtocolViolation { detail })
+                        }
+                    };
                 }
                 if !decoder.terminal_observed() && already_fired(cancellation) {
                     // Work-first: an already-exited leader's status is

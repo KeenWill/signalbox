@@ -624,6 +624,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "nested_duplicate_unknown_event_member" => {
+            emit(r#"{"type":"future","items":[{"note":"first","note":"second"}]}"#);
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+        }
         "textless_refusal" => {
             envelope(r#"{"outcome":"refused","text":"","tool_calls":[]}"#);
             completed();

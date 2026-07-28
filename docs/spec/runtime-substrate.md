@@ -4,9 +4,9 @@ This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime`, `crates/model-runtime-anthropic`,
 `crates/model-runtime-openai`, and `crates/model-runtime-codex-cli`, verified
 against the implementing stack through PR #183
-(`agent/provider-call-security-parser`) plus the Codex CLI adapter stack (PR
-#264, `agent/codex-cli-wrap`, and PR #268, `agent/codex-cli-pin-smoke`) and its
-escalation closeout in PR #317 (`agent/escalation-closeout`). The `signalboxd`
+(`agent/provider-call-security-parser`). The Codex CLI adapter stack comprises
+PR #264 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
+escalation closeout is PR #317 (`agent/escalation-closeout`). The `signalboxd`
 names this page states for the composition root, its telemetry, and the
 production `FileCredentialAccess` were verified through PR #258
 (`agent/signalboxd-rename`); the Anthropic adapter's server-side
