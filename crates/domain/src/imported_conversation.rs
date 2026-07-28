@@ -3487,6 +3487,34 @@ mod tests {
         );
     }
 
+    /// S28 / INV-038: the Codex reprojection maps a
+    /// `custom_tool_call_output`'s exact `call_id` and string `output` as an
+    /// exact-text result without fabricating an error attestation.
+    #[test]
+    fn s28_inv038_codex_reprojection_maps_custom_tool_call_output_as_exact_text_result() {
+        let source_call_id = text("call-custom");
+        let output = text("applied");
+
+        assert_codex_payload_projects_one_entry_attesting_no_speaker(
+            object_with_members(vec![
+                (
+                    "type",
+                    ImportedStructuredValue::String(text("custom_tool_call_output")),
+                ),
+                (
+                    "call_id",
+                    ImportedStructuredValue::String(source_call_id.clone()),
+                ),
+                ("output", ImportedStructuredValue::String(output.clone())),
+            ]),
+            ImportedTranscriptContent::ToolResult {
+                source_call_id: ImportedSourceAttestation::Attested(source_call_id),
+                content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Text(output)),
+                is_error: ImportedSourceAttestation::NotAttested,
+            },
+        );
+    }
+
     /// S28 / INV-038: the Codex reprojection emits one ordered source result
     /// block per tool-search element, retaining an object element's exact type
     /// attestation and leaving a non-object element unattested.
