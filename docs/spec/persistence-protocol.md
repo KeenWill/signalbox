@@ -63,7 +63,7 @@ remains at SQLx defaults until an operational slice selects limits.
 
 Schema change is a forward-only, versioned SQL file set in
 `crates/persistence/migrations/` — thirty-seven files, `202607180001` through
-`202607290201` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`202607290301` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -124,7 +124,7 @@ Implemented table families (across the forward-only migrations):
 - `model_call` (execution state owned by
   [model-call-execution](model-call-execution.md), its turn-level
   provider-target pin on `turn_lifecycle`, and its pinned
-  `credential_reference`); migration `202607290001` adds four independently
+  `credential_reference`); migration `202607290301` adds four independently
   nullable, scale-preserving `numeric` token-usage columns whose explicit
   integrality and full-`u64` range checks reject fractional or out-of-range
   input without rounding. A nonterminal row must keep all four null, and a
