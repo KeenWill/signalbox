@@ -4653,7 +4653,9 @@ fn identity_collision(error: &sqlx::Error) -> Option<ModelCallIdentityCollision>
         .as_database_error()
         .and_then(|database| database.constraint())
     {
-        Some("model_call_pkey") => Some(ModelCallIdentityCollision::ModelCall),
+        Some("model_call_pkey" | "model_call_identity_pkey") => {
+            Some(ModelCallIdentityCollision::ModelCall)
+        }
         Some("semantic_transcript_entry_pk" | "semantic_transcript_entry_id_global") => {
             Some(ModelCallIdentityCollision::SemanticEntry)
         }

@@ -2916,6 +2916,7 @@ pub enum ContextCompactionReconstitutionFailure {
     SummaryPayloadMismatch,
     RangeEndpointMissing,
     RangeOrderInvalid,
+    UnsafeToolExchangeBoundary,
     ResultIsNotSummaryAppend,
     ProducingCallMismatch,
 }
@@ -2932,6 +2933,7 @@ pub enum ContextFrontierProjectionFailure {
     RangeStartMismatch,
     RangeEndpointMissing,
     RangeOrderInvalid,
+    UnsafeToolExchangeBoundary,
     SummaryNotAfterBoundary,
 }
 ```

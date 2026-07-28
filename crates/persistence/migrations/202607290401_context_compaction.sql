@@ -4,6 +4,39 @@
 -- summary entry and one complete result frontier; no transcript row is
 -- deleted or rewritten.
 
+CREATE TABLE model_call_identity (
+    model_call_id uuid PRIMARY KEY,
+    call_kind text NOT NULL,
+
+    CONSTRAINT model_call_identity_kind_closed
+        CHECK (call_kind IN ('ordinary', 'context_compaction'))
+);
+
+INSERT INTO model_call_identity (model_call_id, call_kind)
+SELECT model_call_id, 'ordinary'
+  FROM model_call;
+
+CREATE FUNCTION reserve_model_call_identity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO model_call_identity (model_call_id, call_kind)
+    VALUES (NEW.model_call_id, TG_ARGV[0]);
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER model_call_reserves_global_identity
+BEFORE INSERT ON model_call
+FOR EACH ROW
+EXECUTE FUNCTION reserve_model_call_identity('ordinary');
+
+CREATE TRIGGER model_call_identity_is_append_only
+BEFORE UPDATE OR DELETE ON model_call_identity
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
 CREATE TABLE context_compaction_model_call (
     model_call_id uuid PRIMARY KEY,
     session_id uuid NOT NULL,
@@ -66,6 +99,11 @@ CREATE TABLE context_compaction_model_call (
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED
 );
+
+CREATE TRIGGER context_compaction_call_reserves_global_identity
+BEFORE INSERT ON context_compaction_model_call
+FOR EACH ROW
+EXECUTE FUNCTION reserve_model_call_identity('context_compaction');
 
 CREATE FUNCTION reject_context_compaction_model_call_invalid_change()
 RETURNS trigger
@@ -405,6 +443,28 @@ BEGIN
        OR result_count <> source_count + 1
     THEN
         RAISE EXCEPTION 'compaction range or frontier cardinality is invalid'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT
+        count(*) FILTER (WHERE entry.payload_kind = 'assistant_tool_use')
+        - count(*) FILTER (
+            WHERE entry.payload_kind IN (
+                'tool_execution_result',
+                'tool_denied',
+                'tool_closed_by_turn_end'
+            )
+        )
+      INTO mismatch_count
+      FROM context_frontier_member AS member
+      JOIN semantic_transcript_entry AS entry
+        ON entry.source_session_id = member.source_session_id
+       AND entry.semantic_entry_id = member.semantic_entry_id
+     WHERE member.owning_session_id = NEW.session_id
+       AND member.context_frontier_id = NEW.source_frontier_id
+       AND member.member_position BETWEEN first_position AND through_position;
+    IF mismatch_count <> 0 THEN
+        RAISE EXCEPTION 'compaction boundary leaves a tool exchange open'
             USING ERRCODE = '23514';
     END IF;
 

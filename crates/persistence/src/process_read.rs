@@ -814,7 +814,14 @@ impl ProcessTranscriptReader {
             }
             self.turns_complete = true;
             let session = self.session;
-            let latest_frontier = self.latest_frontier;
+            let current_frontier = self.latest_frontier;
+            let latest_frontier = advance_through_latest_compaction(
+                self.transaction_mut()?,
+                session,
+                current_frontier,
+            )
+            .await?;
+            self.latest_frontier = latest_frontier;
             self.entry_count = Some(match latest_frontier {
                 Some(frontier) => {
                     open_transcript_entry_cursor(self.transaction_mut()?, session, frontier).await?
@@ -869,6 +876,70 @@ impl ProcessTranscriptReader {
         self.transaction
             .as_mut()
             .ok_or_else(|| ProcessReadCorruption::Missing("process read transaction").into())
+    }
+}
+
+async fn advance_through_latest_compaction(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+    current: Option<ContextFrontierId>,
+) -> Result<Option<ContextFrontierId>, ProcessReadError> {
+    let latest: Option<Uuid> = sqlx::query_scalar(
+        "SELECT candidate.result_frontier_id
+           FROM context_compaction AS candidate
+          WHERE candidate.session_id = $1
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM context_compaction AS successor
+                 WHERE successor.session_id = candidate.session_id
+                   AND successor.predecessor_compaction_id =
+                           candidate.context_compaction_id
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(latest) = latest.map(ContextFrontierId::from_uuid) else {
+        return Ok(current);
+    };
+    let Some(current) = current else {
+        return Ok(Some(latest));
+    };
+    if current == latest {
+        return Ok(Some(current));
+    }
+    let row: (bool, bool) = sqlx::query_as(
+        "SELECT
+            NOT EXISTS (
+                SELECT 1
+                  FROM resolve_context_frontier_members($1, $2) AS earlier
+                  LEFT JOIN resolve_context_frontier_members($1, $3) AS later
+                    ON later.member_position = earlier.member_position
+                   AND later.source_session_id = earlier.source_session_id
+                   AND later.semantic_entry_id = earlier.semantic_entry_id
+                 WHERE later.member_position IS NULL
+            ),
+            NOT EXISTS (
+                SELECT 1
+                  FROM resolve_context_frontier_members($1, $3) AS earlier
+                  LEFT JOIN resolve_context_frontier_members($1, $2) AS later
+                    ON later.member_position = earlier.member_position
+                   AND later.source_session_id = earlier.source_session_id
+                   AND later.semantic_entry_id = earlier.semantic_entry_id
+                 WHERE later.member_position IS NULL
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(current.into_uuid())
+    .bind(latest.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await?;
+    match row {
+        (true, false) => Ok(Some(latest)),
+        (false, true) => Ok(Some(current)),
+        _ => {
+            Err(ProcessReadCorruption::Inconsistent("turn and compaction frontier lineage").into())
+        }
     }
 }
 

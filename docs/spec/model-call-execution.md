@@ -33,13 +33,16 @@ dedicated compaction-call evidence were verified against
 ## Call records and lifecycle
 
 A model call is one durable daemon authorization to attempt a provider
-interaction (INV-014). Its record (`crates/domain/src/model_call.rs`) fixes at
-creation: `ModelCallId`, owning turn and attempt, the exact frozen model
-selection, the turn-pinned resolved target, and the exact ordered context
-frontier it consumes (INV-015). Nonterminal states are `Prepared`, `InFlight`,
-and `CancellationRequested`; terminal history is a separate `EndedModelCall`
-carrying one of five physical dispositions — `Completed`, `KnownFailed`,
-`Refused`, `Cancelled`, `Ambiguous` — and exposes no transition back (INV-006).
+interaction (INV-014). Ordinary and dedicated compaction calls reserve their
+`ModelCallId` from one append-only global call-identity registry, so the same
+physical identity cannot name both call kinds (INV-001). Its record
+(`crates/domain/src/model_call.rs`) fixes at creation: `ModelCallId`, owning
+turn and attempt, the exact frozen model selection, the turn-pinned resolved
+target, and the exact ordered context frontier it consumes (INV-015).
+Nonterminal states are `Prepared`, `InFlight`, and `CancellationRequested`;
+terminal history is a separate `EndedModelCall` carrying one of five physical
+dispositions — `Completed`, `KnownFailed`, `Refused`, `Cancelled`, `Ambiguous` —
+and exposes no transition back (INV-006).
 
 The predecessor matrix:
 

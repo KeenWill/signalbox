@@ -419,6 +419,9 @@ impl ContextCompactionReconstitutionInput {
         if first > through {
             return Err(ContextCompactionReconstitutionFailure::RangeOrderInvalid);
         }
+        if !range_closes_tool_exchanges(source_entries, first, through) {
+            return Err(ContextCompactionReconstitutionFailure::UnsafeToolExchangeBoundary);
+        }
         if result_entries.len() != source_entries.len() + 1
             || result_entries[..source_entries.len()] != *source_entries
             || result_entries.last() != Some(summary)
@@ -455,10 +458,37 @@ pub enum ContextCompactionReconstitutionFailure {
     RangeEndpointMissing,
     /// The first endpoint occurs after the through endpoint.
     RangeOrderInvalid,
+    /// The summarized range leaves a correlated tool exchange open.
+    UnsafeToolExchangeBoundary,
     /// The result frontier is not exactly the source plus its summary.
     ResultIsNotSummaryAppend,
     /// The producing call is not the matching completed dedicated call.
     ProducingCallMismatch,
+}
+
+fn range_closes_tool_exchanges(
+    entries: &[SemanticTranscriptEntry],
+    first: usize,
+    through: usize,
+) -> bool {
+    let mut open_requests = 0usize;
+    for entry in &entries[first..=through] {
+        match entry.payload() {
+            SemanticTranscriptEntryPayload::AssistantToolUse { .. } => {
+                open_requests = open_requests.saturating_add(1);
+            }
+            SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+            | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolClosed { .. } => {
+                let Some(remaining) = open_requests.checked_sub(1) else {
+                    return false;
+                };
+                open_requests = remaining;
+            }
+            _ => {}
+        }
+    }
+    open_requests == 0
 }
 
 /// The exact source-qualified entries visible after applying compaction.
@@ -500,6 +530,9 @@ impl ContextFrontierProjection {
                 .ok_or(ContextFrontierProjectionFailure::RangeEndpointMissing)?;
             if first > through {
                 return Err(ContextFrontierProjectionFailure::RangeOrderInvalid);
+            }
+            if !range_closes_tool_exchanges(entries, first, through) {
+                return Err(ContextFrontierProjectionFailure::UnsafeToolExchangeBoundary);
             }
             if summary_index <= through {
                 return Err(ContextFrontierProjectionFailure::SummaryNotAfterBoundary);
@@ -545,6 +578,8 @@ pub enum ContextFrontierProjectionFailure {
     RangeEndpointMissing,
     /// The first summarized endpoint occurs after the through endpoint.
     RangeOrderInvalid,
+    /// The summarized range leaves a correlated tool exchange open.
+    UnsafeToolExchangeBoundary,
     /// The selected summary is not a later append after its boundary.
     SummaryNotAfterBoundary,
 }
@@ -563,6 +598,27 @@ mod tests {
             session_id(1),
             InitialSemanticTranscriptEntryPayload::TurnFailed {
                 turn: crate::test_support::turn_id(value),
+            },
+        )
+    }
+
+    fn tool_use(value: u128, request: u128) -> SemanticTranscriptEntry {
+        SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(value),
+            session_id(1),
+            InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call: model_call_id(8),
+                request: crate::ToolRequestId::from_uuid(uuid::Uuid::from_u128(request)),
+            },
+        )
+    }
+
+    fn tool_denied(value: u128, request: u128) -> SemanticTranscriptEntry {
+        SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(value),
+            session_id(1),
+            InitialSemanticTranscriptEntryPayload::ToolDenied {
+                request: crate::ToolRequestId::from_uuid(uuid::Uuid::from_u128(request)),
             },
         )
     }
@@ -623,6 +679,21 @@ mod tests {
         assert_eq!(
             ContextFrontierProjection::from_complete_entries(&[first, hidden, through, summary]),
             Err(ContextFrontierProjectionFailure::RangeStartMismatch)
+        );
+    }
+
+    /// INV-015: a boundary cannot separate a tool proposal from its correlated
+    /// result because the suffix would be invalid provider conversation history.
+    #[test]
+    fn inv015_projection_rejects_open_tool_exchange_boundary() {
+        let proposal = tool_use(1, 9);
+        let result = tool_denied(2, 9);
+        let range = ContextCompactionRange::inclusive(proposal.reference(), proposal.reference());
+        let summary = summary(3, range);
+
+        assert_eq!(
+            ContextFrontierProjection::from_complete_entries(&[proposal, result, summary]),
+            Err(ContextFrontierProjectionFailure::UnsafeToolExchangeBoundary)
         );
     }
 

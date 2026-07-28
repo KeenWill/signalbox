@@ -591,7 +591,10 @@ Each compaction range starts at the current model-visible frontier start: the
 complete frontier's first entry for a root compaction, or the predecessor
 summary entry for a successor. Its through endpoint selects how much of that
 visible frontier the new summary replaces; a compaction cannot hide an
-unsummarized visible prefix.
+unsummarized visible prefix. The through boundary is safe only when every
+assistant tool proposal inside the summarized range has its execution result,
+denial, or turn-end closure inside that same range; a boundary cannot leave a
+provider-visible tool result in the suffix after hiding its proposal.
 
 For model input only, a complete frontier containing summaries is projected from
 its latest summary: render that summary first and then every complete-frontier
