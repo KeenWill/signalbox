@@ -19,8 +19,8 @@ code-host result redaction are verified through PR #270
 defaults boundary was verified through PR #272 (`agent/mid-session-model`). The
 credential-file value narrowing and the credential-shaped code-host detail were
 verified through PR #285 (`agent/dev-instance-code-host-credential`). The static
-copy-on-create session-template catalog was verified through PR #313
-(`agent/session-templates`). Invariant law lives in
+copy-on-create session-template catalog was verified through PR #311
+(`agent/session-templates-spec`). Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag.
 
 ## Process configuration

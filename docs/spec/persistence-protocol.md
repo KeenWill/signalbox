@@ -14,15 +14,16 @@ classifier names, ambiguity reconstitution facts, and command-adapter boundaries
 were verified through PR #288 (`agent/audit-fix-docs-coherence`); and the
 session system-prompt columns were verified through PR #286
 (`agent/session-system-prompt`); and the session-template provenance columns and
-storage version four were verified through PR #313 (`agent/session-templates`).
-This page covers the Postgres representation in `crates/persistence` (source and
-migrations), migration discipline, durable command storage and replay equality,
-the fail-closed reconstitution boundary, the lock protocol, pending-steering
-durable state, the corruption taxonomy, commit-ambiguity handling, and the
-transactional outbox. Session aggregate semantics live in
-[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
-lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
-identity kinds and command construction in
+storage version four were verified through PR #311
+(`agent/session-templates-spec`). This page covers the Postgres representation
+in `crates/persistence` (source and migrations), migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
 [docs/invariants.md](../invariants.md); this page cites rows by tag.

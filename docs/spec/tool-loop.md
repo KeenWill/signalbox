@@ -11,7 +11,7 @@ detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
 decision surface through PR #291 (`agent/turn-control-verbs`), and
 runner-protocol batch reconstitution through PR #260
 (`agent/runner-protocol-domain`). Template-derived blanket creation was verified
-through PR #313 (`agent/session-templates`). It owns logical tool requests,
+through PR #311 (`agent/session-templates-spec`). It owns logical tool requests,
 approval policy and decisions, physical tool attempts, result admission,
 intra-turn continuation, crash classification, the compiled registry, and the
 daemon-local catalog. Turn and attempt lifecycle law lives in
@@ -648,8 +648,8 @@ records reconstitute with `DangerousToolAutoApproval::Disabled`. Later
 system-prompt and template provenance migrations advance the affected families
 independently. The current kind-scoped versions and their compatibility gates
 are owned by
-[identity and commands](identity-and-commands.md#registry-and-typed-command-records)
-and [persistence protocol](persistence-protocol.md#relational-representation).
+[identity and commands](identity-and-commands.md#durable-command-records) and
+[persistence protocol](persistence-protocol.md#relational-representation).
 `SubmitInput` and `DecideToolRequest` remain version 1; registry inspection
 validates the supported version set for the selected kind rather than applying
 one global version constant.

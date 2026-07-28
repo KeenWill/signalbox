@@ -13,7 +13,7 @@ verified through PR #296 (`agent/continuation-reconstitution-siblings`); the
 version-thirteen delivery surface, queued restart behavior, and protocol-driven
 continuation steering were verified through PR #302 (`agent/mid-turn-steering`);
 the template-specific home requirement and template-catalog startup order were
-verified through PR #313 (`agent/session-templates`). Code homes:
+verified through PR #311 (`agent/session-templates-spec`). Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
