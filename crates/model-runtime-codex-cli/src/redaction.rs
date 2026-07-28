@@ -939,9 +939,22 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.emit_redacted(unsafe_fragments);
             self.dropped_context = context.to_string();
         } else {
-            // The chain is confined to the dropped bytes; the held text is
-            // untouched, so the dropped context excludes it (it stays in
-            // `pending`) to avoid double-counting when both are rejoined.
+            // The chain is confined to the dropped bytes: no candidate spans
+            // from the held text into them, and the dropped bytes fully
+            // separate the held text from every future field, so the held
+            // text can no longer extend into a later credential. Resolve it
+            // now on its own self-contained content (a candidate begun and
+            // ended within the held text still redacts) — keeping it in
+            // `pending` would let a downstream `dropped_context ++ pending ++
+            // delta` join scan the bytes out of chronological order and miss
+            // a credential formed by the dropped bytes and the next delta.
+            if let Some(pending) = self.pending.take() {
+                if redact_text(&pending.text) == pending.text {
+                    self.emit_original(pending.fragments);
+                } else {
+                    self.emit_redacted(pending.fragments);
+                }
+            }
             let mut only_dropped = std::mem::take(&mut self.dropped_context);
             only_dropped.push_str(dropped);
             self.dropped_context = trailing_credential_context(&only_dropped).to_string();
