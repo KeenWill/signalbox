@@ -4724,7 +4724,7 @@ mod tests {
             },
         };
         assert_eq!(
-            ServerFrame::try_new_for_version(ProtocolVersion::Eleven, request_id, message.clone()),
+            ServerFrame::try_new_for_version(ProtocolVersion::Twelve, request_id, message.clone()),
             Err(FrameValidationError::MessageRequiresNewerVersion)
         );
 

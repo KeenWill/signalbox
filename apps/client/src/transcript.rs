@@ -449,10 +449,16 @@ fn entry_key(source_session_id: CanonicalUuid, entry_id: CanonicalUuid) -> [u8; 
     key
 }
 
+#[derive(Clone, Copy)]
+struct ModelCallUsagePosition {
+    turn: [u8; 16],
+    call: [u8; 16],
+}
+
 struct DiskModelCallUsageOrder {
     file: File,
     reading: bool,
-    previous: Option<([u8; 16], [u8; 16])>,
+    previous: Option<ModelCallUsagePosition>,
 }
 
 impl DiskModelCallUsageOrder {
@@ -478,11 +484,11 @@ impl DiskModelCallUsageOrder {
         let call = uuid_key(call);
         let accepted = match self.previous {
             None => self.advance_to(turn)?,
-            Some((previous_turn, previous_call)) if previous_turn == turn => previous_call < call,
+            Some(previous) if previous.turn == turn => previous.call < call,
             Some(_) => self.advance_to(turn)?,
         };
         if accepted {
-            self.previous = Some((turn, call));
+            self.previous = Some(ModelCallUsagePosition { turn, call });
         }
         Ok(accepted)
     }

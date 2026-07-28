@@ -1038,6 +1038,12 @@ pub struct ProcessReadRepository {
     pool: PgPool,
 }
 
+#[derive(Clone, Copy)]
+enum ModelCallUsageRead {
+    Included,
+    Omitted,
+}
+
 impl ProcessReadRepository {
     /// Uses the supplied pool for independent repeatable-read snapshots.
     pub const fn new(pool: PgPool) -> Self {
@@ -1314,7 +1320,7 @@ impl ProcessReadRepository {
         &self,
         requested_session: SessionId,
     ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
-        self.open_transcript_with_model_call_usage(requested_session, true)
+        self.open_transcript_with_model_call_usage(requested_session, ModelCallUsageRead::Included)
             .await
     }
 
@@ -1327,14 +1333,14 @@ impl ProcessReadRepository {
         &self,
         requested_session: SessionId,
     ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
-        self.open_transcript_with_model_call_usage(requested_session, false)
+        self.open_transcript_with_model_call_usage(requested_session, ModelCallUsageRead::Omitted)
             .await
     }
 
     async fn open_transcript_with_model_call_usage(
         &self,
         requested_session: SessionId,
-        includes_model_call_usage: bool,
+        model_call_usage: ModelCallUsageRead,
     ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(REPEATABLE_READ_ONLY)
@@ -1368,10 +1374,12 @@ impl ProcessReadRepository {
             load_checked_imported_seed_frontier(&mut transaction, requested_session).await?;
         let expected_turn_count =
             load_transcript_turn_count(&mut transaction, requested_session).await?;
-        let expected_model_call_count = if includes_model_call_usage {
-            load_terminal_model_call_count(&mut transaction, requested_session).await?
-        } else {
-            0
+        let (expected_model_call_count, model_calls_complete) = match model_call_usage {
+            ModelCallUsageRead::Included => (
+                load_terminal_model_call_count(&mut transaction, requested_session).await?,
+                false,
+            ),
+            ModelCallUsageRead::Omitted => (0, true),
         };
         Ok(Some(ProcessTranscriptReader {
             transaction: Some(transaction),
@@ -1390,7 +1398,7 @@ impl ProcessReadRepository {
             expected_model_call_count,
             model_call_count: 0,
             next_model_call_after: None,
-            model_calls_complete: !includes_model_call_usage,
+            model_calls_complete,
             entry_count: None,
             next_entry_index: 0,
             summary: None,

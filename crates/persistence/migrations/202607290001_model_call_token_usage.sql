@@ -4,31 +4,44 @@
 -- honestly unreported.
 
 ALTER TABLE model_call
-    ADD COLUMN usage_input_tokens numeric(20, 0),
-    ADD COLUMN usage_output_tokens numeric(20, 0),
-    ADD COLUMN usage_cache_creation_input_tokens numeric(20, 0),
-    ADD COLUMN usage_cache_read_input_tokens numeric(20, 0),
+    ADD COLUMN usage_input_tokens numeric,
+    ADD COLUMN usage_output_tokens numeric,
+    ADD COLUMN usage_cache_creation_input_tokens numeric,
+    ADD COLUMN usage_cache_read_input_tokens numeric,
     ADD CONSTRAINT model_call_usage_input_tokens_u64
         CHECK (
             usage_input_tokens IS NULL
-            OR usage_input_tokens BETWEEN 0 AND 18446744073709551615
+            OR (
+                usage_input_tokens = trunc(usage_input_tokens)
+                AND usage_input_tokens BETWEEN 0 AND 18446744073709551615
+            )
         ),
     ADD CONSTRAINT model_call_usage_output_tokens_u64
         CHECK (
             usage_output_tokens IS NULL
-            OR usage_output_tokens BETWEEN 0 AND 18446744073709551615
+            OR (
+                usage_output_tokens = trunc(usage_output_tokens)
+                AND usage_output_tokens BETWEEN 0 AND 18446744073709551615
+            )
         ),
     ADD CONSTRAINT model_call_usage_cache_creation_input_tokens_u64
         CHECK (
             usage_cache_creation_input_tokens IS NULL
-            OR usage_cache_creation_input_tokens
-                BETWEEN 0 AND 18446744073709551615
+            OR (
+                usage_cache_creation_input_tokens =
+                    trunc(usage_cache_creation_input_tokens)
+                AND usage_cache_creation_input_tokens
+                    BETWEEN 0 AND 18446744073709551615
+            )
         ),
     ADD CONSTRAINT model_call_usage_cache_read_input_tokens_u64
         CHECK (
             usage_cache_read_input_tokens IS NULL
-            OR usage_cache_read_input_tokens
-                BETWEEN 0 AND 18446744073709551615
+            OR (
+                usage_cache_read_input_tokens = trunc(usage_cache_read_input_tokens)
+                AND usage_cache_read_input_tokens
+                    BETWEEN 0 AND 18446744073709551615
+            )
         ),
     ADD CONSTRAINT model_call_usage_is_terminal_evidence
         CHECK (

@@ -91,8 +91,9 @@ use signalbox_process_protocol::{
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, InputContent, MAX_FRAME_BYTES, MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
     MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
-    ModelSelection as WireModelSelection, ProtocolVersion, RejectionDetail, RequestId,
-    ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
+    ModelSelection as WireModelSelection, PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
+    ProtocolVersion, RejectionDetail, RequestId, ReviewDiffSide as WireReviewDiffSide,
+    ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingDisposition as WireReviewFindingDisposition, ReviewFindingInput,
     ReviewFindingSnapshot, ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle,
     ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot,
@@ -4850,7 +4851,8 @@ where
             return write_process_read_error(writer, version, request_id, error).await;
         }
     }
-    let mut subscription = if version == ProtocolVersion::Twelve {
+    let streams_provider_text = version.as_u64() >= PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION;
+    let mut subscription = if streams_provider_text {
         fanouts.streaming.subscribe()
     } else {
         fanouts.durable.subscribe()
@@ -4896,7 +4898,7 @@ where
             return write_snapshot_spool_error(writer, version, request_id, error).await;
         }
     };
-    let mut updates_queued_at_snapshot = if version == ProtocolVersion::Twelve {
+    let mut updates_queued_at_snapshot = if streams_provider_text {
         subscription.len()
     } else {
         0
@@ -4974,7 +4976,7 @@ where
             }
             ProcessUpdate::ProviderTextDelta(delta) => {
                 if queued_at_snapshot
-                    || version != ProtocolVersion::Twelve
+                    || !streams_provider_text
                     || delta.session() != selected_session
                 {
                     continue;

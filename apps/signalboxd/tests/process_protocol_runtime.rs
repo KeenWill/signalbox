@@ -53,10 +53,11 @@ use signalbox_persistence::{
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationImportFormat,
     ConversationImportSource, CurrentModelCallState, ErrorCode, ImportedContentKind,
-    ImportedSourceSpeaker, ImportedSpeaker, InputContent, MetadataActor, ModelSelection,
-    ProtocolVersion, RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
-    SessionMetadata, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
-    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
+    ImportedSourceSpeaker, ImportedSpeaker, InputContent, MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
+    MetadataActor, ModelSelection, ProtocolVersion, RejectionDetail, RequestId, ServerFrame,
+    ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
+    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
+    encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
@@ -498,6 +499,13 @@ async fn attach_empty_follower(
             ..
         } if *snapshot_session == session_id
     ));
+    if version.as_u64() >= MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION {
+        assert!(matches!(
+            response_within(&mut follow).await?.message(),
+            ServerMessage::TranscriptModelCallsEnd { model_call_count }
+                if model_call_count.value() == 0
+        ));
+    }
     assert!(matches!(
         response_within(&mut follow).await?.message(),
         ServerMessage::TranscriptSnapshotEnd {
@@ -2455,8 +2463,8 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
 }
 
 /// S01 / S02 / S24 / INV-032 / INV-035: the provider bridge asks the scripted
-/// runtime for streamed delivery, and two already-attached version-twelve
-/// followers each observe the exact already-redacted deltas before the durable
+/// runtime for streamed delivery, and two already-attached followers on versions
+/// twelve and fourteen each observe the exact already-redacted deltas before the durable
 /// terminal entries expose the same complete assistant reply.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
@@ -2468,7 +2476,7 @@ async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_dur
     let first_follow =
         attach_empty_follower(runtime.socket(), ProtocolVersion::Twelve, 10, session_id).await?;
     let second_follow =
-        attach_empty_follower(runtime.socket(), ProtocolVersion::Twelve, 11, session_id).await?;
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Fourteen, 11, session_id).await?;
     let expected_delta_count = 2;
     let (script, assistant) =
         streamed_script(expected_delta_count, String::from("already [redacted] "));
