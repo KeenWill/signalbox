@@ -422,12 +422,13 @@ impl ToolArgumentValidator for CodeHostArgumentValidator {
     }
 }
 
-/// All ten compiled code-host declarations and their matching executor.
+/// All fourteen compiled code-host declarations and their matching executor.
 ///
 /// Effect postures are explicit per declaration: summary, files, patch,
-/// checks, threads, and job-log reads are `Auto`; comment, reply, resolve, and
-/// rerun mutations are `Confirm`. Every operation is `ExternalEffect` because
-/// even an authenticated read is visible to the remote code host.
+/// checks, threads, job-log, convergence, stack, thread-inventory, and
+/// review-gate reads are `Auto`; comment, reply, resolve, and rerun mutations
+/// are `Confirm`. Every operation is `ExternalEffect` because even an
+/// authenticated read is visible to the remote code host.
 #[derive(Clone, Debug)]
 pub struct CodeHostTools<Credentials, Transport> {
     catalog: CompiledToolCatalog,
