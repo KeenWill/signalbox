@@ -27,8 +27,7 @@ the prepared operation was verified through PR #286
 (`agent/session-system-prompt`); the empty-thinking completion rule was verified
 through PR #305 (`agent/sonnet-streamed-tool-use`). Invariant tags cite
 [docs/invariants.md](../invariants.md). The context-summary projection and
-dedicated compaction-call evidence were verified against
-`agent/context-compaction-core`.
+dedicated compaction-call evidence were verified against `319dd05b`.
 
 ## Call records and lifecycle
 

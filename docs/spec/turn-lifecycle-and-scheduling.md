@@ -481,10 +481,14 @@ Reconstitution rejects any stored snapshot whose resolved membership disagrees
 with the complete entry set — one identifier can never resolve differently.
 Before validating any stored turn start, the complete scheduling scan
 reconstructs every dedicated compaction call, summary entry, source and result
-snapshot, exact summarized range, and predecessor link. A call must be terminal
-`Completed`; the result must be exactly source-plus-summary; and the predecessor
-chain must be single-rooted, linear, and prefix-preserving. An unreferenced
-call, summary, snapshot, or compaction fails closed.
+snapshot, exact summarized range, and predecessor link. Every compaction record
+requires its terminal `Completed` call and an exact source-plus-summary result;
+the predecessor chain must be single-rooted, linear, and prefix-preserving. A
+standalone `Completed` call or any standalone summary fails closed. A standalone
+`Prepared` or `InFlight` call remains recoverable and blocks ordinary
+activation; a terminal non-completed call remains historical recovery evidence
+without a summary or result. Unreferenced snapshots and compaction records fail
+closed.
 
 The exact historical start law remains closed. Its prefix is either the
 immediate predecessor's terminal snapshot (or the imported seed for the first
