@@ -827,15 +827,21 @@ impl GitHubCodeHostTransport {
         let inventory = self
             .thread_inventory_for(arguments.repository(), arguments.number(), None, credential)
             .await?;
-        let convergence = self
+        let initial_convergence = self
             .convergence_state_for(arguments.repository(), arguments.number(), credential)
             .await?;
         let stack = self
             .stack_state_for(arguments.repository(), arguments.number(), None, credential)
             .await?;
-        if initial_stack != stack {
-            return Err(CodeHostTransportFailure::InvalidResponse);
-        }
+        let convergence = self
+            .convergence_state_for(arguments.repository(), arguments.number(), credential)
+            .await?;
+        ensure_review_gate_snapshot_unchanged(
+            &initial_stack,
+            &stack,
+            &initial_convergence,
+            &convergence,
+        )?;
         Ok(CodeHostResult::ReviewGateCheck(
             ReviewGateCheckResult::compose(arguments.purpose(), &convergence, &stack, &inventory),
         ))
@@ -1212,6 +1218,18 @@ impl CodeHostTransport for GitHubCodeHostTransport {
             }
         }
     }
+}
+
+fn ensure_review_gate_snapshot_unchanged(
+    initial_stack: &StackStateResult,
+    current_stack: &StackStateResult,
+    initial_convergence: &ConvergenceStateResult,
+    current_convergence: &ConvergenceStateResult,
+) -> Result<(), CodeHostTransportFailure> {
+    if initial_stack != current_stack || initial_convergence != current_convergence {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    Ok(())
 }
 
 /// The fixed GitHub client or endpoint could not be constructed.
@@ -1801,11 +1819,65 @@ fn required_bool(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CodeHostRepository;
+    use crate::{
+        CodeHostRepository, ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus,
+    };
 
     fn repository() -> CodeHostRepository {
         CodeHostRepository::try_new(String::from("owner/repository"))
             .expect("fixture repository is admitted")
+    }
+
+    fn gate_stack_state() -> StackStateResult {
+        const BASE_REVISION: &str = "1111111111111111111111111111111111111111";
+        const HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
+        StackStateResult::try_new(StackStateFields {
+            number: 17,
+            base_ref: String::from("main"),
+            base_revision: String::from(BASE_REVISION),
+            head_ref: String::from("feature"),
+            head_revision: String::from(HEAD_REVISION),
+            default_ref: String::from("main"),
+            default_revision: String::from(BASE_REVISION),
+            base_commits_not_in_head: 0,
+            main_commits_not_in_base: 0,
+            children: Vec::new(),
+            children_truncated: false,
+            children_next_cursor: None,
+        })
+        .expect("fixture stack evidence is admitted")
+    }
+
+    fn gate_convergence_state(thread: Option<ReviewThreadIdentity>) -> ConvergenceStateResult {
+        let reviewer = ReviewerVerdictEvidence::try_new(ReviewerVerdictFields {
+            status: ReviewerVerdictStatus::Missing,
+            reviewed_revision: None,
+            reviewed_at: None,
+            starvation_after_verdict: false,
+            latest_starvation_at: None,
+            latest_review_request_at: None,
+            review_request_in_flight: false,
+            source_truncated: false,
+            comments_previous_cursor: None,
+            reviews_previous_cursor: None,
+        })
+        .expect("fixture reviewer evidence is admitted");
+        ConvergenceStateResult::try_new(ConvergenceStateFields {
+            head_revision: String::from("2222222222222222222222222222222222222222"),
+            mergeable_state: String::from("MERGEABLE"),
+            ci_rollup_state: Some(String::from("SUCCESS")),
+            checks: Vec::new(),
+            checks_truncated: false,
+            checks_next_cursor: None,
+            unresolved_threads: thread.clone().into_iter().collect(),
+            open_escalations: Vec::new(),
+            buried_escalations: Vec::new(),
+            undispositioned_threads: thread.into_iter().collect(),
+            threads_truncated: false,
+            threads_next_cursor: None,
+            reviewer,
+        })
+        .expect("fixture convergence evidence is admitted")
     }
 
     /// REST paths and pagination are derived only from checked typed segments.
@@ -2289,6 +2361,30 @@ mod tests {
                     children_truncated: false,
                     children_next_cursor: None,
                 },
+            ),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// A thread arriving during final stack revalidation invalidates the gate snapshot.
+    #[test]
+    fn review_gate_rejects_convergence_changed_during_final_stack_read() {
+        let stack = gate_stack_state();
+        let initial_convergence = gate_convergence_state(None);
+        let thread = ReviewThreadIdentity::try_new(
+            String::from("PRRT_gate"),
+            String::from("src/lib.rs"),
+            String::from("Finding title"),
+        )
+        .expect("fixture thread identity is admitted");
+        let current_convergence = gate_convergence_state(Some(thread));
+
+        assert_eq!(
+            ensure_review_gate_snapshot_unchanged(
+                &stack,
+                &stack,
+                &initial_convergence,
+                &current_convergence,
             ),
             Err(CodeHostTransportFailure::InvalidResponse)
         );

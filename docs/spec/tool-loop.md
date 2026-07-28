@@ -644,20 +644,20 @@ The declarations and compact result objects are:
   `next_cursor`.
 - `review_gate_check` accepts `repository`, `number`, and purpose
   `request_review_wave` or `declare_convergence`. It reads the same fresh typed
-  evidence as the three slog tools, then re-reads stack ancestry after inventory
-  and convergence. It rejects the composed read if the before-and-after stack
-  evidence differs and uses the final stack read for ancestry blockers, then
-  purely derives `ready`, the exact head, and stable blocker codes with affected
-  identities within the transport's 30-second aggregate deadline. Both purposes
-  block when the three evidence sources name different heads, a review request
-  is still in flight, evidence is incomplete, CI is not green, threads are
-  undispositioned or unresolved, escalations are buried, or parent,
-  default-chain, or immediate-child ancestry is unhealthy. Declaring convergence
-  additionally requires the exact mergeable posture and an actual current-head
-  reviewer verdict not followed by usage-limit starvation. Requesting a review
-  wave is blocked when a completed reviewer verdict already covers the current
-  head and no later usage-limit response requires a retry, because that quiet or
-  all-declined wave concludes the loop.
+  evidence as the three slog tools, then re-reads stack ancestry and convergence
+  after inventory. It rejects the composed read if either before-and-after
+  evidence pair differs and uses the final stack and convergence reads for
+  blockers, then purely derives `ready`, the exact head, and stable blocker
+  codes with affected identities within the transport's 30-second aggregate
+  deadline. Both purposes block when the three evidence sources name different
+  heads, a review request is still in flight, evidence is incomplete, CI is not
+  green, threads are undispositioned or unresolved, escalations are buried, or
+  parent, default-chain, or immediate-child ancestry is unhealthy. Declaring
+  convergence additionally requires the exact mergeable posture and an actual
+  current-head reviewer verdict not followed by usage-limit starvation.
+  Requesting a review wave is blocked when a completed reviewer verdict already
+  covers the current head and no later usage-limit response requires a retry,
+  because that quiet or all-declined wave concludes the loop.
 
 Shared typed admission rejects extra object members; repositories are at most
 256 bytes, paths 4 KiB, comment bodies and returned text fields 64 KiB, and
