@@ -173,20 +173,30 @@ in
   env.SIGNALBOX_SOCKET_PATH = daemonSocketPath;
 
   # Build from the workspace so a caller project's Cargo configuration is not
-  # discovered. The subshell returns to the caller's directory before exec, so
-  # client arguments containing relative paths retain their expected base.
+  # discovered. The build and resolution run inside a command substitution, an
+  # implicit subshell, so its `cd` never leaks: the exec below still runs from
+  # the caller's original directory, and client arguments containing relative
+  # paths keep their expected base. The executable path comes from Cargo's own
+  # build output rather than an assumed target/debug: a developer with
+  # `build.target` in their Cargo configuration, or `CARGO_BUILD_TARGET` in the
+  # environment, gets the binary under target/<triple>/debug instead, and a
+  # hard-coded target/debug path would then either fail outright or silently
+  # exec a stale binary left over from an earlier build. Resolution and the
+  # matching refusal for a target this host cannot run follow the same
+  # approach as the dev-instance daemon launcher below, factored into
+  # tooling/resolve-cargo-bin.sh so it has its own regression coverage
+  # (tooling/test_resolve_cargo_bin.py).
   scripts.signalbox = {
     description = "Run the Signalbox terminal client from the working tree.";
     exec = ''
-      (
+      executable="$(
         cd "$DEVENV_ROOT" || exit $?
-        unset CARGO_BUILD_TARGET
         env RUSTUP_TOOLCHAIN=${shellArg workspaceRustToolchain} \
-          cargo build -q --manifest-path "$DEVENV_ROOT/Cargo.toml" \
-            --target-dir "$DEVENV_ROOT/target" \
-            -p signalbox-client --bin signalbox
-      ) || exit $?
-      exec "$DEVENV_ROOT/target/debug/signalbox" "$@"
+          "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
+            "$DEVENV_ROOT/Cargo.toml" "$DEVENV_ROOT/target" \
+            signalbox-client signalbox
+      )" || exit $?
+      exec "$executable" "$@"
     '';
   };
 
