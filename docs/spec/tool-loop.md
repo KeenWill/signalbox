@@ -605,13 +605,14 @@ The declarations and compact result objects are:
   `@codex review` request by an owner, member, or collaborator has no later
   verdict or starvation response. A request tied with the latest response
   timestamp is treated as still pending because the code host does not expose a
-  reliable order within that timestamp. Its derived verdict is `converged`,
-  `converged_with_escalations`, `not_converged`, or `indeterminate`. A missing
-  or non-successful CI rollup, conflicting mergeability, any unresolved
-  non-escalation or undispositioned thread, reviewer starvation, or a
-  still-pending request prevents convergence; an additive unknown mergeability
-  state or any truncated evidence required for the verdict makes it
-  indeterminate.
+  reliable order within that timestamp. Typed construction rejects an open
+  escalation identity absent from the unresolved-thread evidence. Its derived
+  verdict is `converged`, `converged_with_escalations`, `not_converged`, or
+  `indeterminate`. A missing or non-successful CI rollup, conflicting
+  mergeability, any unresolved non-escalation or undispositioned thread,
+  reviewer starvation, or a still-pending request prevents convergence; an
+  additive unknown mergeability state or any truncated evidence required for the
+  verdict makes it indeterminate.
 - `change_request_stack_state` accepts `repository`, `number`, and an optional
   opaque GraphQL child-page `cursor`. It returns the current immediate-base,
   head, and default-branch refs and revisions; current-base commits absent from

@@ -312,6 +312,10 @@ impl ConvergenceStateResult {
             && fields.open_escalations.len() <= MAX_RESULT_ITEMS
             && fields.buried_escalations.len() <= MAX_RESULT_ITEMS
             && fields.undispositioned_threads.len() <= MAX_RESULT_ITEMS;
+        let escalation_relationships_valid = fields
+            .open_escalations
+            .iter()
+            .all(|escalation| fields.unresolved_threads.contains(escalation));
         let text_valid = valid_revision(&fields.head_revision)
             && valid_required_text(&fields.mergeable_state)
             && fields
@@ -328,7 +332,7 @@ impl ConvergenceStateResult {
                 .is_none_or(valid_cursor)
             && fields.checks_truncated == fields.checks_next_cursor.is_some()
             && fields.threads_truncated == fields.threads_next_cursor.is_some();
-        if !(lists_valid && text_valid && cursors_valid) {
+        if !(lists_valid && text_valid && cursors_valid && escalation_relationships_valid) {
             return None;
         }
         let incomplete =
@@ -811,6 +815,15 @@ mod tests {
             result.verdict(),
             ConvergenceVerdict::ConvergedWithEscalations
         );
+    }
+
+    /// Open escalation evidence must identify an unresolved thread exactly.
+    #[test]
+    fn open_escalation_absent_from_unresolved_is_rejected() {
+        let mut fields = complete_fields();
+        fields.open_escalations = vec![review_thread()];
+
+        assert!(ConvergenceStateResult::try_new(fields).is_none());
     }
 
     /// Independently bounded overlapping lists cannot exceed the aggregate
