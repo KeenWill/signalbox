@@ -9,8 +9,7 @@ use signalbox_domain::{
     CreateSessionReconstitutionInput, DirectModelSelection, DurableCommandId, ModelAlias,
     ModelSelectionRequest, PreparedCreateSession, ReconstitutedSessionCreation,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, TranscriptAncestry,
+    SessionCreationProvenance, TranscriptAncestry,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -24,7 +23,7 @@ use crate::mapping::{
 use crate::outbox;
 
 const COMMAND_KIND: &str = "create_session";
-const STORAGE_VERSION: i16 = 4;
+const STORAGE_VERSION: i16 = 3;
 const OWNER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
 const APPLIED: &str = "applied";
@@ -334,24 +333,12 @@ async fn insert_prepared(
     let stored_selection = encode_selection(defaults.defaults().model());
 
     sqlx::query(
-        "INSERT INTO session
-            (session_id, creation_cause, ancestry_kind,
-             template_name, template_content_digest)
-         VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO session (session_id, creation_cause, ancestry_kind)
+         VALUES ($1, $2, $3)",
     )
     .bind(session_id_to_uuid(session.id()))
     .bind(OWNER_INITIATED)
     .bind(NO_ANCESTRY)
-    .bind(
-        session
-            .template_provenance()
-            .map(|value| value.name().as_str()),
-    )
-    .bind(
-        session
-            .template_provenance()
-            .map(|value| value.content_digest().as_bytes().to_vec()),
-    )
     .execute(&mut *connection)
     .await?;
 
@@ -401,10 +388,9 @@ async fn insert_prepared(
             (command_id, command_kind, storage_version,
              creation_cause, ancestry_kind, initial_defaults_version,
              model_selection_kind, direct_model_selection_id, model_alias_id,
-             dangerous_tool_auto_approval, system_prompt,
-             template_name, template_content_digest,
-             result_kind, created_session_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+             dangerous_tool_auto_approval, system_prompt, result_kind,
+             created_session_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
@@ -425,16 +411,6 @@ async fn insert_prepared(
             .initial_configuration_defaults()
             .system_prompt()
             .map(signalbox_domain::SessionSystemPrompt::as_str),
-    )
-    .bind(
-        command
-            .template_provenance()
-            .map(|value| value.name().as_str()),
-    )
-    .bind(
-        command
-            .template_provenance()
-            .map(|value| value.content_digest().as_bytes().to_vec()),
     )
     .bind(APPLIED)
     .bind(session_id_to_uuid(prepared.applied_result().session()))
@@ -492,15 +468,11 @@ async fn load_from_connection(
             c.model_alias_id AS command_alias_id,
             c.dangerous_tool_auto_approval AS command_tool_auto_approval,
             c.system_prompt AS command_system_prompt,
-            c.template_name AS command_template_name,
-            c.template_content_digest AS command_template_digest,
             c.result_kind,
             c.created_session_id AS result_session_id,
             s.session_id AS stored_session_id,
             s.creation_cause AS stored_cause,
             s.ancestry_kind AS stored_ancestry,
-            s.template_name AS stored_template_name,
-            s.template_content_digest AS stored_template_digest,
             v.session_id AS defaults_session_id,
             v.version AS stored_defaults_version,
             v.model_selection_kind AS stored_model_kind,
@@ -556,22 +528,6 @@ fn decode_complete(
         typed_version,
         "command model selection",
     )?;
-    let command_template_provenance = decode_template_provenance(
-        row.try_get("command_template_name")?,
-        row.try_get("command_template_digest")?,
-        "command template provenance",
-    )?;
-    let command = match command_template_provenance {
-        Some(template_provenance) => signalbox_domain::CreateSession::new_from_template(
-            command_id,
-            command_provenance,
-            template_provenance,
-            command_defaults,
-        ),
-        None => {
-            signalbox_domain::CreateSession::new(command_id, command_provenance, command_defaults)
-        }
-    };
     require_spelling(&row, "result_kind", APPLIED)?;
     let result_session = session_id_from_uuid(required(&row, "result_session_id")?);
 
@@ -580,11 +536,6 @@ fn decode_complete(
     let stored_provenance = decode_provenance(
         required(&row, "stored_cause")?,
         required(&row, "stored_ancestry")?,
-    )?;
-    let stored_template_provenance = decode_template_provenance(
-        row.try_get("stored_template_name")?,
-        row.try_get("stored_template_digest")?,
-        "stored template provenance",
     )?;
     let defaults_session: Uuid = required(&row, "defaults_session_id")?;
     if defaults_session != stored_session_uuid {
@@ -601,42 +552,17 @@ fn decode_complete(
         "stored model selection",
     )?;
 
-    CreateSessionReconstitutionInput::new_with_template_provenance(
-        command,
+    CreateSessionReconstitutionInput::new(
+        signalbox_domain::CreateSession::new(command_id, command_provenance, command_defaults),
         result_session,
         stored_session,
         stored_provenance,
-        stored_template_provenance,
         session_id_from_uuid(defaults_session),
         stored_version,
         stored_defaults,
     )
     .reconstitute()
     .map_err(|error| CreateSessionCorruption::Domain(error.failure()).into())
-}
-
-fn decode_template_provenance(
-    name: Option<String>,
-    digest: Option<Vec<u8>>,
-    relationship: &'static str,
-) -> Result<Option<SessionTemplateProvenance>, CreateSessionRepositoryError> {
-    match (name, digest) {
-        (None, None) => Ok(None),
-        (Some(name), Some(digest)) => {
-            let name = SessionTemplateName::try_new(name)
-                .map_err(|_| CreateSessionCorruption::Inconsistent(relationship))?;
-            let digest: [u8; 32] = digest
-                .try_into()
-                .map_err(|_| CreateSessionCorruption::Inconsistent(relationship))?;
-            Ok(Some(SessionTemplateProvenance::new(
-                name,
-                SessionTemplateContentDigest::from_bytes(digest),
-            )))
-        }
-        (None, Some(_)) | (Some(_), None) => {
-            Err(CreateSessionCorruption::Inconsistent(relationship).into())
-        }
-    }
 }
 
 fn required<T>(row: &PgRow, field: &'static str) -> Result<T, CreateSessionRepositoryError>
@@ -669,7 +595,7 @@ fn require_supported_version(
     field: &'static str,
 ) -> Result<i16, CreateSessionRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if matches!(actual, 1..=4) {
+    if matches!(actual, 1..=3) {
         Ok(actual)
     } else {
         Err(CreateSessionCorruption::Unsupported {

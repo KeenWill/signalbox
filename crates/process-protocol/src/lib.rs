@@ -64,9 +64,6 @@ pub const INPUT_DELIVERY_PROTOCOL_VERSION: u64 = 13;
 /// inspection stack.
 pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
 
-/// The daemon-resolved session-template protocol version.
-pub const SESSION_TEMPLATE_PROTOCOL_VERSION: u64 = 18;
-
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProtocolVersion {
@@ -98,8 +95,6 @@ pub enum ProtocolVersion {
     Thirteen,
     /// Unified conversation-listing vocabulary.
     Sixteen,
-    /// Daemon-resolved session-template creation and listing vocabulary.
-    Eighteen,
 }
 
 impl ProtocolVersion {
@@ -120,7 +115,6 @@ impl ProtocolVersion {
             Self::Twelve => PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
             Self::Thirteen => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::Sixteen => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
-            Self::Eighteen => SESSION_TEMPLATE_PROTOCOL_VERSION,
         }
     }
 
@@ -140,7 +134,6 @@ impl ProtocolVersion {
             PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION => Some(Self::Twelve),
             INPUT_DELIVERY_PROTOCOL_VERSION => Some(Self::Thirteen),
             UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION => Some(Self::Sixteen),
-            SESSION_TEMPLATE_PROTOCOL_VERSION => Some(Self::Eighteen),
             _ => None,
         }
     }
@@ -1515,22 +1508,6 @@ fn validate_imported_display_title(title: &str) -> Result<(), FrameValidationErr
     Ok(())
 }
 
-fn validate_session_template_name(value: &str) -> Result<(), FrameValidationError> {
-    let first_is_admitted = value
-        .as_bytes()
-        .first()
-        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
-    if value.len() > 128
-        || !first_is_admitted
-        || value.bytes().any(|byte| {
-            !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && !b"._-".contains(&byte)
-        })
-    {
-        return Err(FrameValidationError::TemplateShape);
-    }
-    Ok(())
-}
-
 /// Closed versioned request family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -1546,15 +1523,6 @@ pub enum ClientRequest {
         #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
         system_prompt: SystemPromptMember,
     },
-    /// Create an owner-initiated session from one daemon-held template.
-    CreateSessionFromTemplate {
-        /// Durable mutation identity.
-        command_id: CommandId,
-        /// Validated static template name.
-        template_name: String,
-    },
-    /// List available static templates by name and version.
-    ListTemplates {},
     /// List current sessions.
     ListSessions {},
     /// Submit owner input with an admitted delivery treatment.
@@ -1846,9 +1814,6 @@ impl ClientRequest {
             | Self::ReadReviewFinding { .. }
             | Self::ListReviewFindings { .. } => REVIEW_WORKFLOW_PROTOCOL_VERSION,
             Self::StopTurn { .. } | Self::DecideToolRequest { .. } => TURN_CONTROL_PROTOCOL_VERSION,
-            Self::CreateSessionFromTemplate { .. } | Self::ListTemplates {} => {
-                SESSION_TEMPLATE_PROTOCOL_VERSION
-            }
             Self::ListConversations { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
             Self::ReadSessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::CreateSessionFromImportedFrontier { .. } => {
@@ -1930,9 +1895,6 @@ impl ClientRequest {
             if !(1..=100).contains(&page_size.value()) {
                 return Err(FrameValidationError::ConversationListShape);
             }
-        }
-        if let Self::CreateSessionFromTemplate { template_name, .. } = self {
-            validate_session_template_name(template_name)?;
         }
         Ok(())
     }
@@ -3057,20 +3019,6 @@ pub enum ServerMessage {
         /// Number of preceding summaries.
         session_count: CanonicalU64,
     },
-    /// Begins the available-template sequence.
-    TemplatesStart {},
-    /// One available static template summary.
-    TemplateSummary {
-        /// Validated template name.
-        name: String,
-        /// Positive owner-assigned bundle version.
-        version: CanonicalU64,
-    },
-    /// Completes the available-template sequence.
-    TemplatesEnd {
-        /// Number of preceding summaries.
-        template_count: CanonicalU64,
-    },
     /// Begins one bounded metadata-summary page.
     SessionMetadataPageStart {},
     /// One current session metadata summary.
@@ -3396,9 +3344,6 @@ impl ServerMessage {
             | Self::ReviewFindingItem { .. }
             | Self::ReviewFindingsEnd { .. } => REVIEW_WORKFLOW_PROTOCOL_VERSION,
             Self::ToolRequestDecided { .. } => TURN_CONTROL_PROTOCOL_VERSION,
-            Self::TemplatesStart {} | Self::TemplateSummary { .. } | Self::TemplatesEnd { .. } => {
-                SESSION_TEMPLATE_PROTOCOL_VERSION
-            }
             Self::ConversationPageStart {}
             | Self::ConversationSummary { .. }
             | Self::ConversationPageEnd { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
@@ -3456,12 +3401,6 @@ impl ServerMessage {
                 }
             }
             Self::ConversationSummary { conversation } => conversation.validate()?,
-            Self::TemplateSummary { name, version } => {
-                validate_session_template_name(name)?;
-                if version.value() == 0 {
-                    return Err(FrameValidationError::TemplateShape);
-                }
-            }
             Self::ConversationPageEnd {
                 conversation_count,
                 next_after,
@@ -3634,8 +3573,6 @@ pub enum FrameValidationError {
     ImportedFrontierShape,
     /// A submit-input delivery carried forbidden or missing correlated fields.
     InputDeliveryShape,
-    /// A template name or positive version carried an invalid shape.
-    TemplateShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -3656,7 +3593,6 @@ impl fmt::Display for FrameValidationError {
             Self::SystemPromptShape => "version-nine frame omits its required system-prompt member",
             Self::ImportedFrontierShape => "imported frontier position is not positive",
             Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
-            Self::TemplateShape => "session-template frame shape is inconsistent",
         })
     }
 }
@@ -3710,7 +3646,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1 through 13, 16, and 18",
+                "process-protocol version is unsupported; supported versions are 1 through 13, and 16",
             ),
         }
     }
@@ -3921,20 +3857,7 @@ fn probe_header(
     }
     if !matches!(
         version_spelling,
-        "1" | "2"
-            | "3"
-            | "4"
-            | "5"
-            | "6"
-            | "7"
-            | "8"
-            | "9"
-            | "10"
-            | "11"
-            | "12"
-            | "13"
-            | "16"
-            | "18"
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" | "12" | "13" | "16"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -4052,7 +3975,6 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "12" => Some(ProtocolVersion::Twelve),
         "13" => Some(ProtocolVersion::Thirteen),
         "16" => Some(ProtocolVersion::Sixteen),
-        "18" => Some(ProtocolVersion::Eighteen),
         _ => None,
     }
 }
@@ -4106,10 +4028,9 @@ mod tests {
         MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
         MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION,
         ProtocolVersion, RejectionDetail, RequestId, ReviewTargetSubject,
-        SESSION_METADATA_PROTOCOL_VERSION, SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
-        SESSION_TEMPLATE_PROTOCOL_VERSION, ServerFrame, ServerMessage, SessionEvent,
-        SessionMetadata, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TurnState,
+        SESSION_METADATA_PROTOCOL_VERSION, SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, ServerFrame,
+        ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
         UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION, decode_client_line, decode_server_line,
         encode_client_line, encode_server_line,
     };
@@ -4193,7 +4114,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1 through 13, 16, and 18")
+                .contains("supported versions are 1 through 13, and 16")
         );
     }
 
@@ -5957,103 +5878,11 @@ mod tests {
         assert!(SystemPromptText::try_new("a\u{0}b".to_owned()).is_err());
     }
 
-    /// INV-033 / INV-047: version eighteen gives template creation and listing
-    /// exact closed request and response shapes.
+    /// INV-033: the admitted version set is closed exactly at one through
+    /// thirteen plus sixteen; fourteen and fifteen remain reserved by concurrent
+    /// protocol stacks and are not admitted here.
     #[test]
-    fn inv033_inv047_version_eighteen_template_frames_have_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let create = ClientFrame::try_new_for_version(
-            ProtocolVersion::Eighteen,
-            request(1)?,
-            ClientRequest::CreateSessionFromTemplate {
-                command_id: command(2)?,
-                template_name: "reviewer".to_owned(),
-            },
-        )?;
-        let encoded_create = encode_client_line(&create)?;
-        assert_eq!(
-            String::from_utf8(encoded_create.clone())?,
-            r#"{"version":18,"request_id":"1","request":{"type":"create_session_from_template","command_id":"00000000-0000-0000-0000-000000000002","template_name":"reviewer"}}
-"#
-        );
-        assert_eq!(decode_client_line(&encoded_create)?, create);
-
-        let list = ClientFrame::try_new_for_version(
-            ProtocolVersion::Eighteen,
-            request(2)?,
-            ClientRequest::ListTemplates {},
-        )?;
-        let encoded_list = encode_client_line(&list)?;
-        assert_eq!(
-            String::from_utf8(encoded_list.clone())?,
-            r#"{"version":18,"request_id":"2","request":{"type":"list_templates"}}
-"#
-        );
-        assert_eq!(decode_client_line(&encoded_list)?, list);
-
-        assert_server_message_round_trip(
-            request(3)?,
-            ServerMessage::TemplatesStart {},
-            r#"{"type":"templates_start"}"#,
-        )?;
-        assert_server_message_round_trip(
-            request(3)?,
-            ServerMessage::TemplateSummary {
-                name: "reviewer".to_owned(),
-                version: CanonicalU64::new(7),
-            },
-            r#"{"type":"template_summary","name":"reviewer","version":"7"}"#,
-        )?;
-        assert_server_message_round_trip(
-            request(3)?,
-            ServerMessage::TemplatesEnd {
-                template_count: CanonicalU64::new(1),
-            },
-            r#"{"type":"templates_end","template_count":"1"}"#,
-        )?;
-        Ok(())
-    }
-
-    /// INV-033: template vocabulary is rejected below eighteen and invalid
-    /// names or versions cannot enter admitted frames.
-    #[test]
-    fn inv033_template_frames_require_version_eighteen_and_valid_values()
-    -> Result<(), Box<dyn std::error::Error>> {
-        assert_client_malformed(
-            r#"{"version":16,"request_id":"1","request":{"type":"list_templates"}}"#,
-        );
-        assert_client_malformed(
-            r#"{"version":18,"request_id":"1","request":{"type":"create_session_from_template","command_id":"00000000-0000-0000-0000-000000000002","template_name":"Reviewer"}}"#,
-        );
-        assert_eq!(
-            ServerFrame::try_new_for_version(
-                ProtocolVersion::Sixteen,
-                request(1)?,
-                ServerMessage::TemplatesStart {},
-            )
-            .expect_err("version sixteen must reject template messages"),
-            FrameValidationError::MessageRequiresNewerVersion
-        );
-        assert_eq!(
-            ServerFrame::try_new_for_version(
-                ProtocolVersion::Eighteen,
-                request(1)?,
-                ServerMessage::TemplateSummary {
-                    name: "reviewer".to_owned(),
-                    version: CanonicalU64::new(0),
-                },
-            )
-            .expect_err("zero template version is rejected"),
-            FrameValidationError::TemplateShape
-        );
-        Ok(())
-    }
-
-    /// INV-033: the admitted set is one through thirteen, sixteen, and eighteen;
-    /// fourteen and fifteen remain reserved by earlier stacks and seventeen by
-    /// concurrent compaction.
-    #[test]
-    fn inv033_version_eighteen_completes_the_admitted_set() {
+    fn inv033_versions_thirteen_and_sixteen_complete_the_admitted_set() {
         assert_eq!(
             ProtocolVersion::Nine.as_u64(),
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
@@ -6061,10 +5890,6 @@ mod tests {
         assert_eq!(
             ProtocolVersion::Sixteen.as_u64(),
             UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION
-        );
-        assert_eq!(
-            ProtocolVersion::Eighteen.as_u64(),
-            SESSION_TEMPLATE_PROTOCOL_VERSION
         );
         assert_eq!(ProtocolVersion::from_u64(8), Some(ProtocolVersion::Eight));
         assert_eq!(ProtocolVersion::from_u64(9), Some(ProtocolVersion::Nine));
@@ -6082,10 +5907,6 @@ mod tests {
             Some(ProtocolVersion::Sixteen)
         );
         assert_eq!(ProtocolVersion::from_u64(17), None);
-        assert_eq!(
-            ProtocolVersion::from_u64(18),
-            Some(ProtocolVersion::Eighteen)
-        );
     }
 
     #[test]

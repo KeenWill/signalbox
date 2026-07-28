@@ -49,15 +49,14 @@ use signalbox_domain::{
     ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult, ResolvedProviderTarget,
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
-    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, StoppedToolResponsePartIdentity,
-    StoppedToolRoundModelCallIdentities, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
-    ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId,
-    ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal, ToolEffectClass,
-    ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolResponsePartIdentity,
-    ToolResultContent, ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse,
-    TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
+    SessionSystemPrompt, StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities,
+    SubmitInput, SubmitInputAppliedResult, SubmitInputReconstitutionFailure,
+    SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure,
+    ToolCallProposal, ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName,
+    ToolRequestId, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
+    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
+    TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -265,16 +264,6 @@ struct ModelCallPinFacts {
     direct_model_selection_id: Uuid,
     resolved_provider_model_identity_id: Uuid,
     credential_reference: String,
-}
-
-#[derive(Debug, PartialEq, sqlx::FromRow)]
-struct TemplateCreationFacts {
-    session_template_name: String,
-    session_template_content_digest: Vec<u8>,
-    command_template_name: String,
-    command_template_content_digest: Vec<u8>,
-    registry_storage_version: i16,
-    command_storage_version: i16,
 }
 
 #[track_caller]
@@ -8803,108 +8792,6 @@ async fn s01_inv002_inv008_inv012_application_session_services_use_postgres_adap
         CreateSessionError::Transaction(CreateSessionRepositoryError::Database(_))
     ));
 
-    drop(container);
-    Ok(())
-}
-
-/// INV-047: template creation durably copies the original bundle and its
-/// provenance; a same-command replay after a catalog edit returns that winner.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn inv047_template_creation_persists_copy_and_name_keyed_replay() -> Result<(), Box<dyn Error>>
-{
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0x1601));
-    let winner = SessionId::from_uuid(Uuid::from_u128(0x1701));
-    let replay_candidate = SessionId::from_uuid(Uuid::from_u128(0x1702));
-    let name = SessionTemplateName::try_new("reviewer".to_owned())?;
-    let original_provenance = SessionTemplateProvenance::new(
-        name.clone(),
-        SessionTemplateContentDigest::from_bytes([0x21; 32]),
-    );
-    let edited_provenance = SessionTemplateProvenance::new(
-        name.clone(),
-        SessionTemplateContentDigest::from_bytes([0x22; 32]),
-    );
-    let original_defaults = SessionConfigurationDefaults::complete(
-        direct(0x1801),
-        signalbox_domain::DangerousToolAutoApproval::ApproveAll,
-        Some(SessionSystemPrompt::try_new(
-            "original reviewer prompt".to_owned(),
-        )?),
-    );
-    let edited_defaults = SessionConfigurationDefaults::complete(
-        alias(0x1802),
-        signalbox_domain::DangerousToolAutoApproval::Disabled,
-        Some(SessionSystemPrompt::try_new(
-            "edited reviewer prompt".to_owned(),
-        )?),
-    );
-    let original_request = CreateSessionRequest::try_new_from_template(
-        command_id,
-        original_provenance.clone(),
-        original_defaults.clone(),
-    )?;
-    let replay_after_edit = CreateSessionRequest::try_new_from_template(
-        command_id,
-        edited_provenance,
-        edited_defaults,
-    )?;
-    let mut service = CreateSessionService::new(
-        FixedSessionIds::new([winner, replay_candidate]),
-        CreateSessionRepository::new(pool.clone()),
-    );
-
-    let first = service.execute(original_request).await?;
-    let replay = service.execute(replay_after_edit).await?;
-
-    assert_eq!(first, replay);
-    let CreateSessionOutcome::Applied(replay_receipt) = replay else {
-        panic!("same-name replay must return the recorded receipt");
-    };
-    assert_eq!(replay_receipt.session(), winner);
-    assert_ne!(replay_receipt.session(), replay_candidate);
-
-    let stored: TemplateCreationFacts = sqlx::query_as(
-        "SELECT s.template_name AS session_template_name,
-                s.template_content_digest AS session_template_content_digest,
-                c.template_name AS command_template_name,
-                c.template_content_digest AS command_template_content_digest,
-                d.storage_version AS registry_storage_version,
-                c.storage_version AS command_storage_version
-         FROM session AS s
-         JOIN create_session_command AS c
-           ON c.created_session_id = s.session_id
-         JOIN durable_command AS d USING (command_id)
-         WHERE s.session_id = $1",
-    )
-    .bind(winner.into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(stored.session_template_name, name.as_str());
-    assert_eq!(
-        stored.session_template_content_digest,
-        original_provenance.content_digest().as_bytes()
-    );
-    assert_eq!(stored.command_template_name, name.as_str());
-    assert_eq!(
-        stored.command_template_content_digest,
-        original_provenance.content_digest().as_bytes()
-    );
-    assert_eq!(stored.registry_storage_version, 4);
-    assert_eq!(stored.command_storage_version, 4);
-
-    let loaded = LoadSessionService::new(SessionRepository::new(pool.clone()))
-        .execute(winner)
-        .await?
-        .expect("template-created session remains loadable");
-    assert_eq!(loaded.template_provenance(), Some(&original_provenance));
-    assert_eq!(
-        loaded.current_configuration_defaults().defaults(),
-        &original_defaults
-    );
-
-    pool.close().await;
     drop(container);
     Ok(())
 }

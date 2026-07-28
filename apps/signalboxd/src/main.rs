@@ -37,8 +37,7 @@ use signalboxd::{
     ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CODE_HOST_CREDENTIAL_REFERENCE, DaemonTools,
     FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
     GitHubCodeHostTransport, HubModelConfiguration, LocalProcessListener,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
-    SessionTemplateConfiguration, SystemCurrentTimeClock,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, SystemCurrentTimeClock,
 };
 use tokio::{
     pin, select,
@@ -49,7 +48,6 @@ use tokio::{
 
 const GRACEFUL_SHUTDOWN_WINDOW: Duration = Duration::from_secs(30);
 const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
-const TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_TEMPLATE_CONFIG_FILE";
 const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
 const GITHUB_TOKEN_FILE_ENVIRONMENT: &str = "GITHUB_TOKEN_FILE";
 const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
@@ -103,7 +101,6 @@ impl HubRuntimeError {
 struct HubConfiguration {
     database_url: String,
     model_configuration_file: PathBuf,
-    template_configuration_file: PathBuf,
     anthropic_api_key_file: PathBuf,
     github_token_file: PathBuf,
     process_socket_path: PathBuf,
@@ -114,7 +111,6 @@ impl HubConfiguration {
         Self::from_values(
             env::var_os("DATABASE_URL"),
             env::var_os(MODEL_CONFIGURATION_FILE_ENVIRONMENT),
-            env::var_os(TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT),
             env::var_os(ANTHROPIC_API_KEY_FILE_ENVIRONMENT),
             env::var_os(GITHUB_TOKEN_FILE_ENVIRONMENT),
             env::var_os(PROCESS_SOCKET_PATH_ENVIRONMENT),
@@ -124,7 +120,6 @@ impl HubConfiguration {
     fn from_values(
         database_url: Option<OsString>,
         model_configuration_file: Option<OsString>,
-        template_configuration_file: Option<OsString>,
         anthropic_api_key_file: Option<OsString>,
         github_token_file: Option<OsString>,
         process_socket_path: Option<OsString>,
@@ -137,7 +132,6 @@ impl HubConfiguration {
             return Err(HubRuntimeError::infrastructure(RuntimePhase::Configuration));
         }
         let model_configuration_file = required_path(model_configuration_file)?;
-        let template_configuration_file = required_path(template_configuration_file)?;
         let anthropic_api_key_file = required_path(anthropic_api_key_file)?;
         let github_token_file = required_path(github_token_file)?;
         let process_socket_path = required_path(process_socket_path)?;
@@ -145,7 +139,6 @@ impl HubConfiguration {
         Ok(Self {
             database_url,
             model_configuration_file,
-            template_configuration_file,
             anthropic_api_key_file,
             github_token_file,
             process_socket_path,
@@ -158,10 +151,6 @@ impl HubConfiguration {
 
     fn model_configuration_file(&self) -> &Path {
         &self.model_configuration_file
-    }
-
-    fn template_configuration_file(&self) -> &Path {
-        &self.template_configuration_file
     }
 
     fn anthropic_api_key_file(&self) -> PathBuf {
@@ -365,12 +354,6 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let configuration = HubConfiguration::from_environment()?;
     let model_configuration = HubModelConfiguration::read(configuration.model_configuration_file())
         .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
-    let template_configuration = SessionTemplateConfiguration::read(
-        configuration.template_configuration_file(),
-        || env::var_os("HOME").map(PathBuf::from),
-        &model_configuration,
-    )
-    .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
     let credential_access = FileCredentialAccess::new(
         configuration.anthropic_api_key_file(),
         CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
@@ -485,13 +468,12 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
-    let process_runtime = ProcessRuntime::new_with_templates(
+    let process_runtime = ProcessRuntime::new(
         listener,
         scheduler_pool.clone(),
         eligibility_nudge,
         tool_dispatch_gate.clone(),
         model_configuration,
-        template_configuration,
     );
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
@@ -787,7 +769,6 @@ mod tests {
             HubConfiguration::from_values(
                 None,
                 Some(OsString::from("models.toml")),
-                Some(OsString::from("templates.toml")),
                 Some(OsString::from("key")),
                 Some(OsString::from("github-token")),
                 Some(OsString::from("/tmp/signalbox.sock")),
@@ -799,7 +780,6 @@ mod tests {
             HubConfiguration::from_values(
                 Some(OsString::from("postgres://secret")),
                 Some(OsString::from("")),
-                Some(OsString::from("templates.toml")),
                 Some(OsString::from("key")),
                 Some(OsString::from("github-token")),
                 Some(OsString::from("/tmp/signalbox.sock")),
@@ -811,19 +791,6 @@ mod tests {
             HubConfiguration::from_values(
                 Some(OsString::from("postgres://secret")),
                 Some(OsString::from("models.toml")),
-                None,
-                Some(OsString::from("key")),
-                Some(OsString::from("github-token")),
-                Some(OsString::from("/tmp/signalbox.sock")),
-            )
-            .err(),
-            Some(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
-        );
-        assert_eq!(
-            HubConfiguration::from_values(
-                Some(OsString::from("postgres://secret")),
-                Some(OsString::from("models.toml")),
-                Some(OsString::from("templates.toml")),
                 Some(OsString::from("key")),
                 None,
                 Some(OsString::from("/tmp/signalbox.sock")),
@@ -835,7 +802,6 @@ mod tests {
             HubConfiguration::from_values(
                 Some(OsString::from("postgres://secret")),
                 Some(OsString::from("models.toml")),
-                Some(OsString::from("templates.toml")),
                 Some(OsString::from("key")),
                 Some(OsString::from("github-token")),
                 None,
@@ -847,7 +813,6 @@ mod tests {
         let configuration = HubConfiguration::from_values(
             Some(OsString::from("postgres://secret")),
             Some(OsString::from("models.toml")),
-            Some(OsString::from("templates.toml")),
             Some(OsString::from("key")),
             Some(OsString::from("github-token")),
             Some(OsString::from("/tmp/signalbox.sock")),
@@ -857,10 +822,6 @@ mod tests {
         assert_eq!(
             configuration.model_configuration_file(),
             std::path::Path::new("models.toml")
-        );
-        assert_eq!(
-            configuration.template_configuration_file(),
-            std::path::Path::new("templates.toml")
         );
         assert_eq!(
             configuration.anthropic_api_key_file(),
