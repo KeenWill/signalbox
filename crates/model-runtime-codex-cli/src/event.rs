@@ -190,29 +190,22 @@ impl<C: Clone> EventDecoder<C> {
                     ItemDetails::Other => {
                         // An unsupported item is dropped from the output, but
                         // any credential-bearing text it carries still marks
-                        // following output as a secret. Fail closed by feeding
-                        // its string-valued fields into the match-only
-                        // lookbehind, exactly as the reasoning and error
-                        // branches do for the shapes the typed variants model.
-                        // Only content-bearing fields — never the `id`/`type`
-                        // metadata, which are not credential text and whose
-                        // bytes could otherwise break a marker the content
-                        // carries. The adapter has no ordering semantics for an
-                        // unmodeled item's fields, so a benign field must not
-                        // erase a marker another field establishes: benign
-                        // fields are fed first and marker-bearing fields last,
-                        // and two independent markers we cannot chain jointly
-                        // fail closed.
-                        let contents: Vec<&str> = value
-                            .get("item")
-                            .and_then(Value::as_object)
-                            .into_iter()
-                            .flat_map(|item| {
-                                ["text", "message"]
-                                    .into_iter()
-                                    .filter_map(|field| item.get(field).and_then(Value::as_str))
-                            })
-                            .collect();
+                        // following output as a secret. The item is unmodeled,
+                        // so provider text can live in any field (`text`,
+                        // `message`, `aggregated_output`, `result`, future
+                        // additive fields) or nested within one; collect *every*
+                        // string leaf — recursively — except the `id`/`type`
+                        // metadata keys, and feed them into the match-only
+                        // lookbehind. The adapter has no ordering semantics for
+                        // an unmodeled item's fields, so a benign field must not
+                        // erase a marker another establishes: benign fields are
+                        // fed first and marker-bearing fields last, and two
+                        // independent markers we cannot chain jointly fail
+                        // closed.
+                        let mut contents = Vec::new();
+                        if let Some(item) = value.get("item") {
+                            collect_credential_content(item, true, &mut contents);
+                        }
                         let markers = contents
                             .iter()
                             .filter(|content| !trailing_credential_context(content).is_empty())
@@ -634,6 +627,31 @@ fn validate_item_identity(item: &ItemIdentity) -> Result<(), DecodeFailure> {
         ));
     }
     Ok(())
+}
+
+/// Collects every string leaf carried by an unmodeled item's JSON in document
+/// order, so credential text in any field — present or future, top-level or
+/// nested — reaches the redaction lookbehind. The `id`/`type` metadata keys of
+/// the item object itself are skipped: they name the item, not its content, and
+/// their bytes could otherwise break a marker the content carries.
+fn collect_credential_content<'a>(value: &'a Value, is_item_root: bool, out: &mut Vec<&'a str>) {
+    match value {
+        Value::String(text) => out.push(text),
+        Value::Array(items) => {
+            for item in items {
+                collect_credential_content(item, false, out);
+            }
+        }
+        Value::Object(fields) => {
+            for (key, field) in fields {
+                if is_item_root && matches!(key.as_str(), "id" | "type") {
+                    continue;
+                }
+                collect_credential_content(field, false, out);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 /// Requires a string-carried tool-argument payload to hold one JSON object

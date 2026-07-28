@@ -24,12 +24,17 @@ pub(crate) fn classify_error(message: &str) -> ProviderErrorKind {
                 "refresh token rejected",
                 "invalid refresh token",
                 "credential rejected",
+                "authentication_error",
             ],
         ) =>
         {
             ProviderErrorKind::CredentialRejected
         }
-        _ if contains_any(&normalized, &["permission denied", "forbidden"]) => {
+        _ if contains_any(
+            &normalized,
+            &["permission denied", "forbidden", "permission_denied"],
+        ) =>
+        {
             ProviderErrorKind::PermissionDenied
         }
         _ if contains_any(
@@ -86,7 +91,11 @@ pub(crate) fn classify_error(message: &str) -> ProviderErrorKind {
         {
             ProviderErrorKind::ProviderInternal
         }
-        _ if contains_any(&normalized, &["invalid request", "bad request"]) => {
+        _ if contains_any(
+            &normalized,
+            &["invalid request", "bad request", "invalid_request_error"],
+        ) =>
+        {
             ProviderErrorKind::InvalidRequest
         }
         _ => ProviderErrorKind::Unrecognized,
@@ -148,6 +157,25 @@ mod tests {
         assert_eq!(
             classify_error("some future failure"),
             ProviderErrorKind::Unrecognized
+        );
+    }
+
+    /// A CLI failure rendered solely with the native underscore-form token —
+    /// no `400 Bad Request` prose wrapper — keeps its typed kind rather than
+    /// degrading to `Unrecognized`, preserving the shared failure taxonomy.
+    #[test]
+    fn underscore_form_native_tokens_keep_their_typed_kind() {
+        assert_eq!(
+            classify_error("invalid_request_error"),
+            ProviderErrorKind::InvalidRequest
+        );
+        assert_eq!(
+            classify_error("authentication_error"),
+            ProviderErrorKind::CredentialRejected
+        );
+        assert_eq!(
+            classify_error("permission_denied"),
+            ProviderErrorKind::PermissionDenied
         );
     }
 
