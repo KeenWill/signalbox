@@ -612,6 +612,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "duplicate_unknown_event_member" => {
+            // Repeated members are ambiguous provider input even on an
+            // otherwise additively tolerated unknown event. The adapter must
+            // reject the event before serde's last-value-wins projection can
+            // discard either occurrence.
+            emit(r#"{"type":"future","note":"first","note":"second"}"#);
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+        }
         "textless_refusal" => {
             envelope(r#"{"outcome":"refused","text":"","tool_calls":[]}"#);
             completed();

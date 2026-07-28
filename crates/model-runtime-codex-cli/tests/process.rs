@@ -19,6 +19,7 @@ use signalbox_model_runtime::{
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
+    DISABLED_CODEX_CLI_CAPABILITY_FEATURES,
 };
 
 #[path = "support/fixtures.rs"]
@@ -88,12 +89,24 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
     assert!(result.argv.contains("exec\n--json\n--ephemeral"));
     assert!(result.argv.contains("--ignore-user-config"));
     assert!(result.argv.contains("--ignore-rules"));
-    assert!(result.argv.contains("--disable\nshell_tool"));
-    assert!(result.argv.contains("--disable\nunified_exec"));
-    assert!(result.argv.contains("--disable\nskill_search"));
+    assert!(result.argv.contains(&disabled_capability_argv()));
+    assert!(result.argv.contains("--config\nagents.enabled=false"));
+    assert!(result.argv.contains("--config\nmcp_servers={}"));
+    assert!(result.argv.contains("--config\nweb_search=\"disabled\""));
     assert!(result.argv.contains("--config\nproject_doc_max_bytes=0"));
     assert!(result.argv.contains(RESOLVED_TARGET));
     assert!(result.prompt.contains(scenario));
+}
+
+/// Exact ordered argv fragment generated from the audited production fixture,
+/// so the process regression proves every classified capability reaches the
+/// spawned CLI as a hard disable without re-encoding the list in the test.
+fn disabled_capability_argv() -> String {
+    DISABLED_CODEX_CLI_CAPABILITY_FEATURES
+        .iter()
+        .map(|feature| format!("--disable\n{feature}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[tokio::test]
@@ -419,6 +432,27 @@ async fn streamed_empty_completion_with_held_credential_is_unintelligible() {
 
     let cause = response_unintelligible(&boundary_loss(&result.evidence).cause);
     assert!(cause.contains("no completion material"));
+    assert_eq!(
+        boundary_loss(&result.evidence).finish_reported,
+        Some(signalbox_model_runtime::FinishReason::EndTurn)
+    );
+}
+
+/// Repeated members are ambiguous stream input, never additive evolution: the
+/// adapter fails closed before a last-value-wins JSON projection can choose
+/// which occurrence becomes evidence.
+#[tokio::test]
+async fn duplicate_event_members_are_stream_protocol_violations() {
+    let result = execute_scenario(
+        "duplicate_unknown_event_member",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let detail = stream_protocol_violation(&boundary_loss(&result.evidence).cause);
+    assert!(detail.contains("duplicate"));
 }
 
 /// INV-035: a marker-bearing object field that sorts before a benign sibling
@@ -3829,6 +3863,13 @@ fn transport_failed(cause: &LossCause) -> &signalbox_model_runtime::TransportFac
 fn response_unintelligible(cause: &LossCause) -> &str {
     let LossCause::ResponseUnintelligible { detail } = cause else {
         panic!("expected unintelligible-response loss, got {cause:?}");
+    };
+    detail
+}
+
+fn stream_protocol_violation(cause: &LossCause) -> &str {
+    let LossCause::StreamProtocolViolation { detail } = cause else {
+        panic!("expected stream-protocol violation, got {cause:?}");
     };
     detail
 }

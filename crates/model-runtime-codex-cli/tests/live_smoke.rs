@@ -39,7 +39,8 @@ use signalbox_model_runtime::{
     TerminalEvidence, TokenUsage,
 };
 use signalbox_model_runtime_codex_cli::{
-    CodexCliConfig, CodexCliPreparedRequest, CodexCliRuntime, SUPPORTED_CODEX_CLI_VERSION,
+    CodexCliConfig, CodexCliPreparedRequest, CodexCliRuntime,
+    DISABLED_CODEX_CLI_CAPABILITY_FEATURES, SUPPORTED_CODEX_CLI_VERSION,
 };
 
 /// Overrides the executable under test. The default resolves through `PATH`;
@@ -54,6 +55,171 @@ const MODEL_VARIABLE: &str = "SIGNALBOX_CODEX_SMOKE_MODEL";
 
 const DEFAULT_EXECUTABLE: &str = "codex";
 const DEFAULT_MODEL: &str = "gpt-5.1-codex-mini";
+const CODEX_SMOKE_WORKFLOW: &str = include_str!("../../../.github/workflows/codex-smoke.yml");
+const LOGIN_TIMEOUT_INVOCATION: &str =
+    "env -u CODEX_SMOKE_API_KEY timeout --signal=TERM --kill-after=5s 30s";
+
+/// Exact built-in feature inventory reported by the pinned CLI. Stage and
+/// default are part of the snapshot: a newly enabled feature is classification
+/// drift even when its name already existed.
+const PINNED_CODEX_FEATURE_INVENTORY: &str = r#"apply_patch_freeform                 removed            false
+apply_patch_streaming_events         under development  false
+apps                                 stable             true
+apps_mcp_path_override               removed            false
+artifact                             under development  false
+auth_elicitation                     stable             true
+browser_use                          stable             true
+browser_use_external                 stable             true
+browser_use_full_cdp_access          stable             true
+chronicle                            under development  false
+code_mode                            under development  false
+code_mode_buffered_exec              under development  false
+code_mode_host                       stable             true
+code_mode_only                       under development  false
+codex_git_commit                     removed            false
+collaboration_modes                  removed            true
+computer_use                         stable             true
+concurrent_reasoning_summaries       under development  false
+current_time_reminder                under development  false
+default_mode_request_user_input      under development  false
+deferred_executor                    under development  false
+elevated_windows_sandbox             removed            false
+enable_fanout                        removed            false
+enable_mcp_apps                      under development  false
+enable_request_compression           stable             true
+exec_permission_approvals            under development  false
+executor_capability_discovery        under development  false
+experimental_windows_sandbox         removed            false
+external_agent_memory_import         under development  false
+external_migration                   removed            false
+fast_mode                            stable             true
+goals                                stable             true
+guardian_approval                    stable             true
+hooks                                stable             true
+image_detail_original                removed            false
+image_generation                     stable             true
+in_app_browser                       stable             true
+item_ids                             under development  false
+js_repl                              removed            false
+js_repl_tools_only                   removed            false
+local_thread_store_compression       under development  false
+memories                             stable             false
+mentions_v2                          stable             true
+multi_agent                          stable             true
+multi_agent_mode                     removed            false
+multi_agent_v2                       stable             false
+network_proxy                        experimental       false
+non_prefixed_mcp_tool_names          under development  false
+personality                          stable             true
+plugin_hooks                         removed            false
+plugin_sharing                       stable             true
+plugins                              stable             true
+prevent_idle_sleep                   experimental       false
+realtime_conversation                under development  false
+remote_compaction_v2                 stable             true
+remote_control                       removed            false
+remote_models                        removed            false
+remote_plugin                        stable             true
+request_permissions_tool             under development  false
+request_rule                         removed            false
+resize_all_images                    removed            true
+respect_system_proxy                 under development  false
+responses_websockets                 removed            false
+responses_websockets_v2              removed            false
+rollout_budget                       under development  false
+runtime_metrics                      under development  false
+search_tool                          removed            false
+secret_auth_storage                  stable             false
+shell_snapshot                       stable             true
+shell_tool                           stable             true
+shell_zsh_fork                       under development  false
+skill_env_var_dependency_prompt      removed            false
+skill_mcp_dependency_install         stable             true
+skill_search                         stable             true
+sqlite                               removed            true
+standalone_web_search                under development  false
+steer                                removed            true
+terminal_resize_reflow               removed            true
+terminal_visualization_instructions  under development  false
+token_budget                         under development  false
+tool_call_mcp_elicitation            stable             true
+tool_search                          removed            false
+tool_search_always_defer_mcp_tools   removed            true
+tool_suggest                         stable             true
+tui_app_server                       removed            true
+unavailable_dummy_tools              removed            false
+undo                                 removed            false
+unified_exec                         stable             true
+unified_exec_zsh_fork                under development  false
+use_agent_identity                   under development  false
+use_legacy_landlock                  deprecated         false
+use_linux_sandbox_bwrap              removed            false
+web_search_cached                    deprecated         false
+web_search_request                   deprecated         false
+workspace_dependencies               stable             true
+workspace_owner_usage_nudge          removed            false
+"#;
+
+/// Inventory entries that do not add a model-visible tool, external
+/// interaction, instruction source, or delegated execution surface. Every
+/// other entry is in the runtime's exported hard-disable list above.
+const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
+    "apply_patch_freeform",
+    "apply_patch_streaming_events",
+    "apps_mcp_path_override",
+    "chronicle",
+    "codex_git_commit",
+    "collaboration_modes",
+    "concurrent_reasoning_summaries",
+    "elevated_windows_sandbox",
+    "enable_fanout",
+    "enable_request_compression",
+    "experimental_windows_sandbox",
+    "external_migration",
+    "fast_mode",
+    "image_detail_original",
+    "item_ids",
+    "js_repl",
+    "js_repl_tools_only",
+    "local_thread_store_compression",
+    "mentions_v2",
+    "multi_agent_mode",
+    "network_proxy",
+    "non_prefixed_mcp_tool_names",
+    "personality",
+    "plugin_hooks",
+    "prevent_idle_sleep",
+    "remote_compaction_v2",
+    "remote_control",
+    "remote_models",
+    "request_rule",
+    "resize_all_images",
+    "respect_system_proxy",
+    "responses_websockets",
+    "responses_websockets_v2",
+    "rollout_budget",
+    "runtime_metrics",
+    "search_tool",
+    "secret_auth_storage",
+    "shell_zsh_fork",
+    "skill_env_var_dependency_prompt",
+    "sqlite",
+    "steer",
+    "terminal_resize_reflow",
+    "terminal_visualization_instructions",
+    "tool_search",
+    "tool_search_always_defer_mcp_tools",
+    "tui_app_server",
+    "unavailable_dummy_tools",
+    "undo",
+    "unified_exec_zsh_fork",
+    "use_agent_identity",
+    "use_legacy_landlock",
+    "use_linux_sandbox_bwrap",
+    "web_search_cached",
+    "web_search_request",
+    "workspace_owner_usage_nudge",
+];
 
 /// A trivial prompt keeps the exchange to the smallest billable turn that
 /// still exercises the whole event protocol.
@@ -72,6 +238,7 @@ async fn the_pinned_codex_cli_completes_one_exchange() {
     let model = variable_or(MODEL_VARIABLE, DEFAULT_MODEL);
 
     assert_pinned_version(&executable).await;
+    assert_pinned_feature_inventory(&executable).await;
 
     let working_directory = tempfile::tempdir().expect("smoke working directory is created");
     let credential_reference = CredentialReference::new("codex-smoke");
@@ -209,19 +376,46 @@ const MAX_PROBE_STDOUT_BYTES: usize = 4096;
 /// the smoke slot or buffering an unbounded stream into memory. Factored so a
 /// short bound can be injected in tests.
 async fn probe_output_bounded(
-    mut child: tokio::process::Child,
+    child: tokio::process::Child,
     executable: &std::path::Path,
     bound: Duration,
 ) -> std::process::Output {
+    command_output_bounded(
+        child,
+        executable,
+        "--version",
+        bound,
+        MAX_PROBE_STDOUT_BYTES,
+        "version banner",
+    )
+    .await
+}
+
+/// Shared bounded command collection for pre-spend CLI inspection. It owns
+/// the child and kills the whole process group on timeout, read failure, or
+/// overflow, matching the version probe's cleanup contract.
+async fn command_output_bounded(
+    mut child: tokio::process::Child,
+    executable: &std::path::Path,
+    invocation: &str,
+    bound: Duration,
+    stdout_limit: usize,
+    output_name: &str,
+) -> std::process::Output {
     let group = child.id();
-    match tokio::time::timeout(bound, bounded_probe_output(&mut child)).await {
+    match tokio::time::timeout(
+        bound,
+        bounded_command_output(&mut child, stdout_limit, output_name),
+    )
+    .await
+    {
         Ok(Ok(output)) => output,
         Ok(Err(failure)) => {
             // The child may still be producing when reading fails or
             // overflows; kill its whole group before failing the gate so a
             // flooding launcher (or its native subprocess) cannot linger.
             kill_probe_group(group);
-            panic!("`{} --version` {failure}", executable.display());
+            panic!("`{} {invocation}` {failure}", executable.display());
         }
         Err(_) => {
             // The timed-out future drops the child, whose kill-on-drop kills
@@ -230,28 +424,30 @@ async fn probe_output_bounded(
             // survive the panic.
             kill_probe_group(group);
             panic!(
-                "`{} --version` did not exit within {bound:?}",
+                "`{} {invocation}` did not exit within {bound:?}",
                 executable.display()
             );
         }
     }
 }
 
-/// Reads the child's stdout to the version-probe byte bound, then awaits its
+/// Reads the child's stdout to the supplied byte bound, then awaits its
 /// exit. A producer that exceeds the bound is reported without buffering the
 /// remainder — `wait_with_output` would collect the entire stream, letting a
 /// fast producer consume unbounded memory before the timeout fires. Closing
 /// the taken stdout handle after the bounded read denies an over-producing
 /// child anywhere to write (a pipe with no reader), so it cannot grow the
 /// buffer past the bound while the exit wait runs.
-async fn bounded_probe_output(
+async fn bounded_command_output(
     child: &mut tokio::process::Child,
+    stdout_limit: usize,
+    output_name: &str,
 ) -> Result<std::process::Output, String> {
     use tokio::io::AsyncReadExt;
 
     let mut stdout = Vec::new();
     if let Some(mut pipe) = child.stdout.take() {
-        let mut buffer = vec![0_u8; MAX_PROBE_STDOUT_BYTES + 1];
+        let mut buffer = vec![0_u8; stdout_limit + 1];
         let mut filled = 0_usize;
         while filled < buffer.len() {
             match pipe.read(&mut buffer[filled..]).await {
@@ -260,10 +456,10 @@ async fn bounded_probe_output(
                 Err(error) => return Err(format!("stdout could not be read: {error}")),
             }
         }
-        if filled > MAX_PROBE_STDOUT_BYTES {
+        if filled > stdout_limit {
             return Err(format!(
-                "printed more than {MAX_PROBE_STDOUT_BYTES} bytes; refusing to \
-                 buffer an unbounded version banner"
+                "printed more than {stdout_limit} bytes; refusing to buffer an \
+                 unbounded {output_name}"
             ));
         }
         buffer.truncate(filled);
@@ -359,6 +555,113 @@ async fn assert_pinned_version(executable: &std::path::Path) {
          tooling/codex-cli/package.json",
         executable.display()
     );
+}
+
+/// Fails before spend when the pinned CLI's complete built-in feature registry
+/// differs from the reviewed classification. A fresh home keeps this command
+/// independent of — and unable to read — any ambient CLI login or config.
+async fn assert_pinned_feature_inventory(executable: &std::path::Path) {
+    const FEATURE_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+    const MAX_FEATURE_STDOUT_BYTES: usize = 16 * 1024;
+
+    assert_complete_feature_classification();
+    let isolated_home = tempfile::tempdir().expect("feature probe home is created");
+    let mut command = tokio::process::Command::new(executable);
+    command.args(["features", "list"]).env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    command
+        .env("HOME", isolated_home.path())
+        .env("CODEX_HOME", isolated_home.path())
+        .env("XDG_CONFIG_HOME", isolated_home.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let child = spawn_probe(&mut command, executable).await;
+    let output = command_output_bounded(
+        child,
+        executable,
+        "features list",
+        FEATURE_PROBE_TIMEOUT,
+        MAX_FEATURE_STDOUT_BYTES,
+        "feature inventory",
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "`{} features list` exited with {}",
+        executable.display(),
+        output.status
+    );
+    let reported = String::from_utf8(output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "`{} features list` printed non-UTF-8 output",
+            executable.display()
+        )
+    });
+    assert_eq!(
+        reported, PINNED_CODEX_FEATURE_INVENTORY,
+        "the pinned CLI feature inventory changed; classify every added or \
+         changed entry before moving the supported-version contract"
+    );
+}
+
+/// Proves that every pinned entry has exactly one disposition and that every
+/// capability disposition is the feature the production invocation disables.
+fn assert_complete_feature_classification() {
+    use std::collections::BTreeSet;
+
+    let inventory: BTreeSet<&str> = PINNED_CODEX_FEATURE_INVENTORY
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    let disabled: BTreeSet<&str> = DISABLED_CODEX_CLI_CAPABILITY_FEATURES
+        .iter()
+        .copied()
+        .collect();
+    let non_capability: BTreeSet<&str> = NON_CAPABILITY_CODEX_FEATURES.iter().copied().collect();
+    assert_eq!(
+        inventory.len(),
+        PINNED_CODEX_FEATURE_INVENTORY.lines().count(),
+        "the pinned inventory repeats a feature name"
+    );
+    assert_eq!(
+        disabled.len(),
+        DISABLED_CODEX_CLI_CAPABILITY_FEATURES.len(),
+        "the production hard-disable list repeats a feature name"
+    );
+    assert_eq!(
+        non_capability.len(),
+        NON_CAPABILITY_CODEX_FEATURES.len(),
+        "the non-capability classification repeats a feature name"
+    );
+    assert!(
+        disabled.is_disjoint(&non_capability),
+        "a pinned feature has two classifications"
+    );
+    let classified: BTreeSet<&str> = disabled.union(&non_capability).copied().collect();
+    assert_eq!(
+        classified, inventory,
+        "every pinned feature must be classified exactly once"
+    );
+}
+
+#[test]
+fn pinned_feature_classification_matches_the_runtime_hard_disables() {
+    assert_complete_feature_classification();
+}
+
+/// The credentialed login is independently bounded and removes the secret
+/// from the timeout and CLI environments; the ignored model exchange and the
+/// job-level timeout cannot substitute for this local cleanup boundary.
+#[test]
+fn compatibility_smoke_login_has_a_process_group_timeout() {
+    assert!(CODEX_SMOKE_WORKFLOW.contains(LOGIN_TIMEOUT_INVOCATION));
+    assert!(CODEX_SMOKE_WORKFLOW.contains("| env -u CODEX_SMOKE_API_KEY timeout"));
 }
 
 /// Writes an executable version-probe script and returns its path.
@@ -700,10 +1003,14 @@ fn bare_command_with_unset_path_fails() {
 /// let a fast producer consume unbounded memory before failing.
 #[cfg(unix)]
 #[tokio::test]
-#[should_panic(expected = "printed more than")]
-async fn version_probe_bounds_a_flooding_stdout() {
+async fn version_probe_overflow_kills_flooding_probe_descendants() {
     let directory = tempfile::tempdir().expect("flood fixture directory is created");
-    let executable = version_probe_fixture(directory.path(), "#!/bin/sh\nexec yes codex-flood\n");
+    let pid_file = directory.path().join("descendant-pid");
+    let script = format!(
+        "#!/bin/sh\nsleep 60 &\nprintf '%s\\n' \"$!\" > '{}'\nexec yes codex-flood\n",
+        pid_file.display()
+    );
+    let executable = version_probe_fixture(directory.path(), &script);
     let mut command = tokio::process::Command::new(&executable);
     command
         .stdin(Stdio::null())
@@ -714,13 +1021,22 @@ async fn version_probe_bounds_a_flooding_stdout() {
     // Shared retry, as above: tolerate a transient `ETXTBSY` on the
     // freshly written fixture under parallel test execution.
     let child = spawn_probe(&mut command, &executable).await;
+    let descendant = read_recorded_descendant(&pid_file).await;
 
-    let _ = probe_output_bounded(
+    let probe = tokio::spawn(probe_output_bounded_owned(
         child,
-        std::path::Path::new("flooding-probe"),
+        std::path::PathBuf::from("flooding-probe"),
         Duration::from_secs(30),
-    )
+    ))
     .await;
+
+    let panic_message = probe
+        .expect_err("the overflowing probe panics")
+        .into_panic()
+        .downcast::<String>()
+        .expect("the probe panic carries its message");
+    assert!(panic_message.contains("printed more than"));
+    assert_process_exits(descendant).await;
 }
 
 /// The retry loop keeps trying through transient `ETXTBSY` and returns the
@@ -976,6 +1292,40 @@ fn non_utf8_executable_override_is_resolved_verbatim() {
     assert_eq!(resolved, executable);
 }
 
+/// Selection preserves a populated override as raw OS bytes before any path
+/// resolution, including a valid Unix value that is not UTF-8.
+#[cfg(unix)]
+#[test]
+fn executable_selector_preserves_a_non_utf8_override() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let override_value =
+        std::ffi::OsString::from_vec(vec![b'c', b'o', b'd', b'e', b'x', b'-', 0xff]);
+
+    assert_eq!(
+        selected_executable_or_default(Some(override_value.clone())),
+        override_value
+    );
+}
+
+/// An absent override selects the documented bare-command default.
+#[test]
+fn executable_selector_defaults_when_override_is_absent() {
+    assert_eq!(
+        selected_executable_or_default(None),
+        std::ffi::OsString::from(DEFAULT_EXECUTABLE)
+    );
+}
+
+/// An explicitly empty override has the same defaulting semantics as absence.
+#[test]
+fn executable_selector_defaults_when_override_is_empty() {
+    assert_eq!(
+        selected_executable_or_default(Some(std::ffi::OsString::new())),
+        std::ffi::OsString::from(DEFAULT_EXECUTABLE)
+    );
+}
+
 fn variable_or(name: &str, fallback: &str) -> String {
     selected_or(std::env::var(name).ok(), fallback)
 }
@@ -1032,7 +1382,13 @@ fn smoke_variable_selection_falls_back_for_a_whitespace_variable() {
 /// resolving the default instead of the executable the operator named. The
 /// model override stays a `String` — it is protocol text, not a path.
 fn executable_override_or_default() -> std::ffi::OsString {
-    match std::env::var_os(EXECUTABLE_VARIABLE) {
+    selected_executable_or_default(std::env::var_os(EXECUTABLE_VARIABLE))
+}
+
+/// Pure selection behind [`executable_override_or_default`], keeping raw OS
+/// path bytes injectable without mutating process-global environment state.
+fn selected_executable_or_default(selected: Option<std::ffi::OsString>) -> std::ffi::OsString {
+    match selected {
         Some(value) if !value.is_empty() => value,
         _ => std::ffi::OsString::from(DEFAULT_EXECUTABLE),
     }
