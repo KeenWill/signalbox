@@ -55,7 +55,8 @@ pub use context_frontier::{
 };
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use imported_conversation::{
-    ImportedConversation, ImportedConversationFormat, ImportedConversationReconstitutionError,
+    ImportedConversation, ImportedConversationDisplayTitle, ImportedConversationDisplayTitleError,
+    ImportedConversationFormat, ImportedConversationReconstitutionError,
     ImportedConversationReconstitutionFailure, ImportedConversationReconstitutionInput,
     ImportedConversationSourceDigest, ImportedJsonNumber, ImportedJsonNumberError,
     ImportedMediaSource, ImportedMessageContentAbsence, ImportedRawRecordConversionDigest,

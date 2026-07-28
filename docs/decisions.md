@@ -37,6 +37,67 @@ would duplicate transcript session selection and its validated snapshot path.
 transcript version fourteen, `signalbox transcript`, and the model-call,
 persistence, and process-protocol specifications.
 
+## 2026-07-27 — Serve the unified conversation listing from authoritative tables
+
+**Context.** The owner needs one read surface listing native sessions and
+imported conversations together — the two durable conversation record classes —
+always reflecting committed state. Product surfaces must never depend on
+analytical artifacts, and imported conversations deliberately remain a separate
+record class from sessions: import creates no eager session, and `continue`
+materializes lazily.
+
+**Decision.** One closed read-only protocol request, `list_conversations`
+(version sixteen; thirteen and fourteen were reserved by concurrent stacks and
+fifteen by the imported-conversation inspection stack), served as a plain keyset
+read over the authoritative `session`, current-defaults, metadata, and
+`imported_conversation` tables inside one repeatable-read, read-only transaction
+— transactionally fresh, with no materialized view or caching layer. The surface
+unifies the view, never the storage. The unified order is conversation identity
+UUID value with a native row before an imported row of theoretical equal
+identity, and the cursor names origin plus identity, so pagination is honest at
+every boundary. If this read ever slows, the recorded upgrade is
+write-time-maintained projection tables — still transactionally fresh — never a
+lagging view.
+
+**Rejected alternatives.** A materialized or periodically refreshed view serves
+stale product data. An eager session per import unifies storage by fabricating
+lifecycle records evidence never established. Extending `search` would overload
+a sessions-only verb whose output shape recently stabilized.
+
+**Affects.** Process protocol version sixteen, the unified-listing repository
+and application service, the terminal `conversations` verb, and
+[process-protocol](spec/process-protocol.md).
+
+## 2026-07-27 — Derive imported display titles at import time
+
+**Context.** The unified listing needs a human-readable name for an imported
+conversation. Importers preserve complete raw source records: Claude Code
+exports carry summary records and first-user-message material, and Codex
+rollouts carry title and instruction material. Nothing stored was queryable as a
+title.
+
+**Decision.** Derive one bounded single-line display title (at most 256 Unicode
+scalars) from preserved source evidence, once, and store it as a queryable
+column on the imported-conversation header with a closed
+`pending`/`derived`/`underivable` state (migration
+`202607290201_imported_conversation_display_title.sql`). Insertion always
+resolves the title; rows inserted before the column are `pending` and a one-time
+daemon-startup backfill re-derives them from the durably stored raw records
+before serving — a pure derivation applied through the header's one guarded
+update, following the fail-closed backfill precedent. Checked loads re-derive
+and reject drift; the title never joins the source digest, identity, or
+uniqueness, so re-import idempotency is unchanged.
+
+**Rejected alternatives.** A SQL backfill inside the migration cannot decode the
+checked binary entry encoding the derivation reads. Leaving old rows
+`NULL`-means-unknown forever, as source-session lineage did, would deny titles
+to rows whose complete evidence is durably stored. Deriving on every read would
+recompute per page and leave no queryable column for the title filter.
+
+**Affects.** Migration `202607290201`, import insertion and checked loading,
+daemon startup order, the unified listing's imported rows, and
+[conversation-import](spec/conversation-import.md).
+
 ## 2026-07-27 — Keep provider-text deltas ephemeral and cursorless
 
 **Context.** Both HTTP model adapters can emit credential-redacted text deltas,
