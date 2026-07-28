@@ -368,6 +368,59 @@ async fn inv_035_error_item_marker_suppresses_streamed_continuation() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a marker-bearing object field that sorts before a benign sibling
+/// (so a key-sorted concatenation would drop the marker) still governs the
+/// following final text — sibling fields are seeded as independent units.
+#[tokio::test]
+async fn inv_035_sibling_object_field_marker_is_not_erased() {
+    let result = execute_scenario(
+        "credential_split_across_sibling_object_fields",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: an additive credential marker on an otherwise-accepted
+/// `turn.started` event governs the following final text.
+#[tokio::test]
+async fn inv_035_turn_started_additive_field_marker_suppresses_the_value() {
+    let result = execute_scenario(
+        "credential_split_across_turn_started_field",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a retained agent message ending in a marker, superseded by a
+/// `turn.failed` whose message supplies the value, is folded so the failure
+/// message's value is suppressed in native error evidence.
+#[tokio::test]
+async fn inv_035_retained_agent_message_folds_before_failure() {
+    let result = execute_scenario(
+        "credential_split_across_agent_message_then_failure",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
 /// INV-035: a credential marker ending an agent message superseded by a later
 /// one, with the value in the final message, is folded into the lookbehind and
 /// suppressed rather than reconstructed across the discard.

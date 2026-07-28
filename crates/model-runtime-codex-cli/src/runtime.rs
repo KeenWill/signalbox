@@ -448,6 +448,16 @@ async fn execute_process<C: Clone + Send + Sync>(
     #[cfg(unix)]
     command.process_group(0);
 
+    // Re-poll immediately before the irrevocable boundary: the pre-`execute`
+    // check ran before the command and environment were assembled, and a
+    // signal that became ready during that work must still yield ProvenUnsent
+    // rather than dispatch an operation the caller already cancelled.
+    if already_fired(cancellation) {
+        return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+            cause: UnsentCause::CancelledBeforeSend,
+        });
+    }
+
     sink.observe(Observation {
         correlation: prepared.correlation.clone(),
         fact: ObservationFact::SendCommenced,
