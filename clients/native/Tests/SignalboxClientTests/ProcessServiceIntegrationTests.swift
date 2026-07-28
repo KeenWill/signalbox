@@ -427,6 +427,19 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testMissingRuntimeAndSavedPathExposeTheTransportSetupGate() {
+    UserDefaults.standard.removeObject(
+      forKey: NativeProcessConstants.socketDefaultsKey
+    )
+
+    let settings = SignalboxProcessSettingsViewModel(environment: [:])
+
+    XCTAssertEqual(settings.socketPath, ProcessSubmissionFixture.noSocketPath)
+    XCTAssertEqual(settings.connectionStatus, .notConfigured)
+    XCTAssertNil(NativeProcessConstants.defaultSocketPath(environment: [:]))
+  }
+
+  @MainActor
   func testOlderSessionRefreshCannotReplaceNewerServiceResult() async throws {
     let fixtures = try await makeService().listConversations(includeArchived: true)
     let olderConversations = [
@@ -1735,6 +1748,7 @@ private enum ProcessSubmissionFixture {
   )
   static let initialSocketPath = "/tmp/signalbox-initial-review-fixture.sock"
   static let replacementSocketPath = "/tmp/signalbox-review-fixture.sock"
+  static let noSocketPath = ""
   static let acceptedInputID = "abababab-0000-4000-8000-000000000002"
   static let acceptedTurnID = "abababab-0000-4000-8000-000000000003"
   static let singleAcceptedInputID = [acceptedInputID]
