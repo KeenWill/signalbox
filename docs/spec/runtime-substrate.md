@@ -18,13 +18,13 @@ text-delta projection were verified through PR #300
 (`agent/token-level-streaming`); the Claude 5-family thinking-signature stream
 shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
 CLI redaction contract was verified through PR #316
-(`agent/redaction-hardening`; shape coverage, absorbing suppression, stateful
-parity, and geometric work bound). It covers the provider-neutral operation,
-observation, and evidence vocabulary; SSE framing; structured-output and tool
-decode; `ScriptedModel`; the three provider adapters; and their credential
-boundaries. Layer-2 authorization and evidence classification
-([model-call-execution](model-call-execution.md)), credential channels,
-delivery, and rotation discipline
+(`agent/redaction-hardening`; shape coverage, absorbing suppression, enumerated
+single-split parity with one open divergence, and geometric work bound). It
+covers the provider-neutral operation, observation, and evidence vocabulary; SSE
+framing; structured-output and tool decode; `ScriptedModel`; the three provider
+adapters; and their credential boundaries. Layer-2 authorization and evidence
+classification ([model-call-execution](model-call-execution.md)), credential
+channels, delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
@@ -687,24 +687,27 @@ by spaces or tabs, redact the password after that argument's first colon. A
 double-quoted credential key remains subject to the raw assignment scan whenever
 malformed JSON prevents the structural JSON scanner from claiming it.
 
-For any delta fragmentation of one text stream, including Unicode-escaped
-markers, the concatenated streamed output is never less redacted than the
-stateless scan of the concatenated provider text. Fail-closed suppression is
-absorbing for the sink's lifetime: usage reports, other fact boundaries, and
-terminal flushes never re-enable provider-controlled bytes. Streamed
-lookbehind's 64-KiB memory bound is independent of its work bound. One initial
-unsafe-suffix classification decides whether a prefix is held; it is not charged
-as reclassification. After a streamed hold or a live dropped-provider match-only
-suffix at length L, reclassification occurs only when its length reaches at
-least twice L, while crossing the cap forces one final round. Each streamed
-post-hold round invokes the two top-level whole-buffer classifiers; a dropped
-suffix round invokes its suffix classifier but receives the same conservative
-two-classifier charge. Before invocation, the sink charges the full joined
-input, including emitted or dropped lookbehind context, at that rate. A live
-dropped suffix is extended in place between those checkpoints, empty dropped
-items are no-ops, and obsolete prefixes are compacted only at a checkpoint;
-suffix-copy work therefore follows the same geometric linear bound rather than
-growing with the square of the provider-event count. A
+For a delta fragmentation of one text stream, including Unicode-escaped markers,
+the concatenated streamed output is never less redacted than the stateless scan
+of the concatenated provider text, except where an earlier delta has already
+released a clean prefix: that case is an open divergence, not a covered limit,
+and is enumerated and pinned by the corpus split tests. Every committed corpus
+line is cut at every UTF-8 boundary on the default test path. Fail-closed
+suppression is absorbing for the sink's lifetime: usage reports, other fact
+boundaries, and terminal flushes never re-enable provider-controlled bytes.
+Streamed lookbehind's 64-KiB memory bound is independent of its work bound. One
+initial unsafe-suffix classification decides whether a prefix is held; it is not
+charged as reclassification. After a streamed hold or a live dropped-provider
+match-only suffix at length L, reclassification occurs only when its length
+reaches at least twice L, while crossing the cap forces one final round. Each
+streamed post-hold round invokes the two top-level whole-buffer classifiers; a
+dropped suffix round invokes its suffix classifier but receives the same
+conservative two-classifier charge. Before invocation, the sink charges the full
+joined input, including emitted or dropped lookbehind context, at that rate. A
+live dropped suffix is extended in place between those checkpoints, empty
+dropped items are no-ops, and obsolete prefixes are compacted only at a
+checkpoint; suffix-copy work therefore follows the same geometric linear bound
+rather than growing with the square of the provider-event count. A
 per-continuously-unresolved-candidate budget fails closed before a round would
 make cumulative reclassification input exceed 393,216 bytes (six times 64 KiB),
 independent of delta count. Without external context, the geometric held lengths
@@ -768,4 +771,5 @@ failures after staleness handling.
   `model-provider-runtime` bridge, the daemon composition root) is a review-time
   contract only; no manifest allowlist check enforces it.
 - [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
-  owns controlled provider-proxy and private-root support.
+  owns controlled provider-proxy and private-root support, and owns the open
+  streamed-redaction divergence after a released clean prefix.

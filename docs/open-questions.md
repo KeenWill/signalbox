@@ -313,6 +313,17 @@ questions below remain open.
   text can nevertheless echo machine-local data. Whether the runner, daemon, or
   tool contract applies redaction or stronger egress controls remains undecided.
   Blocks a general no-credential-disclosure claim for runner output.
+- **Streamed redaction after a released clean prefix.** The Codex CLI sink's
+  stateful redaction is meant to be never less redacted than the stateless scan
+  of the joined text, for any delta fragmentation. Exhaustive corpus split
+  enumeration shows it is not: when an earlier delta has already released a
+  clean prefix, the finish path can release a held value the stateless scan
+  redacts. The reach is measured and pinned in
+  `crates/model-runtime-codex-cli/src/redaction_corpus_tests.rs` — three corpus
+  lines at one split, sixteen at two — and the shared cause is emitted-context
+  resolution rather than any single credential shape. Whether to close it in the
+  sink or to narrow the stated guarantee remains undecided. Blocks an
+  unconditional any-fragmentation claim for streamed adapter output.
 - **In-memory credential hygiene.** Zeroization or equivalent handling for the
   request-scoped value read by `FileCredentialAccess` remains undecided, with no
   implementation. This question is separate from the accepted storage and
