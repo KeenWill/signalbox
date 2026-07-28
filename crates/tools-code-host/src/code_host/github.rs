@@ -87,11 +87,10 @@ query Convergence($owner: String!, $name: String!, $number: Int!) {
       reviewThreads(first: 100) {
         nodes {
           id isResolved isOutdated path line
-          commentCount: comments(first: 1) { totalCount }
-          firstComment: comments(first: 1) {
+          comments(first: 100) {
             nodes { author { login __typename } body }
+            pageInfo { hasNextPage }
           }
-          lastComment: comments(last: 1) { nodes { body } }
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -126,11 +125,10 @@ query ThreadInventory($owner: String!, $name: String!, $number: Int!, $cursor: S
       reviewThreads(first: 100, after: $cursor) {
         nodes {
           id isResolved isOutdated path line
-          commentCount: comments(first: 1) { totalCount }
-          firstComment: comments(first: 1) {
+          comments(first: 100) {
             nodes { author { login __typename } body }
+            pageInfo { hasNextPage }
           }
-          lastComment: comments(last: 1) { nodes { body } }
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -577,7 +575,7 @@ impl GitHubCodeHostTransport {
     ) -> Result<StackStateResult, CodeHostTransportFailure> {
         let request_url =
             self.repository_url(repository, &["pulls", &number.get().to_string()], None)?;
-        let request_value = self.get_json(request_url, credential).await?;
+        let request_value = self.get_json(request_url.clone(), credential).await?;
         let request = parse_stack_request(&request_value, number.get())?;
 
         let branch_url = self.repository_url(
@@ -585,7 +583,7 @@ impl GitHubCodeHostTransport {
             &["branches", request.default_ref.as_str()],
             None,
         )?;
-        let branch_value = self.get_json(branch_url, credential).await?;
+        let branch_value = self.get_json(branch_url.clone(), credential).await?;
         let default_revision = required_string(
             required_object(required(required_object(&branch_value)?, "commit")?)?,
             "sha",
@@ -671,6 +669,21 @@ impl GitHubCodeHostTransport {
         } else {
             None
         };
+        let current_request =
+            parse_stack_request(&self.get_json(request_url, credential).await?, number.get())?;
+        let current_default_revision = required_string(
+            required_object(required(
+                required_object(&self.get_json(branch_url, credential).await?)?,
+                "commit",
+            )?)?,
+            "sha",
+        )?;
+        ensure_stack_snapshot_unchanged(
+            &request,
+            &current_request,
+            default_revision.as_str(),
+            current_default_revision.as_str(),
+        )?;
         StackStateResult::try_new(StackStateFields {
             number: number.get(),
             base_ref: request.base_ref,
@@ -1237,12 +1250,25 @@ fn parse_slog_thread(
     value: &serde_json::Value,
 ) -> Result<ParsedSlogThread, CodeHostTransportFailure> {
     let object = required_object(value)?;
-    let first = first_connection_node(required(object, "firstComment")?)?;
+    let comments = required_object(required(object, "comments")?)?;
+    if nested_bool(required(object, "comments")?, &["pageInfo", "hasNextPage"])? {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    let comment_nodes = required(comments, "nodes")?
+        .as_array()
+        .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+    let first = comment_nodes
+        .first()
+        .ok_or(CodeHostTransportFailure::InvalidResponse)?;
     let first = required_object(first)?;
-    let last = first_connection_node(required(object, "lastComment")?)?;
-    let last = required_object(last)?;
     let first_body = required_string(first, "body")?;
-    let last_body = required_string(last, "body")?;
+    let reply_bodies = comment_nodes
+        .iter()
+        .skip(1)
+        .map(required_object)
+        .map(|comment| comment.and_then(|comment| required_string(comment, "body")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let reply_bodies = reply_bodies.iter().map(String::as_str).collect::<Vec<_>>();
     let title = finding_title(&first_body);
     let author_value = required(first, "author")?;
     let (author, actor_type) = match author_value {
@@ -1256,11 +1282,7 @@ fn parse_slog_thread(
     let id = required_string(object, "id")?;
     let path = required_string(object, "path")?;
     let resolved = required_bool(object, "isResolved")?;
-    let comment_count = required_u64(
-        required_object(required(object, "commentCount")?)?,
-        "totalCount",
-    )?;
-    let disposition = disposition_class(&last_body, comment_count > 1);
+    let disposition = disposition_class(&reply_bodies);
     let identity = ReviewThreadIdentity::try_new(id.clone(), path.clone(), title.clone())
         .ok_or(CodeHostTransportFailure::InvalidResponse)?;
     let inventory = ReviewThreadInventoryItem::try_new(ReviewThreadInventoryFields {
@@ -1281,15 +1303,6 @@ fn parse_slog_thread(
         resolved,
         escalated: disposition == ReviewDispositionClass::EscalationMarker,
     })
-}
-
-fn first_connection_node(
-    value: &serde_json::Value,
-) -> Result<&serde_json::Value, CodeHostTransportFailure> {
-    required(required_object(value)?, "nodes")?
-        .as_array()
-        .and_then(|nodes| nodes.first())
-        .ok_or(CodeHostTransportFailure::InvalidResponse)
 }
 
 fn parse_reviewer_activities(
@@ -1433,6 +1446,17 @@ fn parse_stack_request(
     })
 }
 
+fn ensure_stack_snapshot_unchanged(
+    initial_request: &StackRequestFacts,
+    current_request: &StackRequestFacts,
+    initial_default_revision: &str,
+    current_default_revision: &str,
+) -> Result<(), CodeHostTransportFailure> {
+    if initial_request != current_request || initial_default_revision != current_default_revision {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    Ok(())
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StackChildFacts {
     number: u32,
@@ -1834,6 +1858,105 @@ mod tests {
         let request = parse_stack_request(&value, 17).expect("fixture request is admitted");
 
         assert_eq!(request.head_repository.as_str(), HEAD_REPOSITORY);
+    }
+
+    /// A changed immediate-base revision invalidates comparisons made from the
+    /// earlier stack snapshot.
+    #[test]
+    fn stack_snapshot_rejects_changed_base_revision() {
+        const INITIAL_BASE: &str = "1111111111111111111111111111111111111111";
+        const CURRENT_BASE: &str = "3333333333333333333333333333333333333333";
+        const DEFAULT_REVISION: &str = "1111111111111111111111111111111111111111";
+        let initial = parse_stack_request(
+            &serde_json::json!({
+                "number": 17,
+                "base": {
+                    "ref": "main",
+                    "sha": INITIAL_BASE,
+                    "repo": {"default_branch": "main"}
+                },
+                "head": {
+                    "ref": "feature",
+                    "sha": "2222222222222222222222222222222222222222",
+                    "repo": {"full_name": "owner/repository"}
+                }
+            }),
+            17,
+        )
+        .expect("initial fixture request is admitted");
+        let current = parse_stack_request(
+            &serde_json::json!({
+                "number": 17,
+                "base": {
+                    "ref": "main",
+                    "sha": CURRENT_BASE,
+                    "repo": {"default_branch": "main"}
+                },
+                "head": {
+                    "ref": "feature",
+                    "sha": "2222222222222222222222222222222222222222",
+                    "repo": {"full_name": "owner/repository"}
+                }
+            }),
+            17,
+        )
+        .expect("current fixture request is admitted");
+
+        assert_eq!(
+            ensure_stack_snapshot_unchanged(&initial, &current, DEFAULT_REVISION, DEFAULT_REVISION,),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// A changed default revision invalidates the default-chain comparisons.
+    #[test]
+    fn stack_snapshot_rejects_changed_default_revision() {
+        const INITIAL_DEFAULT: &str = "1111111111111111111111111111111111111111";
+        const CURRENT_DEFAULT: &str = "3333333333333333333333333333333333333333";
+        let value = serde_json::json!({
+            "number": 17,
+            "base": {
+                "ref": "main",
+                "sha": "1111111111111111111111111111111111111111",
+                "repo": {"default_branch": "main"}
+            },
+            "head": {
+                "ref": "feature",
+                "sha": "2222222222222222222222222222222222222222",
+                "repo": {"full_name": "owner/repository"}
+            }
+        });
+        let request = parse_stack_request(&value, 17).expect("fixture request is admitted");
+
+        assert_eq!(
+            ensure_stack_snapshot_unchanged(&request, &request, INITIAL_DEFAULT, CURRENT_DEFAULT,),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// An over-bound comment history cannot be classified from a silently
+    /// incomplete prefix.
+    #[test]
+    fn slog_thread_rejects_truncated_comment_history() {
+        let value = serde_json::json!({
+            "id": "PRRT_fixture",
+            "isResolved": false,
+            "isOutdated": false,
+            "path": "src/lib.rs",
+            "line": 12,
+            "comments": {
+                "nodes": [{
+                    "author": {"login": "review-bot", "__typename": "Bot"},
+                    "body": "Finding title"
+                }],
+                "pageInfo": {"hasNextPage": true}
+            }
+        });
+
+        assert_eq!(
+            parse_slog_thread(&value),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
     }
 
     /// Lossy decoding cannot expand a retained job-log prefix beyond its

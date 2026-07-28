@@ -615,18 +615,23 @@ The declarations and compact result objects are:
   default-branch commits absent from the base chain; and one page of immediate
   child requests whose base names the request's head branch. Each child carries
   the same merge-forward and default-chain comparison for its level. Children
-  are discovered in the request's head repository. The child page carries
+  are discovered in the request's head repository. After computing those
+  comparisons, the adapter re-reads the request and default branch and rejects
+  evidence if either revision snapshot changed. The child page carries
   `children_truncated` and `children_next_cursor`.
 - `change_request_thread_inventory` accepts `repository`, `number`, and an
   optional opaque GraphQL `cursor`. It returns the observed head revision and at
   most 100 review threads with exact resolution and outdated posture, path and
   optional line, first-comment author and `bot` / `human` / `unknown` class, the
-  bounded first-comment finding title, and the actual reply's `fix_named` /
-  `declined` / `escalation_marker` / `undispositioned` class. A thread without a
-  reply is undispositioned. `fix_named` requires a reply beginning with
-  `Fixed in commit` or `Fixed in commits`, followed by a space and a 7-to-40-hex
-  commit token; `declined` requires a reply beginning `Declined:` and a nonempty
-  reason. The page carries `truncated` and `next_cursor`.
+  bounded first-comment finding title, and its `fix_named` / `declined` /
+  `escalation_marker` / `undispositioned` class. A thread without a reply is
+  undispositioned. `fix_named` requires a reply beginning with `Fixed in commit`
+  or `Fixed in commits`, followed by a space and a 7-to-40-hex commit token;
+  `declined` requires a reply beginning `Declined:` and a nonempty reason. The
+  latest recognized fix or decline survives later non-disposition replies, while
+  `escalation_marker` requires the actual last reply to carry the exact marker.
+  Classification rejects a thread whose comment history exceeds the 100-comment
+  read bound. The page carries `truncated` and `next_cursor`.
 - `review_gate_check` accepts `repository`, `number`, and purpose
   `request_review_wave` or `declare_convergence`. It reads the same fresh typed
   evidence as the three slog tools, re-reading convergence last and using that
