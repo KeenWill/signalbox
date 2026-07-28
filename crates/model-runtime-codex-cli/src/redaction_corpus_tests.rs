@@ -10,6 +10,12 @@ const BASELINE_REDACTED_COUNT: usize = 57;
 const BASELINE_ACCEPTED_UNCOVERED_COUNT: usize = 73;
 const CORRELATION: u8 = 7;
 const BOUNDARY_FRAGMENT: &str = "{}";
+const GENERATOR_SEED: u64 = 0x5eed_c0de_d15c_a11e;
+const DEFAULT_GENERATIVE_CASES: usize = 512;
+const SOAK_GENERATIVE_CASES: usize = 32_768;
+const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
+const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
+const ASCII_NOISE: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_-";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CorpusStatus {
@@ -79,6 +85,92 @@ struct CorpusSummary {
 enum TerminalContext {
     Seed,
     Drop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GeneratedFamily {
+    ApiKey,
+    EscapedApiKey,
+    TokenName,
+    SpacedPasswordFlag,
+    UrlUserinfo,
+    MalformedQuotedJsonKey,
+    MysqlPassword,
+    SigningKey,
+}
+
+const GENERATED_FAMILIES: [GeneratedFamily; 8] = [
+    GeneratedFamily::ApiKey,
+    GeneratedFamily::EscapedApiKey,
+    GeneratedFamily::TokenName,
+    GeneratedFamily::SpacedPasswordFlag,
+    GeneratedFamily::UrlUserinfo,
+    GeneratedFamily::MalformedQuotedJsonKey,
+    GeneratedFamily::MysqlPassword,
+    GeneratedFamily::SigningKey,
+];
+
+impl GeneratedFamily {
+    fn from_ordinal(ordinal: usize) -> Self {
+        GENERATED_FAMILIES[ordinal % GENERATED_FAMILIES.len()]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GeneratedInterlude {
+    None,
+    ToolArgumentsBoundary,
+    UsageReported,
+    Finish,
+}
+
+const GENERATED_INTERLUDES: [GeneratedInterlude; 4] = [
+    GeneratedInterlude::None,
+    GeneratedInterlude::ToolArgumentsBoundary,
+    GeneratedInterlude::UsageReported,
+    GeneratedInterlude::Finish,
+];
+
+#[derive(Debug, PartialEq, Eq)]
+struct GeneratedCase {
+    ordinal: usize,
+    family: GeneratedFamily,
+    marker: String,
+    input: String,
+    chunks: Vec<String>,
+    interludes: Vec<GeneratedInterlude>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SuppressionAction {
+    UsageReported,
+    Finish,
+    ProviderChunk(usize),
+}
+
+const SUPPRESSION_BARRIERS: [SuppressionAction; 2] =
+    [SuppressionAction::UsageReported, SuppressionAction::Finish];
+
+struct DeterministicGenerator {
+    state: u64,
+}
+
+impl DeterministicGenerator {
+    fn seeded(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self
+            .state
+            .wrapping_mul(LCG_MULTIPLIER)
+            .wrapping_add(LCG_INCREMENT);
+        self.state
+    }
+
+    fn index(&mut self, exclusive_end: usize) -> usize {
+        (self.next_u64() % exclusive_end as u64) as usize
+    }
 }
 
 fn decode_corpus_line(encoded: &str) -> CorpusCase {
@@ -399,6 +491,247 @@ fn run_corpus() -> CorpusSummary {
     }
 }
 
+fn generated_ascii(rng: &mut DeterministicGenerator) -> String {
+    let length = rng.index(9);
+    let mut value = String::with_capacity(length);
+    for _ in 0..length {
+        value.push(ASCII_NOISE[rng.index(ASCII_NOISE.len())] as char);
+    }
+    value
+}
+
+fn generated_input(family: GeneratedFamily, marker: &str, noise: &str) -> String {
+    let value = format!("AAAA-{marker}-BBBB");
+    match family {
+        GeneratedFamily::ApiKey => format!("{noise}: api_key={value} tail"),
+        GeneratedFamily::EscapedApiKey => {
+            format!("{noise}: note \\u0061pi_key={value} tail")
+        }
+        GeneratedFamily::TokenName => format!("{noise}: GITHUB_TOKEN={value} tail"),
+        GeneratedFamily::SpacedPasswordFlag => {
+            format!("{noise}: codex --password \t {value} tail")
+        }
+        GeneratedFamily::UrlUserinfo => {
+            format!("postgres://user:{value}@host/{noise}")
+        }
+        GeneratedFamily::MalformedQuotedJsonKey => {
+            format!(r#"{{"x,"client_secret":"{value}","note":"{noise}"}}"#)
+        }
+        GeneratedFamily::MysqlPassword => format!("{noise}: MYSQL_PWD={value} tail"),
+        GeneratedFamily::SigningKey => format!("{noise}: signing_key={value} tail"),
+    }
+}
+
+fn generated_interlude(rng: &mut DeterministicGenerator) -> GeneratedInterlude {
+    GENERATED_INTERLUDES[rng.index(GENERATED_INTERLUDES.len())]
+}
+
+fn generate_case(ordinal: usize, rng: &mut DeterministicGenerator) -> GeneratedCase {
+    let family = GeneratedFamily::from_ordinal(ordinal);
+    let marker = format!("{SYNTHETIC_SECRET_MARKER}-GENERATED-{ordinal:08x}");
+    let noise = generated_ascii(rng);
+    let input = generated_input(family, &marker, &noise);
+    let mut chunks = Vec::new();
+    let mut interludes = Vec::new();
+    let mut offset = 0;
+    while offset < input.len() {
+        if rng.index(5) == 0 {
+            chunks.push(String::new());
+            interludes.push(generated_interlude(rng));
+        }
+        let remaining = input.len() - offset;
+        let chunk_length = 1 + rng.index(remaining.min(17));
+        let end = offset + chunk_length;
+        chunks.push(input[offset..end].to_string());
+        interludes.push(generated_interlude(rng));
+        offset = end;
+    }
+    GeneratedCase {
+        ordinal,
+        family,
+        marker,
+        input,
+        chunks,
+        interludes,
+    }
+}
+
+fn observe_generated_interlude(
+    sink: &mut RedactingSink<'_, u8>,
+    interlude: GeneratedInterlude,
+    index: u32,
+) {
+    match interlude {
+        GeneratedInterlude::None => {}
+        GeneratedInterlude::ToolArgumentsBoundary => sink.observe(Observation {
+            correlation: CORRELATION,
+            fact: ObservationFact::ToolArgumentsDelta {
+                index,
+                fragment: BOUNDARY_FRAGMENT.to_string(),
+            },
+        }),
+        GeneratedInterlude::UsageReported => sink.observe(Observation {
+            correlation: CORRELATION,
+            fact: ObservationFact::UsageReported(TokenUsage::unreported()),
+        }),
+        GeneratedInterlude::Finish => sink.finish(),
+    }
+}
+
+fn generated_stateful_output(case: &GeneratedCase) -> String {
+    let mut observed = Vec::new();
+    let terminal_capture;
+    {
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.begin_terminal_text_capture();
+        for (index, (chunk, interlude)) in case
+            .chunks
+            .iter()
+            .zip(case.interludes.iter().copied())
+            .enumerate()
+        {
+            sink.observe(Observation {
+                correlation: CORRELATION,
+                fact: ObservationFact::TextDelta {
+                    index: index as u32,
+                    text: chunk.clone(),
+                },
+            });
+            observe_generated_interlude(&mut sink, interlude, index as u32);
+        }
+        sink.finish();
+        terminal_capture = sink.take_terminal_text_capture();
+    }
+    let mut output = observed_stream_outputs(observed)
+        .into_iter()
+        .map(|observed| observed.text)
+        .collect::<String>();
+    output.push_str(&terminal_capture);
+    output
+}
+
+#[track_caller]
+fn assert_stateful_equals_stateless(seed: u64, case_count: usize) {
+    let mut rng = DeterministicGenerator::seeded(seed);
+    for ordinal in 0..case_count {
+        let case = generate_case(ordinal, &mut rng);
+        let stateless = redact_text(&case.input);
+        let stateful = generated_stateful_output(&case);
+        if !stateless.contains(&case.marker) {
+            assert!(
+                !stateful.contains(&case.marker),
+                "STATEFUL-EQUALS-STATELESS failed for generated case {} ({:?}); \
+                 input={:?}, chunks={:?}, interludes={:?}, stateless={:?}, stateful={:?}",
+                case.ordinal,
+                case.family,
+                case.input,
+                case.chunks,
+                case.interludes,
+                stateless,
+                stateful
+            );
+        }
+    }
+}
+
+fn suppression_actions(
+    case: &GeneratedCase,
+    rng: &mut DeterministicGenerator,
+) -> Vec<SuppressionAction> {
+    let mut actions = Vec::new();
+    for chunk_index in 0..case.chunks.len() {
+        let barrier = SUPPRESSION_BARRIERS[rng.index(SUPPRESSION_BARRIERS.len())];
+        actions.push(barrier);
+        if rng.index(3) == 0 {
+            actions.push(barrier);
+        }
+        actions.push(SuppressionAction::ProviderChunk(chunk_index));
+    }
+    actions
+}
+
+fn apply_suppression_action(
+    sink: &mut RedactingSink<'_, u8>,
+    case: &GeneratedCase,
+    action: SuppressionAction,
+    index: &mut u32,
+) {
+    match action {
+        SuppressionAction::UsageReported => sink.observe(Observation {
+            correlation: CORRELATION,
+            fact: ObservationFact::UsageReported(TokenUsage::unreported()),
+        }),
+        SuppressionAction::Finish => sink.finish(),
+        SuppressionAction::ProviderChunk(chunk_index) => {
+            emit_text_delta(sink, index, case.chunks[chunk_index].clone());
+        }
+    }
+}
+
+#[track_caller]
+fn assert_suppression_is_absorbing(seed: u64, case_count: usize) {
+    let mut rng = DeterministicGenerator::seeded(seed);
+    for ordinal in 0..case_count {
+        let case = generate_case(ordinal, &mut rng);
+        let actions = suppression_actions(&case, &mut rng);
+        let mut observed = Vec::new();
+        let terminal_capture;
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.begin_terminal_text_capture();
+            sink.suppress_remaining();
+            assert!(
+                sink.is_suppressing(),
+                "SUPPRESSION IS ABSORBING must begin suppressed"
+            );
+            let mut index = 0_u32;
+            for action in actions {
+                apply_suppression_action(&mut sink, &case, action, &mut index);
+                assert!(
+                    sink.is_suppressing(),
+                    "SUPPRESSION IS ABSORBING failed for generated case {} ({:?}) \
+                     after {:?}",
+                    case.ordinal,
+                    case.family,
+                    action
+                );
+            }
+            sink.finish();
+            assert!(
+                sink.is_suppressing(),
+                "SUPPRESSION IS ABSORBING failed at the terminal finish for \
+                 generated case {} ({:?})",
+                case.ordinal,
+                case.family
+            );
+            terminal_capture = sink.take_terminal_text_capture();
+        }
+        let mut output = observed_stream_outputs(observed)
+            .into_iter()
+            .map(|observed| observed.text)
+            .collect::<String>();
+        output.push_str(&terminal_capture);
+        assert!(
+            !output.contains(&case.marker),
+            "SUPPRESSION IS ABSORBING emitted the marker for generated case {} \
+             ({:?}): {:?}",
+            case.ordinal,
+            case.family,
+            output
+        );
+    }
+}
+
+fn generator_replay(seed: u64) -> String {
+    let mut rng = DeterministicGenerator::seeded(seed);
+    let case = generate_case(0, &mut rng);
+    let chunk_lengths = case.chunks.iter().map(String::len).collect::<Vec<_>>();
+    format!(
+        "ordinal={}; family={:?}; input={:?}; chunk_lengths={:?}; interludes={:?}",
+        case.ordinal, case.family, case.input, chunk_lengths, case.interludes
+    )
+}
+
 #[test]
 fn corpus_decoder_decodes_byte_and_event_tokens() {
     let decoded = decode_corpus_line(
@@ -500,4 +833,43 @@ fn redaction_corpus_classification_is_exact() {
         "corpus classifications changed in either direction: {:#?}",
         summary.mismatches
     );
+}
+
+#[test]
+fn deterministic_generator_replays_the_pinned_seed() {
+    let replay = generator_replay(GENERATOR_SEED);
+
+    assert_eq!(
+        replay,
+        "ordinal=0; family=ApiKey; input=\"qr8r_v8: api_key=AAAA-SYNTHETIC-SECRET-GENERATED-00000000-BBBB tail\"; chunk_lengths=[8, 13, 14, 0, 8, 6, 0, 10, 5, 1, 1, 1]; interludes=[Finish, None, ToolArgumentsBoundary, Finish, ToolArgumentsBoundary, UsageReported, None, UsageReported, Finish, None, ToolArgumentsBoundary, UsageReported]"
+    );
+}
+
+/// STATEFUL-EQUALS-STATELESS: every generated delta/event schedule must
+/// remove a planted marker whenever `redact_text` removes it from the joined
+/// input.
+#[test]
+fn stateful_equals_stateless_for_generated_corpus_families() {
+    assert_stateful_equals_stateless(GENERATOR_SEED, DEFAULT_GENERATIVE_CASES);
+}
+
+/// SUPPRESSION IS ABSORBING: after fail-closed suppression, repeated usage
+/// reports, explicit finishes, and provider deltas never re-arm emission.
+#[test]
+fn suppression_is_absorbing_for_generated_event_sequences() {
+    assert_suppression_is_absorbing(GENERATOR_SEED, DEFAULT_GENERATIVE_CASES);
+}
+
+/// Deterministic long-run coverage for STATEFUL-EQUALS-STATELESS.
+#[test]
+#[ignore = "deterministic 32,768-case redaction soak"]
+fn stateful_equals_stateless_generated_soak() {
+    assert_stateful_equals_stateless(GENERATOR_SEED, SOAK_GENERATIVE_CASES);
+}
+
+/// Deterministic long-run coverage for SUPPRESSION IS ABSORBING.
+#[test]
+#[ignore = "deterministic 32,768-case redaction soak"]
+fn suppression_is_absorbing_generated_soak() {
+    assert_suppression_is_absorbing(GENERATOR_SEED, SOAK_GENERATIVE_CASES);
 }
