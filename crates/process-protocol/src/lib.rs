@@ -60,7 +60,16 @@ pub const INPUT_DELIVERY_PROTOCOL_VERSION: u64 = 13;
 /// The unified conversation-listing protocol version.
 ///
 /// Version thirteen is allocated by input delivery; versions fourteen and
-/// fifteen remain reserved by concurrent protocol work.
+/// fifteen were reserved by concurrent protocol work that had not yet shipped
+/// when this version claimed sixteen. That establishes a standing convention:
+/// once any version ships, every lower number still unshipped is retired
+/// permanently, not merely skipped, because admitting it later would
+/// retroactively widen an already-closed vocabulary underneath a version
+/// already in use (admission is numeric, version >= minimum, and a closed
+/// enum decodes a version's frames against exactly its own vocabulary, never
+/// a gap's). Fourteen and fifteen are retired under this rule and are never
+/// admitted; a later surface always claims the next number above the
+/// highest already shipped, never a lower gap.
 pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
 
 /// The imported-conversation inspection protocol version.
@@ -68,12 +77,23 @@ pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
 /// This surface reserved fifteen while sixteen was still unclaimed, but sixteen
 /// shipped first. Numbering the inspection request below an already-closed
 /// vocabulary would retroactively admit it in version-sixteen frames, so this
-/// version sits above sixteen instead. Fourteen and fifteen remain reserved and
-/// unadmitted here.
+/// version sits above sixteen instead, per the retirement convention sixteen's
+/// comment states. Fourteen and fifteen remain retired and unadmitted here.
 pub const IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION: u64 = 17;
 
 /// The daemon-resolved session-template protocol version.
 pub const SESSION_TEMPLATE_PROTOCOL_VERSION: u64 = 18;
+
+/// The provider-reported model-call token-usage protocol version.
+///
+/// This surface originally reserved fourteen, but versions sixteen, seventeen,
+/// and eighteen all shipped first while it was still in flight. Numbering it
+/// below their already-closed vocabularies would retroactively admit
+/// `transcript_model_call_usage` frames under those versions, so this version
+/// sits above eighteen instead, per the retirement convention sixteen's
+/// comment states. Fourteen is retired under that convention alongside
+/// fifteen and is never admitted.
+pub const MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION: u64 = 19;
 
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -110,6 +130,8 @@ pub enum ProtocolVersion {
     Seventeen,
     /// Daemon-resolved session-template creation and listing vocabulary.
     Eighteen,
+    /// Provider-reported model-call token-usage vocabulary.
+    Nineteen,
 }
 
 impl ProtocolVersion {
@@ -132,6 +154,7 @@ impl ProtocolVersion {
             Self::Sixteen => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
             Self::Seventeen => IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
             Self::Eighteen => SESSION_TEMPLATE_PROTOCOL_VERSION,
+            Self::Nineteen => MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
         }
     }
 
@@ -153,6 +176,7 @@ impl ProtocolVersion {
             UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION => Some(Self::Sixteen),
             IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION => Some(Self::Seventeen),
             SESSION_TEMPLATE_PROTOCOL_VERSION => Some(Self::Eighteen),
+            MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION => Some(Self::Nineteen),
             _ => None,
         }
     }
@@ -712,6 +736,28 @@ impl ContentFragment {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Provider-reported token fields for one terminal model call.
+///
+/// Every field is required on the wire but independently nullable. A null is
+/// unreported evidence; a reported zero is encoded as the canonical string
+/// `"0"`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCallTokenUsage {
+    /// Provider-reported input-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub input_tokens: Option<CanonicalU64>,
+    /// Provider-reported output-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub output_tokens: Option<CanonicalU64>,
+    /// Provider-reported cache-creation input-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub cache_creation_input_tokens: Option<CanonicalU64>,
+    /// Provider-reported cache-read input-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub cache_read_input_tokens: Option<CanonicalU64>,
 }
 
 impl TryFrom<String> for ContentFragment {
@@ -3376,6 +3422,22 @@ pub enum ServerMessage {
         /// Exact lifecycle state.
         state: TurnState,
     },
+    /// Exact provider-reported token fields for one terminal model call.
+    TranscriptModelCallUsage {
+        /// Zero-based model-call evidence index in this snapshot.
+        model_call_index: CanonicalU64,
+        /// Turn that owns the terminal model call.
+        turn_id: CanonicalUuid,
+        /// Immutable model-call identity.
+        model_call_id: CanonicalUuid,
+        /// Exact independently nullable provider fields.
+        usage: ModelCallTokenUsage,
+    },
+    /// Completes the model-call evidence section of one transcript snapshot.
+    TranscriptModelCallsEnd {
+        /// Number of preceding model-call usage messages.
+        model_call_count: CanonicalU64,
+    },
     /// One non-text frontier member.
     TranscriptEntry {
         /// Zero-based frontier member index.
@@ -3540,6 +3602,9 @@ impl ServerMessage {
     pub const fn minimum_protocol_version(&self) -> u64 {
         match self {
             Self::TranscriptTurn { state, .. } => state.minimum_protocol_version(),
+            Self::TranscriptModelCallUsage { .. } | Self::TranscriptModelCallsEnd { .. } => {
+                MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION
+            }
             Self::TranscriptEntry { entry, .. } => entry.minimum_protocol_version(),
             Self::TranscriptTextEntry { entry, .. } => entry.minimum_protocol_version(),
             Self::SessionEvent { event, .. } => event.minimum_protocol_version(),
@@ -3935,7 +4000,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1 through 13 and 16 through 18",
+                "process-protocol version is unsupported; supported versions are 1 through 13 and 16 through 19",
             ),
         }
     }
@@ -4161,6 +4226,7 @@ fn probe_header(
             | "16"
             | "17"
             | "18"
+            | "19"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -4280,6 +4346,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "16" => Some(ProtocolVersion::Sixteen),
         "17" => Some(ProtocolVersion::Seventeen),
         "18" => Some(ProtocolVersion::Eighteen),
+        "19" => Some(ProtocolVersion::Nineteen),
         _ => None,
     }
 }
@@ -4332,9 +4399,10 @@ mod tests {
         MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
-        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
-        MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION,
-        ProtocolVersion, RejectionDetail, RequestId, ReviewTargetSubject,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
+        MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION, MetadataActor, MetadataLastWriter,
+        ModelCallDisposition, ModelCallState, ModelCallTokenUsage, ModelSelection,
+        PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId, ReviewTargetSubject,
         SESSION_METADATA_PROTOCOL_VERSION, SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
         SESSION_TEMPLATE_PROTOCOL_VERSION, ServerFrame, ServerMessage, SessionEvent,
         SessionMetadata, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
@@ -4422,7 +4490,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1 through 13 and 16 through 18")
+                .contains("supported versions are 1 through 13 and 16 through 19")
         );
     }
 
@@ -5541,6 +5609,50 @@ mod tests {
         Ok(())
     }
 
+    /// INV-033: version nineteen adds exact required-nullable token evidence
+    /// without admitting it in the preceding retained vocabulary.
+    #[test]
+    fn inv033_version_nineteen_model_call_usage_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let message = ServerMessage::TranscriptModelCallUsage {
+            model_call_index: CanonicalU64::new(0),
+            turn_id: uuid(2),
+            model_call_id: uuid(3),
+            usage: ModelCallTokenUsage {
+                input_tokens: Some(CanonicalU64::new(10)),
+                output_tokens: Some(CanonicalU64::new(0)),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(CanonicalU64::new(4)),
+            },
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::Twelve, request_id, message.clone()),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+
+        let frame =
+            ServerFrame::try_new_for_version(ProtocolVersion::Nineteen, request_id, message)?;
+        let encoded = encode_server_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            format!(
+                "{{\"version\":{MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION},\"request_id\":\"1\",\"message\":{{\"type\":\"transcript_model_call_usage\",\"model_call_index\":\"0\",\"turn_id\":\"00000000-0000-0000-0000-000000000002\",\"model_call_id\":\"00000000-0000-0000-0000-000000000003\",\"usage\":{{\"input_tokens\":\"10\",\"output_tokens\":\"0\",\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":\"4\"}}}}}}\n"
+            )
+        );
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn version_nineteen_usage_rejects_an_omitted_evidence_field() {
+        let error = decode_server_line(&line(
+            r#"{"version":19,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null}}}"#,
+        ))
+        .expect_err("required-nullable evidence fields cannot be omitted");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
+    }
+
     /// INV-033: a version-ten imported-frontier request rejects position zero.
     #[test]
     fn inv033_version_ten_imported_frontier_rejects_zero_position()
@@ -6600,9 +6712,9 @@ mod tests {
     }
 
     /// INV-033: the admitted set is one through thirteen and sixteen through
-    /// eighteen; fourteen and fifteen remain reserved and unsupported.
+    /// nineteen; fourteen and fifteen remain retired and unsupported.
     #[test]
-    fn inv033_version_eighteen_completes_the_admitted_set() {
+    fn inv033_version_nineteen_completes_the_admitted_set() {
         assert_eq!(
             ProtocolVersion::Nine.as_u64(),
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
@@ -6618,6 +6730,10 @@ mod tests {
         assert_eq!(
             ProtocolVersion::Eighteen.as_u64(),
             SESSION_TEMPLATE_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            ProtocolVersion::Nineteen.as_u64(),
+            MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION
         );
         assert_eq!(ProtocolVersion::from_u64(8), Some(ProtocolVersion::Eight));
         assert_eq!(ProtocolVersion::from_u64(9), Some(ProtocolVersion::Nine));
@@ -6642,6 +6758,11 @@ mod tests {
             ProtocolVersion::from_u64(18),
             Some(ProtocolVersion::Eighteen)
         );
+        assert_eq!(
+            ProtocolVersion::from_u64(19),
+            Some(ProtocolVersion::Nineteen)
+        );
+        assert_eq!(ProtocolVersion::from_u64(20), None);
     }
 
     #[test]
