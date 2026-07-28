@@ -394,11 +394,27 @@ fn spawn_error_enoent_is_not_retryable() {
 fn busy_then_success(failures: usize) -> impl FnMut() -> std::io::Result<tokio::process::Child> {
     let mut remaining = failures;
     move || match remaining {
-        0 => tokio::process::Command::new("true").spawn(),
+        0 => trivial_success_command().spawn(),
         _ => {
             remaining -= 1;
             Err(std::io::Error::from_raw_os_error(26))
         }
+    }
+}
+
+/// A no-op command that exits successfully on the running platform, so the
+/// retry-loop tests do not depend on the Unix-only `true` executable and stay
+/// runnable on the ordinary Windows workspace suite.
+fn trivial_success_command() -> tokio::process::Command {
+    #[cfg(windows)]
+    {
+        let mut command = tokio::process::Command::new("cmd");
+        command.args(["/C", "exit", "0"]);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        tokio::process::Command::new("true")
     }
 }
 
@@ -518,19 +534,47 @@ async fn read_recorded_descendant(pid_file: &std::path::Path) -> rustix::process
     }
 }
 
-/// Asserts the process exits within a bounded observation window.
+/// Asserts the process exits within a bounded observation window. A killed
+/// descendant can linger as an unreaped zombie in containers whose PID 1 does
+/// not promptly reap orphans, and `test_kill_process` keeps succeeding for that
+/// zombie; treat a zombie (via `/proc` where available) as exited so cleanup is
+/// not falsely reported as a live process.
 #[cfg(unix)]
 async fn assert_process_exits(pid: rustix::process::Pid) {
     const PROCESS_EXIT_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
 
     let deadline = std::time::Instant::now() + PROCESS_EXIT_OBSERVATION_TIMEOUT;
-    while rustix::process::test_kill_process(pid).is_ok() {
+    while process_is_live(pid) {
         assert!(
             std::time::Instant::now() < deadline,
             "the probe descendant remains alive after the timeout cleanup"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// Whether `pid` names a still-running process. A signalable pid that `/proc`
+/// reports as a zombie has already exited (its slot only awaits reaping); where
+/// `/proc` is unavailable (macOS), a signalable pid is treated as live, the
+/// best signal available.
+#[cfg(unix)]
+fn process_is_live(pid: rustix::process::Pid) -> bool {
+    if rustix::process::test_kill_process(pid).is_err() {
+        return false;
+    }
+    match std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero().get())) {
+        Ok(stat) => !proc_stat_is_zombie(&stat),
+        Err(_) => true,
+    }
+}
+
+/// A `/proc/<pid>/stat` line reports a zombie as state `Z` in the field after
+/// the parenthesized comm (which itself may contain spaces or `)`), so the
+/// state is read after the last `") "`.
+#[cfg(unix)]
+fn proc_stat_is_zombie(stat: &str) -> bool {
+    stat.rsplit_once(") ")
+        .is_some_and(|(_, fields)| fields.starts_with("Z "))
 }
 
 /// A probe that floods stdout is stopped at the byte bound and fails the gate
