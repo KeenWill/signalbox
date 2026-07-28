@@ -44,9 +44,11 @@ speaks versions one through thirteen and sixteen, and its terminal client
 selects version sixteen. Its `search` verb over version four's metadata list was
 verified through PR #283 (`agent/session-search-cli`; terminal client surface
 only). This page's version-four last-writer member spelling was verified through
-PR #288 (`agent/audit-fix-docs-coherence`). This page is the normative boundary
-between a local client process and `signalboxd`; domain values, PostgreSQL
-records, and wire messages remain distinct representations.
+PR #288 (`agent/audit-fix-docs-coherence`). The interactive terminal chat
+surface adds no protocol version and was verified through PR #310
+(`agent/interactive-terminal-chat`). This page is the normative boundary between
+a local client process and `signalboxd`; domain values, PostgreSQL records, and
+wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
