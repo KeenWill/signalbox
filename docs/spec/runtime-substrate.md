@@ -19,7 +19,7 @@ text-delta projection were verified through PR #300
 shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
 CLI redaction contract was verified through PR #316
 (`agent/redaction-hardening`; shape coverage, absorbing suppression, stateful
-parity, and geometric rescan bound). It covers the provider-neutral operation,
+parity, and geometric work bound). It covers the provider-neutral operation,
 observation, and evidence vocabulary; SSE framing; structured-output and tool
 decode; `ScriptedModel`; the three provider adapters; and their credential
 boundaries. Layer-2 authorization and evidence classification
@@ -700,7 +700,11 @@ least twice L, while crossing the cap forces one final round. Each streamed
 post-hold round invokes the two top-level whole-buffer classifiers; a dropped
 suffix round invokes its suffix classifier but receives the same conservative
 two-classifier charge. Before invocation, the sink charges the full joined
-input, including emitted or dropped lookbehind context, at that rate. A
+input, including emitted or dropped lookbehind context, at that rate. A live
+dropped suffix is extended in place between those checkpoints, empty dropped
+items are no-ops, and obsolete prefixes are compacted only at a checkpoint;
+suffix-copy work therefore follows the same geometric linear bound rather than
+growing with the square of the provider-event count. A
 per-continuously-unresolved-candidate budget fails closed before a round would
 make cumulative reclassification input exceed 393,216 bytes (six times 64 KiB),
 independent of delta count. Without external context, the geometric held lengths

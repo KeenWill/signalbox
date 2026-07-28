@@ -1496,6 +1496,8 @@ pub(crate) struct RedactingSink<'a, C> {
     dropped_context_next_rescan_len: usize,
     #[cfg(test)]
     pending_rescan_work: PendingRescanWork,
+    #[cfg(test)]
+    dropped_context_clone_bytes: usize,
 }
 
 impl<'a, C: Clone> RedactingSink<'a, C> {
@@ -1517,6 +1519,8 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 reclassifications: 0,
                 bytes: 0,
             },
+            #[cfg(test)]
+            dropped_context_clone_bytes: 0,
         }
     }
 
@@ -1543,39 +1547,51 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         if self.suppressing {
             return;
         }
+        // An empty dropped item advances neither chronology nor a geometric
+        // checkpoint. In particular it must not copy a live near-cap suffix.
+        if dropped.is_empty() {
+            return;
+        }
         // Once a chronological lookbehind is known live, dropped bytes cannot
         // reach any output and may be accumulated without rescanning until its
         // length doubles. The full suffix remains available to every terminal
         // field between checkpoints; only the expensive classification waits.
         if self.pending.is_none() && self.dropped_context_next_rescan_len > 0 {
-            let mut joined = if self.dropped_context.is_empty() {
-                self.emitted_context.clone()
-            } else {
-                self.dropped_context.clone()
-            };
-            let prior_context_len = joined.len();
-            joined.push_str(dropped);
-            if joined.len() < self.dropped_context_next_rescan_len
-                && joined.len() <= MAX_PENDING_STREAM_BYTES
+            if self.dropped_context.is_empty() {
+                #[cfg(test)]
+                {
+                    self.dropped_context_clone_bytes += self.emitted_context.len();
+                }
+                self.dropped_context.clone_from(&self.emitted_context);
+            }
+            let prior_context_len = self.dropped_context.len();
+            self.dropped_context.push_str(dropped);
+            let joined_len = self.dropped_context.len();
+            if joined_len < self.dropped_context_next_rescan_len
+                && joined_len <= MAX_PENDING_STREAM_BYTES
             {
-                self.dropped_context = joined;
                 return;
             }
-            if !self.record_context_rescan(joined.len()) {
+            if !self.record_context_rescan(joined_len) {
                 self.suppress_remaining();
                 return;
             }
-            let unsafe_start = unsafe_stream_suffix_start(&joined);
-            let context = unsafe_start.map_or("", |start| &joined[start..]);
-            if context.len() > MAX_PENDING_STREAM_BYTES {
-                self.suppress_remaining();
-                return;
-            }
+            let unsafe_start = unsafe_stream_suffix_start(&self.dropped_context);
             let continued = unsafe_start.is_some_and(|start| start < prior_context_len);
+            match unsafe_start {
+                Some(start) if start > 0 => {
+                    self.dropped_context.drain(..start);
+                }
+                Some(_) => {}
+                None => self.dropped_context.clear(),
+            }
+            if self.dropped_context.len() > MAX_PENDING_STREAM_BYTES {
+                self.suppress_remaining();
+                return;
+            }
             if !continued {
                 self.dropped_context_rescan_bytes = 0;
             }
-            self.dropped_context = context.to_string();
             self.dropped_context_continues_candidate = continued;
             self.refresh_dropped_context_rescan_threshold();
             self.reset_context_budget_if_spent();
@@ -1693,6 +1709,11 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     #[cfg(test)]
     fn pending_rescan_work(&self) -> &PendingRescanWork {
         &self.pending_rescan_work
+    }
+
+    #[cfg(test)]
+    fn dropped_context_clone_bytes(&self) -> usize {
+        self.dropped_context_clone_bytes
     }
 
     #[cfg(test)]
@@ -2559,7 +2580,13 @@ fn spaced_credential_starts_at_zero(text: &str) -> bool {
 }
 
 fn space_separated_flag_candidate(text: &str) -> bool {
-    space_separated_flag_unsafe_start(text) == Some(0) || redact_space_separated_flags(text) != text
+    space_separated_flag_unsafe_start(text) == Some(0)
+        || (redact_space_separated_flags(text) != text
+            && SPACE_SEPARATED_CREDENTIAL_FLAGS.iter().any(|flag| {
+                text.len() > flag.len()
+                    && text.as_bytes()[..flag.len()].eq_ignore_ascii_case(flag.as_bytes())
+                    && matches!(text.as_bytes()[flag.len()], b' ' | b'\t')
+            }))
 }
 
 fn space_separated_flag_unsafe_start(text: &str) -> Option<usize> {
@@ -2602,7 +2629,14 @@ fn space_separated_flag_unsafe_start(text: &str) -> Option<usize> {
 }
 
 fn url_userinfo_candidate(text: &str) -> bool {
-    url_userinfo_unsafe_start(text) == Some(0) || redact_url_userinfo_passwords(text) != text
+    url_userinfo_unsafe_start(text) == Some(0)
+        || (redact_url_userinfo_passwords(text) != text
+            && text.find("://").is_some_and(|separator| {
+                separator > 0
+                    && text[..separator].bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')
+                    })
+            }))
 }
 
 fn url_userinfo_unsafe_start(text: &str) -> Option<usize> {
@@ -2661,7 +2695,15 @@ fn unfinished_url_userinfo_contains_password(text: &str) -> bool {
 }
 
 fn curl_userinfo_candidate(text: &str) -> bool {
-    curl_userinfo_unsafe_start(text) == Some(0) || redact_curl_userinfo_passwords(text) != text
+    curl_userinfo_unsafe_start(text) == Some(0)
+        || (redact_curl_userinfo_passwords(text) != text
+            && CURL_USER_FLAGS.iter().any(|flag| {
+                text.starts_with(flag)
+                    && text
+                        .as_bytes()
+                        .get(flag.len())
+                        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+            }))
 }
 
 fn curl_userinfo_unsafe_start(text: &str) -> Option<usize> {
@@ -2727,7 +2769,6 @@ fn identifier_assignment_candidate(text: &str) -> bool {
     if identifier_assignment_unsafe_start_with_claims(text, &mut unsafe_cursor) == Some(0) {
         return true;
     }
-    let mut candidate_cursor = json_claims.cursor();
     let base = text.as_ptr() as usize;
     let mut offset = 0;
     while let Some(relative) = text[offset..]
@@ -2744,9 +2785,7 @@ fn identifier_assignment_candidate(text: &str) -> bool {
             } else {
                 content
             };
-            let json_scanner_declined =
-                quote == Some('"') && !candidate_cursor.claims_in_source_order(start);
-            if start == 0 || json_scanner_declined {
+            if start == 0 {
                 return true;
             }
         }
@@ -2971,7 +3010,28 @@ fn identifier_assignment_unsafe_start_with_claims(
         };
         fold(start);
     }
+    if let Some(start) = trailing_single_quoted_key_opener(text) {
+        fold(start);
+    }
     earliest
+}
+
+/// A single quote at the end of a key position may open a non-JSON quoted
+/// assignment whose name arrives in the next delta. Holding only the quote is
+/// conservative and reversible: a clean completion releases it byte-exact.
+fn trailing_single_quoted_key_opener(text: &str) -> Option<usize> {
+    let trimmed = text.trim_end_matches([' ', '\t']);
+    let (start, quote) = trimmed.char_indices().next_back()?;
+    if quote != '\'' {
+        return None;
+    }
+    text[..start]
+        .chars()
+        .next_back()
+        .is_none_or(|character| {
+            character.is_whitespace() || matches!(character, '{' | '[' | '(' | ',')
+        })
+        .then_some(start)
 }
 
 /// Whether escape decoding exposed an unsafe suffix away from original offset
@@ -4626,6 +4686,39 @@ safe-line"
         assert!(output.contains("tail"));
     }
 
+    /// INV-035: a single-quoted credential key opener split from its name is
+    /// held until the statelessly covered assignment can be classified whole.
+    #[test]
+    fn inv_035_stream_holds_split_single_quoted_key_opener() {
+        const PLANTED_VALUE: &str = PLANTED_SYNTHETIC_SECRET;
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "{'".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: format!("client_secret': '{PLANTED_VALUE}'}}"),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
     /// INV-035: a quoted TOML key split before its closing quote, preceded by
     /// text that keeps both the JSON-key heuristic and the `"<name>":` marker
     /// prefixes from recognizing it, is held from its opening quote so the
@@ -5160,6 +5253,48 @@ safe-line"
         assert!(streamed.contains(REDACTED));
     }
 
+    /// INV-035: suppressing a complete flag reconstructed from context keeps
+    /// its unfinished value marker live across the next barrier.
+    #[test]
+    fn inv_035_context_suppression_retains_nested_flag_value() {
+        const PLANTED_VALUE: &str = PLANTED_SYNTHETIC_SECRET;
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "co".to_string(),
+                },
+            });
+            sink.finish();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: "dex --password \t ".to_string(),
+                },
+            });
+            sink.finish();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 2,
+                    text: PLANTED_VALUE.to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
     /// INV-035: a candidate carried across a finish barrier owns an unsafe
     /// suffix that begins inside its value; a later finish cannot release that
     /// value as though it were an independent clean candidate.
@@ -5551,6 +5686,13 @@ safe-line"
         }
     }
 
+    /// Repeats empty dropped provider items without advancing chronology.
+    fn extend_empty_dropped_context(sink: &mut RedactingSink<'_, u8>, item_count: u32) {
+        for _ in 0..item_count {
+            sink.extend_dropped_context("");
+        }
+    }
+
     /// Repeats a benign dropped unit that ends in a fresh partial marker.
     fn extend_repeated_dropped_unit(sink: &mut RedactingSink<'_, u8>, unit: &str, count: u32) {
         for _ in 0..count {
@@ -5624,6 +5766,28 @@ safe-line"
         assert_eq!(sink.pending_rescan_work(), &EXPECTED_WORK);
         assert!(sink.pending_rescan_work().bytes <= MAX_PENDING_RESCAN_BYTES);
         assert!(!sink.is_suppressing());
+    }
+
+    /// INV-035: bytes copied solely to inspect a growing dropped lookbehind
+    /// are bounded linearly rather than cloning the whole suffix per event.
+    #[test]
+    fn inv_035_dropped_context_growth_does_not_clone_per_event() {
+        const BYTE_COUNT: u32 = 1_024;
+        const MAX_CLONED_BYTES: usize = 2 * BYTE_COUNT as usize;
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        extend_one_byte_dropped_context(&mut sink, BYTE_COUNT);
+
+        let copied_after_growth = sink.dropped_context_clone_bytes();
+        extend_empty_dropped_context(&mut sink, 20_000);
+
+        assert_eq!(sink.dropped_context_clone_bytes(), copied_after_growth);
+        assert!(
+            sink.dropped_context_clone_bytes() <= MAX_CLONED_BYTES,
+            "dropped context cloned {} bytes",
+            sink.dropped_context_clone_bytes()
+        );
     }
 
     /// INV-035: dropped-context growth crossing the 64-KiB cap receives one
