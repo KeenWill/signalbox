@@ -128,13 +128,19 @@ impl<C: Clone> EventDecoder<C> {
                 // thread id that extends a credential marker held from a
                 // drifted earlier reasoning delta is suppressed instead of
                 // escaping in the observation and terminal exchange facts.
-                self.exchange.provider_request_id = Some(ProviderRequestId::new(
-                    sink.redact_terminal_failure_text(&event.thread_id),
-                ));
+                let sanitized = sink.redact_terminal_failure_text(&event.thread_id);
+                self.exchange.provider_request_id = Some(ProviderRequestId::new(sanitized.clone()));
                 sink.observe(Observation {
                     correlation: self.correlation.clone(),
                     fact: ObservationFact::ExchangeEstablished(self.exchange.clone()),
                 });
+                // The id just left the adapter inside `ExchangeEstablished`,
+                // where later text sits beside it in observations and terminal
+                // evidence. Seeding its unsafe trailing suffix (a credential
+                // marker prefix such as `api_`) into the lookbehind makes text
+                // completing that marker (`key=value`) suppress instead of
+                // emitting as the marker's reconstructable continuation.
+                sink.seed_emitted_context(&sanitized);
             }
             "turn.started" => {}
             "item.started" | "item.updated" => {
@@ -386,7 +392,12 @@ impl<C: Clone> EventDecoder<C> {
             return Err("a refusal envelope also proposed tools".to_string());
         }
         let mut content = Vec::new();
-        let text = redact_text(&envelope.text);
+        // Consults the held lookbehind (including the emitted thread-id
+        // context), not just the stateless scan: a buffered final text whose
+        // start completes a credential marker ending the already-recorded
+        // thread id must be suppressed whole, exactly as the streamed path
+        // suppresses it delta by delta.
+        let text = sink.redact_terminal_failure_text(&envelope.text);
         if !text.is_empty() {
             content.push(AssistantPart::Text(text));
         }
