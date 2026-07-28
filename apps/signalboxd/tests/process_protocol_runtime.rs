@@ -831,10 +831,17 @@ fn transcript_snapshot_end_facts(message: &ServerMessage) -> TranscriptSnapshotE
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct InputAcceptedEventFacts {
+    cursor: u64,
+    session_id: CanonicalUuid,
+    accepted_input_id: CanonicalUuid,
+    acceptance_position: u64,
+    content: InputContent,
+}
+
 #[track_caller]
-fn input_accepted_event_facts(
-    message: &ServerMessage,
-) -> (u64, CanonicalUuid, CanonicalUuid, u64, InputContent) {
+fn input_accepted_event_facts(message: &ServerMessage) -> InputAcceptedEventFacts {
     match message {
         ServerMessage::SessionEvent {
             cursor,
@@ -846,13 +853,13 @@ fn input_accepted_event_facts(
                     content,
                     ..
                 },
-        } => (
-            cursor.value(),
-            *session_id,
-            *accepted_input_id,
-            acceptance_position.value(),
-            content.clone(),
-        ),
+        } => InputAcceptedEventFacts {
+            cursor: cursor.value(),
+            session_id: *session_id,
+            accepted_input_id: *accepted_input_id,
+            acceptance_position: acceptance_position.value(),
+            content: content.clone(),
+        },
         message => panic!("fixture expected input-accepted event, got {message:?}"),
     }
 }
@@ -2614,20 +2621,23 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
     // The exact-limit queued content keeps the snapshot writer blocked after
     // its start frame. Commit the next update before draining the snapshot so
     // only a subscription formed before snapshot transmission can retain it.
+    let second_position = 2;
+    let second_content = InputContent::new(String::from("second input"));
     commands
         .request(
             6,
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new("second input".to_owned()),
+                content: second_content.clone(),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 delivery: None,
             },
         )
         .await?;
     let second_submit = commands.response().await?;
-    let second_accepted_input = submitted_input_identity(second_submit.message(), session_id, 2);
+    let second_accepted_input =
+        submitted_input_identity(second_submit.message(), session_id, second_position);
 
     let queued_turn = response_within(&mut follow).await?;
     let (projected_turn, projected_position, projected_state) =
@@ -2653,16 +2663,12 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
     );
 
     let followed = response_within(&mut follow).await?;
-    let (event_cursor, event_session, event_input, event_position, event_content) =
-        input_accepted_event_facts(followed.message());
-    assert!(event_cursor > follow_cursor);
-    assert_eq!(event_session, session_id);
-    assert_eq!(event_input, second_accepted_input);
-    assert_eq!(event_position, 2);
-    assert_eq!(
-        event_content,
-        InputContent::new(String::from("second input"))
-    );
+    let event = input_accepted_event_facts(followed.message());
+    assert!(event.cursor > follow_cursor);
+    assert_eq!(event.session_id, session_id);
+    assert_eq!(event.accepted_input_id, second_accepted_input);
+    assert_eq!(event.acceptance_position, second_position);
+    assert_eq!(event.content, second_content);
 
     drop(commands);
     drop(follow);

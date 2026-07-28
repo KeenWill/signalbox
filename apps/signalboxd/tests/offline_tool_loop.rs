@@ -51,8 +51,9 @@ use signalbox_persistence::{
     submit_input::SubmitInputRepository, tool_loop::PostgresToolLoopRepository,
 };
 use signalbox_process_protocol::{
-    CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent, InputDelivery,
-    ProtocolVersion, RequestId, ServerMessage, decode_server_line, encode_client_line,
+    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
+    InputDelivery, ProtocolVersion, RequestId, ServerMessage, decode_server_line,
+    encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnExecution, CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
@@ -2661,11 +2662,10 @@ async fn s02_s10_inv006_failed_continuation_call_admits_and_runs_later_turn()
     Ok(())
 }
 
-async fn submit_steering_through_process(
+async fn submit_frame_through_process(
     fixture: &ToolLoopFixture,
-    command_id: u128,
-    content: &str,
-) -> Result<(), Box<dyn Error>> {
+    frame: &ClientFrame,
+) -> Result<ServerMessage, Box<dyn Error>> {
     let directory = tempdir()?;
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
     let socket = directory.path().join("hub.sock");
@@ -2684,20 +2684,7 @@ async fn submit_steering_through_process(
 
     let stream = UnixStream::connect(&socket).await?;
     let (reader, mut writer) = stream.into_split();
-    let frame = ClientFrame::try_new_for_version(
-        ProtocolVersion::Thirteen,
-        RequestId::try_new(1)?,
-        ClientRequest::SubmitInput {
-            command_id: CommandId::try_from_uuid(Uuid::from_u128(command_id))?,
-            session_id: CanonicalUuid::from_uuid(fixture.session.into_uuid()),
-            content: InputContent::new(content.to_owned()),
-            expected_defaults_version: None,
-            delivery: Some(InputDelivery::Steer {
-                expected_active_turn_id: CanonicalUuid::from_uuid(fixture.turn.into_uuid()),
-            }),
-        },
-    )?;
-    writer.write_all(&encode_client_line(&frame)?).await?;
+    writer.write_all(&encode_client_line(frame)?).await?;
     let mut reader = BufReader::new(reader);
     let mut line = Vec::new();
     reader.read_until(b'\n', &mut line).await?;
@@ -2707,23 +2694,7 @@ async fn submit_steering_through_process(
     drop(writer);
     shutdown.send(true)?;
     timeout(Duration::from_secs(10), runtime_task).await???;
-    match response {
-        ServerMessage::SteeringSubmitted {
-            session_id,
-            acceptance_position,
-            source_turn_id,
-            ..
-        } if session_id.into_uuid() == fixture.session.into_uuid()
-            && acceptance_position.value() == 2
-            && source_turn_id.into_uuid() == fixture.turn.into_uuid() =>
-        {
-            Ok(())
-        }
-        message => Err(std::io::Error::other(format!(
-            "unexpected pending-steering receipt: {message:?}"
-        ))
-        .into()),
-    }
+    Ok(response)
 }
 
 /// S02 / S10 / INV-006: a provider refusal on the continuation model call of
@@ -2850,7 +2821,39 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_completes()
         .await?;
     let request = fixture.wait_for_requests(1).await?[0];
 
-    submit_steering_through_process(&fixture, 0x3610, "steer the parked tool round").await?;
+    let steering_content = InputContent::new(String::from("steer the parked tool round"));
+    let steering_frame = ClientFrame::try_new_for_version(
+        ProtocolVersion::Thirteen,
+        RequestId::try_new(1)?,
+        ClientRequest::SubmitInput {
+            command_id: CommandId::try_from_uuid(Uuid::from_u128(0x3610))?,
+            session_id: CanonicalUuid::from_uuid(fixture.session.into_uuid()),
+            content: steering_content,
+            expected_defaults_version: None,
+            delivery: Some(InputDelivery::Steer {
+                expected_active_turn_id: CanonicalUuid::from_uuid(fixture.turn.into_uuid()),
+            }),
+        },
+    )?;
+    let steering_response = submit_frame_through_process(&fixture, &steering_frame).await?;
+    let accepted_input_id: Uuid = sqlx::query_scalar(
+        "SELECT accepted_input_id
+           FROM accepted_input
+          WHERE session_id = $1
+            AND acceptance_position = 2",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        steering_response,
+        ServerMessage::SteeringSubmitted {
+            session_id: CanonicalUuid::from_uuid(fixture.session.into_uuid()),
+            accepted_input_id: CanonicalUuid::from_uuid(accepted_input_id),
+            acceptance_position: CanonicalU64::new(2),
+            source_turn_id: CanonicalUuid::from_uuid(fixture.turn.into_uuid()),
+        }
+    );
 
     fixture
         .decide(request, ToolApprovalDecision::Approve)
