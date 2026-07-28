@@ -1232,6 +1232,43 @@ async fn timeout_while_stdin_is_blocked_covers_the_whole_spawn_lifetime() {
     );
 }
 
+/// A leader that already exited while a surviving descendant held the
+/// inherited stdin read end (keeping the oversized upload blocked past the
+/// deadline) is preserved at the upload-deadline arm: its definitive nonzero
+/// status classifies as a typed provider error instead of being laundered
+/// into timeout loss by the group kill, mirroring the cancellation arm's
+/// work-first probe.
+#[cfg(unix)]
+#[tokio::test]
+async fn upload_deadline_preserves_an_exited_leader_with_held_stdin() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    std::fs::write(
+        temporary
+            .path()
+            .join(fixtures::EARLY_STDIN_HELD_EXIT_MARKER),
+        "hold",
+    )
+    .expect("the held-stdin exit marker is created");
+    let runtime = runtime_with_timeout(temporary.path(), fake_cli(), Duration::from_secs(2));
+    let prepared = prepare(&runtime, blocked_input_operation()).await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let failure = provider_error(&report.evidence);
+
+    assert_eq!(failure.kind, ProviderErrorKind::CredentialRejected);
+    assert!(
+        failure
+            .native
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("authentication failed"))
+    );
+    assert_recorded_process_group_exited(temporary.path().join("fake-codex-stdin-held-group"));
+}
+
 #[tokio::test]
 async fn nonzero_exit_while_writing_stdin_preserves_provider_error() {
     let temporary = tempfile::tempdir().expect("test working directory is created");

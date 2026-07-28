@@ -34,6 +34,10 @@ pub const CREDENTIAL_PREFIX_THREAD_ID: &str = "api_";
 /// on its own (`key` matches no credential shape).
 pub const SENSITIVE_THREAD_CONTINUATION: &str = "key=opaque-thread-continuation done";
 pub const EARLY_STDIN_EXIT_MARKER: &str = "fake-codex-exit-before-stdin";
+/// Makes the fake CLI hand its stdin to a surviving descendant (which never
+/// reads it, keeping the upload blocked), write a classifiable stderr
+/// failure, and exit nonzero before reading the prompt.
+pub const EARLY_STDIN_HELD_EXIT_MARKER: &str = "fake-codex-exit-with-held-stdin";
 pub const EARLY_STDIN_COMPLETION_MARKER: &str = "fake-codex-complete-before-stdin";
 pub const EARLY_STDIN_FAILURE: &str = "unexpected status 400 Bad Request: context_length_exceeded";
 #[allow(

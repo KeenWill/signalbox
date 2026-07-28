@@ -273,12 +273,21 @@ fn redact_identifier_assignment(text: &str) -> String {
         .position(|byte| matches!(byte, b'=' | b':'))
     {
         let is_colon = remaining.as_bytes()[separator] == b':';
-        // A *double*-quoted key before `:` is a JSON member the JSON scanner
-        // already owns; a single-quoted key before `:` (`'api_key': value`) is
-        // not JSON, and a `=` after any quoted key (TOML) or any separator after
-        // a bare key is a plaintext credential assignment this scanner must own.
+        // A *double*-quoted key before `:` is exempt only where the JSON
+        // scanner actually owns it — after `{`, `,`, or at the scan start. A
+        // quoted key embedded after prose (`detail: "client_secret":"v"`) is
+        // one the JSON scanner rejects, so this scanner must take it or a
+        // composite credential name leaks. A single-quoted key before `:`
+        // (`'api_key': value`) is never JSON, and a `=` after any quoted key
+        // (TOML) or any separator after a bare key is a plaintext credential
+        // assignment this scanner owns outright.
         if let Some((identifier, quote)) = trailing_identifier(&remaining[..separator])
-            && !(quote == Some('"') && is_colon)
+            && !(quote == Some('"')
+                && is_colon
+                && json_key_can_start_at(
+                    text,
+                    identifier.as_ptr() as usize - text.as_ptr() as usize - 1,
+                ))
             && credential_key(identifier)
         {
             let termination = if credential_key_is_free_form(identifier) {
@@ -948,6 +957,32 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         redact_text(message)
     }
 
+    /// Redacts the final envelope text like a terminal failure message, then
+    /// resolves the dropped-reasoning chain through it: after this text, a
+    /// dropped-marker candidate has either completed inside it (and was
+    /// suppressed just now), been broken by it, or — only when the candidate
+    /// is still in progress at the text's end — remains live. Consuming the
+    /// resolved chain keeps it from misfiring on the clean provider ids that
+    /// follow: with the broken chain still live, an id beginning `key=` would
+    /// be reassembled as `api_key=` despite the intervening text.
+    pub(crate) fn redact_final_envelope_text(&mut self, text: &str) -> String {
+        let redacted = self.redact_terminal_failure_text(text);
+        if !self.dropped_context.is_empty() && !self.suppressing {
+            let mut joined = std::mem::take(&mut self.dropped_context);
+            let dropped_length = joined.len();
+            joined.push_str(text);
+            if unsafe_stream_suffix_start(&joined).is_some_and(|start| start < dropped_length) {
+                let context = trailing_credential_context(&joined);
+                if context.len() > MAX_PENDING_STREAM_BYTES {
+                    self.suppressing = true;
+                } else {
+                    self.dropped_context = context.to_string();
+                }
+            }
+        }
+        redacted
+    }
+
     /// Redacts tool-argument JSON against the held lookbehind state:
     /// arguments that extend a held credential candidate — or that arrive
     /// while the sink is suppressing an oversized one — are replaced whole,
@@ -1526,8 +1561,12 @@ fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
         }
         let separator = index;
         let is_colon = byte == b':';
+        // The double-quoted-colon exemption mirrors the stateless scanner:
+        // only a position the JSON scanner owns is left to it.
         if let Some((identifier, quote)) = trailing_identifier(&text[..separator])
-            && !(quote == Some('"') && is_colon)
+            && !(quote == Some('"')
+                && is_colon
+                && json_key_can_start_at(text, identifier.as_ptr() as usize - base - 1))
             && credential_key(identifier)
         {
             let termination = if credential_key_is_free_form(identifier) {
@@ -2777,6 +2816,20 @@ safe-line"
         );
     }
 
+    /// INV-035: a double-quoted composite credential member embedded after
+    /// prose — where the JSON scanner's key predicate rejects it — is taken
+    /// by the identifier scanner instead of leaking, while a member in real
+    /// JSON position stays owned by the JSON scanner.
+    #[test]
+    fn inv_035_redacts_quoted_credential_members_embedded_after_prose() {
+        let fixture = r#"provider detail: "client_secret":"opaque-embedded-value" tail"#;
+        let output = redact_text(fixture);
+
+        assert!(!output.contains("opaque-embedded-value"));
+        assert!(output.contains("[redacted]"));
+        assert!(output.contains("provider detail:"));
+    }
+
     /// INV-035: a credential marker inside dropped (buffered-delivery
     /// reasoning) bytes governs the final text, so its value continuation is
     /// suppressed whole rather than surfacing as an opaque-but-real secret.
@@ -2806,6 +2859,55 @@ safe-line"
             sink.redact_terminal_failure_text("key=opaque-context-value done"),
             REDACTED
         );
+    }
+
+    /// A dropped-marker chain the final text breaks (`api_` then `hello`)
+    /// is consumed by that text: a later provider id beginning `key=` is NOT
+    /// reassembled as `api_key=` across the intervening text, so clean ids
+    /// keep their fidelity.
+    #[test]
+    fn dropped_chain_broken_by_final_text_releases_later_ids() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.extend_dropped_context("api_");
+
+        assert_eq!(
+            sink.redact_final_envelope_text("hello there."),
+            "hello there."
+        );
+        assert_eq!(sink.redact_provider_id("", "key=call-7"), "key=call-7");
+    }
+
+    /// INV-035: a dropped-marker chain still in progress at the final text's
+    /// end (an empty text resolves nothing; the bare marker alone already
+    /// redacts, so even the empty text is suppressed) stays live and governs
+    /// the fields that follow.
+    #[test]
+    fn inv_035_dropped_chain_survives_an_empty_final_text() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.extend_dropped_context("Authorization:");
+
+        assert_eq!(sink.redact_final_envelope_text(""), REDACTED);
+        assert_eq!(
+            sink.redact_provider_id("", " opaque-continuation"),
+            REDACTED
+        );
+    }
+
+    /// INV-035: a dropped-marker candidate completing inside the final text
+    /// suppresses that text whole and is consumed by the suppression.
+    #[test]
+    fn inv_035_dropped_chain_completing_in_final_text_is_consumed() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.extend_dropped_context("api_");
+
+        assert_eq!(
+            sink.redact_final_envelope_text("key=opaque-context-value done."),
+            REDACTED
+        );
+        assert_eq!(sink.redact_provider_id("", "call-7"), "call-7");
     }
 
     /// An id with a credential-clean trailing suffix seeds nothing, and the
