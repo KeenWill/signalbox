@@ -44,19 +44,18 @@ surface reserved fifteen while sixteen was still unclaimed, but sixteen shipped
 first: numbering its request below an already-closed vocabulary would
 retroactively admit that request in version-sixteen frames, so inspection takes
 version seventeen for `read_imported_conversation` and its typed continuation
-rejections, verified through PR #303
-(`agent/imported-conversation-inspection`). The session-template surface takes
-version eighteen for daemon-side copy-on-create resolution and template listing,
-verified through this PR (`agent/session-templates-spec`). Every earlier
-admitted version retains its closed vocabulary. This implementation speaks
-versions one through thirteen and sixteen through eighteen, with fourteen and
-fifteen unsupported, and its terminal client selects version eighteen. Its
-`search` verb over version four's metadata list was verified through PR #283
-(`agent/session-search-cli`; terminal client surface only). This page's
-version-four last-writer member spelling was verified through PR #288
-(`agent/audit-fix-docs-coherence`). This page is the normative boundary between
-a local client process and `signalboxd`; domain values, PostgreSQL records, and
-wire messages remain distinct representations.
+rejections, verified through PR #303 (`agent/imported-conversation-inspection`).
+The session-template surface takes version eighteen for daemon-side
+copy-on-create resolution and template listing, verified through this PR
+(`agent/session-templates-spec`). Every earlier admitted version retains its
+closed vocabulary. This implementation speaks versions one through thirteen and
+sixteen through eighteen, with fourteen and fifteen unsupported, and its
+terminal client selects version eighteen. Its `search` verb over version four's
+metadata list was verified through PR #283 (`agent/session-search-cli`; terminal
+client surface only). This page's version-four last-writer member spelling was
+verified through PR #288 (`agent/audit-fix-docs-coherence`). This page is the
+normative boundary between a local client process and `signalboxd`; domain
+values, PostgreSQL records, and wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -181,13 +180,13 @@ contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
 spellings decode to the same name. A version other than one through thirteen,
-sixteen, seventeen, or eighteen produces an `unsupported_version` error
-naming the supported versions, then the server closes the connection. Versions
-fourteen and fifteen are reserved and unsupported here, so the admitted set has
-one gap; that gap is a reservation, not a retired version. Every response uses
-the request's admitted version; when no version can be admitted, the server
-error uses version one as the pre-admission fallback. A client speaking a
-version above one admits that version-one fallback only for `malformed_frame` or
+sixteen, seventeen, or eighteen produces an `unsupported_version` error naming
+the supported versions, then the server closes the connection. Versions fourteen
+and fifteen are reserved and unsupported here, so the admitted set has one gap;
+that gap is a reservation, not a retired version. Every response uses the
+request's admitted version; when no version can be admitted, the server error
+uses version one as the pre-admission fallback. A client speaking a version
+above one admits that version-one fallback only for `malformed_frame` or
 `unsupported_version`, then applies the ordinary request-identity check; every
 other response-version mismatch fails locally. A server error uses
 `request_id = "0"` only when the incoming frame prevents recovery of a valid

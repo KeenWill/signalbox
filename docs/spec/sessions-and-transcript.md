@@ -472,11 +472,12 @@ dependency for future creation-derived visibility is recorded in
 ## The session aggregate
 
 The long-lived domain `Session` (`crates/domain/src/session.rs`) contains
-exactly three facts: `SessionId`, the immutable creation provenance, and the
-complete current defaults version selected by the durable pointer. It embeds
-nothing else — no transcript entries, accepted inputs, turns, queue facts,
-command history, evidence, or presentation state (INV-005). Those remain
-independently stored facts correlated by typed identity.
+exactly four facts: `SessionId`, the immutable creation provenance, optional
+immutable template provenance, and the complete current defaults version
+selected by the durable pointer. It embeds nothing else — no transcript entries,
+accepted inputs, turns, queue facts, command history, evidence, or presentation
+state (INV-005). Those remain independently stored facts correlated by typed
+identity.
 
 Why (small aggregate): embedding session-associated collections would turn an
 ordinary session read into an unbounded reconstruction crossing several
@@ -492,16 +493,17 @@ loading never returns a receipt and command replay never returns a `Session`.
 ### Loading and reconstitution
 
 `load_session(SessionId)` performs one statement-consistent read joining the
-session row, its one current-defaults pointer, and exactly the version that
-pointer names (`crates/persistence/src/session.rs`). For imported ancestry, the
-same bounded read joins the one-to-one seed record and its frontier header as a
-constant-size proof: seed and frontier ownership and identity must agree with
-the session, and the stored member count must equal the selected imported
-boundary position. It does not materialize the imported conversation, frontier
-members, or semantic entries. Full prefix comparison belongs to creation replay
-and purpose-specific semantic-context resolution. The pointer is authoritative;
-a load never infers current defaults from version one, the greatest stored
-version, a caller-supplied version, or a cache.
+session row — including its creation provenance and optional template provenance
+— its one current-defaults pointer, and exactly the version that pointer names
+(`crates/persistence/src/session.rs`). For imported ancestry, the same bounded
+read joins the one-to-one seed record and its frontier header as a constant-size
+proof: seed and frontier ownership and identity must agree with the session, and
+the stored member count must equal the selected imported boundary position. It
+does not materialize the imported conversation, frontier members, or semantic
+entries. Full prefix comparison belongs to creation replay and purpose-specific
+semantic-context resolution. The pointer is authoritative; a load never infers
+current defaults from version one, the greatest stored version, a
+caller-supplied version, or a cache.
 
 Why (pointer authority): append-only version existence does not mean
 installation; only the pointer records the accepted current choice.
@@ -511,9 +513,12 @@ the row exists, a missing pointer, missing selected version, ownership mismatch,
 pointer/record version disagreement, unknown discriminator, invalid ordinal, or
 an absent or inconsistent bounded imported-seed proof fails closed as typed
 corruption: the adapter's decode checks feed the domain-owned
-`SessionReconstitutionInput::reconstitute` seam, which accepts only complete
-agreeing domain values (INV-002, INV-039). Reconstitution never yields `None`, a
-default, or a partial session.
+`SessionReconstitutionInput::reconstitute` seam. Its complete input retains the
+requested and stored session identities, creation provenance, optional template
+provenance, the current-pointer identity and version, and the selected defaults
+record's identity, version, and value; it accepts only complete agreeing domain
+values (INV-002, INV-039). Reconstitution never yields `None`, a default, or a
+partial session.
 
 Why (fail closed): a fabricated or partial session would mask corruption and
 launder invalid durable state into valid-looking domain values.

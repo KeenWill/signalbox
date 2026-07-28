@@ -642,14 +642,17 @@ reconstructing provider history in frontier order; it performs no per-entry
 database round trips while holding the scheduler lock.
 
 `DecideToolRequest` joins the owner-global durable-command registry as its own
-typed record family. Because adding the dangerous posture changes every
-defaults-bearing canonical command payload, new `CreateSession`,
-`CreateSessionFromImportedFrontier`, and `ReplaceSessionDefaults` records use
-kind-scoped storage version 2; their version-1 records reconstitute with
-`DangerousToolAutoApproval::Disabled`. `SubmitInput` remains version 1, and the
-new decision command begins at version 1; registry inspection validates the
-supported version set for the selected kind rather than applying one global
-version constant.
+typed record family. Adding the dangerous posture originally advanced each
+defaults-bearing command family to kind-scoped storage version 2; version-1
+records reconstitute with `DangerousToolAutoApproval::Disabled`. Later
+system-prompt and template provenance migrations advance the affected families
+independently. The current kind-scoped versions and their compatibility gates
+are owned by
+[identity and commands](identity-and-commands.md#registry-and-typed-command-records)
+and [persistence protocol](persistence-protocol.md#relational-representation).
+`SubmitInput` and `DecideToolRequest` remain version 1; registry inspection
+validates the supported version set for the selected kind rather than applying
+one global version constant.
 
 ## Open edges
 

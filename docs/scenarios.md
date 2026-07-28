@@ -1118,7 +1118,7 @@ those tests.
   originally copied session even if a later daemon load sees edited template
   content.
 - **State transitions:** No session → ordinary durable session with immutable
-  defaults version one plus optional template provenance. Editing the config and
+  defaults version one plus present template provenance. Editing the config and
   restarting the daemon changes only later commands with new identities; no
   existing defaults epoch or provenance record changes.
 - **Transient updates:** Template lookup and prompt-file loading are startup
