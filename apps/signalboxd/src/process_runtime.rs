@@ -3587,7 +3587,11 @@ pub(crate) async fn compact_automatically(
             Err(error) => return Err(AutomaticContextCompactionError::Repository(error)),
         }
     };
-    let rendered_range = match load_context_compaction_range(pool, &prepared).await {
+    let rendered_range = match retry_context_compaction_range_database_reads(|| {
+        load_context_compaction_range(pool, &prepared)
+    })
+    .await
+    {
         Ok(rendered) => rendered,
         Err(ContextCompactionRangeLoadError::Read(error)) => {
             fail_context_compaction_until_resolved(
@@ -3671,6 +3675,23 @@ async fn load_context_compaction_range(
         .map(context_compaction_entry_value)
         .collect::<Vec<_>>();
     serde_json::to_string(&values).map_err(|_| ContextCompactionRangeLoadError::Integrity)
+}
+
+async fn retry_context_compaction_range_database_reads<Load, LoadFuture>(
+    mut load: Load,
+) -> Result<String, ContextCompactionRangeLoadError>
+where
+    Load: FnMut() -> LoadFuture,
+    LoadFuture: Future<Output = Result<String, ContextCompactionRangeLoadError>>,
+{
+    loop {
+        match load().await {
+            Err(ContextCompactionRangeLoadError::Read(ProcessReadError::Database(_))) => {
+                sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await;
+            }
+            result => return result,
+        }
+    }
 }
 
 fn transcript_entry_reference(
@@ -8017,6 +8038,7 @@ impl Error for ProcessRuntimeError {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::VecDeque,
         error::Error,
         io,
         sync::{Arc, mpsc},
@@ -8050,19 +8072,20 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        INBOUND_READ_AHEAD_BYTES, IncomingLine, MAX_ACTIVE_CONNECTIONS,
-        MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS,
-        MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES, OperationalImportError, ProcessConnectionError,
-        ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
-        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, ReviewCommandAdmission,
-        SelectedSessionRepresentationFacts, SnapshotSpoolError, acquire_import_permit,
-        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
-        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
-        acquire_snapshot_reader_permit, admits_provider_text_deltas, admitted_user_content,
-        canonical_review_request_digest, consume_snapshot_queued_update,
-        context_compaction_failure_disposition, execute_import, inspect_connection_completion,
-        map_rejection, read_frame_line, replacement_model_is_admitted,
-        required_protocol_version_for_selected_session, run_until_shutdown,
+        ContextCompactionRangeLoadError, INBOUND_READ_AHEAD_BYTES, IncomingLine,
+        MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS,
+        MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
+        OperationalImportError, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
+        ProtocolError, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId,
+        ReviewCommandAdmission, SelectedSessionRepresentationFacts, SnapshotSpoolError,
+        acquire_import_permit, acquire_inbound_frame_permit,
+        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
+        acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
+        admits_provider_text_deltas, admitted_user_content, canonical_review_request_digest,
+        consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
+        inspect_connection_completion, map_rejection, read_frame_line,
+        replacement_model_is_admitted, required_protocol_version_for_selected_session,
+        retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, wire_model_call_state, wire_tool_decision, wire_turn_state,
         wire_uuid, write_content, write_snapshot_spool_error, write_transcript_entry,
     };
@@ -8074,7 +8097,7 @@ mod tests {
             DispatchedReconciliationOperation, DispatchedToolBatchState,
         },
         process_read::{
-            ProcessImportedContentKind, ProcessImportedSourceSpeaker,
+            ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessReadError,
             ProcessReconciliationOperation, ProcessSessionAncestry, ProcessTranscriptEntry,
             ProcessTurnState,
         },
@@ -8116,6 +8139,32 @@ mod tests {
         assert!(consume_snapshot_queued_update(&mut queued));
         assert!(consume_snapshot_queued_update(&mut queued));
         assert!(!consume_snapshot_queued_update(&mut queued));
+    }
+
+    #[tokio::test]
+    async fn automatic_compaction_range_read_retries_transient_database_failure() {
+        let expected_range = String::from("rendered compaction range");
+        let transient = ProcessReadError::Database(sqlx::Error::Io(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "synthetic transient range read",
+        )));
+        let mut outcomes = VecDeque::from([
+            Err(ContextCompactionRangeLoadError::Read(transient)),
+            Ok(expected_range.clone()),
+        ]);
+
+        let loaded = retry_context_compaction_range_database_reads(|| {
+            std::future::ready(
+                outcomes
+                    .pop_front()
+                    .expect("the fixture supplies one retry and one success"),
+            )
+        })
+        .await
+        .expect("a transient database read is retried");
+
+        assert_eq!(loaded, expected_range);
+        assert!(outcomes.is_empty());
     }
 
     impl tokio::io::AsyncWrite for PendingResponseWriter {

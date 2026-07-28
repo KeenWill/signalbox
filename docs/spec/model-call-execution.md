@@ -200,9 +200,13 @@ by guarded session mutation. Each transition first rereads its exact call and
 command lifecycle: an equal `InFlight`, failed terminal disposition, or complete
 summary/result is a successful replay, while a different terminal fact fails
 closed. The daemon retries database and ambiguous-commit outcomes at this seam;
-it does not start provider interaction until authorization is resolved, and it
-retains a successful summary and its usage in memory until the exact completion
-is durably applied or replayed.
+it does not start provider interaction until authorization is resolved. Before
+authorization, an automatic compaction also retries transient database failures
+while loading its selected transcript range, retaining the live `Prepared` call
+as provably unsent rather than consuming that queued turn's sole automatic
+attempt. An integrity failure still terminalizes the unsent call. After a
+successful provider result, the daemon retains the summary and its usage in
+memory until the exact completion is durably applied or replayed.
 
 The explicit version-seventeen `compact_session` request names a session and an
 optional semantic transcript position. Absence selects the latest safe terminal
@@ -212,15 +216,16 @@ rule. Command replay returns the same compaction identity, call, exact through
 position, summary entry, and result frontier.
 
 Every catalog model selection also declares `context_window_tokens` as a
-required nonzero integer beside `max_output_tokens`. It is operator-declared per
-selection and is never inferred from provider/model names. Before activating an
-eligible turn, the daemon renders its prospective initial ordinary call and
-obtains the exact input-token count from that selection's provider adapter. The
-call fits only when that input count plus the selection's full
-`max_output_tokens` reservation is at most the declared context window; checked
-addition fails closed on overflow. When the requested total exceeds the window,
-the turn is not activated and the ordinary call is not sent; the daemon runs
-compaction through the latest safe boundary, reloads the resulting complete
+required nonzero integer beside `max_output_tokens`; configuration is invalid
+when the maximum output reservation exceeds the context window. The window is
+operator-declared per selection and is never inferred from provider/model names.
+Before activating an eligible turn, the daemon renders its prospective initial
+ordinary call and obtains the exact input-token count from that selection's
+provider adapter. The call fits only when that input count plus the selection's
+full `max_output_tokens` reservation is at most the declared context window;
+checked addition fails closed on overflow. When the requested total exceeds the
+window, the turn is not activated and the ordinary call is not sent; the daemon
+runs compaction through the latest safe boundary, reloads the resulting complete
 frontier, renders and counts again, and proceeds only when the recounted input
 plus the same output reservation fits. A compaction result that still cannot fit
 fails closed rather than looping or guessing a different limit. The first

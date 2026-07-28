@@ -450,7 +450,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
     }
 
     #[test]
-    fn configuration_requires_a_positive_declared_context_window() {
+    fn configuration_requires_a_positive_viable_declared_context_window() {
         let missing = CONFIGURATION.replace("\ncontext_window_tokens = 200000", "");
         assert_eq!(
             HubModelConfiguration::parse(&missing).err(),
@@ -464,6 +464,13 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         assert_eq!(
             HubModelConfiguration::parse(&zero).err(),
             Some(HubModelConfigurationError::InvalidLimit)
+        );
+
+        let impossible_reservation =
+            CONFIGURATION.replace("max_output_tokens = 256", "max_output_tokens = 200001");
+        assert_eq!(
+            HubModelConfiguration::parse(&impossible_reservation).err(),
+            Some(HubModelConfigurationError::InvalidField)
         );
     }
 

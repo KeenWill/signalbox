@@ -778,16 +778,31 @@ async fn prepare_in_transaction(
         };
         return Ok((false, outcome));
     }
-    // Lock inventory: the target session row follows the owner-global command
-    // claim. Guarded updates and inserts provide later serialization.
-    let current_version: Option<Decimal> =
-        sqlx::query_scalar(crate::lock_inventory::CONTEXT_COMPACTION_SESSION)
-            .bind(session_id_to_uuid(request.session))
-            .fetch_optional(&mut **transaction)
-            .await?;
-    let Some(current_version) = current_version else {
+    // Lock inventory: the session scheduler follows the owner-global command
+    // claim, then the current-defaults pointer. Holding the scheduler while
+    // selecting and recording the boundary makes compaction preparation and
+    // turn activation mutually exclusive.
+    let session_uuid = session_id_to_uuid(request.session);
+    let (session_exists, scheduler_session) = sqlx::query_as::<_, (bool, Option<Uuid>)>(
+        crate::lock_inventory::CONTEXT_COMPACTION_SCHEDULER,
+    )
+    .bind(session_uuid)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !session_exists {
         return Ok((false, PrepareContextCompactionOutcome::SessionNotFound));
-    };
+    }
+    if scheduler_session.is_none() {
+        return Err(ContextCompactionCorruption::Missing("session scheduler row").into());
+    }
+    let current_version: Decimal =
+        sqlx::query_scalar(crate::lock_inventory::CONTEXT_COMPACTION_DEFAULTS)
+            .bind(session_uuid)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(ContextCompactionCorruption::Missing(
+                "session current defaults",
+            ))?;
     if decode_u64(current_version, "current defaults version")? != request.defaults_version.as_u64()
     {
         return Ok((false, PrepareContextCompactionOutcome::DefaultsChanged));

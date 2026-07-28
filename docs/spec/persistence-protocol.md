@@ -354,18 +354,22 @@ Locks per transaction, in acquisition order:
   append-only, so complete loading and boundary resolution need no mutable-state
   lock. Semantic-entry candidates are requested only after the resulting checked
   prefix fixes their cardinality.
-- **ContextCompaction**: an unseen command locks the target session row in
-  `FOR UPDATE` mode before reading defaults, turn, frontier, and existing
-  compaction state. It is the transaction's only explicit row lock; guarded
-  updates and inserts serialize the call, command, summary, and result-frontier
-  records. The pending typed command stores its immutable dedicated
-  `model_call_id` from creation, so recovery never infers correlation from a
-  result-only field. An automatic command additionally stores the immutable
-  queued `turn_id`; a partial uniqueness constraint admits at most one automatic
-  compaction command for that turn in its session, and preparation recognizes
-  the retained attempt before allocating a second call. An equal replay resolves
-  from the command registry and receipt without taking the session lock or
-  resolving current configuration.
+- **ContextCompaction**: after claiming an unseen owner-global command,
+  preparation locks the target `session_scheduler` row `FOR UPDATE` and then the
+  current-defaults pointer `FOR UPDATE` before reading defaults, turn, frontier,
+  and existing compaction state. Holding the scheduler lock through boundary
+  selection and recording makes preparation mutually exclusive with turn
+  activation; the loser reconstitutes the winner. Guarded updates and inserts
+  serialize the call, command, summary, and result-frontier records. Later
+  call-lifecycle transitions use the session row `FOR NO KEY UPDATE`. The
+  pending typed command stores its immutable dedicated `model_call_id` from
+  creation, so recovery never infers correlation from a result-only field. An
+  automatic command additionally stores the immutable queued `turn_id`; a
+  partial uniqueness constraint admits at most one automatic compaction command
+  for that turn in its session, and preparation recognizes the retained attempt
+  before allocating a second call. An equal replay resolves from the command
+  registry and receipt without taking a session lifecycle lock or resolving
+  current configuration.
 - **SubmitInput** (`prepare_against_locked_state`): session row
   `FOR NO KEY UPDATE`, then `session_scheduler` row `FOR UPDATE`, then
   `session_current_defaults` row `FOR UPDATE`; only then does it read the

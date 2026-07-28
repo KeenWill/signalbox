@@ -5251,6 +5251,83 @@ async fn inv012_concurrent_compaction_command_claim_has_one_winner() -> Result<(
     runtime.stop().await
 }
 
+/// INV-009 / INV-014: compaction preparation and turn activation share the
+/// scheduler lock, so exactly one can claim the session boundary and the loser
+/// reconstitutes the winner before committing any conflicting lifecycle.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv009_inv014_compaction_preparation_serializes_turn_activation()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let (mut connection, session_id) = seed_completed_compaction_session(&mut runtime).await?;
+    connection
+        .request_version(
+            ProtocolVersion::Seventeen,
+            91,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(String::from(
+                    "scheduler race successor remains singular",
+                )),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
+            },
+        )
+        .await?;
+    let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+    );
+    let repository = ContextCompactionRepository::new(runtime.pool.clone());
+    let compaction_request = direct_compaction_request(
+        session_id,
+        DurableCommandId::from_uuid(Uuid::from_u128(0xde31)),
+        None,
+        0xde40,
+    );
+
+    let (activation_outcome, compaction_outcome) = tokio::join!(
+        activation.execute(session),
+        repository.prepare(compaction_request),
+    );
+    let activation_outcome = activation_outcome?;
+    let compaction_outcome = compaction_outcome?;
+    assert!(
+        matches!(activation_outcome, StartEligibleTurnOutcome::Activated(_))
+            && matches!(compaction_outcome, PrepareContextCompactionOutcome::Busy)
+            || matches!(activation_outcome, StartEligibleTurnOutcome::NoEligibleTurn)
+                && matches!(
+                    compaction_outcome,
+                    PrepareContextCompactionOutcome::Prepared(_)
+                ),
+        "scheduler serialization must admit exactly one owner: activation={activation_outcome:?}; compaction={compaction_outcome:?}"
+    );
+    let durable_state: (String, i64) = sqlx::query_as(
+        "SELECT turn.state_kind,
+                (SELECT count(*)
+                   FROM context_compaction_model_call AS call
+                  WHERE call.session_id = turn.session_id
+                    AND call.state_kind <> 'terminal')
+           FROM turn_lifecycle AS turn
+          WHERE turn.session_id = $1 AND turn.turn_id = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(queued_turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert!(
+        durable_state == (String::from("active"), 0)
+            || durable_state == (String::from("queued"), 1),
+        "the durable boundary must have one owner: {durable_state:?}"
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
 /// INV-012 / INV-014: compaction completion and a legacy submit serialize on
 /// the session row, so a queued version-sixteen submit observes the summary,
 /// refuses it, and rolls back its command claim.

@@ -144,6 +144,9 @@ impl RuntimeModelDefinition {
         if context_window_tokens == 0 {
             return Err(RuntimeModelDefinitionError::InvalidContextWindow);
         }
+        if max_output_tokens > context_window_tokens {
+            return Err(RuntimeModelDefinitionError::OutputLimitExceedsContextWindow);
+        }
         Ok(Self {
             target,
             provider_model,
@@ -182,6 +185,8 @@ pub enum RuntimeModelDefinitionError {
     InvalidOutputLimit,
     /// Automatic guarding requires a positive declared context window.
     InvalidContextWindow,
+    /// The reserved output alone cannot exceed the declared context window.
+    OutputLimitExceedsContextWindow,
 }
 
 impl fmt::Display for RuntimeModelDefinitionError {
@@ -190,6 +195,9 @@ impl fmt::Display for RuntimeModelDefinitionError {
             Self::InvalidProviderModel => "provider model spelling is empty or padded",
             Self::InvalidOutputLimit => "provider output-token limit is zero",
             Self::InvalidContextWindow => "provider context-window limit is zero",
+            Self::OutputLimitExceedsContextWindow => {
+                "provider output-token limit exceeds its context window"
+            }
         })
     }
 }
@@ -1599,8 +1607,8 @@ mod tests {
     use super::{
         AcceptanceObservations, ProviderTextDelta, ProviderTextDeltaContext, ProviderTextDeltaSink,
         RuntimeModelCallProviderError, RuntimeModelCatalog, RuntimeModelCatalogError,
-        RuntimeModelDefinition, classify_terminal, decode_checked_raw_json,
-        render_runtime_messages,
+        RuntimeModelDefinition, RuntimeModelDefinitionError, classify_terminal,
+        decode_checked_raw_json, render_runtime_messages,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -2721,6 +2729,14 @@ mod tests {
         let bounded = super::diagnostic_model_identity(&hostile);
         assert!(bounded.starts_with(&"x".repeat(super::DIAGNOSTIC_MODEL_IDENTITY_LIMIT)));
         assert!(bounded.ends_with("… [truncated]"));
+    }
+
+    #[test]
+    fn output_reservation_cannot_exceed_context_window() {
+        assert_eq!(
+            RuntimeModelDefinition::try_new(target(1), String::from("fixture-model"), 65, 64,),
+            Err(RuntimeModelDefinitionError::OutputLimitExceedsContextWindow)
+        );
     }
 
     #[test]
