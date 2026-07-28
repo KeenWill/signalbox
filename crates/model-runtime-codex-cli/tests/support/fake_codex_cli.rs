@@ -546,6 +546,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             envelope(r#"{"outcome":"completed","text":"safe","tool_calls":[]}"#);
             completed();
         }
+        "agent_message_additive_field_marker" => {
+            // A known agent-message item carrying an additively tolerated
+            // sibling serde discards; its marker must still govern the
+            // envelope text the same item retains.
+            emit(&format!(
+                r#"{{"type":"item.completed","item":{{"id":"message-offline-1","type":"agent_message","diagnostic":"api_","text":"{}"}}}}"#,
+                json_escape(&format!(
+                    r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                    fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+                ))
+            ));
+            completed();
+        }
+        "turn_failed_additive_field_marker" => {
+            // An additive field on the failure event holds the marker its own
+            // interpreted message completes.
+            emit(&format!(
+                r#"{{"type":"turn.failed","diagnostic":"api_","error":{{"message":"key={}"}}}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+        }
+        "superseded_message_marker_before_clean_id" => {
+            // The superseded message ends in a live marker while its id is
+            // clean; folding the id after the text would resolve the chain and
+            // release the value the final text completes.
+            agent_message("superseded-done.", "api_");
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "unsupported_item_object_inside_an_array" => {
+            // The marker and a benign sibling are fields of an object nested
+            // inside an array; joining them into one wire-adjacent unit would
+            // erase the marker.
+            emit(
+                r#"{"type":"item.completed","item":{"id":"diag","type":"diagnostic","entries":[{"a_marker":"api_","z_benign":"done."}]}}"#,
+            );
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "unknown_event_metadata_marker" => {
+            // An unknown event interprets nothing — its `type` matched no known
+            // event and its `id` is never validated or emitted — so every field
+            // is dropped provider content that must still govern what follows.
+            emit(r#"{"type":"future","id":"api_"}"#);
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "textless_refusal" => {
+            envelope(r#"{"outcome":"refused","text":"","tool_calls":[]}"#);
+            completed();
+        }
         "structured_refused" => {
             envelope(&format!(
                 r#"{{"outcome":"refused","text":"{}","tool_calls":[]}}"#,

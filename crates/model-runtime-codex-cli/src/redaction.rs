@@ -47,6 +47,14 @@ const VALUE_CREDENTIAL_MARKERS: &[&str] = &[
     "\"session_token\":",
 ];
 const TOKEN_PREFIXES: &[&str] = &["sk-", "eyJ"];
+/// PEM armor opening a block, and the label substring that makes the block a
+/// private key of any type (`PRIVATE KEY`, `RSA PRIVATE KEY`, `OPENSSH PRIVATE
+/// KEY`, `ENCRYPTED PRIVATE KEY`). Such a block is an unambiguous credential on
+/// its own, with no assignment marker in front of it for the marker,
+/// spaced-name, or identifier scanners to key on.
+const PEM_BEGIN: &str = "-----BEGIN";
+const PEM_DASHES: &str = "-----";
+const PEM_PRIVATE_KEY_LABEL: &str = "PRIVATE KEY";
 
 pub(crate) fn redact_text(text: &str) -> String {
     let sanitized = redact_text_literal(text);
@@ -105,6 +113,20 @@ const CREDENTIAL_INDICATORS: &[&str] = &[
     "credential",
     "sk-",
     "eyJ",
+    // Space-separated labels a diagnostic prints (`API key: …`): the JSON key
+    // policy normalizes across punctuation, so the plaintext spellings must be
+    // recognized here too or the fast path releases them unscanned.
+    "api key",
+    "auth token",
+    "bearer token",
+    "access token",
+    "refresh token",
+    "id token",
+    "session token",
+    "private key",
+    // A standalone private-key PEM block carries no credential word at all;
+    // its armor is what the PEM pass keys on.
+    "-----begin",
 ];
 
 fn text_might_contain_credential(text: &str) -> bool {
@@ -127,7 +149,11 @@ fn redact_text_literal(text: &str) -> String {
     if !text_might_contain_credential(text) {
         return text.to_string();
     }
-    let mut sanitized = redact_json_credential_values(text);
+    // A standalone private-key PEM block is consumed whole before the
+    // assignment scanners run, so its body cannot be mistaken for ordinary
+    // prose by them.
+    let mut sanitized = redact_pem_private_keys(text);
+    sanitized = redact_json_credential_values(&sanitized);
     for marker in LINE_CREDENTIAL_MARKERS {
         sanitized = redact_line_value(&sanitized, marker);
     }
@@ -329,6 +355,9 @@ const LINE_CREDENTIAL_NAMES: &[&str] = &[
     "password",
     "secret",
     "credential",
+    // The space-separated label a diagnostic prints; `secret` alone does not
+    // match it, because the separator does not follow the word.
+    "secret key",
 ];
 const VALUE_CREDENTIAL_NAMES: &[&str] = &[
     "api_key",
@@ -354,6 +383,16 @@ const VALUE_CREDENTIAL_NAMES: &[&str] = &[
     "idtoken",
     "sessiontoken",
     "privatekey",
+    // Space-separated spellings of the same names, which ordinary provider
+    // diagnostics print (`API key: opaque-value`).
+    "api key",
+    "auth token",
+    "bearer token",
+    "access token",
+    "refresh token",
+    "id token",
+    "session token",
+    "private key",
 ];
 
 /// Redacts a `name` credential whose separator (`=` or `:`) carries optional
@@ -692,13 +731,129 @@ fn credential_value_bounds(
     (&text[value_start..prefix_end], prefix_end, value_end)
 }
 
+/// Redacts every standalone private-key PEM block — `-----BEGIN … PRIVATE
+/// KEY-----` through its matching `-----END …-----` — which the marker,
+/// spaced-name, and identifier scanners all miss because no assignment
+/// introduces it. An unterminated block is suppressed through the text end, so
+/// a truncated key never surfaces its body.
+fn redact_pem_private_keys(text: &str) -> String {
+    let mut remaining = text;
+    let mut output = String::with_capacity(text.len());
+    while let Some(index) = private_key_pem_start(remaining) {
+        output.push_str(&remaining[..index]);
+        output.push_str(REDACTED);
+        let end = pem_block_end(remaining, index).unwrap_or(remaining.len());
+        remaining = &remaining[end..];
+    }
+    output.push_str(remaining);
+    output
+}
+
+/// The byte offset of the first `-----BEGIN … PRIVATE KEY-----` armor in
+/// `text`. The label is the span between `-----BEGIN` and the header's closing
+/// dashes; an armor whose closing dashes never arrive names no complete label
+/// and is left to the streaming lookbehind
+/// ([`pem_private_key_unsafe_start`]) to hold.
+fn private_key_pem_start(text: &str) -> Option<usize> {
+    let mut offset = 0;
+    while let Some(relative) = find_ascii_case_insensitive(&text[offset..], PEM_BEGIN) {
+        let start = offset + relative;
+        let after_begin = start + PEM_BEGIN.len();
+        let label_end = text[after_begin..]
+            .find(PEM_DASHES)
+            .map(|length| after_begin + length)?;
+        if find_ascii_case_insensitive(&text[after_begin..label_end], PEM_PRIVATE_KEY_LABEL)
+            .is_some()
+        {
+            return Some(start);
+        }
+        offset = after_begin;
+    }
+    None
+}
+
+/// Byte offset where a private-key PEM block still in progress at the end of
+/// `text` begins, so a block split across deltas is held rather than emitted
+/// piecewise. Three shapes are in progress: a trailing partial `-----BEGIN`
+/// prefix, an armor whose closing dashes have not arrived (its label may still
+/// name a private key), and a private-key block whose matching `-----END …-----`
+/// has not arrived. A block that closed inside the fragment is skipped past
+/// rather than rescanned, so a fragment carrying many blocks stays linear.
+fn pem_private_key_unsafe_start(text: &str) -> Option<usize> {
+    let mut earliest: Option<usize> = None;
+    let mut fold = |start: usize| {
+        earliest = Some(earliest.map_or(start, |current: usize| current.min(start)));
+    };
+    let prefix_length = trailing_marker_prefix(text, PEM_BEGIN, true);
+    if prefix_length > 0 {
+        fold(text.len() - prefix_length);
+    }
+    let mut offset = 0;
+    while let Some(relative) = find_ascii_case_insensitive(&text[offset..], PEM_BEGIN) {
+        let start = offset + relative;
+        let after_begin = start + PEM_BEGIN.len();
+        let Some(label_end) = text[after_begin..]
+            .find(PEM_DASHES)
+            .map(|length| after_begin + length)
+        else {
+            fold(start);
+            break;
+        };
+        if find_ascii_case_insensitive(&text[after_begin..label_end], PEM_PRIVATE_KEY_LABEL)
+            .is_none()
+        {
+            offset = after_begin;
+            continue;
+        }
+        let end_marker = format!(
+            "-----END {}{PEM_DASHES}",
+            text[after_begin..label_end].trim()
+        );
+        match find_ascii_case_insensitive(&text[label_end..], &end_marker) {
+            Some(relative_end) => offset = label_end + relative_end + end_marker.len(),
+            None => {
+                fold(start);
+                break;
+            }
+        }
+    }
+    earliest
+}
+
+/// Whether `text` begins a private-key PEM block — the armor, a prefix of it
+/// whose remainder may still arrive, or an armor whose label has not finished
+/// arriving — whether or not the block has terminated. Held text that already
+/// reached its `-----END …-----` must still enter the redaction branch, so this
+/// is broader than the in-progress-only [`pem_private_key_unsafe_start`],
+/// exactly as `spaced_credential_starts_at_zero` is broader than
+/// `spaced_credential_unsafe_start`.
+fn pem_private_key_starts_at_zero(text: &str) -> bool {
+    if text.len() <= PEM_BEGIN.len() {
+        return PEM_BEGIN.as_bytes()[..text.len()].eq_ignore_ascii_case(text.as_bytes());
+    }
+    if !text.as_bytes()[..PEM_BEGIN.len()].eq_ignore_ascii_case(PEM_BEGIN.as_bytes()) {
+        return false;
+    }
+    let label_end = text[PEM_BEGIN.len()..]
+        .find(PEM_DASHES)
+        .map_or(text.len(), |length| PEM_BEGIN.len() + length);
+    label_end == text.len()
+        || find_ascii_case_insensitive(&text[PEM_BEGIN.len()..label_end], PEM_PRIVATE_KEY_LABEL)
+            .is_some()
+}
+
 /// If an unquoted value at `value_start` opens a PEM block, returns the byte
 /// offset just past its matching `-----END …-----` marker, or the text end
 /// when the block is unterminated. `None` when the value is not a PEM block.
 fn pem_block_end(text: &str, value_start: usize) -> Option<usize> {
-    const BEGIN: &str = "-----BEGIN";
-    const DASHES: &str = "-----";
-    if !text[value_start..].starts_with(BEGIN) {
+    const BEGIN: &str = PEM_BEGIN;
+    const DASHES: &str = PEM_DASHES;
+    // Case-insensitive like the matching END search below, so lowercase armor
+    // cannot slip a key body past the scan.
+    if !text.as_bytes()[value_start..]
+        .get(..BEGIN.len())
+        .is_some_and(|armor| armor.eq_ignore_ascii_case(BEGIN.as_bytes()))
+    {
         return None;
     }
     // The BEGIN header is `-----BEGIN <label>-----`; the matching close is
@@ -1524,6 +1679,7 @@ fn stream_candidate_starts_at_zero(text: &str) -> bool {
         || trailing_partial_unicode_escape(text) == Some(0)
         || spaced_credential_starts_at_zero(text)
         || identifier_assignment_unsafe_start(text) == Some(0)
+        || pem_private_key_starts_at_zero(text)
 }
 
 /// Whether `text` begins a spaced credential assignment — a recognized name
@@ -1614,6 +1770,9 @@ fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
         earliest = Some(earliest.map_or(start, |current| current.min(start)));
     }
     if let Some(start) = identifier_assignment_unsafe_start(text) {
+        earliest = Some(earliest.map_or(start, |current| current.min(start)));
+    }
+    if let Some(start) = pem_private_key_unsafe_start(text) {
         earliest = Some(earliest.map_or(start, |current| current.min(start)));
     }
     earliest
@@ -1936,7 +2095,7 @@ mod tests {
     use super::{
         MAX_PENDING_STREAM_BYTES, REDACTED, REDACTED_JSON_OBJECT, RedactingSink,
         decode_unicode_escapes, redact_json, redact_text, stream_candidate_starts_at_zero,
-        trailing_credential_context, unsafe_stream_suffix_start,
+        trailing_credential_context, unsafe_stream_suffix_start, unterminated_json_key_start,
     };
 
     const CREDENTIAL_SHAPED_VALUE: &str = "sk-sensitive-value";
@@ -2324,6 +2483,110 @@ mod tests {
         assert!(!output.contains("sk-sensitive-mixed-key"));
         assert_eq!(output, REDACTED_JSON_OBJECT);
         assert!(serde_json::from_str::<serde_json::Value>(&output).is_ok());
+    }
+
+    /// The JSON-key suffix scan stays linear on text ending in many
+    /// backslash-escaped quotes: an escaped quote cannot begin a JSON key, and
+    /// the eligibility check short-circuits before the quoted-value walk, so no
+    /// position rescans the remaining suffix. A quadratic scan would not finish.
+    #[test]
+    fn json_key_suffix_scan_is_linear_on_repeated_escaped_quotes() {
+        let hostile = format!("prose {}", "\\\"".repeat(500_000));
+
+        assert_eq!(unterminated_json_key_start(&hostile), None);
+    }
+
+    /// INV-035: a private-key PEM block standing on its own — no `private_key=`
+    /// member in front of it — is consumed whole through its matching END
+    /// marker. No assignment introduces it, so the marker, spaced-name, and
+    /// identifier scanners never see it.
+    #[test]
+    fn inv_035_redacts_a_standalone_pem_private_key_block() {
+        let fixture = "note\n-----BEGIN PRIVATE KEY-----\nMIIBstandalone-body-secret\n-----END PRIVATE KEY-----\nsafe-after";
+        let output = redact_text(fixture);
+
+        assert!(!output.contains("MIIBstandalone-body-secret"));
+        assert!(!output.contains("BEGIN PRIVATE KEY"));
+        assert!(output.contains("[redacted]"));
+        assert!(output.contains("safe-after"));
+    }
+
+    /// INV-035: the labelled private-key variants share the standalone rule,
+    /// and an unterminated block is suppressed through the text end rather
+    /// than releasing the body it was still emitting.
+    #[test]
+    fn inv_035_redacts_an_unterminated_openssh_private_key_block() {
+        let fixture = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC-openssh-body-secret";
+        let output = redact_text(fixture);
+
+        assert_eq!(output, "[redacted]");
+    }
+
+    /// A PEM block that is not a private key is ordinary provider output and
+    /// is left verbatim: the rule names the credential shape, not all armor.
+    #[test]
+    fn certificate_pem_block_is_not_redacted() {
+        let fixture = "-----BEGIN CERTIFICATE-----\nMIICertificate-body\n-----END CERTIFICATE-----";
+        let output = redact_text(fixture);
+
+        assert_eq!(output, fixture);
+    }
+
+    /// INV-035: a private-key PEM block arriving across streamed deltas is
+    /// held from its armor and suppressed, rather than emitting the header
+    /// delta and then the body that follows it.
+    #[test]
+    fn inv_035_holds_a_pem_private_key_split_across_deltas() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 3_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "-----BEGIN PRIVATE KEY".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 3_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "-----\nMIIBsplit-delta-body-secret\n".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted: Vec<String> = observed.into_iter().map(observation_text).collect();
+
+        assert!(
+            !emitted
+                .iter()
+                .any(|text| text.contains("MIIBsplit-delta-body-secret"))
+        );
+        assert_eq!(emitted, vec![REDACTED.to_string(), REDACTED.to_string()]);
+    }
+
+    /// INV-035: the space-separated label a provider diagnostic prints
+    /// (`API key: …`) is recognized like the underscore, hyphenated, and
+    /// concatenated spellings the exact-name scanners already carry.
+    #[test]
+    fn inv_035_redacts_a_space_separated_api_key_label() {
+        let output = redact_text("API key: opaque-spaced-label-value tail");
+
+        assert!(!output.contains("opaque-spaced-label-value"));
+        assert!(output.contains("[redacted]"));
+        assert!(output.contains("tail"));
+    }
+
+    /// INV-035: the free-form space-separated `secret key` label consumes its
+    /// whole line, since an unquoted passphrase can carry spaces.
+    #[test]
+    fn inv_035_redacts_a_space_separated_secret_key_label() {
+        let output = redact_text("secret key = opaque spaced passphrase\nsafe-line");
+
+        assert!(!output.contains("opaque spaced passphrase"));
+        assert!(output.contains("[redacted]"));
+        assert!(output.contains("safe-line"));
     }
 
     /// INV-035: an unquoted PEM private-key assignment consumes the whole
