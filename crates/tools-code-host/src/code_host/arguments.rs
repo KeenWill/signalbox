@@ -10,6 +10,7 @@ pub(super) const MAX_REPOSITORY_BYTES: usize = 256;
 pub(super) const MAX_FILE_PATH_BYTES: usize = 4 * 1024;
 pub(super) const MAX_COMMENT_BODY_BYTES: usize = 64 * 1024;
 pub(super) const MAX_OPAQUE_ID_BYTES: usize = 512;
+pub(super) const MAX_CURSOR_BYTES: usize = 512;
 
 /// A code-host argument value did not satisfy its checked representation.
 #[doc(hidden)]
@@ -390,4 +391,53 @@ impl JsonSchema for CodeHostOpaqueId {
     fn inline_schema() -> bool {
         true
     }
+}
+
+/// One bounded opaque GraphQL pagination cursor.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(try_from = "String")]
+pub struct CodeHostCursor(String);
+
+impl CodeHostCursor {
+    pub(super) fn try_new(value: String) -> Result<Self, InvalidCodeHostArguments> {
+        valid_cursor(&value)
+            .then_some(Self(value))
+            .ok_or(InvalidCodeHostArguments)
+    }
+
+    /// Borrows the opaque cursor exactly as the code host returned it.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for CodeHostCursor {
+    type Error = InvalidCodeHostArguments;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl JsonSchema for CodeHostCursor {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CodeHostCursor")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_CURSOR_BYTES,
+            "pattern": r"^[^\u0000-\u001F\u007F-\u009F]+$",
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
+pub(super) fn valid_cursor(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_CURSOR_BYTES && !value.chars().any(char::is_control)
 }
