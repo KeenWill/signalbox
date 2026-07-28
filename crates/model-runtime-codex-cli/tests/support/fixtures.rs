@@ -26,6 +26,13 @@ pub const SENSITIVE_SPLIT_AUTHORIZATION: &str = "sensitive-split-authorization";
 pub const SENSITIVE_COMPOSITE_SECRET: &str = "sensitive-composite-secret";
 pub const SENSITIVE_STRUCTURED_SECRET: &str = "sensitive-structured-container-value";
 pub const SENSITIVE_STDERR_CONTINUATION: &str = "sensitive-stderr-continuation";
+/// A thread id ending in a credential-marker prefix; clean on its own, but
+/// later text beginning with the marker's remainder reconstructs `api_key=`
+/// beside it.
+pub const CREDENTIAL_PREFIX_THREAD_ID: &str = "api_";
+/// The final-text continuation of `CREDENTIAL_PREFIX_THREAD_ID`; also clean
+/// on its own (`key` matches no credential shape).
+pub const SENSITIVE_THREAD_CONTINUATION: &str = "key=opaque-thread-continuation done";
 pub const EARLY_STDIN_EXIT_MARKER: &str = "fake-codex-exit-before-stdin";
 pub const EARLY_STDIN_COMPLETION_MARKER: &str = "fake-codex-complete-before-stdin";
 pub const EARLY_STDIN_FAILURE: &str = "unexpected status 400 Bad Request: context_length_exceeded";

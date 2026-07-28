@@ -431,10 +431,24 @@ async fn execute_process<C: Clone + Send + Sync>(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    for name in CODEX_ENVIRONMENT_ALLOWLIST {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, spawn_environment_value(name, value));
+    let environment = match allowlisted_environment(|name| std::env::var_os(name)) {
+        Ok(environment) => environment,
+        Err(name) => {
+            // Nothing was sent: the rejection precedes `SendCommenced` and the
+            // spawn itself. The diagnostic names only the variable, never its
+            // value.
+            return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                cause: UnsentCause::ConnectFailed(TransportFacts::new(format!(
+                    "inherited `{name}` embeds URL userinfo; the Codex CLI would receive \
+                     that credential verbatim and could reflect it in output the adapter \
+                     can only shape-redact, so the exchange is refused — remove the \
+                     credential from the proxy URL"
+                ))),
+            });
         }
+    };
+    for (name, value) in environment {
+        command.env(name, value);
     }
     #[cfg(unix)]
     command.process_group(0);
@@ -915,6 +929,57 @@ fn spawn_environment_value(name: &str, value: std::ffi::OsString) -> std::ffi::O
     }
 }
 
+/// The allowlisted variables whose values are proxy URLs. `NO_PROXY` is a
+/// host list, never a URL with an authority, so it is not checked for
+/// userinfo.
+const PROXY_URL_VARIABLES: &[&str] = &[
+    "ALL_PROXY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+];
+
+/// Assembles the allowlisted child environment through the injectable `read`,
+/// rejecting (with the offending variable's name, never its value) a proxy
+/// URL that embeds userinfo. Such a credential would transit to the child
+/// verbatim, and a CLI that reflects its proxy configuration in an error or
+/// event would hand the password to output the adapter can only shape-redact
+/// — `redact_text` has no proxy-userinfo rule, so the value must never reach
+/// the child at all (INV-035).
+fn allowlisted_environment(
+    read: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<Vec<(&'static str, std::ffi::OsString)>, &'static str> {
+    let mut environment = Vec::new();
+    for name in CODEX_ENVIRONMENT_ALLOWLIST {
+        if let Some(value) = read(name) {
+            if proxy_value_carries_userinfo(name, &value) {
+                return Err(name);
+            }
+            environment.push((*name, spawn_environment_value(name, value)));
+        }
+    }
+    Ok(environment)
+}
+
+/// Whether a proxy variable's value embeds URL userinfo
+/// (`scheme://user:secret@host`). The authority is the span after any
+/// `scheme://` up to the first `/`, `?`, or `#`; userinfo is an `@` inside
+/// it. A value that cannot be read as UTF-8 cannot be verified
+/// credential-free and fails closed.
+fn proxy_value_carries_userinfo(name: &str, value: &std::ffi::OsStr) -> bool {
+    if !PROXY_URL_VARIABLES.contains(&name) {
+        return false;
+    }
+    let Some(text) = value.to_str() else {
+        return true;
+    };
+    let after_scheme = text.split_once("://").map_or(text, |(_, rest)| rest);
+    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    authority.contains('@')
+}
+
 /// Reaps a leader that has already exited on its own, returning its status and
 /// stderr detail so a cancellation racing that exit hands the definitive
 /// provider-error evidence to the exit-classification path instead of
@@ -1240,7 +1305,7 @@ fn already_fired(signal: &mut CancellationSignal) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_bounded_line, spawn_environment_value};
+    use super::{allowlisted_environment, read_bounded_line, spawn_environment_value};
 
     #[test]
     fn codex_home_is_absolutized_for_the_child() {
@@ -1262,6 +1327,68 @@ mod tests {
         let value = spawn_environment_value("PATH", std::ffi::OsString::from("relative:paths"));
 
         assert_eq!(value, std::ffi::OsString::from("relative:paths"));
+    }
+
+    /// INV-035: a proxy URL embedding userinfo is refused by name — with or
+    /// without a scheme, with or without a password — before anything can
+    /// pass it to the child.
+    #[test]
+    fn credential_bearing_proxy_urls_are_rejected() {
+        for (name, value) in [
+            (
+                "HTTP_PROXY",
+                "http://alice:opaque-proxy-value@proxy.internal:8080",
+            ),
+            ("HTTPS_PROXY", "https://alice@proxy.internal"),
+            ("ALL_PROXY", "alice:opaque-proxy-value@proxy.internal:8080"),
+            (
+                "http_proxy",
+                "socks5://alice:opaque-proxy-value@proxy.internal",
+            ),
+        ] {
+            let result = allowlisted_environment(|queried| {
+                (queried == name).then(|| std::ffi::OsString::from(value))
+            });
+
+            assert_eq!(result, Err(name), "`{name}={value}` must be rejected");
+        }
+    }
+
+    /// A credential-free proxy URL, a `NO_PROXY` host list containing `@`,
+    /// and an `@` confined to the URL path all pass through: the rejection
+    /// targets authority userinfo, not the byte.
+    #[test]
+    fn credential_free_environment_passes_through() {
+        for (name, value) in [
+            ("HTTP_PROXY", "http://proxy.internal:8080"),
+            ("HTTPS_PROXY", "https://proxy.internal/path/we@ird"),
+            ("NO_PROXY", "internal,@odd-but-not-a-url"),
+            ("TERM", "user:secret@not-a-proxy-variable"),
+        ] {
+            let result = allowlisted_environment(|queried| {
+                (queried == name).then(|| std::ffi::OsString::from(value))
+            });
+
+            assert_eq!(
+                result,
+                Ok(vec![(name, std::ffi::OsString::from(value))]),
+                "`{name}={value}` must pass through"
+            );
+        }
+    }
+
+    /// A proxy value that is not UTF-8 cannot be verified credential-free
+    /// and fails closed.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_proxy_value_is_rejected() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let value = std::ffi::OsString::from_vec(vec![0x68, 0x74, 0xff, 0xfe]);
+        let result =
+            allowlisted_environment(|queried| (queried == "HTTP_PROXY").then(|| value.clone()));
+
+        assert_eq!(result, Err("HTTP_PROXY"));
     }
 
     #[tokio::test]

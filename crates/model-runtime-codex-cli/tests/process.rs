@@ -270,6 +270,49 @@ async fn inv_035_final_text_marker_before_message_id_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a thread id ending in a credential-marker prefix (`api_`) seeds
+/// the lookbehind when it is emitted in `ExchangeEstablished`, so streamed
+/// text carrying the marker's continuation (`key=value`) is suppressed
+/// instead of emitted beside the id, where the two records would reconstruct
+/// the credential.
+#[tokio::test]
+async fn inv_035_thread_id_marker_prefix_suppresses_streamed_continuation() {
+    let result = execute_scenario(
+        "credential_prefix_thread_id_before_text",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_THREAD_CONTINUATION));
+    assert!(!diagnostic.contains("opaque-thread-continuation"));
+    // The id itself is harmless alone and keeps its diagnostic fidelity; the
+    // suppression lands on the continuation text, not the exchange facts.
+    assert!(diagnostic.contains(fixtures::CREDENTIAL_PREFIX_THREAD_ID));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: the same reconstruction is caught in buffered delivery, where the
+/// final text reaches terminal evidence without passing through streamed
+/// deltas — the buffered text consults the emitted thread-id context too.
+#[tokio::test]
+async fn inv_035_thread_id_marker_prefix_suppresses_buffered_continuation() {
+    let result = execute_scenario(
+        "credential_prefix_thread_id_before_text",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_THREAD_CONTINUATION));
+    assert!(!diagnostic.contains("opaque-thread-continuation"));
+    assert_eq!(result.spawns, 1);
+}
+
 /// INV-035: a credential marker held from streamed reasoning also governs the
 /// agent-message item id, so an id extending the marker never surfaces as
 /// `ProviderMessageId` in terminal evidence.

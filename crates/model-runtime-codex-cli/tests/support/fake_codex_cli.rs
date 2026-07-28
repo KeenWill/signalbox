@@ -43,9 +43,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write("fake-codex-prompt", &prompt)?;
 
     let scenario = scenario(&prompt)?;
-    emit(&format!(
-        r#"{{"type":"thread.started","thread_id":"{}"}}"#,
+    // A drifted or hostile CLI can choose its thread id; this scenario's id
+    // ends in a credential-marker prefix whose continuation the final text
+    // carries.
+    let thread_id = if scenario == "credential_prefix_thread_id_before_text" {
+        fixtures::CREDENTIAL_PREFIX_THREAD_ID
+    } else {
         fixtures::THREAD_ID
+    };
+    emit(&format!(
+        r#"{{"type":"thread.started","thread_id":"{thread_id}"}}"#
     ));
     emit(r#"{"type":"turn.started"}"#);
     if let Some(violation) = fixtures::strict_schema_violation(&output_schema) {
@@ -152,6 +159,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &format!(" {}", fixtures::SENSITIVE_SPLIT_AUTHORIZATION),
                 r#"{"outcome":"completed","text":"Authorization:","tool_calls":[]}"#,
             );
+            completed();
+        }
+        "credential_prefix_thread_id_before_text" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_THREAD_CONTINUATION
+            ));
             completed();
         }
         "split_stream_authorization_before_tool_name" => {

@@ -846,6 +846,13 @@ pub(crate) struct RedactingSink<'a, C> {
     pending: Option<PendingStreamText<C>>,
     suppressing: bool,
     terminal_text_capture: Option<String>,
+    /// The unsafe trailing suffix of a provider-controlled field already
+    /// emitted in an out-of-band record (the thread id in
+    /// `ExchangeEstablished`). Later provider text sits beside that record in
+    /// observations and terminal evidence, so a credential split between the
+    /// field's end and the text's start must be caught by joining this context
+    /// into the lookbehind — it is match-state only and is never emitted.
+    emitted_context: String,
 }
 
 impl<'a, C: Clone> RedactingSink<'a, C> {
@@ -855,7 +862,17 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             pending: None,
             suppressing: false,
             terminal_text_capture: None,
+            emitted_context: String::new(),
         }
+    }
+
+    /// Seeds the lookbehind with the unsafe trailing context of a field value
+    /// that has already been emitted in an out-of-band record, so stream text
+    /// that would extend a credential marker ending that field (`api_` in the
+    /// id, `key=value` in the text) is suppressed rather than emitted as the
+    /// marker's reconstructable continuation beside it.
+    pub(crate) fn seed_emitted_context(&mut self, emitted: &str) {
+        self.emitted_context = trailing_credential_context(emitted).to_string();
     }
 
     /// Starts recording every emitted final-text byte, so terminal evidence
@@ -879,8 +896,11 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         if self.suppressing {
             return REDACTED.to_string();
         }
-        if let Some(pending) = &self.pending {
-            let mut joined = pending.text.clone();
+        if !self.emitted_context.is_empty() || self.pending.is_some() {
+            let mut joined = self.emitted_context.clone();
+            if let Some(pending) = &self.pending {
+                joined.push_str(&pending.text);
+            }
             joined.push_str(message);
             if redact_text(&joined) != joined {
                 return REDACTED.to_string();
@@ -907,10 +927,13 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             .pending
             .as_ref()
             .map_or("", |pending| pending.text.as_str());
-        if held.is_empty() && preceding.is_empty() {
+        if self.emitted_context.is_empty() && held.is_empty() && preceding.is_empty() {
             return false;
         }
-        let mut joined = String::with_capacity(held.len() + preceding.len() + value.len());
+        let mut joined = String::with_capacity(
+            self.emitted_context.len() + held.len() + preceding.len() + value.len(),
+        );
+        joined.push_str(&self.emitted_context);
         joined.push_str(held);
         joined.push_str(preceding);
         joined.push_str(value);
@@ -942,11 +965,30 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
 
     fn flush_boundary(&mut self) {
         if let Some(pending) = self.pending.take() {
-            if stream_candidate_starts_at_zero(&pending.text) {
+            // A live emitted-field context chains the held text to bytes in an
+            // out-of-band record; the boundary forces a decision, so a chained
+            // candidate is suppressed whole and the context is spent by the
+            // flush. A context with no held text survives the boundary — no
+            // text was emitted, so reader adjacency to the field is unchanged.
+            let context_length = self.emitted_context.len();
+            let (candidate, unsafe_start) = if context_length == 0 {
+                (
+                    stream_candidate_starts_at_zero(&pending.text),
+                    unsafe_stream_suffix_start(&pending.text),
+                )
+            } else {
+                let mut joined = std::mem::take(&mut self.emitted_context);
+                joined.push_str(&pending.text);
+                (
+                    stream_candidate_starts_at_zero(&joined),
+                    unsafe_stream_suffix_start(&joined),
+                )
+            };
+            if candidate || unsafe_start.is_some_and(|start| start < context_length) {
                 self.emit_redacted(pending.fragments);
-            } else if let Some(unsafe_start) = unsafe_stream_suffix_start(&pending.text) {
+            } else if let Some(unsafe_start) = unsafe_start {
                 let (safe, unsafe_fragments) =
-                    split_stream_fragments(pending.fragments, unsafe_start);
+                    split_stream_fragments(pending.fragments, unsafe_start - context_length);
                 self.emit_original(safe);
                 self.emit_redacted(unsafe_fragments);
             } else {
@@ -958,8 +1000,14 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     /// Flushes already-decoded text when no later provider text can extend it.
     pub(crate) fn finish(&mut self) {
         self.suppressing = false;
+        // Terminal: judged on the joined form so held text completing a
+        // credential begun in an already-emitted field (the thread id) is
+        // suppressed; the context cannot outlive the terminal either way.
+        let context = std::mem::take(&mut self.emitted_context);
         if let Some(pending) = self.pending.take() {
-            if redact_text(&pending.text) == pending.text {
+            let mut joined = context;
+            joined.push_str(&pending.text);
+            if redact_text(&joined) == joined {
                 self.emit_original(pending.fragments);
             } else {
                 self.emit_redacted(pending.fragments);
@@ -1017,6 +1065,11 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     fn redact_delta(&mut self, field: StreamField, index: u32, correlation: C, text: String) {
         if self.suppressing {
             self.emit(field, index, correlation, REDACTED.to_string());
+            return;
+        }
+        if !self.emitted_context.is_empty()
+            && self.redact_delta_with_context(field, index, correlation.clone(), &text)
+        {
             return;
         }
         if let Some(mut pending) = self.pending.take() {
@@ -1088,6 +1141,78 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         } else {
             self.emit(field, index, correlation, redact_text(&text));
         }
+    }
+
+    /// Processes one delta while an emitted-field context is live. Decisions
+    /// are made on the joined form `context + pending + delta` — the bytes a
+    /// reader can lay side by side — and emissions are mapped back into
+    /// pending space (the context itself was already emitted elsewhere and is
+    /// never re-emitted). Returns `true` when the delta was consumed here;
+    /// `false` when the join resolved credential-clean, the context is spent,
+    /// and ordinary lookbehind processing should run instead.
+    fn redact_delta_with_context(
+        &mut self,
+        field: StreamField,
+        index: u32,
+        correlation: C,
+        text: &str,
+    ) -> bool {
+        let context_length = self.emitted_context.len();
+        let mut joined = self.emitted_context.clone();
+        if let Some(pending) = &self.pending {
+            joined.push_str(&pending.text);
+        }
+        joined.push_str(text);
+        let unsafe_start = unsafe_stream_suffix_start(&joined);
+        let candidate = stream_candidate_starts_at_zero(&joined);
+        if !candidate && !unsafe_start.is_some_and(|start| start < context_length) {
+            // The join resolved clean: no candidate begins inside the emitted
+            // field's suffix anymore, so adjacency to it is no longer a
+            // hazard and the context is spent.
+            self.emitted_context.clear();
+            return false;
+        }
+        let mut pending = self.pending.take().unwrap_or(PendingStreamText {
+            fragments: Vec::new(),
+            text: String::new(),
+        });
+        if !text.is_empty() {
+            pending.fragments.push(StreamFragment {
+                field,
+                index,
+                correlation,
+                text: text.to_string(),
+            });
+            pending.text.push_str(text);
+        }
+        match unsafe_start {
+            // A candidate begun in (or spanning) the context is still in
+            // progress at the joined end; its value bytes may follow, so the
+            // held text cannot be emitted or suppressed piecewise yet.
+            Some(start) if start < context_length => self.hold_or_suppress(pending),
+            // A candidate begun in the context completed within the join and
+            // a distinct unsafe suffix follows: suppress the completed
+            // portion's pending bytes whole and hold the tail as a fresh
+            // candidate of its own — the context is consumed by the
+            // suppression, which also breaks reader adjacency.
+            Some(start) => {
+                let pending_split = start - context_length;
+                let (completed, tail) = split_stream_fragments(pending.fragments, pending_split);
+                self.emit_redacted(completed);
+                self.emitted_context.clear();
+                self.hold_or_suppress(PendingStreamText {
+                    fragments: tail,
+                    text: pending.text[pending_split..].to_string(),
+                });
+            }
+            // The whole join is a completed candidate: every held byte is the
+            // credential's continuation, suppressed whole.
+            None => {
+                self.emit_redacted(pending.fragments);
+                self.emitted_context.clear();
+            }
+        }
+        true
     }
 }
 
@@ -2560,5 +2685,72 @@ safe-line"
         let hostile = "secret={".repeat(20_000);
 
         assert_eq!(unsafe_stream_suffix_start(&hostile), Some(0));
+    }
+
+    /// INV-035: text completing a credential marker begun by an emitted
+    /// field's trailing suffix (`api_` in the thread id, `key=value` in the
+    /// stream) is suppressed — emitted beside the id it would reconstruct the
+    /// credential — while trailing clean text past the completed candidate is
+    /// released.
+    #[test]
+    fn inv_035_emitted_context_suppresses_the_marker_continuation() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.seed_emitted_context("api_");
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "key=opaque-context-value done".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted: Vec<String> = observed.into_iter().map(observation_text).collect();
+
+        assert!(
+            !emitted
+                .iter()
+                .any(|text| text.contains("opaque-context-value"))
+        );
+        assert!(emitted.iter().any(|text| text.contains(REDACTED)));
+    }
+
+    /// INV-035: the emitted-field context also governs a terminal failure
+    /// message, so a failure text continuing the id's marker suffix is
+    /// suppressed whole.
+    #[test]
+    fn inv_035_emitted_context_suppresses_a_failure_continuation() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.seed_emitted_context("api_");
+
+        assert_eq!(
+            sink.redact_terminal_failure_text("key=opaque-context-value refused"),
+            REDACTED
+        );
+    }
+
+    /// An id with a credential-clean trailing suffix seeds nothing, and the
+    /// following stream stays byte-exact once flushed.
+    #[test]
+    fn clean_emitted_context_leaves_the_stream_byte_exact() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.seed_emitted_context("thread-offline-1");
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "key=ordinary value.".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted: Vec<String> = observed.into_iter().map(observation_text).collect();
+
+        assert_eq!(emitted, vec!["key=ordinary value.".to_string()]);
     }
 }
