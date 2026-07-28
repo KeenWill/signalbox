@@ -68,8 +68,8 @@ pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
 /// This surface reserved fifteen while sixteen was still unclaimed, but sixteen
 /// shipped first. Numbering the inspection request below an already-closed
 /// vocabulary would retroactively admit it in version-sixteen frames, so this
-/// version sits above sixteen instead. Thirteen, fourteen, and fifteen remain
-/// reserved and unadmitted here.
+/// version sits above sixteen instead. Fourteen and fifteen remain reserved and
+/// unadmitted here.
 pub const IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION: u64 = 17;
 
 /// One admitted process-protocol version.

@@ -821,11 +821,11 @@ the second states that the identity was valid and only the ordinal was outside
 `1..=last_position`. Because imported positions are that contiguous sequence, a
 `last_position` of zero or a `requested_position` inside the stated range is a
 contradictory frame and is rejected rather than presented. The admitted versions
-ten through twelve and sixteen have no typed detail for either case and keep the
-undetailed `not_found` their closed message vocabulary already admits,
-distinguished only by its non-normative message. Thirteen, fourteen, and fifteen
-are reserved rather than admitted, so no frame ever reaches this mapping under
-them. The `turn_not_awaiting_reconciliation`, `tool_request_not_in_session`,
+ten through thirteen and sixteen have no typed detail for either case and keep
+the undetailed `not_found` their closed message vocabulary already admits,
+distinguished only by its non-normative message. Fourteen and fifteen are
+reserved rather than admitted, so no frame ever reaches this mapping under them.
+The `turn_not_awaiting_reconciliation`, `tool_request_not_in_session`,
 `imported_conversation_not_found`, and `imported_frontier_position_out_of_range`
 details report refusals made before command recording, so unlike every other
 `rejected` detail they name no durable command result and have no replay

@@ -91,8 +91,8 @@ surface first reserved fifteen. Version sixteen then merged while the branch was
 open, and numbering the request below an already-closed vocabulary would
 retroactively admit it in version-sixteen frames — widening a shipped version
 rather than adding a new one — so the surface moved above sixteen to seventeen.
-Thirteen, fourteen, and fifteen stay reserved and unadmitted, and the admitted
-set carries that gap.
+Fourteen and fifteen stay reserved and unadmitted, and the admitted set carries
+that gap.
 
 **Affects.** [process protocol](spec/process-protocol.md) (version seventeen,
 the read request, its three messages, the two rejection details, and the
