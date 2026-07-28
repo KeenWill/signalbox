@@ -54,17 +54,20 @@ pub const REVIEW_WORKFLOW_PROTOCOL_VERSION: u64 = 11;
 /// The ephemeral provider-text streaming protocol version.
 pub const PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION: u64 = 12;
 
-/// The imported-conversation inspection protocol version.
-///
-/// Versions thirteen and fourteen are reserved by other open stacks, so this
-/// implementation admits twelve and then fifteen with no version between them.
-pub const IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION: u64 = 15;
-
 /// The unified conversation-listing protocol version.
 ///
-/// Versions thirteen and fourteen were reserved by concurrent protocol work
-/// when this version was selected; fifteen is the inspection version above.
+/// Versions thirteen, fourteen, and fifteen were reserved by concurrent
+/// protocol work when this version was selected.
 pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
+
+/// The imported-conversation inspection protocol version.
+///
+/// This surface reserved fifteen while sixteen was still unclaimed, but sixteen
+/// shipped first. Numbering the inspection request below an already-closed
+/// vocabulary would retroactively admit it in version-sixteen frames, so this
+/// version sits above sixteen instead. Thirteen, fourteen, and fifteen remain
+/// reserved and unadmitted here.
+pub const IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION: u64 = 17;
 
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -93,10 +96,10 @@ pub enum ProtocolVersion {
     Eleven,
     /// Ephemeral provider-text presentation events on follow streams.
     Twelve,
-    /// Imported-conversation inspection vocabulary.
-    Fifteen,
     /// Unified conversation-listing vocabulary.
     Sixteen,
+    /// Imported-conversation inspection vocabulary.
+    Seventeen,
 }
 
 impl ProtocolVersion {
@@ -115,8 +118,8 @@ impl ProtocolVersion {
             Self::Ten => IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION,
             Self::Eleven => REVIEW_WORKFLOW_PROTOCOL_VERSION,
             Self::Twelve => PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
-            Self::Fifteen => IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
             Self::Sixteen => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
+            Self::Seventeen => IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
         }
     }
 
@@ -134,8 +137,8 @@ impl ProtocolVersion {
             IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION => Some(Self::Ten),
             REVIEW_WORKFLOW_PROTOCOL_VERSION => Some(Self::Eleven),
             PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION => Some(Self::Twelve),
-            IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION => Some(Self::Fifteen),
             UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION => Some(Self::Sixteen),
+            IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION => Some(Self::Seventeen),
             _ => None,
         }
     }
@@ -3776,7 +3779,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1 through 12, 15, and 16",
+                "process-protocol version is unsupported; supported versions are 1 through 12, 16, and 17",
             ),
         }
     }
@@ -3987,7 +3990,7 @@ fn probe_header(
     }
     if !matches!(
         version_spelling,
-        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" | "12" | "15" | "16"
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" | "12" | "16" | "17"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -4103,8 +4106,8 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "10" => Some(ProtocolVersion::Ten),
         "11" => Some(ProtocolVersion::Eleven),
         "12" => Some(ProtocolVersion::Twelve),
-        "15" => Some(ProtocolVersion::Fifteen),
         "16" => Some(ProtocolVersion::Sixteen),
+        "17" => Some(ProtocolVersion::Seventeen),
         _ => None,
     }
 }
@@ -4246,7 +4249,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1 through 12, 15, and 16")
+                .contains("supported versions are 1 through 12, 16, and 17")
         );
     }
 
@@ -5385,10 +5388,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: version fifteen admits the imported-conversation read with its
+    /// INV-033: version seventeen admits the imported-conversation read with its
     /// exact closed request shape, and version eleven does not.
     #[test]
-    fn inv033_version_fifteen_imported_conversation_read_has_an_exact_closed_shape()
+    fn inv033_version_seventeen_imported_conversation_read_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::ReadImportedConversation {
@@ -5403,12 +5406,15 @@ mod tests {
             Err(FrameValidationError::RequestRequiresNewerVersion)
         );
 
-        let frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::Fifteen, request_id, request_value)?;
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request_id,
+            request_value,
+        )?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":15,\"request_id\":\"1\",\"request\":{\"type\":\"read_imported_conversation\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\"}}\n"
+            "{\"version\":17,\"request_id\":\"1\",\"request\":{\"type\":\"read_imported_conversation\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\"}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
@@ -5417,7 +5423,7 @@ mod tests {
     /// INV-033: an imported-conversation entry carries its position, exact
     /// attestation, content kind, and bounded preview in one closed shape.
     #[test]
-    fn inv033_version_fifteen_imported_conversation_entry_has_an_exact_closed_shape()
+    fn inv033_version_seventeen_imported_conversation_entry_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::ImportedConversationEntry {
             position: CanonicalU64::new(2),
@@ -5434,11 +5440,11 @@ mod tests {
         );
 
         let frame =
-            ServerFrame::try_new_for_version(ProtocolVersion::Fifteen, request(1)?, message)?;
+            ServerFrame::try_new_for_version(ProtocolVersion::Seventeen, request(1)?, message)?;
         let encoded = encode_server_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":15,\"request_id\":\"1\",\"message\":{\"type\":\"imported_conversation_entry\",\"position\":\"2\",\"imported_entry_id\":\"00000000-0000-0000-0000-000000000006\",\"source_speaker\":{\"type\":\"attested\",\"speaker\":\"assistant\"},\"content_kind\":\"text\",\"text_preview\":{\"preview\":\"imported answer\",\"truncated\":false}}}\n"
+            "{\"version\":17,\"request_id\":\"1\",\"message\":{\"type\":\"imported_conversation_entry\",\"position\":\"2\",\"imported_entry_id\":\"00000000-0000-0000-0000-000000000006\",\"source_speaker\":{\"type\":\"attested\",\"speaker\":\"assistant\"},\"content_kind\":\"text\",\"text_preview\":{\"preview\":\"imported answer\",\"truncated\":false}}}\n"
         );
         assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
@@ -5450,7 +5456,7 @@ mod tests {
     fn inv033_imported_conversation_entry_states_an_absent_preview_as_null()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Fifteen,
+            ProtocolVersion::Seventeen,
             request(1)?,
             ServerMessage::ImportedConversationEntry {
                 position: CanonicalU64::new(1),
@@ -5473,7 +5479,7 @@ mod tests {
     fn inv033_imported_conversation_entry_rejects_zero_position()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Fifteen,
+            ProtocolVersion::Seventeen,
             request(1)?,
             ServerMessage::ImportedConversationEntry {
                 position: CanonicalU64::new(0),
@@ -5554,7 +5560,7 @@ mod tests {
     fn inv033_imported_text_preview_rejects_truncated_empty_text()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Fifteen,
+            ProtocolVersion::Seventeen,
             request(1)?,
             ServerMessage::ImportedConversationEntry {
                 position: CanonicalU64::new(1),
@@ -5579,7 +5585,7 @@ mod tests {
     fn inv033_imported_conversation_entry_rejects_a_preview_on_nontext_content()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Fifteen,
+            ProtocolVersion::Seventeen,
             request(1)?,
             ServerMessage::ImportedConversationEntry {
                 position: CanonicalU64::new(1),
@@ -5603,7 +5609,7 @@ mod tests {
     fn inv033_imported_range_rejection_refuses_a_selectable_requested_position()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Fifteen,
+            ProtocolVersion::Seventeen,
             request(1)?,
             ServerMessage::Error {
                 code: ErrorCode::Rejected,
@@ -5628,7 +5634,7 @@ mod tests {
     fn inv033_imported_range_rejection_refuses_an_empty_selectable_range()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Fifteen,
+            ProtocolVersion::Seventeen,
             request(1)?,
             ServerMessage::Error {
                 code: ErrorCode::Rejected,
@@ -5650,7 +5656,7 @@ mod tests {
     /// INV-033: an out-of-range imported position is a rejection naming the
     /// conversation's selectable range, never the absent-session `not_found`.
     #[test]
-    fn inv033_version_fifteen_names_the_imported_position_range()
+    fn inv033_version_seventeen_names_the_imported_position_range()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::Error {
             code: ErrorCode::Rejected,
@@ -5667,11 +5673,11 @@ mod tests {
         );
 
         let frame =
-            ServerFrame::try_new_for_version(ProtocolVersion::Fifteen, request(1)?, message)?;
+            ServerFrame::try_new_for_version(ProtocolVersion::Seventeen, request(1)?, message)?;
         let encoded = encode_server_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":15,\"request_id\":\"1\",\"message\":{\"type\":\"error\",\"code\":\"rejected\",\"message\":\"the command was rejected by current durable state\",\"detail\":{\"type\":\"imported_frontier_position_out_of_range\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\",\"requested_position\":\"999999\",\"last_position\":\"2\"}}}\n"
+            "{\"version\":17,\"request_id\":\"1\",\"message\":{\"type\":\"error\",\"code\":\"rejected\",\"message\":\"the command was rejected by current durable state\",\"detail\":{\"type\":\"imported_frontier_position_out_of_range\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\",\"requested_position\":\"999999\",\"last_position\":\"2\"}}}\n"
         );
         assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
@@ -5680,10 +5686,10 @@ mod tests {
     /// INV-033: an absent imported conversation names an imported conversation
     /// as the missing target.
     #[test]
-    fn inv033_version_fifteen_names_the_absent_imported_conversation()
+    fn inv033_version_seventeen_names_the_absent_imported_conversation()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Fifteen,
+            ProtocolVersion::Seventeen,
             request(1)?,
             ServerMessage::Error {
                 code: ErrorCode::Rejected,
@@ -6324,8 +6330,8 @@ mod tests {
     }
 
     /// INV-033: the admitted version set is closed exactly at one through
-    /// twelve plus fifteen and sixteen; thirteen and fourteen remain reserved
-    /// by concurrent protocol stacks and are not admitted here.
+    /// twelve plus sixteen and seventeen; thirteen, fourteen, and fifteen
+    /// remain reserved by concurrent protocol stacks and are not admitted.
     #[test]
     fn inv033_version_sixteen_completes_the_admitted_set() {
         assert_eq!(
@@ -6333,7 +6339,7 @@ mod tests {
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
         );
         assert_eq!(
-            ProtocolVersion::Fifteen.as_u64(),
+            ProtocolVersion::Seventeen.as_u64(),
             IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
         );
         assert_eq!(
@@ -6347,15 +6353,16 @@ mod tests {
         assert_eq!(ProtocolVersion::from_u64(12), Some(ProtocolVersion::Twelve));
         assert_eq!(ProtocolVersion::from_u64(13), None);
         assert_eq!(ProtocolVersion::from_u64(14), None);
-        assert_eq!(
-            ProtocolVersion::from_u64(15),
-            Some(ProtocolVersion::Fifteen)
-        );
+        assert_eq!(ProtocolVersion::from_u64(15), None);
         assert_eq!(
             ProtocolVersion::from_u64(16),
             Some(ProtocolVersion::Sixteen)
         );
-        assert_eq!(ProtocolVersion::from_u64(17), None);
+        assert_eq!(
+            ProtocolVersion::from_u64(17),
+            Some(ProtocolVersion::Seventeen)
+        );
+        assert_eq!(ProtocolVersion::from_u64(18), None);
     }
 
     #[test]

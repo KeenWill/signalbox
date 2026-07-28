@@ -38,22 +38,25 @@ began, nine remained reserved by open PR #286 and no open pull request numbered
 #298 or later reserved another protocol version. The ephemeral provider-text
 surface therefore takes version twelve, verified through PR #300
 (`agent/token-level-streaming`). Versions thirteen and fourteen are reserved by
-the then-open steering and token-usage stacks. The imported-conversation
-inspection surface takes version fifteen for the single
-`read_imported_conversation` request and the two typed imported-continuation
-rejections, verified through PR #303 (`agent/imported-conversation-inspection`).
-The unified conversation-listing surface takes version sixteen for the single
-read-only `list_conversations` request, verified through PR #304
-(`agent/unified-conversation-listing`). Versions one through twelve retain their
-closed request and message vocabularies unchanged. The implementation speaks
-versions one through twelve, fifteen, and sixteen while thirteen and fourteen
-remain unsupported, and its terminal client selects version sixteen. Its
-`search` verb over version four's metadata list was verified through PR #283
-(`agent/session-search-cli`; terminal client surface only). This page's
-version-four last-writer member spelling was verified through PR #288
-(`agent/audit-fix-docs-coherence`). This page is the normative boundary between
-a local client process and `signalboxd`; domain values, PostgreSQL records, and
-wire messages remain distinct representations.
+the then-open steering and token-usage stacks. The imported-conversation unified
+conversation-listing surface takes version sixteen for the single read-only
+`list_conversations` request, verified through PR #304
+(`agent/unified-conversation-listing`). The imported-conversation inspection
+surface reserved fifteen while sixteen was still unclaimed, but sixteen shipped
+first: numbering its request below an already-closed vocabulary would
+retroactively admit that request in version-sixteen frames, so the inspection
+surface takes version seventeen for the single `read_imported_conversation`
+request and the two typed imported-continuation rejections, verified through PR
+#303 (`agent/imported-conversation-inspection`). Versions one through twelve and
+sixteen retain their closed request and message vocabularies unchanged. The
+implementation speaks versions one through twelve, sixteen, and seventeen while
+thirteen, fourteen, and fifteen remain unsupported, and its terminal client
+selects version seventeen. Its `search` verb over version four's metadata list
+was verified through PR #283 (`agent/session-search-cli`; terminal client
+surface only). This page's version-four last-writer member spelling was verified
+through PR #288 (`agent/audit-fix-docs-coherence`). This page is the normative
+boundary between a local client process and `signalboxd`; domain values,
+PostgreSQL records, and wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -165,7 +168,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1` through `12`, `15`, or `16`;
+- `version`: JSON integer `1` through `12`, `16`, or `17`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -178,19 +181,19 @@ contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
 spellings decode to the same name. A version other than one through twelve,
-fifteen, or sixteen produces an `unsupported_version` error naming the supported
-versions, then the server closes the connection. Versions thirteen and fourteen
-are reserved by other open stacks and are unsupported here, so the admitted set
-has one gap; that gap is a reservation, not a retired version. Every response
-uses the request's admitted version; when no version can be admitted, the server
-error uses version one as the pre-admission fallback. A client speaking a
-version above one admits that version-one fallback only for `malformed_frame` or
-`unsupported_version`, then applies the ordinary request-identity check; every
-other response-version mismatch fails locally. A server error uses
-`request_id = "0"` only when the incoming frame prevents recovery of a valid
-nonzero identity; zero is never a valid client identity or success-response
-identity. Leading zeroes, a plus sign, whitespace, and any spelling other than
-the shortest ASCII decimal form are invalid.
+sixteen, or seventeen produces an `unsupported_version` error naming the
+supported versions, then the server closes the connection. Versions thirteen,
+fourteen, and fifteen are reserved by other stacks and are unsupported here, so
+the admitted set has one gap; that gap is a reservation, not a retired version.
+Every response uses the request's admitted version; when no version can be
+admitted, the server error uses version one as the pre-admission fallback. A
+client speaking a version above one admits that version-one fallback only for
+`malformed_frame` or `unsupported_version`, then applies the ordinary
+request-identity check; every other response-version mismatch fails locally. A
+server error uses `request_id = "0"` only when the incoming frame prevents
+recovery of a valid nonzero identity; zero is never a valid client identity or
+success-response identity. Leading zeroes, a plus sign, whitespace, and any
+spelling other than the shortest ASCII decimal form are invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -484,24 +487,24 @@ retains every earlier request and adds only
 `create_session_from_imported_frontier`. Version eleven retains every earlier
 admitted request and adds only the review-workflow requests above. Version
 twelve retains every earlier admitted request and adds no request variant.
-Version fifteen retains every earlier admitted request and adds only the
-read-only `read_imported_conversation`. Version sixteen retains every earlier
-admitted request and adds only the read-only `list_conversations`; versions
-thirteen and fourteen remain reserved by concurrent stacks and unsupported here.
-A metadata request carried under version one, two, or three, an import request
-carried under version one through four, a defaults-replacement request carried
-under version one through five, a reconciliation request carried under version
-one through six, a turn-control request carried under version one through seven,
-a defaults read carried under version one through eight, an imported-frontier
-creation request carried under any version one through nine, a review request
-carried under any version one through ten, an imported-conversation read carried
-under any version one through twelve, or a unified-listing request carried under
-any version one through fifteen, is classified as `malformed_frame` because its
-supported version does not admit that request variant; it never reaches
-application construction. A version-one `submit_input`, `read_transcript`, or
-`follow_session` request that selects imported ancestry returns a version-one
-`unsupported_version` error naming version two before mutation or snapshot
-construction.
+Version sixteen retains every earlier admitted request and adds only the
+read-only `list_conversations`. Version seventeen retains every earlier admitted
+request and adds only the read-only `read_imported_conversation`; versions
+thirteen, fourteen, and fifteen remain reserved by concurrent stacks and
+unsupported here. A metadata request carried under version one, two, or three,
+an import request carried under version one through four, a defaults-replacement
+request carried under version one through five, a reconciliation request carried
+under version one through six, a turn-control request carried under version one
+through seven, a defaults read carried under version one through eight, an
+imported-frontier creation request carried under any version one through nine, a
+review request carried under any version one through ten, an
+imported-conversation read carried under any version one through sixteen, or a
+unified-listing request carried under any version one through twelve, is
+classified as `malformed_frame` because its supported version does not admit
+that request variant; it never reaches application construction. A version-one
+`submit_input`, `read_transcript`, or `follow_session` request that selects
+imported ancestry returns a version-one `unsupported_version` error naming
+version two before mutation or snapshot construction.
 
 Versions four and above also inherit every transcript, turn-state, entry, and
 event shape admitted by version three, including the imported representations
@@ -708,8 +711,8 @@ current pointer; a named version reads exactly that immutable epoch, so the
 response is stable under later replacements. The `not_found` error covers both
 an absent session and a named epoch that was never installed.
 
-Version fifteen's successful `read_imported_conversation` response is a bounded
-sequence:
+Version seventeen's successful `read_imported_conversation` response is a
+bounded sequence:
 
 1. `imported_conversation_start { imported_conversation_id }`;
 2. one `imported_conversation_entry` per normalized entry, in imported position
@@ -780,7 +783,7 @@ A version-eight `decide_tool_request` rejection admits
 `tool_request_already_resolved { tool_request_id }`,
 `tool_request_not_earliest_undecided { tool_request_id, earliest_tool_request_id }`,
 and `tool_request_not_in_session { session_id, tool_request_id }`. A
-version-fifteen `create_session_from_imported_frontier` rejection admits
+version-seventeen `create_session_from_imported_frontier` rejection admits
 `imported_conversation_not_found { imported_conversation_id }` and
 `imported_frontier_position_out_of_range { imported_conversation_id, requested_position, last_position }`.
 The first names an imported conversation, never a session, as the absent target;
@@ -788,11 +791,11 @@ the second states that the identity was valid and only the ordinal was outside
 `1..=last_position`. Because imported positions are that contiguous sequence, a
 `last_position` of zero or a `requested_position` inside the stated range is a
 contradictory frame and is rejected rather than presented. The admitted versions
-ten through twelve have no typed detail for either case and keep the undetailed
-`not_found` their closed message vocabulary already admits, distinguished only
-by its non-normative message. Thirteen and fourteen are reserved rather than
-admitted, so no frame ever reaches this mapping under them. The
-`turn_not_awaiting_reconciliation`, `tool_request_not_in_session`,
+ten through twelve and sixteen have no typed detail for either case and keep the
+undetailed `not_found` their closed message vocabulary already admits,
+distinguished only by its non-normative message. Thirteen, fourteen, and fifteen
+are reserved rather than admitted, so no frame ever reaches this mapping under
+them. The `turn_not_awaiting_reconciliation`, `tool_request_not_in_session`,
 `imported_conversation_not_found`, and `imported_frontier_position_out_of_range`
 details report refusals made before command recording, so unlike every other
 `rejected` detail they name no durable command result and have no replay
@@ -1189,7 +1192,7 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack uses version sixteen; version four's
+The `signalbox` binary in this stack uses version seventeen; version four's
 single-session metadata read and metadata replacement remain core protocol and
 daemon capabilities without terminal-client UX, while its paginated metadata
 list is the `search` verb below. Older clients remain supported for
@@ -1361,7 +1364,7 @@ ambiguous attempt. It uses a fresh nonzero request identity per connection,
 validates that a defaults receipt is the exact successor carrying the requested
 selection, copied posture, and exact replacement prompt, validates that a
 decision receipt echoes the exact request and decision it sent, renders only
-known version-sixteen messages, and exits nonzero on protocol or application
+known version-seventeen messages, and exits nonzero on protocol or application
 errors other than the follow-specific `resync_required` control case, which
 reconnects for a fresh snapshot.
 

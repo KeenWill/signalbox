@@ -10,6 +10,46 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-27 — Drop empty thinking parts instead of failing completions closed
+
+**Context.** Claude 5-family models run adaptive thinking by default, and with
+the default omitted display their responses carry thinking blocks whose text is
+empty: the block holds only the provider's replay signature. On the streamed
+path the block opens with an empty-string signature placeholder and the real
+signature arrives through a later signature delta; the strict decoder counted
+the placeholder as a delivered first signature and rejected every such stream as
+a protocol violation, parking each live claude-sonnet-5 tool turn in ambiguity
+recovery. Had the stream decoded, the bridge would still have failed the
+completion closed, because any thinking part was unsupported completion
+material.
+
+**Decision.** The Anthropic streamed decoder treats an empty-string opening
+signature as absent — the block must still close with exactly one non-empty
+signature — and the runtime bridge drops thinking parts whose text is empty,
+exactly as it drops empty text blocks. An empty thinking part carries no
+transcript content, and its replay signature is unusable either way because no
+durable thinking representation exists. The accepted cost is explicit: a
+tool-use continuation replayed without its thinking block is documented by the
+provider as graceful degradation — thinking is silently disabled for that
+request rather than the request erroring — and live verification completed a
+full tool round under exactly that shape. Thinking with actual text and redacted
+thinking still fail the adapter stage closed.
+
+**Rejected alternatives.** Keeping fail-closed for empty thinking parts: it
+rejects legitimate documented provider output, wedging live turns (streamed) or
+raising fatal supervision (buffered). Persisting thinking parts durably so they
+can replay: a foundation-weight transcript-vocabulary change that this defect
+fix must not smuggle in; it stays with the open model-input projection work.
+Tolerating any duplicate signature delta: it would weaken the stream integrity
+law beyond what the provider's shape requires.
+
+**Affects.** `crates/model-runtime-anthropic/src/stream.rs`,
+`crates/model-provider-runtime/src/lib.rs`,
+[runtime-substrate](spec/runtime-substrate.md) (stream integrity),
+[model-call-execution](spec/model-call-execution.md) (observation
+classification), and the wedge-then-reconcile process regression in
+`apps/signalboxd/tests/process_protocol_runtime.rs`.
+
 ## 2026-07-27 — Read imported conversations through their own verb
 
 **Context.** `signalbox import` prints an imported conversation identity and
@@ -22,12 +62,12 @@ out-of-range guess answered `not_found: the requested session was not found` —
 wrong on both counts, since the identity was valid and named no session.
 
 **Decision.** Add a separate read verb,
-`signalbox imported <imported-conversation-uuid>`, over a new version-fifteen
+`signalbox imported <imported-conversation-uuid>`, over a new version-seventeen
 `read_imported_conversation` request whose response is a spooled start/entry/end
 sequence. Each entry names its position, imported entry identity, speaker
 attestation, content kind, and a `text_preview` that is null or the entry's
 exact leading scalars bounded to 256 UTF-8 bytes with a truncation marker.
-Version fifteen also adds two typed rejections for
+Version seventeen also adds two typed rejections for
 `create_session_from_imported_frontier`: `imported_conversation_not_found` and
 `imported_frontier_position_out_of_range`, the latter naming the selectable
 range. `continue --through-position` stays required and gains only the exact
@@ -46,14 +86,17 @@ resolution rather than on the payload. Previewing tool, thinking, or media
 content would widen what the wire exposes about imported content beyond the
 conservative transcript projection, which is a separate foundation-weight
 change. A 256-byte preview is one or two terminal lines: enough to recognize an
-entry, small enough that a several-thousand-entry listing stays scannable.
-Version twelve merged while this branch was open, and thirteen and fourteen are
-reserved by open stacks, so fifteen is the next free number and the admitted set
-carries that gap.
+entry, small enough that a several-thousand-entry listing stays scannable. This
+surface first reserved fifteen. Version sixteen then merged while the branch was
+open, and numbering the request below an already-closed vocabulary would
+retroactively admit it in version-sixteen frames — widening a shipped version
+rather than adding a new one — so the surface moved above sixteen to seventeen.
+Thirteen, fourteen, and fifteen stay reserved and unadmitted, and the admitted
+set carries that gap.
 
-**Affects.** [process protocol](spec/process-protocol.md) (version fifteen, the
-read request, its three messages, the two rejection details, and the `imported`
-and `continue` client surfaces),
+**Affects.** [process protocol](spec/process-protocol.md) (version seventeen,
+the read request, its three messages, the two rejection details, and the
+`imported` and `continue` client surfaces),
 [conversation import](spec/conversation-import.md) (the inspection read),
 `crates/process-protocol`, `apps/signalboxd`, and `apps/client`.
 

@@ -351,7 +351,7 @@ new exact snapshot under the identity model above.
 An import prints only the imported conversation's identity, while
 [later session creation](sessions-and-transcript.md) selects one inclusive
 imported position. `signalbox imported <imported-conversation-uuid>` is the read
-that makes those positions observable: it sends one version-fifteen
+that makes those positions observable: it sends one version-seventeen
 `read_imported_conversation` request and prints one line per normalized entry
 plus a final `entry_count`. Each line names the entry's one-based imported
 position, its imported entry identity, its exact source-speaker attestation, its

@@ -6697,7 +6697,7 @@ impl ProtocolError {
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1 through 12, 15, and 16"
+                    "the protocol version is unsupported; supported versions: 1 through 12, 16, and 17"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
@@ -7437,7 +7437,7 @@ mod tests {
         assert!(
             ProtocolError::without_detail(ErrorCode::UnsupportedVersion)
                 .message
-                .contains("1 through 12, 15, and 16")
+                .contains("1 through 12, 16, and 17")
         );
     }
 
