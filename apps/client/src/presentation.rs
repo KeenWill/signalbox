@@ -851,6 +851,15 @@ impl<'a> Output<'a> {
                     TranscriptTextEntry::Assistant { turn_id, .. } => {
                         format!("assistant turn={turn_id}")
                     }
+                    TranscriptTextEntry::ContextSummary {
+                        model_call_id,
+                        first_source_session_id,
+                        first_entry_id,
+                        through_source_session_id,
+                        through_entry_id,
+                    } => format!(
+                        "context_summary model_call={model_call_id} range={first_source_session_id}/{first_entry_id}..={through_source_session_id}/{through_entry_id}"
+                    ),
                     TranscriptTextEntry::Imported {
                         imported_conversation_id,
                         imported_entry_id,

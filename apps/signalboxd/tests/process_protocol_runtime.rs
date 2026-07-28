@@ -93,12 +93,16 @@ const STREAMING_DELTA_BYTES: usize = 8 * 1024;
 const MODEL_CONFIGURATION: &str = r#"
 version = 1
 
+[compaction]
+prompt = "Summarize the prior conversation faithfully for continuation."
+
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000001"
 target_id = "00000000-0000-0000-0000-000000000003"
 provider = "anthropic"
 provider_model = "fixture-model"
 max_output_tokens = 256
+context_window_tokens = 200000
 
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000004"
@@ -106,6 +110,7 @@ target_id = "00000000-0000-0000-0000-000000000005"
 provider = "anthropic"
 provider_model = "fixture-model-next"
 max_output_tokens = 256
+context_window_tokens = 200000
 
 [[aliases]]
 alias_id = "00000000-0000-0000-0000-000000000002"

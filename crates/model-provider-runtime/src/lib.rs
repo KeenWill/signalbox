@@ -116,6 +116,7 @@ pub struct RuntimeModelDefinition {
     target: ResolvedProviderTarget,
     provider_model: String,
     max_output_tokens: u32,
+    context_window_tokens: u32,
 }
 
 impl RuntimeModelDefinition {
@@ -124,6 +125,7 @@ impl RuntimeModelDefinition {
         target: ResolvedProviderTarget,
         provider_model: String,
         max_output_tokens: u32,
+        context_window_tokens: u32,
     ) -> Result<Self, RuntimeModelDefinitionError> {
         if provider_model.is_empty() || provider_model.trim() != provider_model {
             return Err(RuntimeModelDefinitionError::InvalidProviderModel);
@@ -131,10 +133,14 @@ impl RuntimeModelDefinition {
         if max_output_tokens == 0 {
             return Err(RuntimeModelDefinitionError::InvalidOutputLimit);
         }
+        if context_window_tokens == 0 {
+            return Err(RuntimeModelDefinitionError::InvalidContextWindow);
+        }
         Ok(Self {
             target,
             provider_model,
             max_output_tokens,
+            context_window_tokens,
         })
     }
 
@@ -152,6 +158,11 @@ impl RuntimeModelDefinition {
     pub const fn max_output_tokens(&self) -> u32 {
         self.max_output_tokens
     }
+
+    /// Returns the operator-declared input context-window limit.
+    pub const fn context_window_tokens(&self) -> u32 {
+        self.context_window_tokens
+    }
 }
 
 /// A runtime delivery definition cannot construct a request-safe mapping.
@@ -161,6 +172,8 @@ pub enum RuntimeModelDefinitionError {
     InvalidProviderModel,
     /// A provider request requires a positive output-token ceiling.
     InvalidOutputLimit,
+    /// Automatic guarding requires a positive declared context window.
+    InvalidContextWindow,
 }
 
 impl fmt::Display for RuntimeModelDefinitionError {
@@ -168,6 +181,7 @@ impl fmt::Display for RuntimeModelDefinitionError {
         formatter.write_str(match self {
             Self::InvalidProviderModel => "provider model spelling is empty or padded",
             Self::InvalidOutputLimit => "provider output-token limit is zero",
+            Self::InvalidContextWindow => "provider context-window limit is zero",
         })
     }
 }
@@ -2601,9 +2615,9 @@ mod tests {
     fn conflicting_runtime_target_meaning_is_rejected() {
         assert_eq!(
             RuntimeModelCatalog::try_from_definitions([
-                RuntimeModelDefinition::try_new(target(1), String::from("first"), 64)
+                RuntimeModelDefinition::try_new(target(1), String::from("first"), 64, 200_000)
                     .expect("fixture definition is valid"),
-                RuntimeModelDefinition::try_new(target(1), String::from("second"), 64)
+                RuntimeModelDefinition::try_new(target(1), String::from("second"), 64, 200_000)
                     .expect("fixture definition is valid"),
             ]),
             Err(RuntimeModelCatalogError::ConflictingTarget { target: target(1) })

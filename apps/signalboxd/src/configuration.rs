@@ -24,6 +24,9 @@ use uuid::Uuid;
 /// Non-secret reference pinned into every Anthropic operation.
 pub const ANTHROPIC_CREDENTIAL_REFERENCE: &str = "anthropic-primary";
 
+/// Maximum exact deployment compaction-prompt bytes.
+pub const MAX_COMPACTION_PROMPT_UTF8_BYTES: usize = 1_048_576;
+
 /// Validated static model and alias definitions used by hub composition.
 #[derive(Clone, Debug)]
 pub struct HubModelConfiguration {
@@ -31,6 +34,7 @@ pub struct HubModelConfiguration {
     runtime_models: RuntimeModelCatalog,
     direct_selections: HashSet<DirectModelSelection>,
     aliases: HashMap<ModelAlias, FrozenAliasDefinition>,
+    compaction_prompt: Arc<str>,
 }
 
 impl HubModelConfiguration {
@@ -44,10 +48,26 @@ impl HubModelConfiguration {
     pub fn parse(content: &str) -> Result<Self, HubModelConfigurationError> {
         let document = DocumentMut::from_str(content)
             .map_err(|_| HubModelConfigurationError::InvalidDocument)?;
-        reject_unknown_fields(document.as_table(), &["version", "models", "aliases"])?;
+        reject_unknown_fields(
+            document.as_table(),
+            &["version", "models", "aliases", "compaction"],
+        )?;
         if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
             return Err(HubModelConfigurationError::UnsupportedVersion);
         }
+        let compaction = document
+            .get("compaction")
+            .and_then(|item| item.as_table())
+            .ok_or(HubModelConfigurationError::MissingCompaction)?;
+        reject_unknown_fields(compaction, &["prompt"])?;
+        let compaction_prompt = required_string(compaction, "prompt")?;
+        if compaction_prompt.is_empty()
+            || compaction_prompt.contains('\0')
+            || compaction_prompt.len() > MAX_COMPACTION_PROMPT_UTF8_BYTES
+        {
+            return Err(HubModelConfigurationError::InvalidCompactionPrompt);
+        }
+        let compaction_prompt: Arc<str> = Arc::from(compaction_prompt);
         let models = document
             .get("models")
             .and_then(|item| item.as_array_of_tables())
@@ -68,6 +88,7 @@ impl HubModelConfiguration {
                     "provider",
                     "provider_model",
                     "max_output_tokens",
+                    "context_window_tokens",
                 ],
             )?;
             let selection = DirectModelSelection::from_uuid(required_uuid(model, "selection_id")?);
@@ -82,6 +103,8 @@ impl HubModelConfiguration {
                 return Err(HubModelConfigurationError::InvalidProviderModel);
             }
             let max_output_tokens = required_positive_u32(model, "max_output_tokens")?;
+            let context_window_tokens =
+                required_positive_u32(model, "context_window_tokens")?;
             let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 required_uuid(model, "target_id")?,
             ));
@@ -91,6 +114,7 @@ impl HubModelConfiguration {
                     target,
                     provider_model.to_owned(),
                     max_output_tokens,
+                    context_window_tokens,
                 )
                 .map_err(|_| HubModelConfigurationError::InvalidField)?,
             );
@@ -131,6 +155,7 @@ impl HubModelConfiguration {
             runtime_models,
             direct_selections,
             aliases,
+            compaction_prompt,
         })
     }
 
@@ -142,6 +167,11 @@ impl HubModelConfiguration {
     /// Returns the exact runtime delivery catalog used by the provider bridge.
     pub fn runtime_model_catalog(&self) -> RuntimeModelCatalog {
         self.runtime_models.clone()
+    }
+
+    /// Returns the exact configured compaction system prompt.
+    pub fn compaction_prompt(&self) -> &str {
+        &self.compaction_prompt
     }
 
     /// Reports whether the configuration contains one direct selection key.
@@ -203,6 +233,8 @@ pub enum HubModelConfigurationError {
     UnsupportedVersion,
     /// No nonempty model-definition array exists.
     MissingModels,
+    /// The required compaction configuration table is absent.
+    MissingCompaction,
     /// An unrecognized root or table field was present.
     UnknownField,
     /// A required field had the wrong TOML type or was absent.
@@ -213,8 +245,10 @@ pub enum HubModelConfigurationError {
     UnsupportedProvider,
     /// The provider-native model spelling was empty or padded.
     InvalidProviderModel,
-    /// The output-token ceiling was zero or outside `u32`.
+    /// An output or context token limit was zero or outside `u32`.
     InvalidLimit,
+    /// The compaction prompt was empty, oversized, or contained NUL.
+    InvalidCompactionPrompt,
     /// One direct selection appeared more than once.
     DuplicateSelection,
     /// One target was assigned conflicting runtime meanings.
@@ -234,12 +268,14 @@ impl fmt::Display for HubModelConfigurationError {
             Self::InvalidDocument => "model configuration is not valid TOML",
             Self::UnsupportedVersion => "model configuration version is unsupported",
             Self::MissingModels => "model configuration has no model definitions",
+            Self::MissingCompaction => "model configuration has no compaction settings",
             Self::UnknownField => "model configuration contains an unknown field",
             Self::InvalidField => "model configuration has a missing or mistyped field",
             Self::InvalidIdentity => "model configuration contains an invalid identity",
             Self::UnsupportedProvider => "model configuration names an unsupported provider",
             Self::InvalidProviderModel => "model configuration contains an invalid provider model",
-            Self::InvalidLimit => "model configuration contains an invalid output limit",
+            Self::InvalidLimit => "model configuration contains an invalid token limit",
+            Self::InvalidCompactionPrompt => "model configuration contains an invalid compaction prompt",
             Self::DuplicateSelection => "model configuration repeats a direct selection",
             Self::ConflictingTarget => "model configuration gives one target conflicting meaning",
             Self::InvalidAliases => "model aliases are not an array of tables",
@@ -346,12 +382,16 @@ mod tests {
     const CONFIGURATION: &str = r#"
 version = 1
 
+[compaction]
+prompt = "Summarize the prior conversation faithfully for continuation."
+
 [[models]]
 selection_id = "10000000-0000-4000-8000-000000000001"
 target_id = "20000000-0000-4000-8000-000000000001"
 provider = "anthropic"
 provider_model = "claude-example"
 max_output_tokens = 256
+context_window_tokens = 200000
 
 [[aliases]]
 alias_id = "30000000-0000-4000-8000-000000000001"

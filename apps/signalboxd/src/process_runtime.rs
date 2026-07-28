@@ -710,6 +710,15 @@ where
             )
             .await
         }
+        ClientRequest::CompactSession { .. } => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await
+        }
         ClientRequest::ListSessions {} => {
             let Some(snapshot_permit) = acquire_snapshot_reader_permit(
                 Arc::clone(&services.snapshot_reader_budget),
@@ -7336,12 +7345,16 @@ mod tests {
             r#"
 version = 1
 
+[compaction]
+prompt = "Summarize the prior conversation faithfully for continuation."
+
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000001"
 target_id = "00000000-0000-0000-0000-000000000002"
 provider = "anthropic"
 provider_model = "still-current"
 max_output_tokens = 256
+context_window_tokens = 200000
 "#,
         )?;
         let removed_selection =

@@ -64,6 +64,15 @@ pub const INPUT_DELIVERY_PROTOCOL_VERSION: u64 = 13;
 /// inspection stack.
 pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
 
+/// The append-only context-compaction protocol version.
+///
+/// Version thirteen is allocated by input delivery; version fourteen remains
+/// reserved by concurrent protocol work, version fifteen is allocated by
+/// imported-conversation inspection, and version sixteen is allocated by
+/// unified conversation listing. Version seventeen is allocated here by
+/// context compaction.
+pub const CONTEXT_COMPACTION_PROTOCOL_VERSION: u64 = 17;
+
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProtocolVersion {
@@ -95,6 +104,8 @@ pub enum ProtocolVersion {
     Thirteen,
     /// Unified conversation-listing vocabulary.
     Sixteen,
+    /// Explicit context compaction and summary provenance.
+    Seventeen,
 }
 
 impl ProtocolVersion {
@@ -115,6 +126,7 @@ impl ProtocolVersion {
             Self::Twelve => PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
             Self::Thirteen => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::Sixteen => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
+            Self::Seventeen => CONTEXT_COMPACTION_PROTOCOL_VERSION,
         }
     }
 
@@ -134,6 +146,7 @@ impl ProtocolVersion {
             PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION => Some(Self::Twelve),
             INPUT_DELIVERY_PROTOCOL_VERSION => Some(Self::Thirteen),
             UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION => Some(Self::Sixteen),
+            CONTEXT_COMPACTION_PROTOCOL_VERSION => Some(Self::Seventeen),
             _ => None,
         }
     }
@@ -1546,6 +1559,17 @@ pub enum ClientRequest {
         )]
         delivery: Option<InputDelivery>,
     },
+    /// Compact one session's model-visible history without rewriting it.
+    CompactSession {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Optional one-based semantic position to summarize through; null
+        /// selects the latest safe boundary.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        through_position: Option<CanonicalU64>,
+    },
     /// Read one durable transcript snapshot.
     ReadTranscript {
         /// Target session.
@@ -1815,6 +1839,7 @@ impl ClientRequest {
             | Self::ListReviewFindings { .. } => REVIEW_WORKFLOW_PROTOCOL_VERSION,
             Self::StopTurn { .. } | Self::DecideToolRequest { .. } => TURN_CONTROL_PROTOCOL_VERSION,
             Self::ListConversations { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
+            Self::CompactSession { .. } => CONTEXT_COMPACTION_PROTOCOL_VERSION,
             Self::ReadSessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::CreateSessionFromImportedFrontier { .. } => {
                 IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION
@@ -1853,6 +1878,13 @@ impl ClientRequest {
             && through_position.value() == 0
         {
             return Err(FrameValidationError::ImportedFrontierShape);
+        }
+        if let Self::CompactSession {
+            through_position: Some(position), ..
+        } = self
+            && position.value() == 0
+        {
+            return Err(FrameValidationError::ContextCompactionShape);
         }
         if let Self::ListSessionMetadata {
             required_tags,
@@ -2781,6 +2813,19 @@ pub enum TranscriptTextEntry {
         /// Producing model call.
         model_call_id: CanonicalUuid,
     },
+    /// Model-produced summary of one exact earlier semantic range.
+    ContextSummary {
+        /// Dedicated model call that produced the summary.
+        model_call_id: CanonicalUuid,
+        /// Source session of the inclusive range's first entry.
+        first_source_session_id: CanonicalUuid,
+        /// Identity of the inclusive range's first entry.
+        first_entry_id: CanonicalUuid,
+        /// Source session of the inclusive range's final entry.
+        through_source_session_id: CanonicalUuid,
+        /// Identity of the inclusive range's final entry.
+        through_entry_id: CanonicalUuid,
+    },
     /// Imported text whose exact value was source-attested.
     Imported {
         /// Owning imported conversation.
@@ -2796,7 +2841,8 @@ impl TranscriptTextEntry {
     const fn minimum_protocol_version(&self) -> u64 {
         match self {
             Self::Imported { .. } => IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
-            Self::User { .. } | Self::Assistant { .. } => 1,
+            Self::ContextSummary { .. } => CONTEXT_COMPACTION_PROTOCOL_VERSION,
+            Self::User { .. } | Self::Assistant { .. } => PROTOCOL_VERSION,
         }
     }
 }
@@ -3126,6 +3172,21 @@ pub enum ServerMessage {
         /// Exact recorded decision.
         decision: ToolDecision,
     },
+    /// One completed append-only context-compaction receipt.
+    SessionCompacted {
+        /// Compacted session.
+        session_id: CanonicalUuid,
+        /// Immutable compaction identity.
+        context_compaction_id: CanonicalUuid,
+        /// Dedicated producing model call.
+        model_call_id: CanonicalUuid,
+        /// One-based exact through position in the source frontier.
+        through_position: CanonicalU64,
+        /// Appended summary semantic entry.
+        summary_entry_id: CanonicalUuid,
+        /// Complete source-plus-summary result frontier.
+        result_frontier_id: CanonicalUuid,
+    },
     /// One new immutable imported conversation was inserted.
     ConversationImportInserted {
         /// Newly durable imported-conversation identity.
@@ -3347,6 +3408,7 @@ impl ServerMessage {
             Self::ConversationPageStart {}
             | Self::ConversationSummary { .. }
             | Self::ConversationPageEnd { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
+            Self::SessionCompacted { .. } => CONTEXT_COMPACTION_PROTOCOL_VERSION,
             Self::SessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::SteeringSubmitted { .. } => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::Error { detail, .. } => detail.minimum_protocol_version(),
@@ -3571,6 +3633,8 @@ pub enum FrameValidationError {
     SystemPromptShape,
     /// An imported-frontier request carried a nonpositive position.
     ImportedFrontierShape,
+    /// A context-compaction request carried a nonpositive position.
+    ContextCompactionShape,
     /// A submit-input delivery carried forbidden or missing correlated fields.
     InputDeliveryShape,
 }
@@ -3592,6 +3656,7 @@ impl fmt::Display for FrameValidationError {
             }
             Self::SystemPromptShape => "version-nine frame omits its required system-prompt member",
             Self::ImportedFrontierShape => "imported frontier position is not positive",
+            Self::ContextCompactionShape => "compaction through position is not positive",
             Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
         })
     }
