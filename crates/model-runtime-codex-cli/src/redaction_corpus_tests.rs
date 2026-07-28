@@ -13,6 +13,37 @@ const BOUNDARY_FRAGMENT: &str = "{}";
 const GENERATOR_SEED: u64 = 0x5eed_c0de_d15c_a11e;
 const DEFAULT_GENERATIVE_CASES: usize = 512;
 const SOAK_GENERATIVE_CASES: usize = 32_768;
+/// Every UTF-8 boundary of every corpus line, both empty-delta ends
+/// included. Enumerating the single-split class exhaustively is what keeps
+/// it closed: sampling split points misses the specific boundary a held
+/// state mishandles, which is how three boundary defects reached review.
+const EXHAUSTIVE_SINGLE_SPLIT_CASES: usize = 5_418;
+/// The enumerated cases whose joined line `redact_text` actually redacts, so
+/// the stateful path is held to a nonvacuous obligation. The remainder are
+/// the accepted-uncovered lines, enumerated but unguarded.
+const EXHAUSTIVE_SINGLE_SPLIT_GUARDED_CASES: usize = 4_352;
+/// Every ordered pair of UTF-8 boundaries of every corpus line.
+const EXHAUSTIVE_TWO_SPLIT_CASES: usize = 127_567;
+const EXHAUSTIVE_TWO_SPLIT_GUARDED_CASES: usize = 105_743;
+/// Corpus lines the single-split enumeration still finds diverging, recorded
+/// rather than hidden. All three plant a double-quoted `client_secret` member
+/// inside surrounding text (line 78 through JSON string escapes), and all
+/// three release the value only when an earlier delta already emitted a clean
+/// prefix — the divergence is in emitted-context resolution, not in the
+/// boundary helpers this pull request repairs. Escalated to the owner; the set
+/// and its case count are pinned so any movement fails this test.
+const OPEN_SINGLE_SPLIT_DIVERGENCE_LINES: [usize; 3] = [78, 79, 83];
+const OPEN_SINGLE_SPLIT_DIVERGENCE_CASES: usize = 25;
+/// The escalated divergence measured one delta deeper. These lines are not
+/// accepted-uncovered — `redact_text` redacts every one of them — and this is
+/// not a limit the pull request claims. It is the current measurement of the
+/// open defect, recorded so its reach is a fact in the tree rather than a
+/// number in a review comment: a clean prefix released by an earlier delta
+/// defeats the held-state decision for a credential the joined line redacts.
+const MEASURED_TWO_SPLIT_DIVERGENCE_LINES: [usize; 16] = [
+    36, 41, 56, 57, 72, 73, 77, 78, 79, 80, 82, 83, 84, 112, 113, 117,
+];
+const MEASURED_TWO_SPLIT_DIVERGENCE_CASES: usize = 1_069;
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
 const ASCII_NOISE: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_-";
@@ -79,6 +110,31 @@ struct CorpusSummary {
     redacted: usize,
     accepted_uncovered: usize,
     mismatches: Vec<ClassificationMismatch>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SplitLeak {
+    line: usize,
+    splits: Vec<usize>,
+    fragments: Vec<String>,
+    emitted: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SplitSummary {
+    lines: usize,
+    cases: usize,
+    guarded_cases: usize,
+    leaks: Vec<SplitLeak>,
+}
+
+impl SplitSummary {
+    fn leaking_lines(&self) -> Vec<usize> {
+        let mut lines = self.leaks.iter().map(|leak| leak.line).collect::<Vec<_>>();
+        lines.sort_unstable();
+        lines.dedup();
+        lines
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -491,6 +547,137 @@ fn run_corpus() -> CorpusSummary {
     }
 }
 
+/// The joined text a corpus line denotes, with its committed event schedule
+/// dropped: split enumeration supplies its own fragmentation, so a line's
+/// pinned delta positions must not constrain the boundaries enumerated here.
+fn corpus_line_text(encoded: &str) -> String {
+    let mut text = String::new();
+    for part in decode_corpus_line(encoded).parts {
+        match part {
+            CorpusPart::Text(fragment) => text.push_str(&fragment),
+            CorpusPart::Event(_) => {}
+        }
+    }
+    text
+}
+
+/// Every byte position a delta may end at, which for UTF-8 is every character
+/// boundary. Both ends are included: an empty leading or trailing delta is a
+/// fragmentation a provider can produce.
+fn split_boundaries(text: &str) -> Vec<usize> {
+    (0..=text.len())
+        .filter(|split| text.is_char_boundary(*split))
+        .collect()
+}
+
+/// Whether the joined line obliges the stateful path at all. `redact_text` is
+/// the stateless reference, so a line it leaves marked is enumerated for its
+/// case count but carries no assertion.
+fn split_case_is_guarded(text: &str) -> bool {
+    !redact_text(text).contains(SYNTHETIC_SECRET_MARKER)
+}
+
+fn fragmented_stateful_output(fragments: &[String]) -> String {
+    let mut observed = Vec::new();
+    let terminal_capture;
+    {
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.begin_terminal_text_capture();
+        let mut index = 0_u32;
+        for fragment in fragments {
+            emit_text_delta(&mut sink, &mut index, fragment.clone());
+        }
+        sink.finish();
+        terminal_capture = sink.take_terminal_text_capture();
+    }
+    let mut emitted = observed_stream_outputs(observed)
+        .into_iter()
+        .map(|output| output.text)
+        .collect::<String>();
+    emitted.push_str(&terminal_capture);
+    emitted
+}
+
+fn record_split_case(
+    summary: &mut SplitSummary,
+    line: usize,
+    guarded: bool,
+    splits: Vec<usize>,
+    fragments: Vec<String>,
+) {
+    summary.cases += 1;
+    if !guarded {
+        return;
+    }
+    summary.guarded_cases += 1;
+    let emitted = fragmented_stateful_output(&fragments);
+    if emitted.contains(SYNTHETIC_SECRET_MARKER) {
+        summary.leaks.push(SplitLeak {
+            line,
+            splits,
+            fragments,
+            emitted,
+        });
+    }
+}
+
+/// Exhaustive single-split enumeration: every corpus line cut once at every
+/// UTF-8 boundary, driven as two text deltas and a finish.
+fn run_exhaustive_single_splits() -> SplitSummary {
+    let mut summary = SplitSummary {
+        lines: 0,
+        cases: 0,
+        guarded_cases: 0,
+        leaks: Vec::new(),
+    };
+    for (index, encoded) in CORPUS.lines().enumerate() {
+        summary.lines += 1;
+        let text = corpus_line_text(encoded);
+        let guarded = split_case_is_guarded(&text);
+        for split in split_boundaries(&text) {
+            let fragments = vec![text[..split].to_string(), text[split..].to_string()];
+            record_split_case(&mut summary, index + 1, guarded, vec![split], fragments);
+        }
+    }
+    summary
+}
+
+/// Exhaustive two-split enumeration: every corpus line cut at every ordered
+/// pair of UTF-8 boundaries, driven as three text deltas and a finish. The
+/// two-split space is still small enough to enumerate whole, so the soak
+/// enumerates it rather than sampling it.
+fn run_exhaustive_two_splits() -> SplitSummary {
+    let mut summary = SplitSummary {
+        lines: 0,
+        cases: 0,
+        guarded_cases: 0,
+        leaks: Vec::new(),
+    };
+    for (index, encoded) in CORPUS.lines().enumerate() {
+        summary.lines += 1;
+        let text = corpus_line_text(encoded);
+        let guarded = split_case_is_guarded(&text);
+        let boundaries = split_boundaries(&text);
+        for (first_position, first) in boundaries.iter().copied().enumerate() {
+            for second in boundaries[first_position..].iter().copied() {
+                let fragments = vec![
+                    text[..first].to_string(),
+                    text[first..second].to_string(),
+                    text[second..].to_string(),
+                ];
+                record_split_case(
+                    &mut summary,
+                    index + 1,
+                    guarded,
+                    vec![first, second],
+                    fragments,
+                );
+            }
+        }
+    }
+    summary
+}
+
 fn generated_ascii(rng: &mut DeterministicGenerator) -> String {
     let length = rng.index(9);
     let mut value = String::with_capacity(length);
@@ -849,9 +1036,36 @@ fn deterministic_generator_replays_the_pinned_seed() {
     );
 }
 
+/// STATEFUL-EQUALS-STATELESS over the whole single-split class: every corpus
+/// line cut once at every UTF-8 boundary must emit no marker that
+/// `redact_text` removes from the joined line. This class is enumerated, not
+/// sampled — a sampled split point is exactly what a boundary defect hides
+/// behind — so no single-delta boundary in the committed corpus is untested.
+///
+/// The lines named by `OPEN_SINGLE_SPLIT_DIVERGENCE_LINES` are the escalated
+/// residue: they are enumerated and pinned, not excluded, so the divergence
+/// stays visible and any change to it fails here.
+#[test]
+fn stateful_equals_stateless_for_every_single_corpus_split() {
+    let summary = run_exhaustive_single_splits();
+
+    assert_eq!(summary.lines, CORPUS_LINE_COUNT);
+    assert_eq!(summary.cases, EXHAUSTIVE_SINGLE_SPLIT_CASES);
+    assert_eq!(summary.guarded_cases, EXHAUSTIVE_SINGLE_SPLIT_GUARDED_CASES);
+    assert_eq!(
+        summary.leaking_lines(),
+        OPEN_SINGLE_SPLIT_DIVERGENCE_LINES.to_vec(),
+        "single-split divergence left the escalated lines: {:#?}",
+        summary.leaks
+    );
+    assert_eq!(summary.leaks.len(), OPEN_SINGLE_SPLIT_DIVERGENCE_CASES);
+}
+
 /// STATEFUL-EQUALS-STATELESS: every generated delta/event schedule must
 /// remove a planted marker that `redact_text` also removes from the joined
-/// input; every corpus-seeded family is required to satisfy both sides.
+/// input; every corpus-seeded family is required to satisfy both sides. The
+/// generator covers the multi-split and event-schedule shapes whose space is
+/// too large to enumerate; the single-split class is enumerated instead.
 #[test]
 fn stateful_equals_stateless_for_generated_corpus_families() {
     assert_stateful_equals_stateless(GENERATOR_SEED, DEFAULT_GENERATIVE_CASES);
@@ -862,6 +1076,31 @@ fn stateful_equals_stateless_for_generated_corpus_families() {
 #[test]
 fn suppression_is_absorbing_for_generated_event_sequences() {
     assert_suppression_is_absorbing(GENERATOR_SEED, DEFAULT_GENERATIVE_CASES);
+}
+
+/// Measures — does not accept — how far the escalated divergence reaches once
+/// a second delta boundary exists. The two-split space is still small enough
+/// to enumerate whole, and enumerating it is what shows the single-split
+/// residue is the visible edge of one defect rather than three odd lines: a
+/// clean prefix released by an earlier delta defeats the held-state decision
+/// for many more shapes here than at one split. The pinned set is the current
+/// measurement of an open defect awaiting owner direction, so any movement in
+/// either direction fails and must be re-reported.
+#[test]
+#[ignore = "exhaustive two-split enumeration of the escalated divergence"]
+fn two_split_divergence_measures_the_escalated_defect() {
+    let summary = run_exhaustive_two_splits();
+
+    assert_eq!(summary.lines, CORPUS_LINE_COUNT);
+    assert_eq!(summary.cases, EXHAUSTIVE_TWO_SPLIT_CASES);
+    assert_eq!(summary.guarded_cases, EXHAUSTIVE_TWO_SPLIT_GUARDED_CASES);
+    assert_eq!(
+        summary.leaking_lines(),
+        MEASURED_TWO_SPLIT_DIVERGENCE_LINES.to_vec(),
+        "the measured two-split divergence moved: {:#?}",
+        summary.leaks
+    );
+    assert_eq!(summary.leaks.len(), MEASURED_TWO_SPLIT_DIVERGENCE_CASES);
 }
 
 /// Deterministic long-run coverage for STATEFUL-EQUALS-STATELESS.
