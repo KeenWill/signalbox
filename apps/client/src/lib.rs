@@ -3852,10 +3852,11 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: steering uses the configuration-free version-thirteen request
-    /// and returns its typed accepted-input/source-turn receipt.
+    /// INV-033: the current client inherits the configuration-free
+    /// version-thirteen request and returns its typed accepted-input/source-turn receipt.
     #[tokio::test]
-    async fn inv033_submit_steering_uses_the_exact_v13_exchange() -> Result<(), Box<dyn Error>> {
+    async fn inv033_current_client_inherits_the_exact_v13_steering_exchange()
+    -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let listener = UnixListener::bind(&socket)?;
@@ -3868,7 +3869,7 @@ mod tests {
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert_eq!(request.version(), ProtocolVersion::Thirteen);
+            assert_eq!(request.version(), ProtocolVersion::Sixteen);
             assert_eq!(
                 request.request(),
                 &ClientRequest::SubmitInput {
