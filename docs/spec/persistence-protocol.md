@@ -139,11 +139,12 @@ Representation rules, all enforced in the schema:
   `create_session_command`. Both members are absent or present together; names
   satisfy the domain's 1-through-128-byte lowercase ASCII grammar and digests
   are exactly 32 bytes. The create-command row carries the same pair only at
-  storage version 4; versions 1 through 3 require two nulls. A foreign key binds
-  the pair to its created session, so command replay and checked reconstitution
-  cannot cross-wire provenance. Existing and explicit sessions carry two nulls.
-  Both tables retain their append-only guards; no template catalog or mutable
-  template object exists in Postgres (INV-047).
+  storage version 4; versions 1 through 3 require two nulls. Reciprocal foreign
+  keys bind every present pair across the creation command and its created
+  session, so command replay and checked reconstitution cannot cross-wire
+  provenance. Existing and explicit sessions carry two nulls. Both tables retain
+  their append-only guards; no template catalog or mutable template object
+  exists in Postgres (INV-047).
 - Migration `202607280303` adds the optional bounded `system_prompt` column to
   `session_defaults_version` and the three defaults-bearing command tables, each
   guarded by the 1,048,576-UTF-8-byte and nonempty CHECK constraints and, on

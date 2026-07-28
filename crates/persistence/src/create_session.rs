@@ -561,6 +561,11 @@ fn decode_complete(
         row.try_get("command_template_digest")?,
         "command template provenance",
     )?;
+    if typed_version < STORAGE_VERSION && command_template_provenance.is_some() {
+        return Err(
+            CreateSessionCorruption::Inconsistent("pre-version-four template provenance").into(),
+        );
+    }
     let command = match command_template_provenance {
         Some(template_provenance) => signalbox_domain::CreateSession::new_from_template(
             command_id,
@@ -586,6 +591,11 @@ fn decode_complete(
         row.try_get("stored_template_digest")?,
         "stored template provenance",
     )?;
+    if typed_version < STORAGE_VERSION && stored_template_provenance.is_some() {
+        return Err(
+            CreateSessionCorruption::Inconsistent("pre-version-four template provenance").into(),
+        );
+    }
     let defaults_session: Uuid = required(&row, "defaults_session_id")?;
     if defaults_session != stored_session_uuid {
         return Err(CreateSessionCorruption::Inconsistent("session/defaults ownership").into());
