@@ -8,16 +8,16 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt as _};
 use uuid::Uuid;
 
 use crate::{
-    MAX_INPUT_CONTENT_BYTES, ModelSystemPromptChoice, command_identity, connection::ProcessClient,
-    decide, error::ClientError, presentation::Output, read_snapshot, replace_session_model,
-    resolve_defaults_version, stop_turn, submit_input, terminal_snapshot_selection, transcript,
-    transcript::SnapshotIdentitySet,
+    MAX_INPUT_CONTENT_BYTES, ModelSystemPromptChoice, SubmitInputReceipt, command_identity,
+    connection::ProcessClient, decide, error::ClientError, presentation::Output, read_snapshot,
+    replace_session_model, resolve_defaults_version, steer, stop_turn, submit_input,
+    terminal_snapshot_selection, transcript, transcript::SnapshotIdentitySet,
 };
 
-const MAX_CHAT_LINE_BYTES: usize = MAX_INPUT_CONTENT_BYTES + ":stop ".len();
+const MAX_CHAT_LINE_BYTES: usize = MAX_INPUT_CONTENT_BYTES + ":steer ".len();
 
-const COMMANDS: &str =
-    ":stop TEXT | :approve ID | :deny ID REASON | :transcript | :model ALIAS-UUID | :quit";
+const COMMANDS: &str = ":stop TEXT | :steer TEXT | :approve ID | :deny ID REASON | \
+    :transcript | :model ALIAS-UUID | :quit";
 
 #[derive(Debug, Eq, PartialEq)]
 enum LineRead {
@@ -101,6 +101,7 @@ where
 enum ChatInput {
     Submit(String),
     Stop(String),
+    Steer(String),
     Approve(CanonicalUuid),
     Deny {
         tool_request_id: CanonicalUuid,
@@ -283,6 +284,20 @@ where
                                 Err(error) => output.error(&error)?,
                             }
                         }
+                        ChatInput::Steer(content) => {
+                            let Some(turn_id) = active_turn else {
+                                output.chat_usage(
+                                    "the session has no active turn to steer",
+                                    COMMANDS,
+                                )?;
+                                continue;
+                            };
+                            if let Err(error) =
+                                steer(client, output, session_id, None, Some(turn_id), content).await
+                            {
+                                output.error(&error)?;
+                            }
+                        }
                         ChatInput::Approve(tool_request_id) => {
                             if let Err(error) = decide(
                                 client,
@@ -372,14 +387,19 @@ async fn submit(
         &command_id.into_uuid().hyphenated().to_string(),
     )?;
     let defaults_version = resolve_defaults_version(client, output, session_id, None).await?;
-    submit_input(
+    let receipt = submit_input(
         client,
         command_id,
         session_id,
         InputContent::new(content),
-        defaults_version,
+        Some(defaults_version),
+        None,
     )
-    .await
+    .await?;
+    let SubmitInputReceipt::Turn { turn_id } = receipt else {
+        return Err(ClientError::Protocol("chat input returned a steering receipt").mutation());
+    };
+    Ok(turn_id)
 }
 
 async fn stop(
@@ -471,6 +491,10 @@ fn parse_line(line: String) -> Result<ChatInput, ChatSyntaxError> {
     if let Some(content) = line.strip_prefix(":stop ") {
         validate_content(content, ":stop requires successor text")?;
         return Ok(ChatInput::Stop(content.to_owned()));
+    }
+    if let Some(content) = line.strip_prefix(":steer ") {
+        validate_content(content, ":steer requires text")?;
+        return Ok(ChatInput::Steer(content.to_owned()));
     }
     if let Some(value) = line.strip_prefix(":approve ") {
         return parse_uuid(value, ":approve requires one canonical request UUID")
@@ -584,6 +608,10 @@ mod tests {
             Ok(ChatInput::Stop(String::from("continue here")))
         );
         assert_eq!(
+            parse_line(String::from(":steer inspect the cache")),
+            Ok(ChatInput::Steer(String::from("inspect the cache")))
+        );
+        assert_eq!(
             parse_line(format!(":approve {REQUEST}")),
             Ok(ChatInput::Approve(request))
         );
@@ -633,7 +661,8 @@ mod tests {
 
     #[test]
     fn first_interrupt_offers_stop_and_second_exits_without_stopping() {
-        let active_turn = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        const ACTIVE_TURN_IDENTITY: u128 = 1;
+        let active_turn = CanonicalUuid::from_uuid(Uuid::from_u128(ACTIVE_TURN_IDENTITY));
         let mut state = InterruptState::default();
 
         assert_eq!(
@@ -648,15 +677,20 @@ mod tests {
 
     #[test]
     fn delayed_old_turn_events_do_not_replace_or_terminalize_a_local_successor() {
-        let old_turn = CanonicalUuid::from_uuid(Uuid::from_u128(1));
-        let successor_turn = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        const OLD_TURN_IDENTITY: u128 = 1;
+        const SUCCESSOR_TURN_IDENTITY: u128 = 2;
+        const OLD_ATTEMPT_IDENTITY: u128 = 3;
+        const CANCELLATION_ENTRY_IDENTITY: u128 = 4;
+        const TERMINAL_FRONTIER_IDENTITY: u128 = 5;
+        let old_turn = CanonicalUuid::from_uuid(Uuid::from_u128(OLD_TURN_IDENTITY));
+        let successor_turn = CanonicalUuid::from_uuid(Uuid::from_u128(SUCCESSOR_TURN_IDENTITY));
         let mut active_turn = Some(successor_turn);
 
         assert!(!update_active_from_event(
             &mut active_turn,
             &SessionEvent::TurnActivated {
                 turn_id: old_turn,
-                current_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                current_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(OLD_ATTEMPT_IDENTITY)),
             }
         ));
         assert_eq!(active_turn, Some(successor_turn));
@@ -664,8 +698,12 @@ mod tests {
             &mut active_turn,
             &SessionEvent::TurnCancelled {
                 turn_id: old_turn,
-                cancellation_entry_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
-                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+                cancellation_entry_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                    CANCELLATION_ENTRY_IDENTITY,
+                )),
+                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                    TERMINAL_FRONTIER_IDENTITY
+                )),
             }
         ));
         assert_eq!(active_turn, Some(successor_turn));

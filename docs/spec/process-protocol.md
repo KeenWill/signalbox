@@ -1191,18 +1191,22 @@ transcript, and later provider-text deltas remain ephemeral presentation exactly
 as they do for `follow`.
 
 A line without the `:` prefix submits exact nonempty line content only while no
-turn is active. The closed in-loop command set is `:stop TEXT`, `:approve ID`,
-`:deny ID REASON`, `:transcript`, `:model ALIAS-UUID`, and `:quit`. These map,
-respectively, to `stop_turn`, `decide_tool_request`, `read_transcript`,
-`replace_session_defaults`, or local exit; ordinary input maps to
-`submit_input`. `:stop` requires successor text because the interrupt request
-cannot represent a standalone cancellation. `:model` changes only the alias
-selection and copies the observed dangerous-tool posture and system prompt into
-the forward-only successor defaults epoch. Tool proposals and projected results
-are reread and presented at their durable transition, and an approval wait
-prints its exact request identity. All process-derived text, including live
-deltas and tool content, uses the same terminal-safe escaping as the other
-client verbs unless the invocation selected `--raw-output`.
+turn is active. The closed in-loop command set is `:stop TEXT`, `:steer TEXT`,
+`:approve ID`, `:deny ID REASON`, `:transcript`, `:model ALIAS-UUID`, and
+`:quit`. These map to the existing `stop_turn`, configuration-free steering
+`submit_input`, `decide_tool_request`, `read_transcript`, and
+`replace_session_defaults` requests, or local exit; ordinary input maps to
+start-when-idle `submit_input`. `:stop` requires successor text because the
+interrupt request cannot represent a standalone cancellation. `:steer` requires
+an active turn, binds the exact turn currently observed by the loop, and prints
+the existing typed steering receipt without waiting for a successor turn.
+`:model` changes only the alias selection and copies the observed dangerous-tool
+posture and system prompt into the forward-only successor defaults epoch. Tool
+proposals and projected results are reread and presented at their durable
+transition, and an approval wait prints its exact request identity. All
+process-derived text, including live deltas and tool content, uses the same
+terminal-safe escaping as the other client verbs unless the invocation selected
+`--raw-output`.
 
 While a turn is active, the first Ctrl-C leaves the daemon turn running and
 prints the `:stop TEXT` choice. A second Ctrl-C exits the client and explicitly

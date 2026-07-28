@@ -62,6 +62,10 @@ const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const SCRIPTED_PROVIDER: &str = "scripted-chat";
 const TOOL_NAME: &str = "confirmed_probe";
+const APPROVAL_INPUT_LINE: &str = "use the confirmed probe\n";
+const INITIAL_INPUT_LINE: &str = "first owner line\n";
+const STEERING_INPUT_LINE: &str = ":steer inspect the cache\n";
+const STOP_INPUT_LINE: &str = ":stop successor owner line\n";
 const FIRST_DELTA: &str = "checking ";
 const FINAL_REPLY: &str = "approved tool reply";
 
@@ -515,7 +519,7 @@ async fn chat_streams_and_approves_one_scripted_tool_turn() -> Result<(), Box<dy
     let mut rendered = Vec::new();
 
     read_through(&mut lines, &mut rendered, "state=ready").await?;
-    input.write_all(b"use the confirmed probe\n").await?;
+    input.write_all(APPROVAL_INPUT_LINE.as_bytes()).await?;
     let awaiting = read_through(&mut lines, &mut rendered, "state=awaiting_approval").await?;
     let request = awaiting
         .split_once(" request=")
@@ -561,12 +565,13 @@ async fn chat_streams_and_approves_one_scripted_tool_turn() -> Result<(), Box<dy
     fixture.stop().await
 }
 
-/// S07 / INV-029: while the interactive loop is following an active queued
-/// turn, `:stop` uses its independent request connection to atomically cancel
-/// that turn and admit the exact successor content without closing the follow.
+/// S07 / INV-029: while the interactive loop follows an active queued turn, its
+/// independent request path first steers that exact turn, then `:stop`
+/// atomically cancels it and admits exact successor content without closing the
+/// follow connection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn chat_stops_an_active_turn_and_keeps_its_successor_running() -> Result<(), Box<dyn Error>> {
+async fn chat_steers_then_stops_one_active_turn() -> Result<(), Box<dyn Error>> {
     let fixture = RunningIdleFixture::start().await?;
     let session_id = fixture.create_session().await?;
     let mut child = Command::new(env!("CARGO_BIN_EXE_signalbox"))
@@ -596,7 +601,7 @@ async fn chat_stops_an_active_turn_and_keeps_its_successor_running() -> Result<(
     let mut rendered = Vec::new();
 
     read_through(&mut lines, &mut rendered, "state=ready").await?;
-    input.write_all(b"first owner line\n").await?;
+    input.write_all(INITIAL_INPUT_LINE.as_bytes()).await?;
     let streaming = read_through(&mut lines, &mut rendered, "state=streaming turn=").await?;
     let stopped_turn = streaming
         .split_once(" turn=")
@@ -604,7 +609,12 @@ async fn chat_stops_an_active_turn_and_keeps_its_successor_running() -> Result<(
         .1;
     Uuid::parse_str(stopped_turn)?;
     activate_turn(&fixture.pool, Uuid::parse_str(&session_id)?).await?;
-    input.write_all(b":stop successor owner line\n").await?;
+    input.write_all(STEERING_INPUT_LINE.as_bytes()).await?;
+    let expected_source = format!("source_turn={stopped_turn}");
+    let steering = read_through(&mut lines, &mut rendered, &expected_source).await?;
+    assert!(steering.contains("accepted_input="));
+
+    input.write_all(STOP_INPUT_LINE.as_bytes()).await?;
     let stopped = read_through(&mut lines, &mut rendered, "stopped_turn=").await?;
     let successor_turn = stopped
         .split_once(" successor_turn=")
@@ -621,6 +631,9 @@ async fn chat_stops_an_active_turn_and_keeps_its_successor_running() -> Result<(
     assert!(stopped.contains(&format!("stopped_turn={stopped_turn}")));
     assert!(stderr.contains(&format!("turn={stopped_turn}")));
     assert!(stderr.contains(&format!("turn {successor_turn} remains running")));
+    assert!(
+        line_position(&rendered, "accepted_input=")? < line_position(&rendered, "stopped_turn=")?
+    );
 
     fixture.stop().await
 }
