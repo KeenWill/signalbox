@@ -194,6 +194,43 @@ async fn inv_035_split_authorization_value_before_final_text_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: buffered delivery drops reasoning from the output, but a
+/// credential marker inside the dropped bytes still marks the final text's
+/// value as a secret — the same bytes the streamed path suppresses must not
+/// surface verbatim in buffered completion evidence.
+#[tokio::test]
+async fn inv_035_buffered_reasoning_marker_suppresses_the_final_text_value() {
+    let result = execute_scenario(
+        "split_stream_authorization_before_final_text",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: the dropped-reasoning marker also governs buffered tool
+/// arguments, which reach terminal evidence without passing through streamed
+/// deltas.
+#[tokio::test]
+async fn inv_035_buffered_reasoning_marker_suppresses_tool_arguments() {
+    let result = execute_scenario(
+        "split_stream_authorization_before_tool_arguments",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
 /// INV-035: a credential header split between streamed reasoning and the
 /// final envelope's tool arguments keeps redacting through the value: the
 /// argument bytes consult the held lookbehind state before the streamed

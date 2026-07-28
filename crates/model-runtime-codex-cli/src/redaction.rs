@@ -853,6 +853,16 @@ pub(crate) struct RedactingSink<'a, C> {
     /// field's end and the text's start must be caught by joining this context
     /// into the lookbehind — it is match-state only and is never emitted.
     emitted_context: String,
+    /// The rolling unsafe trailing suffix of provider text the adapter drops
+    /// in buffered delivery (reasoning items never observed as deltas).
+    /// Dropped bytes appear in no record and cannot be reconstructed — but a
+    /// credential marker inside them still marks the value that follows in
+    /// the final text as a secret, and the streamed path suppresses those
+    /// same value bytes. Tracked separately from `emitted_context`: dropped
+    /// bytes sit in no record between the emitted id and later text, so
+    /// folding them into the emitted chain would break its adjacency
+    /// matching. Match-state only, never emitted.
+    dropped_context: String,
 }
 
 impl<'a, C: Clone> RedactingSink<'a, C> {
@@ -863,6 +873,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             suppressing: false,
             terminal_text_capture: None,
             emitted_context: String::new(),
+            dropped_context: String::new(),
         }
     }
 
@@ -873,6 +884,27 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     /// marker's reconstructable continuation beside it.
     pub(crate) fn seed_emitted_context(&mut self, emitted: &str) {
         self.emitted_context = trailing_credential_context(emitted).to_string();
+    }
+
+    /// Extends the match-only lookbehind with provider text the adapter is
+    /// dropping (a buffered-delivery reasoning item), so a later field or the
+    /// final text completing a credential begun in the dropped bytes is
+    /// suppressed exactly as the streamed path suppresses it. An unsafe
+    /// suffix growing past the pending byte cap is an unresolved oversized
+    /// credential candidate; matching against a truncation could miss it, so
+    /// the sink fails closed into suppression instead.
+    pub(crate) fn extend_dropped_context(&mut self, dropped: &str) {
+        if self.suppressing {
+            return;
+        }
+        let mut joined = std::mem::take(&mut self.dropped_context);
+        joined.push_str(dropped);
+        let context = trailing_credential_context(&joined);
+        if context.len() > MAX_PENDING_STREAM_BYTES {
+            self.suppressing = true;
+            return;
+        }
+        self.dropped_context = context.to_string();
     }
 
     /// Starts recording every emitted final-text byte, so terminal evidence
@@ -896,8 +928,15 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         if self.suppressing {
             return REDACTED.to_string();
         }
-        if !self.emitted_context.is_empty() || self.pending.is_some() {
-            let mut joined = self.emitted_context.clone();
+        // Each context is its own adjacency chain (the emitted id's record,
+        // the dropped reasoning's marker) and is judged separately: joining
+        // both at once would insert one chain's bytes between the other's
+        // marker and its continuation and miss the match.
+        for context in [&self.emitted_context, &self.dropped_context] {
+            if context.is_empty() && self.pending.is_none() {
+                continue;
+            }
+            let mut joined = context.clone();
             if let Some(pending) = &self.pending {
                 joined.push_str(&pending.text);
             }
@@ -927,17 +966,23 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             .pending
             .as_ref()
             .map_or("", |pending| pending.text.as_str());
-        if self.emitted_context.is_empty() && held.is_empty() && preceding.is_empty() {
-            return false;
+        // Each context is its own adjacency chain, judged separately (see
+        // `redact_terminal_failure_text`).
+        for context in [&self.emitted_context, &self.dropped_context] {
+            if context.is_empty() && held.is_empty() && preceding.is_empty() {
+                continue;
+            }
+            let mut joined =
+                String::with_capacity(context.len() + held.len() + preceding.len() + value.len());
+            joined.push_str(context);
+            joined.push_str(held);
+            joined.push_str(preceding);
+            joined.push_str(value);
+            if redact_text(&joined) != joined {
+                return true;
+            }
         }
-        let mut joined = String::with_capacity(
-            self.emitted_context.len() + held.len() + preceding.len() + value.len(),
-        );
-        joined.push_str(&self.emitted_context);
-        joined.push_str(held);
-        joined.push_str(preceding);
-        joined.push_str(value);
-        redact_text(&joined) != joined
+        false
     }
 
     pub(crate) fn redact_tool_arguments(&self, preceding: &str, arguments: &str) -> String {
@@ -2728,6 +2773,37 @@ safe-line"
 
         assert_eq!(
             sink.redact_terminal_failure_text("key=opaque-context-value refused"),
+            REDACTED
+        );
+    }
+
+    /// INV-035: a credential marker inside dropped (buffered-delivery
+    /// reasoning) bytes governs the final text, so its value continuation is
+    /// suppressed whole rather than surfacing as an opaque-but-real secret.
+    #[test]
+    fn inv_035_dropped_context_suppresses_a_final_text_continuation() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.extend_dropped_context("Authorization:");
+
+        assert_eq!(
+            sink.redact_terminal_failure_text(" opaque-dropped-value"),
+            REDACTED
+        );
+    }
+
+    /// INV-035: the dropped chain and the emitted-id chain are judged
+    /// separately — clean dropped bytes must not sit between the emitted id's
+    /// marker suffix and its continuation and break that match.
+    #[test]
+    fn inv_035_dropped_text_does_not_break_the_emitted_chain() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.seed_emitted_context("api_");
+        sink.extend_dropped_context("thinking about the request");
+
+        assert_eq!(
+            sink.redact_terminal_failure_text("key=opaque-context-value done"),
             REDACTED
         );
     }
