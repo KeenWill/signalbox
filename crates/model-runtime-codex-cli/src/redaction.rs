@@ -1251,10 +1251,12 @@ impl<C> PendingStreamText<C> {
         Self::after_scan(fragments, text, PendingBasis::ContextContinuation)
     }
 
-    /// Builds held state immediately after `text` received a full
-    /// classification. A still-unresolved candidate is classified again only
+    /// Builds held state after the initial unsafe-suffix detection, or after a
+    /// later full reclassification that already received its work charge. The
+    /// initial detection is not a rescan and is intentionally outside
+    /// [`PendingRescanWork`]. A still-unresolved candidate is reclassified only
     /// after its byte length doubles; the geometric series bounds aggregate
-    /// rescanned bytes while every intervening delta remains held. `basis`
+    /// rescan bytes while every intervening delta remains held. `basis`
     /// records whether offset zero is already known to begin the candidate:
     /// recomputing that fact after the candidate terminates before a clean tail
     /// would otherwise forget why the bytes were held and release its value.
@@ -1281,7 +1283,7 @@ impl<C> PendingStreamText<C> {
 #[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 struct PendingRescanWork {
-    classifications: usize,
+    reclassifications: usize,
     bytes: usize,
 }
 
@@ -1323,7 +1325,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             dropped_context: String::new(),
             #[cfg(test)]
             pending_rescan_work: PendingRescanWork {
-                classifications: 0,
+                reclassifications: 0,
                 bytes: 0,
             },
         }
@@ -1682,27 +1684,36 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         false
     }
 
-    /// Flushes already-decoded text when no later provider text can extend it.
+    /// Flushes already-decoded text while retaining any live credential
+    /// continuation. Usage reports are repeatable, and direct callers may
+    /// invoke `finish` before later deltas, so a flush cannot assume no later
+    /// provider bytes will arrive.
     pub(crate) fn finish(&mut self) {
-        // Terminal: judged on each chain's joined form so held text
-        // completing a credential begun in an already-emitted field (the
-        // thread id) or in dropped provider text is suppressed; no chain
-        // outlives the terminal either way.
-        let emitted = std::mem::take(&mut self.emitted_context);
-        let dropped = std::mem::take(&mut self.dropped_context);
         if let Some(pending) = self.pending.take() {
-            let dirty = ["", emitted.as_str(), dropped.as_str()]
-                .iter()
-                .any(|context| {
-                    let mut joined = String::with_capacity(context.len() + pending.text.len());
-                    joined.push_str(context);
-                    joined.push_str(&pending.text);
-                    redact_text(&joined) != joined
-                });
+            let continuation = self.flush_continuation(&pending.text);
+            let dirty = [
+                "",
+                self.emitted_context.as_str(),
+                self.dropped_context.as_str(),
+            ]
+            .iter()
+            .any(|context| {
+                let mut joined = String::with_capacity(context.len() + pending.text.len());
+                joined.push_str(context);
+                joined.push_str(&pending.text);
+                redact_text(&joined) != joined
+            });
             if dirty {
                 self.emit_redacted(pending.fragments);
             } else {
                 self.emit_original(pending.fragments);
+            }
+            self.emitted_context.clear();
+            self.dropped_context.clear();
+            match continuation {
+                FlushContinuation::None => {}
+                FlushContinuation::One(context) => self.emitted_context = context,
+                FlushContinuation::Ambiguous => self.suppress_remaining(),
             }
         }
     }
@@ -1822,7 +1833,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     /// Appends an intervening delta without reclassifying the whole held
     /// candidate. The bytes remain unavailable to every output channel; a
     /// full decision is deferred until the held length doubles, while crossing
-    /// the hard cap always forces a final classification before suppression.
+    /// the hard cap always forces a final reclassification before suppression.
     fn defer_pending_rescan(
         &mut self,
         field: StreamField,
@@ -1882,13 +1893,15 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         }
     }
 
-    /// Charges the two top-level whole-buffer predicates used by one pending
-    /// classification. Internal fixed scanner passes are an implementation
-    /// detail; the regression bounds how many held bytes reach each classifier.
+    /// Charges the two top-level whole-buffer predicates used by one post-hold
+    /// reclassification. Initial unsafe-suffix detection is not a rescan and
+    /// is outside this counter. Internal fixed scanner passes are an
+    /// implementation detail; the regression bounds how many held bytes reach
+    /// each classifier during rescans.
     fn record_pending_rescan(&mut self, bytes: usize) {
         #[cfg(test)]
         {
-            self.pending_rescan_work.classifications += 1;
+            self.pending_rescan_work.reclassifications += 1;
             self.pending_rescan_work.bytes += bytes.saturating_mul(2);
         }
         #[cfg(not(test))]
@@ -4295,6 +4308,84 @@ safe-line"
         assert!(streamed.contains(REDACTED));
     }
 
+    /// INV-035: a repeatable usage report flushes a held marker without
+    /// forgetting its live continuation, so a later value is still destroyed.
+    #[test]
+    fn inv_035_usage_flush_retains_a_live_credential_continuation() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-after-usage";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "api_key=".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::UsageReported(TokenUsage::unreported()),
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: PLANTED_VALUE.to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
+    /// INV-035: a direct finish flush preserves a marker assembled across
+    /// deltas, so later provider text cannot use the flush as a release seam.
+    #[test]
+    fn inv_035_direct_finish_retains_a_live_credential_continuation() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-after-finish";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "api_".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "key=".to_string(),
+                },
+            });
+            sink.finish();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: PLANTED_VALUE.to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
     /// INV-035: forcing a held private-key marker through a non-delta boundary
     /// retains its continuation state, so the following body is destroyed too.
     #[test]
@@ -4430,15 +4521,17 @@ safe-line"
         }
     }
 
-    /// INV-035: the 66,000 one-byte-delta stress shape receives thirteen
-    /// geometric classification rounds. Charging each round's candidate and
+    /// INV-035: after its initial unsafe-suffix detection, the 66,000
+    /// one-byte-delta stress shape receives thirteen geometric post-hold
+    /// reclassification rounds. Charging each rescan's candidate and
     /// unsafe-suffix predicates separately stays below six times the 64-KiB
-    /// held-byte cap instead of growing with the square of the delta count.
+    /// held-byte cap instead of growing with the square of the delta count; the
+    /// one initial suffix detection is not rescan work and is not charged.
     #[test]
     fn inv_035_stream_redaction_bounds_66000_delta_rescan_work() {
         const DELTA_COUNT: u32 = 66_000;
         const EXPECTED_WORK: PendingRescanWork = PendingRescanWork {
-            classifications: 13,
+            reclassifications: 13,
             bytes: 376_774,
         };
         let mut observed = Vec::new();
