@@ -54,6 +54,7 @@ credential meaning, so coverage stays with the enumerated key families.
 **Affects.** INV-035, the Codex CLI credential contract in
 [runtime-substrate](spec/runtime-substrate.md), and
 `crates/model-runtime-codex-cli/src/redaction.rs`.
+
 ## 2026-07-28 — Load versioned session templates and copy them at creation
 
 **Context.** Session creation can already set a model selection and one bounded
