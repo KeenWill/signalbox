@@ -2698,6 +2698,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-model-runtime-claude-cli"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "signalbox-model-runtime",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "signalbox-model-runtime-codex-cli"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,666 @@
+//! Stateful decoding of one Claude Code streamed-JSON event stream.
+
+use std::collections::{HashMap, HashSet};
+
+use serde_json::Value;
+use signalbox_model_runtime::{
+    AssistantPart, BoundaryLossEvidence, CompletionEvidence, CompletionFinish, DeliveryMode,
+    ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation, ObservationFact,
+    ObservationSink, ProviderErrorEvidence, ProviderMessageId, ProviderReportedModel,
+    ProviderRequestId, RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
+    ToolName, validate_provider_json_nesting,
+};
+
+use crate::SUPPORTED_CLAUDE_CLI_VERSION;
+use crate::bridge::{SERVER_NAME, TOOL_ACKNOWLEDGEMENT, TOOL_PREFIX};
+use crate::redaction::{RedactingSink, redact_json, redact_text};
+use crate::status::classify_error;
+use crate::translate::{ToolRequirement, TranslatedOperation};
+use crate::wire::{AssistantContent, AssistantEvent, ResultEvent, SystemInit, UserEvent};
+
+pub(crate) struct EventDecoder<C> {
+    correlation: C,
+    delivery: DeliveryMode,
+    allowed_tools: HashSet<String>,
+    tool_requirement: ToolRequirement,
+    exchange: ExchangeFacts,
+    reported_model: Option<ProviderReportedModel>,
+    message_id: Option<ProviderMessageId>,
+    content: Vec<AssistantPart>,
+    proposal_indexes: HashMap<String, usize>,
+    result_ids: HashSet<String>,
+    next_part_index: u32,
+    usage: TokenUsage,
+    initialized: bool,
+    terminal: Option<CliTerminal>,
+}
+
+enum CliTerminal {
+    Success {
+        stop_reason: String,
+    },
+    Error {
+        subtype: String,
+        status: Option<u16>,
+        message: String,
+    },
+}
+
+impl<C: Clone> EventDecoder<C> {
+    pub(crate) fn new(
+        correlation: C,
+        delivery: DeliveryMode,
+        translated: &TranslatedOperation,
+    ) -> Self {
+        Self {
+            correlation,
+            delivery,
+            allowed_tools: translated
+                .catalog
+                .tools
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect(),
+            tool_requirement: translated.tool_requirement.clone(),
+            exchange: ExchangeFacts::default(),
+            reported_model: None,
+            message_id: None,
+            content: Vec::new(),
+            proposal_indexes: HashMap::new(),
+            result_ids: HashSet::new(),
+            next_part_index: 0,
+            usage: TokenUsage::unreported(),
+            initialized: false,
+            terminal: None,
+        }
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        line: &[u8],
+        sink: &mut RedactingSink<'_, C>,
+    ) -> Result<(), DecodeFailure> {
+        if self.terminal.is_some() {
+            return Err(DecodeFailure::stream_protocol(
+                "Claude emitted an event after its terminal result",
+            ));
+        }
+        let text = std::str::from_utf8(line).map_err(|error| {
+            DecodeFailure::stream_protocol(format!("event is not UTF-8: {error}"))
+        })?;
+        validate_provider_json_nesting(line)
+            .map_err(|error| DecodeFailure::stream_protocol(error.to_string()))?;
+        let value: Value = serde_json::from_str(text).map_err(|error| {
+            DecodeFailure::stream_protocol(format!("event is not JSON: {error}"))
+        })?;
+        let event_type = value.get("type").and_then(Value::as_str).ok_or_else(|| {
+            DecodeFailure::stream_protocol("event has no string `type` discriminator")
+        })?;
+        match event_type {
+            "system" => self.system(value, sink),
+            "assistant" => self.assistant(value, sink),
+            "user" => self.user(value),
+            "result" => self.result(value, sink),
+            "rate_limit_event" | "stream_event" => {
+                sink.extend_dropped_context(text);
+                Ok(())
+            }
+            _ => Err(DecodeFailure::stream_protocol(format!(
+                "unrecognized Claude event type `{event_type}`"
+            ))),
+        }
+    }
+
+    fn system(
+        &mut self,
+        value: Value,
+        sink: &mut RedactingSink<'_, C>,
+    ) -> Result<(), DecodeFailure> {
+        if value.get("subtype").and_then(Value::as_str) != Some("init") || self.initialized {
+            return Err(DecodeFailure::stream_protocol(
+                "unexpected or duplicate Claude system event",
+            ));
+        }
+        let event: SystemInit = decode(value)?;
+        if event.session_id.is_empty() || event.model.is_empty() {
+            return Err(DecodeFailure::stream_protocol(
+                "Claude init carries an empty session or model id",
+            ));
+        }
+        if event.claude_code_version != SUPPORTED_CLAUDE_CLI_VERSION {
+            return Err(DecodeFailure::stream_protocol(format!(
+                "Claude Code version `{}` does not match pinned `{SUPPORTED_CLAUDE_CLI_VERSION}`",
+                event.claude_code_version
+            )));
+        }
+        let expected = self
+            .allowed_tools
+            .iter()
+            .map(|name| format!("{TOOL_PREFIX}{name}"))
+            .collect::<HashSet<_>>();
+        let actual = event.tools.into_iter().collect::<HashSet<_>>();
+        if actual != expected {
+            return Err(DecodeFailure::stream_protocol(
+                "Claude init tool inventory differs from the declared MCP surface",
+            ));
+        }
+        if event.mcp_servers.len() != 1
+            || event.mcp_servers[0].name != SERVER_NAME
+            || event.mcp_servers[0].status != "connected"
+        {
+            return Err(DecodeFailure::stream_protocol(
+                "Claude init did not report the private MCP server connected",
+            ));
+        }
+        if !event.slash_commands.is_empty() || !event.skills.is_empty() || !event.plugins.is_empty()
+        {
+            return Err(DecodeFailure::stream_protocol(
+                "Claude init exposed an ambient instruction or plugin surface",
+            ));
+        }
+        let request_id = sink.redact_provider_id("", &event.session_id);
+        let model = sink.redact_provider_id(&request_id, &event.model);
+        self.exchange.provider_request_id = Some(ProviderRequestId::new(request_id.clone()));
+        self.reported_model = Some(ProviderReportedModel::new(model.clone()));
+        self.initialized = true;
+        sink.observe(Observation {
+            correlation: self.correlation.clone(),
+            fact: ObservationFact::ExchangeEstablished(self.exchange.clone()),
+        });
+        sink.observe(Observation {
+            correlation: self.correlation.clone(),
+            fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(model)),
+        });
+        sink.seed_emitted_context(&request_id);
+        Ok(())
+    }
+
+    fn assistant(
+        &mut self,
+        value: Value,
+        sink: &mut RedactingSink<'_, C>,
+    ) -> Result<(), DecodeFailure> {
+        self.require_initialized()?;
+        let event: AssistantEvent = decode(value)?;
+        if event.parent_tool_use_id.is_some()
+            || event.message.role != "assistant"
+            || event.message.id.is_empty()
+            || event.message.model.is_empty()
+        {
+            return Err(DecodeFailure::stream_protocol(
+                "Claude assistant event has invalid identity or nesting",
+            ));
+        }
+        if self.message_id.is_none() {
+            self.message_id = Some(ProviderMessageId::new(
+                sink.redact_provider_id("", &event.message.id),
+            ));
+        }
+        if self
+            .reported_model
+            .as_ref()
+            .map(ProviderReportedModel::as_str)
+            != Some(event.message.model.as_str())
+        {
+            return Err(DecodeFailure::stream_protocol(
+                "Claude assistant model contradicts system init",
+            ));
+        }
+        if let Some(usage) = event.message.usage {
+            self.usage.absorb(message_usage(usage));
+        }
+        for block in event.message.content {
+            self.assistant_block(block, sink)?;
+        }
+        Ok(())
+    }
+
+    fn assistant_block(
+        &mut self,
+        block: AssistantContent,
+        sink: &mut RedactingSink<'_, C>,
+    ) -> Result<(), DecodeFailure> {
+        match block {
+            AssistantContent::Text { text } => {
+                if self.result_ids.is_empty() {
+                    let index = self.take_part_index()?;
+                    if self.delivery == DeliveryMode::Streamed {
+                        sink.observe(Observation {
+                            correlation: self.correlation.clone(),
+                            fact: ObservationFact::TextDelta {
+                                index,
+                                text: text.clone(),
+                            },
+                        });
+                    }
+                    self.content.push(AssistantPart::Text(text));
+                } else {
+                    sink.extend_dropped_context(&text);
+                }
+            }
+            AssistantContent::Thinking {
+                thinking,
+                signature,
+            } => {
+                let index = self.take_part_index()?;
+                if self.delivery == DeliveryMode::Streamed {
+                    sink.observe(Observation {
+                        correlation: self.correlation.clone(),
+                        fact: ObservationFact::ThinkingDelta {
+                            index,
+                            text: thinking.clone(),
+                        },
+                    });
+                } else {
+                    sink.extend_dropped_context(&thinking);
+                }
+                self.content.push(AssistantPart::Thinking {
+                    text: thinking,
+                    signature,
+                });
+            }
+            AssistantContent::RedactedThinking { data } => {
+                self.take_part_index()?;
+                self.content.push(AssistantPart::RedactedThinking {
+                    data: redact_text(&data),
+                });
+            }
+            AssistantContent::ToolUse { id, name, input } => {
+                if id.is_empty() || self.proposal_indexes.contains_key(&id) {
+                    return Err(DecodeFailure::stream_protocol(
+                        "Claude tool_use carries an empty or duplicate id",
+                    ));
+                }
+                let Some(name) = name.strip_prefix(TOOL_PREFIX) else {
+                    return Err(DecodeFailure::stream_protocol(
+                        "Claude proposed a tool outside the private MCP namespace",
+                    ));
+                };
+                if !self.allowed_tools.contains(name) || !input.is_object() {
+                    return Err(DecodeFailure::stream_protocol(
+                        "Claude proposed an undeclared tool or non-object arguments",
+                    ));
+                }
+                let index = self.take_part_index()?;
+                let raw_arguments = serde_json::to_string(&input)
+                    .map_err(|error| DecodeFailure::stream_protocol(error.to_string()))?;
+                let arguments = sink.redact_tool_arguments("", &raw_arguments);
+                let proposal = ToolCallProposal {
+                    id: ToolCallId::new(sink.redact_provider_id("", &id)),
+                    name: ToolName::new(name),
+                    arguments_json: arguments.clone(),
+                };
+                self.proposal_indexes.insert(id, self.content.len());
+                self.content.push(AssistantPart::ToolCall(proposal.clone()));
+                if self.delivery == DeliveryMode::Streamed {
+                    sink.observe(Observation {
+                        correlation: self.correlation.clone(),
+                        fact: ObservationFact::ToolArgumentsDelta {
+                            index,
+                            fragment: arguments,
+                        },
+                    });
+                }
+                sink.observe(Observation {
+                    correlation: self.correlation.clone(),
+                    fact: ObservationFact::ToolCallProposed(proposal),
+                });
+            }
+            AssistantContent::Other => {
+                return Err(DecodeFailure::stream_protocol(
+                    "Claude assistant event contains an unsupported content block",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn user(&mut self, value: Value) -> Result<(), DecodeFailure> {
+        self.require_initialized()?;
+        let event: UserEvent = decode(value)?;
+        if event.message.role != "user" || event.message.content.is_empty() {
+            return Err(DecodeFailure::stream_protocol(
+                "Claude user event is not a tool result",
+            ));
+        }
+        for result in event.message.content {
+            if result.content_type != "tool_result"
+                || !self.proposal_indexes.contains_key(&result.tool_use_id)
+                || !self.result_ids.insert(result.tool_use_id)
+                || tool_result_text(&result.content) != Some(TOOL_ACKNOWLEDGEMENT)
+            {
+                return Err(DecodeFailure::stream_protocol(
+                    "Claude tool_result does not acknowledge exactly one declared proposal",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn result(
+        &mut self,
+        value: Value,
+        sink: &mut RedactingSink<'_, C>,
+    ) -> Result<(), DecodeFailure> {
+        self.require_initialized()?;
+        let event: ResultEvent = decode(value)?;
+        if self
+            .exchange
+            .provider_request_id
+            .as_ref()
+            .map(ProviderRequestId::as_str)
+            != Some(event.session_id.as_str())
+        {
+            return Err(DecodeFailure::stream_protocol(
+                "Claude result session contradicts system init",
+            ));
+        }
+        if let Some(usage) = event.usage {
+            self.usage.absorb(result_usage(usage));
+        }
+        sink.observe(Observation {
+            correlation: self.correlation.clone(),
+            fact: ObservationFact::UsageReported(self.usage),
+        });
+        if event.subtype == "success" && !event.is_error {
+            let stop_reason = event.stop_reason.unwrap_or_else(|| "end_turn".to_string());
+            if event.terminal_reason.as_deref() != Some("completed") {
+                return Err(DecodeFailure::stream_protocol(
+                    "Claude success lacks the completed terminal reason",
+                ));
+            }
+            let finish = finish_reason(&stop_reason);
+            sink.observe(Observation {
+                correlation: self.correlation.clone(),
+                fact: ObservationFact::FinishReported(finish),
+            });
+            if let Some(result) = event.result {
+                sink.extend_dropped_context(&result);
+            }
+            self.terminal = Some(CliTerminal::Success { stop_reason });
+        } else if event.is_error {
+            let message = event.errors.join("; ");
+            let message = if message.is_empty() {
+                event
+                    .result
+                    .unwrap_or_else(|| "Claude reported an error".to_string())
+            } else {
+                message
+            };
+            self.exchange.http_status = event.api_error_status;
+            self.terminal = Some(CliTerminal::Error {
+                subtype: event.subtype,
+                status: event.api_error_status,
+                message,
+            });
+        } else {
+            return Err(DecodeFailure::stream_protocol(
+                "Claude result carries contradictory success fields",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
+        let Some(terminal) = self.terminal.take() else {
+            return self.loss(LossCause::StreamEndedWithoutTerminalMarker {
+                interruption: signalbox_model_runtime::StreamInterruption::EndOfStream,
+            });
+        };
+        let stop_reason = match terminal {
+            CliTerminal::Error {
+                subtype,
+                status,
+                message,
+            } => {
+                return TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    exchange: self.exchange,
+                    reported_model: self.reported_model,
+                    kind: classify_error(&subtype, &message),
+                    native: NativeErrorFacts {
+                        error_token: Some(subtype),
+                        error_code: status.map(|value| value.to_string()),
+                        message: Some(sink.redact_terminal_failure_text(&message)),
+                    },
+                    usage: self.usage,
+                });
+            }
+            CliTerminal::Success { stop_reason } => stop_reason,
+        };
+        if self.proposal_indexes.len() != self.result_ids.len() {
+            return self.loss(LossCause::ResponseUnintelligible {
+                detail: "Claude terminal success did not include a tool_result for every tool_use"
+                    .to_string(),
+            });
+        }
+        if let Err(detail) = self.validate_tool_requirement() {
+            return self.loss(LossCause::ResponseUnintelligible { detail });
+        }
+        let content = self.redacted_content(sink);
+        if stop_reason == "refusal" {
+            if !self.proposal_indexes.is_empty() {
+                return self.loss(LossCause::ResponseUnintelligible {
+                    detail: "Claude refusal also proposed a tool".to_string(),
+                });
+            }
+            return TerminalEvidence::Refused(RefusalEvidence {
+                exchange: self.exchange,
+                message_id: self.message_id,
+                reported_model: self.reported_model,
+                content,
+                usage: self.usage,
+            });
+        }
+        if content.is_empty() {
+            return self.loss(LossCause::ResponseUnintelligible {
+                detail: "Claude terminal success carried no typed assistant content".to_string(),
+            });
+        }
+        let finish = if self.proposal_indexes.is_empty() {
+            completion_finish(&stop_reason)
+        } else {
+            CompletionFinish::ToolUse
+        };
+        TerminalEvidence::Completed(CompletionEvidence {
+            exchange: self.exchange,
+            message_id: self.message_id,
+            reported_model: self.reported_model,
+            finish,
+            content,
+            usage: self.usage,
+        })
+    }
+
+    pub(crate) fn provider_error_after_exit(
+        self,
+        fallback: &str,
+        classification: &str,
+        sink: &RedactingSink<'_, C>,
+    ) -> TerminalEvidence {
+        if let Some(CliTerminal::Error {
+            subtype,
+            status,
+            message,
+        }) = self.terminal
+        {
+            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                exchange: self.exchange,
+                reported_model: self.reported_model,
+                kind: classify_error(&subtype, &message),
+                native: NativeErrorFacts {
+                    error_token: Some(subtype),
+                    error_code: status.map(|value| value.to_string()),
+                    message: Some(sink.redact_terminal_failure_text(&message)),
+                },
+                usage: self.usage,
+            })
+        } else {
+            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                exchange: self.exchange,
+                reported_model: self.reported_model,
+                kind: classify_error("process_exit", classification),
+                native: NativeErrorFacts {
+                    error_token: Some("claude_cli_exit".to_string()),
+                    error_code: None,
+                    message: Some(fallback.to_string()),
+                },
+                usage: self.usage,
+            })
+        }
+    }
+
+    pub(crate) fn boundary_loss(self, cause: LossCause) -> TerminalEvidence {
+        self.loss(cause)
+    }
+
+    pub(crate) fn boundary_loss_unless_provider_failure(
+        self,
+        cause: LossCause,
+        sink: &RedactingSink<'_, C>,
+    ) -> TerminalEvidence {
+        if matches!(self.terminal, Some(CliTerminal::Error { .. })) {
+            self.provider_error_after_exit(
+                "Claude reported an error",
+                "Claude reported an error",
+                sink,
+            )
+        } else {
+            self.loss(cause)
+        }
+    }
+
+    pub(crate) fn terminal_observed(&self) -> bool {
+        self.terminal.is_some()
+    }
+
+    fn require_initialized(&self) -> Result<(), DecodeFailure> {
+        if self.initialized {
+            Ok(())
+        } else {
+            Err(DecodeFailure::stream_protocol(
+                "Claude event arrived before system init",
+            ))
+        }
+    }
+
+    fn take_part_index(&mut self) -> Result<u32, DecodeFailure> {
+        let index = self.next_part_index;
+        self.next_part_index = self.next_part_index.checked_add(1).ok_or_else(|| {
+            DecodeFailure::stream_protocol("Claude content-part index overflowed")
+        })?;
+        Ok(index)
+    }
+
+    fn validate_tool_requirement(&self) -> Result<(), String> {
+        match &self.tool_requirement {
+            ToolRequirement::Optional => Ok(()),
+            ToolRequirement::Any if self.proposal_indexes.is_empty() => Err("Claude did not satisfy the required any-tool choice".to_string()),
+            ToolRequirement::Any => Ok(()),
+            ToolRequirement::Named(name) if self.content.iter().any(|part| matches!(part, AssistantPart::ToolCall(call) if call.name.as_str() == name)) => Ok(()),
+            ToolRequirement::Named(name) => Err(format!("Claude did not call required tool `{name}`")),
+        }
+    }
+
+    fn redacted_content(&mut self, sink: &mut RedactingSink<'_, C>) -> Vec<AssistantPart> {
+        self.content
+            .drain(..)
+            .map(|part| match part {
+                AssistantPart::Text(text) => {
+                    AssistantPart::Text(sink.redact_final_envelope_text(&text))
+                }
+                AssistantPart::Thinking { text, signature } => AssistantPart::Thinking {
+                    text: redact_text(&text),
+                    signature: signature.map(|value| redact_text(&value)),
+                },
+                AssistantPart::RedactedThinking { data } => AssistantPart::RedactedThinking {
+                    data: redact_text(&data),
+                },
+                AssistantPart::ToolCall(mut call) => {
+                    call.arguments_json = redact_json(&call.arguments_json);
+                    AssistantPart::ToolCall(call)
+                }
+            })
+            .collect()
+    }
+
+    fn loss(self, cause: LossCause) -> TerminalEvidence {
+        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause,
+            exchange: self.exchange,
+            reported_model: self.reported_model,
+            finish_reported: None,
+            usage: self.usage,
+        })
+    }
+}
+
+fn tool_result_text(value: &Value) -> Option<&str> {
+    value.as_array()?.first()?.get("text")?.as_str()
+}
+
+fn message_usage(value: crate::wire::MessageUsage) -> TokenUsage {
+    TokenUsage {
+        input_tokens: value.input_tokens,
+        output_tokens: value.output_tokens,
+        cache_creation_input_tokens: value.cache_creation_input_tokens,
+        cache_read_input_tokens: value.cache_read_input_tokens,
+    }
+}
+
+fn result_usage(value: crate::wire::ResultUsage) -> TokenUsage {
+    TokenUsage {
+        input_tokens: value.input_tokens,
+        output_tokens: value.output_tokens,
+        cache_creation_input_tokens: value.cache_creation_input_tokens,
+        cache_read_input_tokens: value.cache_read_input_tokens,
+    }
+}
+
+fn finish_reason(token: &str) -> FinishReason {
+    match token {
+        "end_turn" => FinishReason::EndTurn,
+        "refusal" => FinishReason::Refusal,
+        "max_tokens" => FinishReason::MaxOutputTokens,
+        "tool_use" => FinishReason::ToolUse,
+        other => FinishReason::Unrecognized {
+            provider_token: other.to_string(),
+        },
+    }
+}
+
+fn completion_finish(token: &str) -> CompletionFinish {
+    finish_reason(token)
+        .completion_finish()
+        .unwrap_or(CompletionFinish::Unrecognized {
+            provider_token: token.to_string(),
+        })
+}
+
+fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, DecodeFailure> {
+    serde_json::from_value(value).map_err(|error| DecodeFailure::stream_protocol(error.to_string()))
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum DecodeFailureClass {
+    StreamProtocolViolation,
+}
+
+pub(crate) struct DecodeFailure {
+    detail: String,
+    class: DecodeFailureClass,
+}
+
+impl DecodeFailure {
+    fn stream_protocol(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            class: DecodeFailureClass::StreamProtocolViolation,
+        }
+    }
+    pub(crate) fn class(&self) -> DecodeFailureClass {
+        self.class
+    }
+    pub(crate) fn into_detail(self) -> String {
+        self.detail
+    }
+}
