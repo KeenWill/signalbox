@@ -211,7 +211,12 @@ the count exceeds the declared window, the turn is not activated and the
 ordinary call is not sent; the daemon runs compaction through the latest safe
 boundary, reloads the resulting complete frontier, renders and counts again, and
 proceeds only when the new input fits. A compaction result that still cannot fit
-fails closed rather than looping or guessing a different limit.
+fails closed rather than looping or guessing a different limit. The first
+automatic prepare durably and immutably associates its compaction command with
+the queued turn, and at most one automatic command may name that turn in its
+session. A later scheduler pass for the same queued turn therefore fails closed
+without issuing another dedicated compaction call when the already-compacted
+frontier still exceeds the limit.
 
 Both triggers share the same compaction transaction and provider-call lifecycle.
 An explicit command first resolves its owner-global replay state; an equal

@@ -1989,6 +1989,7 @@ fn terminal_event_state(
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::TurnActivated { .. }
+        | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
         | SessionEvent::TurnCompleted { .. }
@@ -2139,6 +2140,7 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::TurnActivated { .. }
+        | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ModelCallTransition { .. } => None,
     }
 }

@@ -1053,7 +1053,8 @@ authoritative snapshot. A follower that overruns its selected bounded fan-out
 receives `resync_required` and reconnects for another snapshot.
 
 Each `session_event` message carries `cursor`, `session_id`, and exactly one
-closed `event` object. Every version admits these unchanged event shapes:
+closed `event` object. Versions one through sixteen admit these unchanged event
+shapes, and version seventeen retains them:
 
 | Event                          | Additional members                                                            |
 | ------------------------------ | ----------------------------------------------------------------------------- |
@@ -1066,6 +1067,14 @@ closed `event` object. Every version admits these unchanged event shapes:
 | `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
 | `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                |
 | `turn_reconciliation_required` | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
+
+Version seventeen additionally admits
+`context_compacted { context_compaction_id, model_call_id, through_position, summary_entry_id, result_frontier_id }`.
+The event is appended atomically with the completed dedicated call, summary
+entry, and projected frontier. A version-one-through-sixteen follower that
+predates the compaction receives `unsupported_version` naming version seventeen
+and closes before the event is emitted; a version-seventeen follower receives
+the event even when its initial snapshot predates the compaction commit.
 
 Version three additionally admits
 `tool_batch_transition { turn_id, model_call_id, state }`, where `state` is
@@ -1099,7 +1108,8 @@ the snapshot remains authoritative.
 This ordering closes the snapshot/subscription race: every listed client-visible
 transition committed before the snapshot is represented by its durable queued
 content, turn state, and current model-call projection even when it adds no
-semantic transcript entry, while a transition committed after the snapshot has a
+semantic transcript entry, while a compaction commit also carries its durable
+`context_compacted` event. A transition committed after the snapshot has a
 greater cursor and was observed by the preexisting subscription. A refused turn
 is therefore terminal in the initial snapshot and cannot leave `send` waiting
 for an event at or below the snapshot cursor. Previously seen transient display

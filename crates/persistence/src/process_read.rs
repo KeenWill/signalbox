@@ -1222,6 +1222,29 @@ impl ProcessReadRepository {
         .map_err(Into::into)
     }
 
+    /// Returns whether the selected session has a context-summary entry.
+    ///
+    /// This narrow read lets a process adapter reject a retained protocol
+    /// version before constructing or mutating history whose summary shape
+    /// that version cannot represent.
+    pub async fn session_has_context_summary_history(
+        &self,
+        requested_session: SessionId,
+    ) -> Result<bool, ProcessReadError> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM semantic_transcript_entry
+                  WHERE source_session_id = $1
+                    AND payload_kind = 'context_summary'
+             )",
+        )
+        .bind(session_id_to_uuid(requested_session))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     /// Reads whether the session exists and, when it does, whether its active
     /// turn is parked on the model-call recovery wait.
     ///

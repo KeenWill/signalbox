@@ -3332,6 +3332,7 @@ where
             command,
             session,
             requested_through_position,
+            automatic_for_turn: None,
             defaults_version: defaults.version(),
             selection,
             target,
@@ -3380,6 +3381,7 @@ where
                 PrepareContextCompactionOutcome::DefaultsChanged
                 | PrepareContextCompactionOutcome::Busy
                 | PrepareContextCompactionOutcome::NoBoundary
+                | PrepareContextCompactionOutcome::AutomaticAlreadyAttempted
                 | PrepareContextCompactionOutcome::FailedReplay,
             ) => {
                 return write_error(
@@ -3470,6 +3472,7 @@ pub(crate) enum AutomaticContextCompactionError {
     Configuration,
     State,
     Integrity,
+    AlreadyAttempted,
 }
 
 impl fmt::Display for AutomaticContextCompactionError {
@@ -3499,7 +3502,7 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
             Self::Repository(ContextCompactionRepositoryError::IdentityCollision) => {
                 signalbox_application::OperatorFailureClass::IdentityCollision
             }
-            Self::Configuration | Self::State => {
+            Self::Configuration | Self::State | Self::AlreadyAttempted => {
                 signalbox_application::OperatorFailureClass::CallerOrHubBug
             }
         }
@@ -3512,6 +3515,7 @@ pub(crate) async fn compact_automatically(
     model: &Arc<dyn ContextCompactionModel>,
     credential_reference: &str,
     session: SessionId,
+    turn: TurnId,
 ) -> Result<AppliedContextCompaction, AutomaticContextCompactionError> {
     let defaults = match ProcessReadRepository::new(pool.clone())
         .read_session_defaults(session, None)
@@ -3542,6 +3546,7 @@ pub(crate) async fn compact_automatically(
             command: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
             session,
             requested_through_position: None,
+            automatic_for_turn: Some(turn),
             defaults_version: defaults.version(),
             selection,
             target,
@@ -3564,6 +3569,9 @@ pub(crate) async fn compact_automatically(
                 | PrepareContextCompactionOutcome::FailedReplay,
             ) => {
                 return Err(AutomaticContextCompactionError::State);
+            }
+            Ok(PrepareContextCompactionOutcome::AutomaticAlreadyAttempted) => {
+                return Err(AutomaticContextCompactionError::AlreadyAttempted);
             }
             Err(ContextCompactionRepositoryError::IdentityCollision) => continue,
             Err(error) => return Err(AutomaticContextCompactionError::Repository(error)),
@@ -5936,13 +5944,20 @@ async fn selected_session_required_protocol_version(
     pool: &PgPool,
     session: SessionId,
 ) -> Result<Option<u64>, ProcessReadError> {
-    if version.as_u64() >= ProtocolVersion::Six.as_u64() {
+    if version.as_u64() >= ProtocolVersion::Seventeen.as_u64() {
         return Ok(None);
     }
     let repository = ProcessReadRepository::new(pool.clone());
-    let has_model_identity_history = repository
-        .session_has_model_identity_history(session)
+    let has_context_summary_history = repository
+        .session_has_context_summary_history(session)
         .await?;
+    let has_model_identity_history = if version.as_u64() < ProtocolVersion::Six.as_u64() {
+        repository
+            .session_has_model_identity_history(session)
+            .await?
+    } else {
+        false
+    };
     let has_tool_history = if version.as_u64() < ProtocolVersion::Three.as_u64() {
         repository.session_has_tool_history(session).await?
     } else {
@@ -5956,6 +5971,7 @@ async fn selected_session_required_protocol_version(
     Ok(required_protocol_version_for_selected_session(
         version,
         SelectedSessionRepresentationFacts {
+            has_context_summary_history,
             has_model_identity_history,
             has_tool_history,
             ancestry,
@@ -5967,7 +5983,9 @@ fn required_protocol_version_for_selected_session(
     version: ProtocolVersion,
     facts: SelectedSessionRepresentationFacts,
 ) -> Option<u64> {
-    if facts.has_model_identity_history && version.as_u64() < ProtocolVersion::Six.as_u64() {
+    if facts.has_context_summary_history && version.as_u64() < ProtocolVersion::Seventeen.as_u64() {
+        Some(ProtocolVersion::Seventeen.as_u64())
+    } else if facts.has_model_identity_history && version.as_u64() < ProtocolVersion::Six.as_u64() {
         Some(ProtocolVersion::Six.as_u64())
     } else if facts.has_tool_history && version.as_u64() < ProtocolVersion::Three.as_u64() {
         Some(ProtocolVersion::Three.as_u64())
@@ -5985,6 +6003,7 @@ fn required_protocol_version_for_selected_session(
 
 #[derive(Clone, Copy)]
 struct SelectedSessionRepresentationFacts {
+    has_context_summary_history: bool,
     has_model_identity_history: bool,
     has_tool_history: bool,
     ancestry: Option<ProcessSessionAncestry>,
@@ -7375,6 +7394,7 @@ impl ProtocolError {
                 3 => "the selected session requires protocol version 3",
                 6 => "the selected session requires protocol version 6",
                 9 => "the selected session requires protocol version 9",
+                17 => "the selected session requires protocol version 17",
                 _ => "the protocol version is unsupported",
             },
             detail: ErrorDetail::none(),
@@ -7478,6 +7498,13 @@ enum ProcessUpdateEvent {
         producing_call: signalbox_domain::ModelCallId,
         state: DispatchedToolBatchState,
     },
+    ContextCompacted {
+        compaction: signalbox_domain::ContextCompactionId,
+        call: signalbox_domain::ModelCallId,
+        through_position: u64,
+        summary_entry: signalbox_domain::SemanticTranscriptEntryId,
+        result_frontier: signalbox_domain::ContextFrontierId,
+    },
     TurnCompleted {
         turn: signalbox_domain::TurnId,
         call: signalbox_domain::ModelCallId,
@@ -7552,6 +7579,19 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
                 turn: *turn,
                 producing_call: *producing_call,
                 state: *state,
+            },
+            DispatchedOutboxEventKind::ContextCompacted {
+                compaction,
+                call,
+                through_position,
+                summary_entry,
+                result_frontier,
+            } => Self::ContextCompacted {
+                compaction: *compaction,
+                call: *call,
+                through_position: *through_position,
+                summary_entry: *summary_entry,
+                result_frontier: *result_frontier,
             },
             DispatchedOutboxEventKind::TurnCompleted {
                 turn,
@@ -7644,6 +7684,19 @@ impl ProcessUpdateEvent {
                         }
                     }
                 },
+            },
+            Self::ContextCompacted {
+                compaction,
+                call,
+                through_position,
+                summary_entry,
+                result_frontier,
+            } => SessionEvent::ContextCompacted {
+                context_compaction_id: wire_uuid(compaction.into_uuid()),
+                model_call_id: wire_uuid(call.into_uuid()),
+                through_position: CanonicalU64::new(*through_position),
+                summary_entry_id: wire_uuid(summary_entry.into_uuid()),
+                result_frontier_id: wire_uuid(result_frontier.into_uuid()),
             },
             Self::TurnCompleted {
                 turn,
@@ -8190,8 +8243,34 @@ mod tests {
     fn inv033_inv046_legacy_session_compatibility_requires_first_representable_version() {
         assert_eq!(
             required_protocol_version_for_selected_session(
+                ProtocolVersion::Sixteen,
+                SelectedSessionRepresentationFacts {
+                    has_context_summary_history: true,
+                    has_model_identity_history: true,
+                    has_tool_history: true,
+                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
+                },
+            ),
+            Some(17),
+            "summary history requires the newest retained representation"
+        );
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::Seventeen,
+                SelectedSessionRepresentationFacts {
+                    has_context_summary_history: true,
+                    has_model_identity_history: true,
+                    has_tool_history: true,
+                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            required_protocol_version_for_selected_session(
                 ProtocolVersion::One,
                 SelectedSessionRepresentationFacts {
+                    has_context_summary_history: false,
                     has_model_identity_history: false,
                     has_tool_history: false,
                     ancestry: Some(ProcessSessionAncestry::ImportedConversation),
@@ -8203,6 +8282,7 @@ mod tests {
             required_protocol_version_for_selected_session(
                 ProtocolVersion::One,
                 SelectedSessionRepresentationFacts {
+                    has_context_summary_history: false,
                     has_model_identity_history: false,
                     has_tool_history: true,
                     ancestry: Some(ProcessSessionAncestry::OwnerInitiated),
@@ -8215,6 +8295,7 @@ mod tests {
             required_protocol_version_for_selected_session(
                 ProtocolVersion::Two,
                 SelectedSessionRepresentationFacts {
+                    has_context_summary_history: false,
                     has_model_identity_history: false,
                     has_tool_history: true,
                     ancestry: Some(ProcessSessionAncestry::OwnerInitiated),
@@ -8227,6 +8308,7 @@ mod tests {
             required_protocol_version_for_selected_session(
                 ProtocolVersion::Three,
                 SelectedSessionRepresentationFacts {
+                    has_context_summary_history: false,
                     has_model_identity_history: false,
                     has_tool_history: true,
                     ancestry: Some(ProcessSessionAncestry::ImportedConversation),
@@ -8238,6 +8320,7 @@ mod tests {
             required_protocol_version_for_selected_session(
                 ProtocolVersion::Four,
                 SelectedSessionRepresentationFacts {
+                    has_context_summary_history: false,
                     has_model_identity_history: false,
                     has_tool_history: true,
                     ancestry: Some(ProcessSessionAncestry::ImportedConversation),
@@ -8249,6 +8332,7 @@ mod tests {
             required_protocol_version_for_selected_session(
                 ProtocolVersion::Two,
                 SelectedSessionRepresentationFacts {
+                    has_context_summary_history: false,
                     has_model_identity_history: false,
                     has_tool_history: false,
                     ancestry: Some(ProcessSessionAncestry::ImportedConversation),
@@ -8260,6 +8344,7 @@ mod tests {
             required_protocol_version_for_selected_session(
                 ProtocolVersion::Five,
                 SelectedSessionRepresentationFacts {
+                    has_context_summary_history: false,
                     has_model_identity_history: true,
                     has_tool_history: false,
                     ancestry: Some(ProcessSessionAncestry::OwnerInitiated),
@@ -8271,6 +8356,7 @@ mod tests {
             required_protocol_version_for_selected_session(
                 ProtocolVersion::One,
                 SelectedSessionRepresentationFacts {
+                    has_context_summary_history: false,
                     has_model_identity_history: true,
                     has_tool_history: true,
                     ancestry: Some(ProcessSessionAncestry::ImportedConversation),
@@ -8283,6 +8369,7 @@ mod tests {
             required_protocol_version_for_selected_session(
                 ProtocolVersion::Six,
                 SelectedSessionRepresentationFacts {
+                    has_context_summary_history: false,
                     has_model_identity_history: true,
                     has_tool_history: true,
                     ancestry: Some(ProcessSessionAncestry::ImportedConversation),

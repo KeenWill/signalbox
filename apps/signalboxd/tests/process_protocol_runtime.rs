@@ -18,11 +18,11 @@ use std::{
 use signalbox_application::{
     AuthorizeModelCallOutcome, CreateSessionFromImportedFrontierIdGenerator,
     CreateSessionFromImportedFrontierOutcome, CreateSessionFromImportedFrontierRequest,
-    CreateSessionFromImportedFrontierService, ImportConversationOutcome, ImportConversationService,
-    ImportedConversationIdGenerator, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
-    InProcessToolDispatchGate, ModelCallCredentialReference, ModelCallExecutionOutcome,
-    ModelCallExecutionService, NoToolCatalog, SchedulerLoop, SchedulerLoopExit,
-    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnOutcome,
+    CreateSessionFromImportedFrontierService, EligibilityPass, ImportConversationOutcome,
+    ImportConversationService, ImportedConversationIdGenerator, InProcessAttemptDispatchGate,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    ModelCallExecutionOutcome, ModelCallExecutionService, NoToolCatalog, SchedulerLoop,
+    SchedulerLoopExit, ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanService, UuidV7ModelCallExecutionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
@@ -69,9 +69,10 @@ use signalbox_process_protocol::{
     TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
-    ActivatedTurnPass, ContextGuardedTurnPass, FatalExecutionSupervisor, HubModelConfiguration,
-    LocalProcessListener, PostgresProviderModelExecution, ProcessProviderTextDeltaSink,
-    ProcessRuntime, ProcessRuntimeError,
+    ActivatedTurnPass, ContextGuardedTurnPass, ContextGuardedTurnPassError,
+    FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
+    PostgresProviderModelExecution, ProcessProviderTextDeltaSink, ProcessRuntime,
+    ProcessRuntimeError,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -624,6 +625,36 @@ async fn accepted_successor_turn(
 
 async fn response_within(connection: &mut Connection) -> Result<ServerFrame, Box<dyn Error>> {
     timeout(Duration::from_secs(5), connection.response()).await?
+}
+
+async fn attach_follower_after_snapshot(
+    socket: &Path,
+    version: ProtocolVersion,
+    request_id: u64,
+    session_id: CanonicalUuid,
+) -> Result<(Connection, u64), Box<dyn Error>> {
+    let mut follow = Connection::connect(socket).await?;
+    follow
+        .request_version(
+            version,
+            request_id,
+            ClientRequest::FollowSession { session_id },
+        )
+        .await?;
+    let start = response_within(&mut follow).await?;
+    let cursor = transcript_snapshot_start_cursor(start.message(), session_id);
+    loop {
+        let frame = response_within(&mut follow).await?;
+        if matches!(
+            frame.message(),
+            ServerMessage::TranscriptSnapshotEnd {
+                session_id: selected,
+                ..
+            } if *selected == session_id
+        ) {
+            return Ok((follow, cursor));
+        }
+    }
 }
 
 async fn attach_empty_follower(
@@ -4647,6 +4678,16 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     let first_probe =
         execute_streamed_turn(&mut runtime, first_model, session_id, first_turn).await?;
     assert_eq!(first_probe.received_operations().len(), 1);
+    let (mut version_seventeen_follow, version_seventeen_cursor) = attach_follower_after_snapshot(
+        runtime.socket(),
+        ProtocolVersion::Seventeen,
+        30,
+        session_id,
+    )
+    .await?;
+    let (mut version_sixteen_follow, _) =
+        attach_follower_after_snapshot(runtime.socket(), ProtocolVersion::Sixteen, 31, session_id)
+            .await?;
     let before_members = sqlx::query_as::<_, (Uuid, Uuid)>(
         "SELECT member.source_session_id, member.semantic_entry_id
            FROM turn_lifecycle AS lifecycle
@@ -4690,6 +4731,89 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     };
     assert_eq!(*compacted_session, session_id);
     assert_eq!(through_position.value(), before_members.len() as u64);
+    let followed = response_within(&mut version_seventeen_follow).await?;
+    let ServerMessage::SessionEvent {
+        cursor: followed_cursor,
+        session_id: followed_session,
+        event:
+            SessionEvent::ContextCompacted {
+                context_compaction_id: followed_compaction,
+                model_call_id: followed_call,
+                through_position: followed_through,
+                summary_entry_id: followed_summary,
+                result_frontier_id: followed_frontier,
+            },
+    } = followed.message()
+    else {
+        panic!(
+            "the established version-seventeen follower expected a compaction event, got {:?}",
+            followed.message()
+        );
+    };
+    assert!(followed_cursor.value() > version_seventeen_cursor);
+    assert_eq!(*followed_session, session_id);
+    assert_eq!(*followed_compaction, *context_compaction_id);
+    assert_eq!(*followed_call, *model_call_id);
+    assert_eq!(*followed_through, *through_position);
+    assert_eq!(*followed_summary, *summary_entry_id);
+    assert_eq!(*followed_frontier, *result_frontier_id);
+    let legacy_follow_error = response_within(&mut version_sixteen_follow).await?;
+    let ServerMessage::Error {
+        code: legacy_follow_code,
+        message: legacy_follow_message,
+        ..
+    } = legacy_follow_error.message()
+    else {
+        panic!(
+            "the established version-sixteen follower expected a gate, got {:?}",
+            legacy_follow_error.message()
+        );
+    };
+    assert_eq!(*legacy_follow_code, ErrorCode::UnsupportedVersion);
+    assert_eq!(
+        legacy_follow_message,
+        "the selected session requires protocol version 17"
+    );
+    connection
+        .request_version(
+            ProtocolVersion::Sixteen,
+            32,
+            ClientRequest::ReadTranscript { session_id },
+        )
+        .await?;
+    let legacy_read_error = response_within(&mut connection).await?;
+    assert!(matches!(
+        legacy_read_error.message(),
+        ServerMessage::Error {
+            code: ErrorCode::UnsupportedVersion,
+            message,
+            ..
+        } if message == "the selected session requires protocol version 17"
+    ));
+    let gated_command = command()?;
+    connection
+        .request_version(
+            ProtocolVersion::Sixteen,
+            33,
+            ClientRequest::SubmitInput {
+                command_id: gated_command,
+                session_id,
+                content: InputContent::new(String::from("must remain unclaimed")),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
+            },
+        )
+        .await?;
+    assert_eq!(
+        protocol_error_code(response_within(&mut connection).await?.message()),
+        ErrorCode::UnsupportedVersion
+    );
+    let gated_claim_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+            .bind(gated_command.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(gated_claim_count, 0);
     let after_members = sqlx::query_as::<_, (Uuid, Uuid)>(
         "SELECT source_session_id, semantic_entry_id
            FROM context_frontier_member
@@ -4846,6 +4970,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             command: DurableCommandId::from_uuid(Uuid::from_u128(0xcc21)),
             session: SessionId::from_uuid(session_id.into_uuid()),
             requested_through_position: None,
+            automatic_for_turn: None,
             defaults_version: SessionConfigurationDefaultsVersion::first(),
             selection: DirectModelSelection::from_uuid(Uuid::from_u128(1)),
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
@@ -4891,6 +5016,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             command: DurableCommandId::from_uuid(Uuid::from_u128(0xcc26)),
             session: SessionId::from_uuid(session_id.into_uuid()),
             requested_through_position: None,
+            automatic_for_turn: None,
             defaults_version: SessionConfigurationDefaultsVersion::first(),
             selection: DirectModelSelection::from_uuid(Uuid::from_u128(1)),
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
@@ -5064,5 +5190,125 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
     assert_eq!(summary_count, 1);
 
     drop(successor);
+    runtime.stop().await
+}
+
+/// S01 / S03 / INV-014 / INV-015: one queued candidate retains its durable
+/// automatic-attempt marker across eligibility retries, so an oversized suffix
+/// cannot issue a paid successor compaction on every sweep.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_turn()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, first_turn) = submit_first_input(
+        &mut connection,
+        session_id,
+        String::from("retry guard historical request"),
+    )
+    .await?;
+    let first_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "retry guard historical reply",
+        TokenUsage::unreported(),
+    ));
+    let first_probe =
+        execute_streamed_turn(&mut runtime, first_runtime, session_id, first_turn).await?;
+    assert_eq!(first_probe.received_operations().len(), 1);
+
+    let oversized_suffix = String::from("oversized suffix remains above the declared window");
+    connection
+        .request_version(
+            ProtocolVersion::Seventeen,
+            40,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(oversized_suffix),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
+            },
+        )
+        .await?;
+    let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    let guarded_configuration = HubModelConfiguration::parse(&MODEL_CONFIGURATION.replace(
+        "context_window_tokens = 200000",
+        "context_window_tokens = 4",
+    ))?;
+    let ordinary_runtime =
+        RecordingCountedScriptedModel::following(std::iter::empty::<Script>(), [40, 40, 40]);
+    let ordinary_probe = ordinary_runtime.clone();
+    let summary_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "one durable retry summary",
+        TokenUsage::unreported(),
+    ));
+    let summary_probe = summary_runtime.clone();
+    let runtime_models = guarded_configuration.runtime_model_catalog();
+    let provider = RuntimeModelCallProvider::new(ordinary_runtime, runtime_models.clone())
+        .with_text_delta_sink(runtime.provider_text_delta_sink());
+    let counter = provider.clone();
+    let repository = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        guarded_configuration.target_catalog(),
+        ModelCallCredentialReference::new("retry-guard-recording-fixture"),
+    );
+    let guarded_repository = repository.clone();
+    let (execution, fatal_execution) =
+        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+            repository,
+            InProcessAttemptDispatchGate::default(),
+            provider,
+        ));
+    let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
+        Arc::new(RuntimeContextCompactionModel::new(
+            summary_runtime,
+            runtime_models.clone(),
+        ));
+    let mut pass = ContextGuardedTurnPass::new(
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+        guarded_repository,
+        counter,
+        NoToolCatalog,
+        runtime_models,
+        guarded_configuration,
+        compaction_model,
+        "retry-guard-summary-fixture",
+        execution,
+    );
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let first_attempt = pass.run(session).await;
+    assert!(matches!(
+        first_attempt,
+        Err(ContextGuardedTurnPassError::ContextStillExceeded)
+    ));
+    let second_attempt = pass.run(session).await;
+    assert!(matches!(
+        second_attempt,
+        Err(ContextGuardedTurnPassError::ContextStillExceeded)
+    ));
+    assert!(!fatal_execution.is_triggered());
+    assert_eq!(ordinary_probe.counted_operations().len(), 3);
+    assert_eq!(ordinary_probe.prepared_operations().len(), 0);
+    assert_eq!(summary_probe.received_operations().len(), 1);
+    let compaction_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM context_compaction WHERE session_id = $1")
+            .bind(session_id.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(compaction_count, 1);
+    let automatic_command_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM compact_session_command
+          WHERE session_id = $1 AND automatic_for_turn_id = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(queued_turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(automatic_command_count, 1);
+
+    drop(connection);
     runtime.stop().await
 }

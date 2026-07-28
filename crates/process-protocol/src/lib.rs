@@ -2944,6 +2944,19 @@ pub enum SessionEvent {
         /// Exact committed batch state.
         state: ToolBatchState,
     },
+    /// One append-only context compaction committed.
+    ContextCompacted {
+        /// Exact compaction provenance record.
+        context_compaction_id: CanonicalUuid,
+        /// Dedicated producing model call.
+        model_call_id: CanonicalUuid,
+        /// One-based final summarized position.
+        through_position: CanonicalU64,
+        /// Appended semantic summary entry.
+        summary_entry_id: CanonicalUuid,
+        /// Complete result frontier.
+        result_frontier_id: CanonicalUuid,
+    },
     /// Turn completed.
     TurnCompleted {
         /// Completed turn.
@@ -3006,6 +3019,7 @@ impl SessionEvent {
     const fn minimum_protocol_version(&self) -> u64 {
         match self {
             Self::ToolBatchTransition { .. } | Self::TurnToolReconciliationRequired { .. } => 3,
+            Self::ContextCompacted { .. } => CONTEXT_COMPACTION_PROTOCOL_VERSION,
             Self::SessionCreated {}
             | Self::InputAccepted { .. }
             | Self::TurnActivated { .. }

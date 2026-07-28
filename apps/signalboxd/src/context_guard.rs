@@ -222,17 +222,27 @@ where
                     if compacted {
                         return Err(ContextGuardedTurnPassError::ContextStillExceeded);
                     }
-                    compact_automatically(
+                    let turn = preview.prepared().turn().turn();
+                    match compact_automatically(
                         model_calls.pool(),
                         &model_configuration,
                         &compaction_model,
                         &compaction_credential_reference,
                         session,
+                        turn,
                     )
                     .await
-                    .map_err(|error| {
-                        ContextGuardedTurnPassError::Compaction(error.operator_failure_class())
-                    })?;
+                    {
+                        Ok(_) => {}
+                        Err(crate::process_runtime::AutomaticContextCompactionError::AlreadyAttempted) => {
+                            return Err(ContextGuardedTurnPassError::ContextStillExceeded);
+                        }
+                        Err(error) => {
+                            return Err(ContextGuardedTurnPassError::Compaction(
+                                error.operator_failure_class(),
+                            ));
+                        }
+                    }
                     compacted = true;
                     continue;
                 }

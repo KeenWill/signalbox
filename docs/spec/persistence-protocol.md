@@ -354,8 +354,12 @@ Locks per transaction, in acquisition order:
   updates and inserts serialize the call, command, summary, and result-frontier
   records. The pending typed command stores its immutable dedicated
   `model_call_id` from creation, so recovery never infers correlation from a
-  result-only field. An equal replay resolves from the command registry and
-  receipt without taking the session lock or resolving current configuration.
+  result-only field. An automatic command additionally stores the immutable
+  queued `turn_id`; a partial uniqueness constraint admits at most one automatic
+  compaction command for that turn in its session, and preparation recognizes
+  the retained attempt before allocating a second call. An equal replay resolves
+  from the command registry and receipt without taking the session lock or
+  resolving current configuration.
 - **SubmitInput** (`prepare_against_locked_state`): session row
   `FOR NO KEY UPDATE`, then `session_scheduler` row `FOR UPDATE`, then
   `session_current_defaults` row `FOR UPDATE`; only then does it read the
@@ -579,15 +583,18 @@ protocol scope). Implemented storage:
   `session_created_outbox_event`, `input_accepted_outbox_event`,
   `turn_activated_outbox_event`, `turn_failed_outbox_event`,
   `model_call_transition_outbox_event`, `tool_batch_transition_outbox_event`,
-  `turn_completed_outbox_event`, `turn_refused_outbox_event`,
-  `turn_cancelled_outbox_event`, and `turn_reconciliation_required_outbox_event`
-  — with a deferred trigger requiring exactly one typed record per header.
-  Tool-batch transition records carry the producing call and exactly one closed
-  state shape: `proposed` names the yielded assistant/tool-use frontier,
-  `results_projected` names the all-resolved result frontier, and
-  `recovery_required` names the exact ambiguous physical attempt. The header and
-  typed record tables are append-only (`reject_immutable_record_change`), and
-  every outbox table rejects `TRUNCATE`.
+  `context_compacted_outbox_event`, `turn_completed_outbox_event`,
+  `turn_refused_outbox_event`, `turn_cancelled_outbox_event`, and
+  `turn_reconciliation_required_outbox_event` — with a deferred trigger
+  requiring exactly one typed record per header. Tool-batch transition records
+  carry the producing call and exactly one closed state shape: `proposed` names
+  the yielded assistant/tool-use frontier, `results_projected` names the
+  all-resolved result frontier, and `recovery_required` names the exact
+  ambiguous physical attempt. The header and typed record tables are append-only
+  (`reject_immutable_record_change`), and every outbox table rejects `TRUNCATE`.
+  A context-compacted record names the authoritative compaction, its completed
+  dedicated call, exact positive through position, appended summary, and result
+  frontier.
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
   updating the singleton, whose row lock is held to transaction end, and a
@@ -619,11 +626,14 @@ appends `tool_batch_transition { recovery_required }`. Completion closure
 appends `turn_completed`, refusal closure appends `turn_refused`, and
 known-failure closure appends `turn_failed`; interrupt-confirmed cancellation
 appends `turn_cancelled`, and live stopped ambiguity appends
-`turn_reconciliation_required`; an interrupt against a parked ambiguous tool
-attempt appends the same event kind with that exact tool-attempt reference. A
-guarded transition that changes zero rows appends zero events. Why: writing the
-event in the committing transaction makes the dual-write failure (state without
-event, or event without state) unrepresentable.
+`turn_reconciliation_required`; completion of a context compaction appends
+`context_compacted` in the same transaction as its dedicated call, summary
+entry, result frontier, compaction result, and applied command receipt. An
+interrupt against a parked ambiguous tool attempt appends the same event kind
+with that exact tool-attempt reference. A guarded transition that changes zero
+rows appends zero events. Why: writing the event in the committing transaction
+makes the dual-write failure (state without event, or event without state)
+unrepresentable.
 
 The public `OutboxDispatcher` is the storage-side single-consumer seam. It locks
 the delivery singleton, decodes exactly the next typed event, invokes a
@@ -641,13 +651,16 @@ and failed, completed, refused, cancelled, and reconciliation-required records
 must agree with the durable turn, terminal frontier, semantic marker where
 present, and terminal model call or tool attempt where present. A
 reconciliation-required event carries exactly one of those two operation
-references. Tool-batch cancellation and known crash-failure records validate
-their terminal marker after the earlier producing model call and ended physical
-attempts rather than requiring an otherwise empty call history. Historical
-Prepared and InFlight transition records remain dispatchable after their call
-advances. Exhausted delivery still validates the allocator singleton and cursor.
-Daemon task ownership, polling, fan-out, and client observation semantics are
-owned by [process-protocol](process-protocol.md).
+references. A context-compacted event must agree with one completed dedicated
+call and the authoritative compaction, applied command, exact through position,
+summary entry, and result frontier before dispatch. Tool-batch cancellation and
+known crash-failure records validate their terminal marker after the earlier
+producing model call and ended physical attempts rather than requiring an
+otherwise empty call history. Historical Prepared and InFlight transition
+records remain dispatchable after their call advances. Exhausted delivery still
+validates the allocator singleton and cursor. Daemon task ownership, polling,
+fan-out, and client observation semantics are owned by
+[process-protocol](process-protocol.md).
 
 ## Open edges
 

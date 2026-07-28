@@ -615,6 +615,20 @@ impl<'a> Output<'a> {
                      tool_attempt={tool_attempt_id}"
                 ),
             },
+            SessionEvent::ContextCompacted {
+                context_compaction_id,
+                model_call_id,
+                through_position,
+                summary_entry_id,
+                result_frontier_id,
+            } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} context_compacted \
+                 compaction={context_compaction_id} call={model_call_id} \
+                 through={} summary_entry={summary_entry_id} \
+                 frontier={result_frontier_id}",
+                through_position.value()
+            ),
             SessionEvent::TurnCompleted {
                 turn_id,
                 model_call_id,

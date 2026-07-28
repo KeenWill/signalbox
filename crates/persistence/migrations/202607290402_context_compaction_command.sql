@@ -48,6 +48,7 @@ CREATE TABLE compact_session_command (
     storage_version smallint NOT NULL,
     session_id uuid NOT NULL,
     requested_through_position numeric(20, 0),
+    automatic_for_turn_id uuid,
     result_kind text NOT NULL,
     result_context_compaction_id uuid,
     model_call_id uuid NOT NULL,
@@ -105,6 +106,12 @@ CREATE TABLE compact_session_command (
         REFERENCES session (session_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT,
+    CONSTRAINT compact_session_command_automatic_turn_fk
+        FOREIGN KEY (automatic_for_turn_id, session_id)
+        REFERENCES turn_lifecycle (turn_id, session_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT compact_session_command_compaction_fk
         FOREIGN KEY (result_context_compaction_id, session_id)
         REFERENCES context_compaction (context_compaction_id, session_id)
@@ -131,6 +138,10 @@ CREATE TABLE compact_session_command (
         DEFERRABLE INITIALLY DEFERRED
 );
 
+CREATE UNIQUE INDEX compact_session_command_automatic_turn_once
+    ON compact_session_command (session_id, automatic_for_turn_id)
+    WHERE automatic_for_turn_id IS NOT NULL;
+
 CREATE FUNCTION reject_compact_session_command_invalid_change()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -155,6 +166,7 @@ BEGIN
         OLD.storage_version,
         OLD.session_id,
         OLD.requested_through_position,
+        OLD.automatic_for_turn_id,
         OLD.model_call_id
     ) IS DISTINCT FROM ROW(
         NEW.command_id,
@@ -162,6 +174,7 @@ BEGIN
         NEW.storage_version,
         NEW.session_id,
         NEW.requested_through_position,
+        NEW.automatic_for_turn_id,
         NEW.model_call_id
     ) THEN
         RAISE EXCEPTION 'compaction command request is immutable'
@@ -182,6 +195,167 @@ CREATE TRIGGER compact_session_command_changes_are_guarded
 BEFORE INSERT OR UPDATE OR DELETE ON compact_session_command
 FOR EACH ROW
 EXECUTE FUNCTION reject_compact_session_command_invalid_change();
+
+ALTER TABLE outbox_event
+    DROP CONSTRAINT outbox_event_kind_closed;
+
+ALTER TABLE outbox_event
+    ADD CONSTRAINT outbox_event_kind_closed
+        CHECK (
+            event_kind IN (
+                'session_created',
+                'input_accepted',
+                'turn_activated',
+                'turn_failed',
+                'model_call_transition',
+                'tool_batch_transition',
+                'context_compacted',
+                'turn_completed',
+                'turn_refused',
+                'turn_cancelled',
+                'turn_reconciliation_required'
+            )
+        );
+
+CREATE TABLE context_compacted_outbox_event (
+    event_sequence numeric(20, 0) PRIMARY KEY,
+    event_kind text NOT NULL,
+    storage_version smallint NOT NULL,
+    session_id uuid NOT NULL,
+    context_compaction_id uuid NOT NULL UNIQUE,
+    model_call_id uuid NOT NULL,
+    through_position numeric(20, 0) NOT NULL,
+    summary_entry_id uuid NOT NULL,
+    result_frontier_id uuid NOT NULL,
+
+    CONSTRAINT context_compacted_outbox_kind_closed
+        CHECK (event_kind = 'context_compacted'),
+    CONSTRAINT context_compacted_outbox_version_supported
+        CHECK (storage_version = 1),
+    CONSTRAINT context_compacted_outbox_position_u64
+        CHECK (
+            through_position >= 1
+            AND through_position <= 18446744073709551615
+        ),
+    CONSTRAINT context_compacted_outbox_header_fk
+        FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
+        REFERENCES outbox_event (
+            event_sequence,
+            event_kind,
+            storage_version,
+            session_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT context_compacted_outbox_compaction_fk
+        FOREIGN KEY (context_compaction_id, session_id)
+        REFERENCES context_compaction (context_compaction_id, session_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT context_compacted_outbox_call_fk
+        FOREIGN KEY (model_call_id, session_id)
+        REFERENCES context_compaction_model_call (model_call_id, session_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT context_compacted_outbox_summary_fk
+        FOREIGN KEY (session_id, summary_entry_id)
+        REFERENCES semantic_transcript_entry (
+            source_session_id,
+            semantic_entry_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT context_compacted_outbox_frontier_fk
+        FOREIGN KEY (session_id, result_frontier_id)
+        REFERENCES context_frontier (
+            owning_session_id,
+            context_frontier_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE TRIGGER context_compacted_outbox_event_is_append_only
+BEFORE UPDATE OR DELETE ON context_compacted_outbox_event
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER context_compacted_outbox_event_cannot_be_truncated
+BEFORE TRUNCATE ON context_compacted_outbox_event
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_outbox_table_truncate();
+
+CREATE OR REPLACE FUNCTION require_outbox_event_typed_record()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    matching_records bigint;
+BEGIN
+    CASE NEW.event_kind
+        WHEN 'session_created' THEN
+            SELECT count(*) INTO matching_records
+              FROM session_created_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'input_accepted' THEN
+            SELECT count(*) INTO matching_records
+              FROM input_accepted_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_activated' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_activated_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_failed' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_failed_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'model_call_transition' THEN
+            SELECT count(*) INTO matching_records
+              FROM model_call_transition_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'tool_batch_transition' THEN
+            SELECT count(*) INTO matching_records
+              FROM tool_batch_transition_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'context_compacted' THEN
+            SELECT count(*) INTO matching_records
+              FROM context_compacted_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_completed' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_completed_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_refused' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_refused_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_cancelled' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_cancelled_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_reconciliation_required' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_reconciliation_required_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        ELSE
+            RAISE EXCEPTION 'unsupported outbox event kind %', NEW.event_kind
+                USING ERRCODE = '23514';
+    END CASE;
+
+    IF matching_records <> 1 THEN
+        RAISE EXCEPTION 'outbox event % requires exactly one % typed record',
+            NEW.event_sequence,
+            NEW.event_kind
+            USING ERRCODE = '23503';
+    END IF;
+    RETURN NULL;
+END;
+$$;
 
 CREATE OR REPLACE FUNCTION require_durable_command_typed_record()
 RETURNS trigger

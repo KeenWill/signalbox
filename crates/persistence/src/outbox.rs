@@ -9,7 +9,7 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AcceptedInputId, ContextFrontierId, ModelCallDisposition, ModelCallId,
+    AcceptedInputId, ContextCompactionId, ContextFrontierId, ModelCallDisposition, ModelCallId,
     SemanticTranscriptEntryId, SessionId, SessionInputPosition, ToolAttemptId, TurnAttemptId,
     TurnId,
 };
@@ -29,6 +29,7 @@ const TURN_ACTIVATED: &str = "turn_activated";
 const TURN_FAILED: &str = "turn_failed";
 const MODEL_CALL_TRANSITION: &str = "model_call_transition";
 const TOOL_BATCH_TRANSITION: &str = "tool_batch_transition";
+const CONTEXT_COMPACTED: &str = "context_compacted";
 const TURN_COMPLETED: &str = "turn_completed";
 const TURN_REFUSED: &str = "turn_refused";
 const TURN_CANCELLED: &str = "turn_cancelled";
@@ -123,6 +124,19 @@ pub enum DispatchedOutboxEventKind {
         producing_call: ModelCallId,
         /// Exact durable batch state.
         state: DispatchedToolBatchState,
+    },
+    /// One append-only context compaction committed.
+    ContextCompacted {
+        /// Exact compaction provenance record.
+        compaction: ContextCompactionId,
+        /// Dedicated producing model call.
+        call: ModelCallId,
+        /// One-based final summarized position.
+        through_position: u64,
+        /// Appended semantic summary entry.
+        summary_entry: SemanticTranscriptEntryId,
+        /// Complete result frontier.
+        result_frontier: ContextFrontierId,
     },
     /// A turn committed authoritative assistant content and completed.
     TurnCompleted {
@@ -980,6 +994,59 @@ async fn load_event(
                 state,
             }
         }
+        CONTEXT_COMPACTED => {
+            let row: (Uuid, Uuid, Decimal, Uuid, Uuid) = sqlx::query_as(
+                "SELECT event.context_compaction_id, event.model_call_id,
+                        event.through_position, event.summary_entry_id,
+                        event.result_frontier_id
+                   FROM context_compacted_outbox_event AS event
+                   JOIN context_compaction AS compaction
+                     ON compaction.context_compaction_id =
+                        event.context_compaction_id
+                    AND compaction.session_id = event.session_id
+                    AND compaction.producing_call_id = event.model_call_id
+                    AND compaction.summary_entry_id = event.summary_entry_id
+                    AND compaction.result_frontier_id = event.result_frontier_id
+                   JOIN context_compaction_model_call AS call
+                     ON call.model_call_id = event.model_call_id
+                    AND call.session_id = event.session_id
+                    AND call.state_kind = 'terminal'
+                    AND call.terminal_disposition_kind = 'completed'
+                   JOIN semantic_transcript_entry AS summary
+                     ON summary.source_session_id = event.session_id
+                    AND summary.semantic_entry_id = event.summary_entry_id
+                    AND summary.payload_kind = 'context_summary'
+                    AND summary.context_summary_producing_call_id =
+                        event.model_call_id
+                   JOIN context_frontier AS frontier
+                     ON frontier.owning_session_id = event.session_id
+                    AND frontier.context_frontier_id = event.result_frontier_id
+                   JOIN compact_session_command AS command
+                     ON command.session_id = event.session_id
+                    AND command.result_kind = 'applied'
+                    AND command.result_context_compaction_id =
+                        event.context_compaction_id
+                    AND command.model_call_id = event.model_call_id
+                    AND command.result_through_position =
+                        event.through_position
+                    AND command.result_summary_entry_id = event.summary_entry_id
+                    AND command.result_frontier_id = event.result_frontier_id
+                  WHERE event.event_sequence = $1
+                    AND event.session_id = $2",
+            )
+            .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            DispatchedOutboxEventKind::ContextCompacted {
+                compaction: ContextCompactionId::from_uuid(row.0),
+                call: ModelCallId::from_uuid(row.1),
+                through_position: decode_positive_sequence(row.2)?,
+                summary_entry: SemanticTranscriptEntryId::from_uuid(row.3),
+                result_frontier: ContextFrontierId::from_uuid(row.4),
+            }
+        }
         TURN_COMPLETED => {
             let row: Option<(Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as(
                 "SELECT event.turn_id, event.model_call_id,
@@ -1419,6 +1486,14 @@ pub(crate) enum OutboxEvent {
         producing_call: ModelCallId,
         state: ToolBatchOutboxState,
     },
+    ContextCompacted {
+        session: SessionId,
+        compaction: ContextCompactionId,
+        call: ModelCallId,
+        through_position: u64,
+        summary_entry: SemanticTranscriptEntryId,
+        result_frontier: ContextFrontierId,
+    },
     TurnCompleted {
         session: SessionId,
         turn: TurnId,
@@ -1511,6 +1586,25 @@ pub(crate) async fn append(
             producing_call,
             state,
         } => append_tool_batch_transition(connection, session, turn, producing_call, state).await,
+        OutboxEvent::ContextCompacted {
+            session,
+            compaction,
+            call,
+            through_position,
+            summary_entry,
+            result_frontier,
+        } => {
+            append_context_compacted(
+                connection,
+                session,
+                compaction,
+                call,
+                through_position,
+                summary_entry,
+                result_frontier,
+            )
+            .await
+        }
         OutboxEvent::TurnCompleted {
             session,
             turn,
@@ -1574,6 +1668,43 @@ pub(crate) async fn append(
             .await
         }
     }
+}
+
+async fn append_context_compacted(
+    connection: &mut PgConnection,
+    session: SessionId,
+    compaction: ContextCompactionId,
+    call: ModelCallId,
+    through_position: u64,
+    summary_entry: SemanticTranscriptEntryId,
+    result_frontier: ContextFrontierId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO context_compacted_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             context_compaction_id, model_call_id, through_position,
+             summary_entry_id, result_frontier_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5, $6, $7, $8
+           FROM header",
+    )
+    .bind(CONTEXT_COMPACTED)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(compaction.into_uuid())
+    .bind(call.into_uuid())
+    .bind(Decimal::from(through_position))
+    .bind(summary_entry.into_uuid())
+    .bind(result_frontier.into_uuid())
+    .execute(connection)
+    .await?;
+    Ok(())
 }
 
 async fn append_tool_batch_transition(

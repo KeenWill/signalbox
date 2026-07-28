@@ -6,11 +6,11 @@ use rust_decimal::Decimal;
 use signalbox_domain::{
     ContextCompactionId, ContextCompactionTokenUsage, ContextFrontierId, DirectModelSelection,
     DurableCommandId, ModelCallId, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion, SessionId,
+    SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion, SessionId, TurnId,
 };
 use sqlx::{PgPool, Row, types::Uuid};
 
-use crate::{commit_failure_is_ambiguous, mapping::session_id_to_uuid};
+use crate::{commit_failure_is_ambiguous, mapping::session_id_to_uuid, outbox};
 
 /// All caller and hub-minted facts for a fresh explicit command attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +21,8 @@ pub struct PrepareContextCompactionRequest {
     pub session: SessionId,
     /// Optional exact one-based complete-frontier position.
     pub requested_through_position: Option<u64>,
+    /// Queued turn whose context guard owns this automatic attempt.
+    pub automatic_for_turn: Option<TurnId>,
     /// Current defaults epoch observed before entering the transaction.
     pub defaults_version: SessionConfigurationDefaultsVersion,
     /// Current direct model selection after freezing any alias.
@@ -168,6 +170,8 @@ pub enum PrepareContextCompactionOutcome {
     InvalidBoundary,
     /// Equal replay names a previously recorded failed command.
     FailedReplay,
+    /// This queued turn already owns one durable automatic attempt.
+    AutomaticAlreadyAttempted,
 }
 
 /// Read-only disposition of one owner-global compaction command lookup.
@@ -261,6 +265,7 @@ impl ContextCompactionRepository {
             command,
             session,
             requested_through_position,
+            None,
         )
         .await
     }
@@ -429,6 +434,18 @@ impl ContextCompactionRepository {
         .await?
         .rows_affected();
         require_single(command_rows, "applied compaction command")?;
+        outbox::append(
+            &mut transaction,
+            outbox::OutboxEvent::ContextCompacted {
+                session: prepared.session,
+                compaction: prepared.compaction,
+                call: prepared.call,
+                through_position: prepared.through_position,
+                summary_entry: prepared.summary_entry,
+                result_frontier: prepared.result_frontier,
+            },
+        )
+        .await?;
         transaction
             .commit()
             .await
@@ -498,6 +515,7 @@ async fn prepare_in_transaction(
         request.command,
         request.session,
         request.requested_through_position,
+        request.automatic_for_turn,
     )
     .await?
     {
@@ -528,6 +546,26 @@ async fn prepare_in_transaction(
     if decode_u64(current_version, "current defaults version")? != request.defaults_version.as_u64()
     {
         return Ok((false, PrepareContextCompactionOutcome::DefaultsChanged));
+    }
+    if let Some(turn) = request.automatic_for_turn {
+        let already_attempted: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM compact_session_command
+                  WHERE session_id = $1
+                    AND automatic_for_turn_id = $2
+             )",
+        )
+        .bind(session_id_to_uuid(request.session))
+        .bind(turn.into_uuid())
+        .fetch_one(&mut **transaction)
+        .await?;
+        if already_attempted {
+            return Ok((
+                false,
+                PrepareContextCompactionOutcome::AutomaticAlreadyAttempted,
+            ));
+        }
     }
     let busy: bool = sqlx::query_scalar(
         "SELECT EXISTS (
@@ -637,12 +675,14 @@ async fn prepare_in_transaction(
     sqlx::query(
         "INSERT INTO compact_session_command
             (command_id, command_kind, storage_version, session_id,
-             requested_through_position, model_call_id, result_kind)
-         VALUES ($1, 'compact_session', 1, $2, $3, $4, 'pending')",
+             requested_through_position, automatic_for_turn_id,
+             model_call_id, result_kind)
+         VALUES ($1, 'compact_session', 1, $2, $3, $4, $5, 'pending')",
     )
     .bind(request.command.into_uuid())
     .bind(session_id_to_uuid(request.session))
     .bind(request.requested_through_position.map(Decimal::from))
+    .bind(request.automatic_for_turn.map(TurnId::into_uuid))
     .bind(request.call.into_uuid())
     .execute(&mut **transaction)
     .await?;
@@ -700,6 +740,7 @@ async fn lookup_command_on_connection(
     command: DurableCommandId,
     session: SessionId,
     requested_through_position: Option<u64>,
+    automatic_for_turn: Option<TurnId>,
 ) -> Result<ContextCompactionCommandLookup, ContextCompactionRepositoryError> {
     let existing_kind: Option<String> =
         sqlx::query_scalar("SELECT command_kind FROM durable_command WHERE command_id = $1")
@@ -713,7 +754,8 @@ async fn lookup_command_on_connection(
         return Ok(ContextCompactionCommandLookup::ConflictingReuse);
     }
     let row = sqlx::query(
-        "SELECT session_id, requested_through_position, result_kind,
+        "SELECT session_id, requested_through_position,
+                automatic_for_turn_id, result_kind,
                 result_context_compaction_id, model_call_id,
                 result_through_position, result_summary_entry_id, result_frontier_id
            FROM compact_session_command
@@ -727,11 +769,13 @@ async fn lookup_command_on_connection(
     ))?;
     let stored_session: Uuid = row.try_get("session_id")?;
     let requested: Option<Decimal> = row.try_get("requested_through_position")?;
+    let stored_automatic_turn: Option<Uuid> = row.try_get("automatic_for_turn_id")?;
     if stored_session != session_id_to_uuid(session)
         || requested
             .map(|value| decode_u64(value, "requested through position"))
             .transpose()?
             != requested_through_position
+        || stored_automatic_turn.map(TurnId::from_uuid) != automatic_for_turn
     {
         return Ok(ContextCompactionCommandLookup::ConflictingReuse);
     }
