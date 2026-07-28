@@ -495,6 +495,35 @@ fn catalog() -> RunnerCatalog {
     .expect("the fixture catalog is internally consistent")
 }
 
+fn confirm_catalog() -> RunnerCatalog {
+    let inspect = RunnerToolDeclaration::new(
+        tool("inspect"),
+        model_definition(),
+        ToolPermissionDefault::Confirm,
+        RunnerToolEffectClass::Pure,
+        ToolAdmissibleLoci::RunnerOnly {
+            selector: RunnerSelector::CapabilityClass(class()),
+        },
+    );
+    let policy = CredentialProfilePolicy::try_new(
+        profile(),
+        [(tool("inspect"), CredentialToolApproval::Automatic)],
+    )
+    .expect("the confirm fixture profile references its declared tool");
+    let replacement_policy = CredentialProfilePolicy::try_new(
+        replacement_profile(),
+        [(tool("inspect"), CredentialToolApproval::SessionPolicy)],
+    )
+    .expect("the confirm replacement profile references its declared tool");
+    RunnerCatalog::try_new(
+        [class()],
+        [inspect],
+        [policy, replacement_policy],
+        [WorkspaceCapability::WorktreePerSession],
+    )
+    .expect("the confirm fixture catalog is internally consistent")
+}
+
 fn idempotent_catalog() -> RunnerCatalog {
     let inspect = RunnerToolDeclaration::new(
         tool("inspect"),
@@ -2308,6 +2337,91 @@ async fn s31_inv035_inv045_session_policy_lease_requires_confirmed_provenance()
         .store_pin(&pin, &registration)
         .await
         .expect_err("policy-auto provenance cannot admit a session-policy lease");
+    sqlx::query("ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_approval_decision
+            SET decision_source = 'session_blanket'
+          WHERE request_id = $1",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.request))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    store.store_pin(&pin, &registration).await?;
+    let admitted: Decimal = sqlx::query_scalar(
+        "SELECT generation
+           FROM runner_lease_generation
+          WHERE lease_id = $1",
+    )
+    .bind(uuid(LEASE))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_store_check_violation(unconfirmed);
+    assert_eq!(admitted, Decimal::from(1u64));
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-035 / INV-045: a profileless lease on a Confirm-permission tool
+/// admits only confirmed approval provenance; policy-auto provenance is
+/// rejected even for a direct lease-row insert.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv035_inv045_profileless_confirm_lease_requires_confirmed_provenance()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), confirm_catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            blanket_authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the profileless placement pins its runner");
+    sqlx::query("ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source)
+         VALUES ($1, 'approve', 'policy_auto')",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.request))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let unconfirmed = store
+        .store_pin(&pin, &registration)
+        .await
+        .expect_err("policy-auto provenance cannot admit a profileless confirm lease");
     sqlx::query("ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;

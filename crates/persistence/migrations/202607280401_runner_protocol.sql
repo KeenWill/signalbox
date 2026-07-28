@@ -2871,6 +2871,7 @@ DECLARE
     current_registration_revision numeric;
     current_registration_runner uuid;
     registered_effect text;
+    registered_permission text;
     bound_lease uuid;
     bound_request_lease uuid;
     prior runner_lease_generation%ROWTYPE;
@@ -2900,10 +2901,12 @@ BEGIN
        FOR UPDATE OF attempt;
     SELECT current_registration.registration_revision,
            registration.runner_id,
-           registered.effect_class
+           registered.effect_class,
+           registered.permission_kind
       INTO current_registration_revision,
            current_registration_runner,
-           registered_effect
+           registered_effect,
+           registered_permission
       FROM runner_current_registration AS current_registration
       JOIN runner_registration AS registration
         ON registration.enrollment_id =
@@ -3063,6 +3066,24 @@ BEGIN
     THEN
         RAISE EXCEPTION
             'session-policy lease admission requires confirmed approval provenance'
+            USING ERRCODE = '23514';
+    END IF;
+    -- A profileless Confirm declaration accepts only an owner-command
+    -- decision or the frozen session blanket. Policy-auto provenance would
+    -- bypass the confirmation the daemon-authoritative declaration records.
+    IF NEW.credential_profile_name IS NULL
+       AND registered_permission = 'confirm'
+       AND NOT EXISTS (
+            SELECT 1
+              FROM tool_approval_decision AS approval
+             WHERE approval.request_id = attempted_request
+               AND approval.decision_kind = 'approve'
+               AND approval.decision_source
+                    IN ('owner_command', 'session_blanket')
+       )
+    THEN
+        RAISE EXCEPTION
+            'profileless confirm lease admission requires confirmed approval provenance'
             USING ERRCODE = '23514';
     END IF;
     IF EXISTS (

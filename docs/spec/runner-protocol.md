@@ -461,7 +461,10 @@ credential-value or generic payload column. A stored grant preserves an explicit
 profile approval exactly; only a genuinely absent policy pair may use the
 session-policy fallback. Truncation of immutable grant audit evidence is
 rejected. Lease insertion joins the current unrevoked grant and exact
-tool/profile pair atomically with dispatch authorization (INV-035, INV-045).
+tool/profile pair atomically with dispatch authorization, and durable admission
+requires confirmed approval provenance — an owner-command decision or the frozen
+session blanket — for a session-policy pair and for a profileless `Confirm`
+declaration alike, even for a direct lease-row insert (INV-035, INV-045).
 
 ## Workspace provisioning
 
