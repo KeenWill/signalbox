@@ -72,9 +72,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         fixtures::THREAD_ID
     };
-    emit(&format!(
-        r#"{{"type":"thread.started","thread_id":"{thread_id}"}}"#
-    ));
+    if scenario == "credential_split_across_thread_started_field" {
+        // A drifted thread.started carries an additive credential marker beyond
+        // the thread id.
+        emit(&format!(
+            r#"{{"type":"thread.started","thread_id":"{thread_id}","diagnostic":"Authorization:"}}"#
+        ));
+    } else {
+        emit(&format!(
+            r#"{{"type":"thread.started","thread_id":"{thread_id}"}}"#
+        ));
+    }
     emit(r#"{"type":"turn.started"}"#);
     if let Some(violation) = fixtures::strict_schema_violation(&output_schema) {
         // The live API rejects a non-strict output schema before producing
@@ -180,6 +188,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &format!(" {}", fixtures::SENSITIVE_SPLIT_AUTHORIZATION),
                 r#"{"outcome":"completed","text":"Authorization:","tool_calls":[]}"#,
             );
+            completed();
+        }
+        "credential_split_across_thread_started_field" => {
+            // thread.started (with the additive `diagnostic` marker above)
+            // then the value in the final text.
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "two_independent_sibling_markers" => {
+            // Two independent object fields each end in a distinct credential
+            // marker; a following value could complete either, so the single
+            // dropped chain fails closed.
+            emit(
+                r#"{"type":"item.completed","item":{"id":"two","type":"future_item","a_field":"api_","z_field":"refresh_tok"}}"#,
+            );
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "streamed_empty_final_text_with_held_credential" => {
+            // A streamed reasoning delta holds a complete credential token, so
+            // `redact_terminal_failure_text("")` returns `[redacted]` for the
+            // empty final text; with no text delta and no tools, the empty
+            // completion must fail closed as unintelligible, not surface as a
+            // contentless Completed.
+            reasoning("reason-held", fixtures::SENSITIVE_SPLIT_STREAM_TOKEN);
+            envelope(r#"{"outcome":"completed","text":"","tool_calls":[]}"#);
             completed();
         }
         "credential_split_across_sibling_object_fields" => {

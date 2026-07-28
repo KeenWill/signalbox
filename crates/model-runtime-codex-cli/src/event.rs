@@ -117,11 +117,26 @@ impl<C: Clone> EventDecoder<C> {
         }
         match event_type {
             "thread.started" => {
-                let event: ThreadStarted = decode(value)?;
+                let event: ThreadStarted = decode(value.clone())?;
                 if event.thread_id.is_empty() || self.exchange.provider_request_id.is_some() {
                     return Err(DecodeFailure::new(
                         "thread.started carries an empty or duplicate thread id",
                     ));
+                }
+                // A drifted thread.started can carry additive provider-controlled
+                // fields beyond `thread_id`; fold their uninterpreted content
+                // into the lookbehind (the `thread_id` itself is separately
+                // sanitized and seeded below), as for turn.started, lifecycle,
+                // and unknown events.
+                if let Value::Object(fields) = &value {
+                    let mut units = Vec::new();
+                    for (key, field) in fields {
+                        if matches!(key.as_str(), "type" | "thread_id") {
+                            continue;
+                        }
+                        collect_units(field, false, &mut units);
+                    }
+                    fold_dropped_units(sink, units.iter().map(String::as_str));
                 }
                 // Sanitized against the held lookbehind before the
                 // ExchangeEstablished observation (which flushes it), so a
@@ -329,13 +344,17 @@ impl<C: Clone> EventDecoder<C> {
     /// Folds a retained agent message (and its id) into the dropped lookbehind
     /// when it is displaced — by a later agent message or a failure terminal —
     /// so a credential marker ending it still governs the text that follows.
+    /// The message text and its id are a single chronological span, so they are
+    /// seeded by *precise* chaining (a benign message the streaming lookbehind
+    /// holds but no value completes flows unchanged) rather than the
+    /// fail-closed multi-unit path used for an unmodeled item's independent
+    /// object fields.
     fn fold_retained_agent_message(&mut self, sink: &mut RedactingSink<'_, C>) {
         if let Some(superseded) = self.agent_message.take() {
-            let mut units = vec![superseded.as_str()];
+            sink.extend_dropped_context(&superseded);
             if let Some(previous_id) = &self.message_id {
-                units.push(previous_id.as_str());
+                sink.extend_dropped_context(previous_id);
             }
-            seed_strongest_dropped(sink, units);
         }
     }
 
@@ -431,11 +450,33 @@ impl<C: Clone> EventDecoder<C> {
             // re-redaction of the raw text would miss a credential value whose
             // marker arrived in an earlier fragment.
             let captured = sink.take_terminal_text_capture();
-            if let Some(AssistantPart::Text(text)) = content
-                .iter_mut()
-                .find(|part| matches!(part, AssistantPart::Text(_)))
+            if let Some(index) = content
+                .iter()
+                .position(|part| matches!(part, AssistantPart::Text(_)))
             {
-                *text = captured;
+                // An empty capture means no final-text delta reached the caller
+                // (the raw text was empty, or fully held and never emitted); a
+                // provisional `[redacted]` text part — which a held credential
+                // makes `redact_terminal_failure_text("")` return, passing the
+                // decode-time non-empty check — must not survive as empty
+                // completion material. Drop it and re-check that some material
+                // remains, so an otherwise-empty completion fails closed as
+                // ResponseUnintelligible rather than a contentless Completed.
+                if captured.is_empty() {
+                    content.remove(index);
+                } else {
+                    content[index] = AssistantPart::Text(captured);
+                }
+            }
+            if content.is_empty() && self.output_contract_name.is_none() {
+                return boundary_loss(
+                    self.exchange,
+                    self.usage,
+                    LossCause::ResponseUnintelligible {
+                        detail: "streamed response envelope carries no completion material"
+                            .to_string(),
+                    },
+                );
             }
         }
 
@@ -708,31 +749,33 @@ fn collect_string_leaves<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 
 /// Folds dropped provider content (an unsupported completed item, an ignored
 /// lifecycle or unknown event, an additive field on a known event) into the
-/// redaction lookbehind by seeding its strongest credential unit.
+/// redaction lookbehind.
 fn fold_dropped_value<C: Clone>(sink: &mut RedactingSink<'_, C>, value: &Value, is_root: bool) {
     let mut units = Vec::new();
     collect_units(value, is_root, &mut units);
-    seed_strongest_dropped(sink, units.iter().map(String::as_str));
+    fold_dropped_units(sink, units.iter().map(String::as_str));
 }
 
-/// Seeds the credential unit whose trailing credential context is strongest
-/// (longest) as dropped context. The units are independent — a following value
-/// is suppressed by *any* active marker among them — so seeding the strongest
-/// suffices, while choosing the longest keeps a real marker (`api_`) from being
-/// shadowed by a trivial prefix (a benign word ending in a marker's first
-/// letter). Precise seeding, not fail-closed, so a benign prefix no value
-/// completes flows unchanged (the keepalive flood among unknown events, for
-/// example, is not suppressed).
-fn seed_strongest_dropped<'a, C: Clone>(
+/// Seeds independent dropped credential units into the lookbehind. The
+/// sink holds one dropped chain, so exactly one live marker unit is seeded
+/// precisely (a benign prefix no value completes then flows unchanged, keeping
+/// the keepalive flood among unknown events from being suppressed). When two or
+/// more *independent* units each end in an unterminated credential candidate,
+/// a following value could complete any one of them and the single chain
+/// cannot track them all, so the sink fails closed. Units with no credential
+/// candidate are ignored.
+fn fold_dropped_units<'a, C: Clone>(
     sink: &mut RedactingSink<'_, C>,
     units: impl IntoIterator<Item = &'a str>,
 ) {
-    if let Some(strongest) = units
+    let markers: Vec<&str> = units
         .into_iter()
-        .max_by_key(|unit| trailing_credential_context(unit).len())
-        && !trailing_credential_context(strongest).is_empty()
-    {
-        sink.extend_dropped_context(strongest);
+        .filter(|unit| !trailing_credential_context(unit).is_empty())
+        .collect();
+    match markers.as_slice() {
+        [] => {}
+        [only] => sink.extend_dropped_context(only),
+        _ => sink.suppress_remaining(),
     }
 }
 
