@@ -32,9 +32,11 @@ session has no per-turn projection switch.
 
 Version seventeen adds explicit session compaction with an optional through
 position and an automatic pre-call guard. Each catalog selection declares a
-nonzero context-window token limit; the daemon never guesses one. Summary
-production uses the selection's ordinary provider target in a separate call and
-a required deployment-configured compaction prompt beside the model catalog.
+nonzero context-window token limit; the daemon never guesses one. The guard
+reserves the selection's complete configured maximum output in addition to the
+provider-counted rendered input. Summary production uses the selection's
+ordinary provider target in a separate call and a required deployment-configured
+compaction prompt beside the model catalog.
 
 **Rejected alternatives.** Deleting, replacing, or rewriting earlier entries: it
 destroys durable truth. Recording only summary text: it loses producing-call,
@@ -47,8 +49,9 @@ truth.
 **Affects.** [sessions-and-transcript](spec/sessions-and-transcript.md),
 [model-call-execution](spec/model-call-execution.md),
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md),
-migration `202607290401_context_compaction.sql`, model-catalog configuration,
-and process protocol version seventeen.
+migrations `202607290401_context_compaction.sql` and
+`202607290402_context_compaction_command.sql`, model-catalog configuration, and
+process protocol version seventeen.
 
 ## 2026-07-27 — Drop empty thinking parts instead of failing completions closed
 

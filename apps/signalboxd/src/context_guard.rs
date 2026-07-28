@@ -204,10 +204,9 @@ where
                     .render(tools.definitions())
                     .map_err(ContextGuardedTurnPassError::Render)?;
                 let target = operation.request().call().target();
-                let context_window = runtime_models
+                let model = runtime_models
                     .resolve(target)
-                    .ok_or(ContextGuardedTurnPassError::ContextWindowUnavailable)?
-                    .context_window_tokens();
+                    .ok_or(ContextGuardedTurnPassError::ContextWindowUnavailable)?;
                 let input_tokens = match counter
                     .count_input_tokens(operation, std::future::pending())
                     .await
@@ -218,7 +217,10 @@ where
                         return Err(ContextGuardedTurnPassError::CountCancelled);
                     }
                 };
-                if input_tokens > u64::from(context_window) {
+                let requested_tokens = input_tokens
+                    .checked_add(u64::from(model.max_output_tokens()))
+                    .ok_or(ContextGuardedTurnPassError::ContextStillExceeded)?;
+                if requested_tokens > u64::from(model.context_window_tokens()) {
                     if compacted {
                         return Err(ContextGuardedTurnPassError::ContextStillExceeded);
                     }

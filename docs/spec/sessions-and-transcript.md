@@ -609,10 +609,11 @@ the ordered subset the selected model sees.
 
 Explicit compaction chooses an optional through position, defaulting to the
 latest safe boundary. The daemon also compacts before an ordinary model send
-when that call's rendered input would exceed the current selection's declared
-context window. Both paths use the required deployment-configured compaction
-prompt and the session's current direct selection. Trigger and configuration
-mechanics are owned by [model-call-execution](model-call-execution.md).
+when that call's rendered input plus its full configured output-token
+reservation would exceed the current selection's declared context window. Both
+paths use the required deployment-configured compaction prompt and the session's
+current direct selection. Trigger and configuration mechanics are owned by
+[model-call-execution](model-call-execution.md).
 
 ### When entries come to exist
 

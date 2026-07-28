@@ -39,6 +39,9 @@ pub(crate) const CONTEXT_COMPACTION_SESSION: &str = "SELECT current.current_vers
           WHERE session.session_id = $1
           FOR UPDATE OF session";
 
+pub(crate) const CONTEXT_COMPACTION_LIFECYCLE_SESSION: &str =
+    "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
+
 pub(crate) const SUBMIT_INPUT_SESSION: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 

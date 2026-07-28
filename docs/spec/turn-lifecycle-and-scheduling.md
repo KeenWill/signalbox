@@ -491,7 +491,12 @@ startup scan recovers its exactly correlated pending command: Prepared
 terminalizes `KnownFailed`, InFlight terminalizes `Ambiguous`, the command
 becomes failed, and neither branch creates a summary or result frontier. A
 terminal non-completed call remains historical recovery evidence without a
-summary or result. Unreferenced snapshots and compaction records fail closed.
+summary or result. Live authorization and terminalization serialize on the
+session row and exactly replay an already-landed transition after an ambiguous
+commit. The same lock serializes a pre-version-seventeen `SubmitInput` mutation:
+a summary committed ahead of that waiter makes the authoritative transaction
+return the version-seventeen requirement and roll back its tentative command
+claim. Unreferenced snapshots and compaction records fail closed.
 
 The exact historical start law remains closed. Its prefix is either the
 immediate predecessor's terminal snapshot (or the imported seed for the first

@@ -20,7 +20,8 @@ PR #265 (`agent/tool-batch-tier0`). The failed tool-attempt telemetry fields
 were verified through PR #285 (`agent/dev-instance-code-host-credential`). The
 current command/telemetry identity-generation, command-family, and
 ambiguity-ownership inventory was verified through PR #288
-(`agent/audit-fix-docs-coherence`).
+(`agent/audit-fix-docs-coherence`); the context-compaction command lifecycle was
+verified against `agent/context-compaction-protocol`.
 
 ## Identity model
 
@@ -175,25 +176,26 @@ All claimed command identifiers live in one owner-global, append-only
 `durable_command` registry (migration `202607180001` and successors): primary
 key `command_id`, a closed `command_kind` discriminator (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
-`replace_session_metadata`, `submit_input`, `decide_tool_request`), a
-kind-scoped `storage_version`, and `claimed_at` (`transaction_timestamp()`),
-which is non-semantic operational metadata. No command kind, session, or client
-has a separate command-ID namespace.
+`replace_session_metadata`, `submit_input`, `decide_tool_request`,
+`review_workflow`, `compact_session`), a kind-scoped `storage_version`, and
+`claimed_at` (`transaction_timestamp()`), which is non-semantic operational
+metadata. No command kind, session, or client has a separate command-ID
+namespace.
 
-Each admitted kind has one purpose-specific typed record family
-(`create_session_command`, `create_session_from_imported_frontier_command`,
-`replace_session_defaults_command`, `replace_session_metadata_command`,
-`submit_input_command`, `decide_tool_request_command`) keyed one-to-one by
-`command_id`, storing every caller-supplied semantic field, the terminal
-`applied`/`rejected` result discriminator, and the typed result fields, all
-under `CHECK` constraints and foreign keys. Kind and version agreement between
-the registry row and its typed record is enforced by a composite foreign key,
-and a deferred constraint trigger (`durable_command_requires_typed_record`,
-executing function `require_durable_command_typed_record`) requires exactly one
-typed record per claim at every transaction boundary. Why: typed relational
-records keep each command's comparison payload and result reviewable and
-constraint-checked instead of delegating meaning to a serializer; there is no
-universal JSONB or byte-blob payload anywhere.
+Each admitted kind has one purpose-specific typed record family, including
+`compact_session_command`, keyed one-to-one by `command_id`, storing every
+caller-supplied semantic field and the kind's closed result or effect-lifecycle
+fields under `CHECK` constraints and foreign keys. A compact-session record
+begins `pending` with its exact dedicated Prepared call, then changes exactly
+once to `applied` with its receipt or to `failed`; its request fields never
+change. Kind and version agreement between the registry row and its typed record
+is enforced by a composite foreign key, and a deferred constraint trigger
+(`durable_command_requires_typed_record`, executing function
+`require_durable_command_typed_record`) requires exactly one typed record per
+claim at every transaction boundary. Why: typed relational records keep each
+command's comparison payload and result reviewable and constraint-checked
+instead of delegating meaning to a serializer; there is no universal JSONB or
+byte-blob payload anywhere.
 
 For `SubmitInput`, each terminal command result must correlate with exactly its
 committed domain effects. Equal replay returns the recorded result only after
@@ -239,24 +241,27 @@ every caller-supplied semantic field and excludes `DurableCommandId`. Why: the
 identifier is the lookup key that names the payload, not part of the meaning it
 names.
 
-Every command repository (`crates/persistence/src/create_session.rs`,
-`create_session_from_imported_frontier.rs`, `replace_session_defaults.rs`,
-`session_metadata.rs`, `submit_input.rs`, and the decision path in
-`tool_loop.rs`) follows one claim protocol, with registry lookup as the first
-durable operation, before any current-state validation (INV-012):
+Every command repository, including
+`crates/persistence/src/context_compaction.rs`, follows one claim protocol, with
+registry lookup as the first durable operation, before any current-state
+validation (INV-012):
 
 1. Inspect the registry. If the identifier is claimed by the same kind, load and
-   reconstruct the recorded typed payload and result through domain-owned
-   reconstitution, compare structurally, and roll back: equal replay returns the
-   recorded terminal result; any difference — including a different kind — is
-   conflicting reuse, returned without disturbing the recorded meaning.
+   reconstruct the recorded typed payload and closed result or lifecycle,
+   compare structurally, and roll back: equal replay returns the recorded
+   terminal result or exact pending disposition; any difference — including a
+   different kind — is conflicting reuse, returned without disturbing the
+   recorded meaning.
 2. If unclaimed, `INSERT ... ON CONFLICT DO NOTHING` claims the registry row. A
    lost race re-inspects and resolves against the winner's committed record; a
    winner row that cannot then be read is corruption.
-3. First handling commits the registry row, the typed payload record, the
-   terminal result, and every applied domain effect in one transaction. No
-   applied result is returned before commit, and a failed transaction claims no
-   identifier.
+3. A single-transaction command's first handling commits the registry row, typed
+   payload record, terminal result, and every applied domain effect together.
+   Compaction instead commits the claim, pending typed record, and Prepared
+   dedicated call together; its later session-locked transaction records the
+   terminal call evidence, summary/result and applied receipt, or the failed
+   disposition. No applied result is returned before its transaction commits,
+   and a failed claim transaction claims no identifier.
 
 After registry inspection and before claiming an unseen identifier, a command
 may perform an owner-specified pre-claim admission read.
@@ -273,15 +278,21 @@ against the winner's committed state and records the re-derived rejection as the
 terminal result; a CAS lost without a version change is corruption
 (`crates/persistence/src/replace_session_defaults.rs`).
 
-Each application service calls its atomic transaction port exactly once and
-surfaces infrastructure failure to its caller without retry or receipt
-reconstruction (the `CreateSessionTransaction` contract in
+Each single-transaction application service calls its atomic transaction port
+exactly once and surfaces infrastructure failure to its caller without retry or
+receipt reconstruction (the `CreateSessionTransaction` contract in
 `crates/application/src/create_session.rs`, the
 `CreateSessionFromImportedFrontierTransaction` contract, and the corresponding
 transaction-failure tests in all six services, including
 `decide_service_returns_transaction_failure_without_retry`). Because a failed
 transaction claims no identifier, retransmitting under the same
 `DurableCommandId` is the caller's retry path and replays or claims cleanly.
+Compaction's off-transaction provider effect is the deliberate exception: its
+runtime retries authorization and terminal persistence after database or
+ambiguous-commit outcomes, while the repository rereads and exactly replays an
+already-landed transition. This retains one successful summary until its durable
+receipt is known instead of issuing another provider call.
+
 Every repository also treats an unreadable claimed payload or result as typed
 corruption rather than unclaimed state, including the imported-frontier command.
 

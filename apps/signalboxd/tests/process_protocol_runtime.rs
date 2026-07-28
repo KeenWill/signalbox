@@ -28,15 +28,15 @@ use signalbox_application::{
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
-    ActiveTurnPhase, AssistantResponsePart, AssistantText, ContextCompactionId, ContextFrontierId,
-    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities,
-    ImportedConversationFormat, ImportedConversationId, ImportedSessionRelationship,
-    ImportedTranscriptEntryId, InitialToolApproval, ModelCallId, ModelCallTerminalIdentities,
-    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionRequest,
-    ModelTargetCatalog, NormalizedToolArguments, ProviderModelIdentity, ResolvedProviderTarget,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionId, ToolCallProposal, ToolName, ToolRequestId, ToolResponsePartIdentity,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId,
+    ActiveTurnPhase, AssistantResponsePart, AssistantText, ContextCompactionId,
+    ContextCompactionTokenUsage, ContextFrontierId, DirectModelSelection, DurableCommandId,
+    FailedModelCallTurnIdentities, ImportedConversationFormat, ImportedConversationId,
+    ImportedSessionRelationship, ImportedTranscriptEntryId, InitialToolApproval, ModelCallId,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments, ProviderModelIdentity,
+    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, ToolCallProposal, ToolName, ToolRequestId,
+    ToolResponsePartIdentity, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId,
 };
 use signalbox_model_provider_runtime::{RuntimeContextCompactionModel, RuntimeModelCallProvider};
 use signalbox_model_runtime::{
@@ -48,8 +48,8 @@ use signalbox_model_runtime::{
 };
 use signalbox_persistence::{
     context_compaction::{
-        ContextCompactionRepository, PrepareContextCompactionOutcome,
-        PrepareContextCompactionRequest,
+        ContextCompactionRepository, FailedContextCompactionDisposition,
+        PrepareContextCompactionOutcome, PrepareContextCompactionRequest,
     },
     conversation_import::ImportedConversationRepository,
     create_session_from_imported_frontier::ImportedSessionRepository,
@@ -877,6 +877,69 @@ async fn wait_for_turn_settle(pool: &PgPool, session: SessionId, turn: TurnId, s
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+async fn seed_completed_compaction_session(
+    runtime: &mut RunningRuntime,
+) -> Result<(Connection, CanonicalUuid), Box<dyn Error>> {
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, turn) = submit_first_input(
+        &mut connection,
+        session_id,
+        String::from("compaction transaction fixture input"),
+    )
+    .await?;
+    let model = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "compaction transaction fixture response",
+        TokenUsage::unreported(),
+    ));
+    let probe = execute_streamed_turn(runtime, model, session_id, turn).await?;
+    assert_eq!(probe.received_operations().len(), 1);
+    Ok((connection, session_id))
+}
+
+fn direct_compaction_request(
+    session_id: CanonicalUuid,
+    command_id: DurableCommandId,
+    requested_through_position: Option<u64>,
+    identity_base: u128,
+) -> PrepareContextCompactionRequest {
+    PrepareContextCompactionRequest {
+        command: command_id,
+        session: SessionId::from_uuid(session_id.into_uuid()),
+        requested_through_position,
+        automatic_for_turn: None,
+        defaults_version: SessionConfigurationDefaultsVersion::first(),
+        selection: DirectModelSelection::from_uuid(Uuid::from_u128(1)),
+        target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+            3,
+        ))),
+        credential_reference: String::from("synthetic-compaction-transaction-credential"),
+        call: ModelCallId::from_uuid(Uuid::from_u128(identity_base)),
+        compaction: ContextCompactionId::from_uuid(Uuid::from_u128(identity_base + 1)),
+        summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(identity_base + 2)),
+        result_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(identity_base + 3)),
+    }
+}
+
+async fn blocked_backend_count_reached(pool: &PgPool, minimum: i64) -> bool {
+    for _ in 0..400 {
+        let blocked: i64 = sqlx::query_scalar(
+            "SELECT count(*)
+               FROM pg_stat_activity
+              WHERE cardinality(pg_blocking_pids(pid)) > 0",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or_default();
+        if blocked >= minimum {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
 }
 
 async fn execute_streamed_turn(
@@ -5067,8 +5130,209 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     runtime.stop().await
 }
 
+/// INV-012 / INV-014 / INV-015: exact authorization, completion, and failure
+/// retries replay their durable outcomes without duplicate summary evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv012_inv014_inv015_compaction_lifecycle_retries_are_exact() -> Result<(), Box<dyn Error>>
+{
+    let mut runtime = RunningRuntime::start().await?;
+    let (connection, session_id) = seed_completed_compaction_session(&mut runtime).await?;
+    let repository = ContextCompactionRepository::new(runtime.pool.clone());
+    let completed_outcome = repository
+        .prepare(direct_compaction_request(
+            session_id,
+            DurableCommandId::from_uuid(Uuid::from_u128(0xdd01)),
+            None,
+            0xdd02,
+        ))
+        .await?;
+    let PrepareContextCompactionOutcome::Prepared(completed) = completed_outcome else {
+        panic!("the completion replay fixture must prepare its call");
+    };
+    repository.authorize(&completed).await?;
+    repository.authorize(&completed).await?;
+    let usage = ContextCompactionTokenUsage::unreported()
+        .with_input_tokens(Some(13))
+        .with_output_tokens(Some(5));
+    let first = repository
+        .complete(&completed, "exact retained summary", usage)
+        .await?;
+    let replay = repository
+        .complete(&completed, "exact retained summary", usage)
+        .await?;
+    assert_eq!(replay, first);
+    let summary_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1
+            AND semantic_entry_id = $2
+            AND payload_kind = 'context_summary'",
+    )
+    .bind(session_id.into_uuid())
+    .bind(first.summary_entry.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(summary_count, 1);
+
+    let failed_outcome = repository
+        .prepare(direct_compaction_request(
+            session_id,
+            DurableCommandId::from_uuid(Uuid::from_u128(0xdd10)),
+            None,
+            0xdd11,
+        ))
+        .await?;
+    let PrepareContextCompactionOutcome::Prepared(failed) = failed_outcome else {
+        panic!("the failure replay fixture must prepare its call");
+    };
+    repository
+        .fail(&failed, FailedContextCompactionDisposition::KnownFailed)
+        .await?;
+    repository
+        .fail(&failed, FailedContextCompactionDisposition::KnownFailed)
+        .await?;
+    let failed_state = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT call.state_kind, call.terminal_disposition_kind, command.result_kind
+           FROM context_compaction_model_call AS call
+           JOIN compact_session_command AS command
+             ON command.model_call_id = call.model_call_id
+            AND command.session_id = call.session_id
+          WHERE call.model_call_id = $1",
+    )
+    .bind(failed.call().into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(
+        failed_state,
+        (
+            String::from("terminal"),
+            String::from("known_failed"),
+            String::from("failed"),
+        )
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-012: concurrent reuse of one owner-global command identity elects one
+/// claimant and makes the loser inspect the committed winner exactly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv012_concurrent_compaction_command_claim_has_one_winner() -> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let (connection, session_id) = seed_completed_compaction_session(&mut runtime).await?;
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xde01));
+    let left_repository = ContextCompactionRepository::new(runtime.pool.clone());
+    let right_repository = left_repository.clone();
+    let left_request = direct_compaction_request(session_id, command_id, None, 0xde10);
+    let right_request = direct_compaction_request(session_id, command_id, Some(1), 0xde20);
+    let (left, right) = tokio::join!(
+        left_repository.prepare(left_request),
+        right_repository.prepare(right_request),
+    );
+    let left = left?;
+    let right = right?;
+    assert!(
+        matches!(left, PrepareContextCompactionOutcome::Prepared(_))
+            && matches!(right, PrepareContextCompactionOutcome::ConflictingReuse)
+            || matches!(left, PrepareContextCompactionOutcome::ConflictingReuse)
+                && matches!(right, PrepareContextCompactionOutcome::Prepared(_))
+    );
+    let claim_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+            .bind(command_id.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(claim_count, 1);
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-012 / INV-014: compaction completion and a legacy submit serialize on
+/// the session row, so a queued version-sixteen submit observes the summary,
+/// refuses it, and rolls back its command claim.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv012_inv014_compaction_boundary_serializes_legacy_submit_gate()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let (connection, session_id) = seed_completed_compaction_session(&mut runtime).await?;
+    let repository = ContextCompactionRepository::new(runtime.pool.clone());
+    let outcome = repository
+        .prepare(direct_compaction_request(
+            session_id,
+            DurableCommandId::from_uuid(Uuid::from_u128(0xdf01)),
+            None,
+            0xdf10,
+        ))
+        .await?;
+    let PrepareContextCompactionOutcome::Prepared(prepared) = outcome else {
+        panic!("the serialized gate fixture must prepare its call");
+    };
+    repository.authorize(&prepared).await?;
+    let mut holder = runtime.pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(session_id.into_uuid())
+        .fetch_one(&mut *holder)
+        .await?;
+    let completion_repository = repository.clone();
+    let completion_prepared = prepared.clone();
+    let completion = tokio::spawn(async move {
+        completion_repository
+            .complete(
+                &completion_prepared,
+                "serialized boundary summary",
+                ContextCompactionTokenUsage::unreported(),
+            )
+            .await
+    });
+    assert!(blocked_backend_count_reached(&runtime.pool, 1).await);
+    let gated_command = command()?;
+    let mut legacy = Connection::connect(runtime.socket()).await?;
+    legacy
+        .request_version(
+            ProtocolVersion::Sixteen,
+            90,
+            ClientRequest::SubmitInput {
+                command_id: gated_command,
+                session_id,
+                content: InputContent::new(String::from("legacy race must remain unclaimed")),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
+            },
+        )
+        .await?;
+    let response = tokio::spawn(async move {
+        response_within(&mut legacy)
+            .await
+            .map_err(|error| error.to_string())
+    });
+    assert!(blocked_backend_count_reached(&runtime.pool, 2).await);
+    holder.rollback().await?;
+    let applied = completion.await??;
+    assert_eq!(applied.summary_entry, prepared.summary_entry());
+    let response = response.await?.map_err(io::Error::other)?;
+    assert_eq!(
+        protocol_error_code(response.message()),
+        ErrorCode::UnsupportedVersion
+    );
+    let claim_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+            .bind(gated_command.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(claim_count, 0);
+
+    drop(connection);
+    runtime.stop().await
+}
+
 /// S01 / S03 / INV-014 / INV-015: an exact provider-native count above the
-/// operator-declared context window compacts before activation, recounts the
+/// input plus its reserved maximum output above the operator-declared context
+/// window compacts before activation, recounts the
 /// projected summary-plus-suffix input, and sends only that fitting operation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
@@ -5108,10 +5372,14 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
         )
         .await?;
     let second_turn = accepted_successor_turn(&mut successor, session_id, 2).await?;
-    let guarded_configuration = HubModelConfiguration::parse(&MODEL_CONFIGURATION.replace(
-        "context_window_tokens = 200000",
-        "context_window_tokens = 4",
-    ))?;
+    let guarded_configuration = HubModelConfiguration::parse(
+        &MODEL_CONFIGURATION
+            .replace("max_output_tokens = 256", "max_output_tokens = 1")
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 5",
+            ),
+    )?;
     let ordinary_runtime = RecordingCountedScriptedModel::following(
         [completed_script(
             "fixture-model",
@@ -5233,10 +5501,14 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
         )
         .await?;
     let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
-    let guarded_configuration = HubModelConfiguration::parse(&MODEL_CONFIGURATION.replace(
-        "context_window_tokens = 200000",
-        "context_window_tokens = 4",
-    ))?;
+    let guarded_configuration = HubModelConfiguration::parse(
+        &MODEL_CONFIGURATION
+            .replace("max_output_tokens = 256", "max_output_tokens = 1")
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 5",
+            ),
+    )?;
     let ordinary_runtime =
         RecordingCountedScriptedModel::following(std::iter::empty::<Script>(), [40, 40, 40]);
     let ordinary_probe = ordinary_runtime.clone();

@@ -4775,6 +4775,9 @@ async fn finish_optional_commit<T>(
 fn map_scheduling_error(error: SubmitInputRepositoryError) -> ModelCallRepositoryError {
     match error {
         SubmitInputRepositoryError::Database(error) => error.into(),
+        SubmitInputRepositoryError::ContextSummaryRequiresProtocolVersion17 => {
+            ModelCallCorruption::Inconsistent("origin context-summary version gate").into()
+        }
         SubmitInputRepositoryError::CommitAmbiguous(error) => {
             ModelCallRepositoryError::from_database(error, true)
         }

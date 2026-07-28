@@ -271,11 +271,40 @@ impl ContextCompactionRepository {
     }
 
     /// Commits InFlight before any provider interaction begins.
+    ///
+    /// An exact InFlight replay proves that an earlier ambiguous commit landed,
+    /// so the caller may continue to provider interaction without abandoning an
+    /// authorized but unsent call.
     pub async fn authorize(
         &self,
         prepared: &PreparedContextCompaction,
     ) -> Result<(), ContextCompactionRepositoryError> {
         let mut transaction = self.pool.begin().await?;
+        lock_lifecycle_session(&mut transaction, prepared.session).await?;
+        let state: String = sqlx::query_scalar(
+            "SELECT state_kind
+               FROM context_compaction_model_call
+              WHERE model_call_id = $1
+                AND session_id = $2",
+        )
+        .bind(prepared.call.into_uuid())
+        .bind(session_id_to_uuid(prepared.session))
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(ContextCompactionCorruption::Missing(
+            "compaction model call",
+        ))?;
+        if state == "in_flight" {
+            transaction.rollback().await?;
+            return Ok(());
+        }
+        if state != "prepared" {
+            transaction.rollback().await?;
+            return Err(ContextCompactionCorruption::Inconsistent(
+                "compaction call authorization state",
+            )
+            .into());
+        }
         let rows = sqlx::query(
             "UPDATE context_compaction_model_call
                 SET state_kind = 'in_flight'
@@ -297,6 +326,9 @@ impl ContextCompactionRepository {
 
     /// Atomically records successful call evidence, summary, result frontier,
     /// compaction provenance, and replay receipt.
+    ///
+    /// Repeating the exact completion after an ambiguous commit validates and
+    /// returns its first durable result without appending duplicate evidence.
     pub async fn complete(
         &self,
         prepared: &PreparedContextCompaction,
@@ -307,6 +339,37 @@ impl ContextCompactionRepository {
             return Err(ContextCompactionCorruption::InvalidSummary.into());
         }
         let mut transaction = self.pool.begin().await?;
+        lock_lifecycle_session(&mut transaction, prepared.session).await?;
+        let lifecycle = load_lifecycle(&mut transaction, prepared).await?;
+        if lifecycle.call_state == "terminal" {
+            let exact = lifecycle.call_disposition.as_deref() == Some("completed")
+                && lifecycle.command_result == "applied"
+                && lifecycle.input_tokens == usage.input_tokens().map(Decimal::from)
+                && lifecycle.output_tokens == usage.output_tokens().map(Decimal::from)
+                && lifecycle.cache_creation_input_tokens
+                    == usage.cache_creation_input_tokens().map(Decimal::from)
+                && lifecycle.cache_read_input_tokens
+                    == usage.cache_read_input_tokens().map(Decimal::from)
+                && lifecycle.result_compaction == Some(prepared.compaction.into_uuid())
+                && lifecycle.result_through_position
+                    == Some(Decimal::from(prepared.through_position))
+                && lifecycle.result_summary_entry == Some(prepared.summary_entry.into_uuid())
+                && lifecycle.result_frontier == Some(prepared.result_frontier.into_uuid())
+                && exact_completed_evidence(&mut transaction, prepared, summary).await?;
+            transaction.rollback().await?;
+            if exact {
+                return Ok(prepared.applied());
+            }
+            return Err(
+                ContextCompactionCorruption::Inconsistent("completed compaction replay").into(),
+            );
+        }
+        if lifecycle.call_state != "in_flight" || lifecycle.command_result != "pending" {
+            transaction.rollback().await?;
+            return Err(
+                ContextCompactionCorruption::Inconsistent("compaction completion state").into(),
+            );
+        }
         let source_count: Decimal = sqlx::query_scalar(
             "SELECT member_count
                FROM context_frontier
@@ -454,12 +517,36 @@ impl ContextCompactionRepository {
     }
 
     /// Records one failed or uncertain dedicated call and failed command.
+    ///
+    /// Repeating the exact terminal disposition after an ambiguous commit is a
+    /// successful replay; a different terminal fact fails closed.
     pub async fn fail(
         &self,
         prepared: &PreparedContextCompaction,
         disposition: FailedContextCompactionDisposition,
     ) -> Result<(), ContextCompactionRepositoryError> {
         let mut transaction = self.pool.begin().await?;
+        lock_lifecycle_session(&mut transaction, prepared.session).await?;
+        let lifecycle = load_lifecycle(&mut transaction, prepared).await?;
+        if lifecycle.call_state == "terminal" {
+            let exact = lifecycle.call_disposition.as_deref() == Some(disposition.as_str())
+                && lifecycle.command_result == "failed";
+            transaction.rollback().await?;
+            if exact {
+                return Ok(());
+            }
+            return Err(
+                ContextCompactionCorruption::Inconsistent("failed compaction replay").into(),
+            );
+        }
+        if !matches!(lifecycle.call_state.as_str(), "prepared" | "in_flight")
+            || lifecycle.command_result != "pending"
+        {
+            transaction.rollback().await?;
+            return Err(
+                ContextCompactionCorruption::Inconsistent("compaction failure state").into(),
+            );
+        }
         let call_rows = sqlx::query(
             "UPDATE context_compaction_model_call
                 SET state_kind = 'terminal', terminal_disposition_kind = $1
@@ -492,6 +579,127 @@ impl ContextCompactionRepository {
             .await
             .map_err(ContextCompactionRepositoryError::commit)
     }
+}
+
+#[derive(Debug)]
+struct StoredContextCompactionLifecycle {
+    call_state: String,
+    call_disposition: Option<String>,
+    input_tokens: Option<Decimal>,
+    output_tokens: Option<Decimal>,
+    cache_creation_input_tokens: Option<Decimal>,
+    cache_read_input_tokens: Option<Decimal>,
+    command_result: String,
+    result_compaction: Option<Uuid>,
+    result_through_position: Option<Decimal>,
+    result_summary_entry: Option<Uuid>,
+    result_frontier: Option<Uuid>,
+}
+
+async fn lock_lifecycle_session(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session: SessionId,
+) -> Result<(), ContextCompactionRepositoryError> {
+    let exists =
+        sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::CONTEXT_COMPACTION_LIFECYCLE_SESSION)
+            .bind(session_id_to_uuid(session))
+            .fetch_optional(&mut **transaction)
+            .await?
+            .is_some();
+    if exists {
+        Ok(())
+    } else {
+        Err(ContextCompactionCorruption::Missing("compaction session").into())
+    }
+}
+
+async fn load_lifecycle(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    prepared: &PreparedContextCompaction,
+) -> Result<StoredContextCompactionLifecycle, ContextCompactionRepositoryError> {
+    let row = sqlx::query(
+        "SELECT call.state_kind, call.terminal_disposition_kind,
+                call.input_tokens, call.output_tokens,
+                call.cache_creation_input_tokens, call.cache_read_input_tokens,
+                command.result_kind, command.result_context_compaction_id,
+                command.result_through_position, command.result_summary_entry_id,
+                command.result_frontier_id
+           FROM context_compaction_model_call AS call
+           JOIN compact_session_command AS command
+             ON command.model_call_id = call.model_call_id
+            AND command.session_id = call.session_id
+          WHERE call.model_call_id = $1
+            AND call.session_id = $2
+            AND command.command_id = $3",
+    )
+    .bind(prepared.call.into_uuid())
+    .bind(session_id_to_uuid(prepared.session))
+    .bind(prepared.command.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(ContextCompactionCorruption::Missing("compaction lifecycle"))?;
+    Ok(StoredContextCompactionLifecycle {
+        call_state: row.try_get("state_kind")?,
+        call_disposition: row.try_get("terminal_disposition_kind")?,
+        input_tokens: row.try_get("input_tokens")?,
+        output_tokens: row.try_get("output_tokens")?,
+        cache_creation_input_tokens: row.try_get("cache_creation_input_tokens")?,
+        cache_read_input_tokens: row.try_get("cache_read_input_tokens")?,
+        command_result: row.try_get("result_kind")?,
+        result_compaction: row.try_get("result_context_compaction_id")?,
+        result_through_position: row.try_get("result_through_position")?,
+        result_summary_entry: row.try_get("result_summary_entry_id")?,
+        result_frontier: row.try_get("result_frontier_id")?,
+    })
+}
+
+async fn exact_completed_evidence(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    prepared: &PreparedContextCompaction,
+    summary: &str,
+) -> Result<bool, ContextCompactionRepositoryError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM semantic_transcript_entry AS entry
+               JOIN context_compaction AS compaction
+                 ON compaction.session_id = entry.source_session_id
+                AND compaction.summary_entry_id = entry.semantic_entry_id
+              WHERE entry.source_session_id = $1
+                AND entry.semantic_entry_id = $2
+                AND entry.payload_kind = 'context_summary'
+                AND entry.context_summary_value = $3
+                AND entry.context_summary_producing_call_id = $4
+                AND entry.context_summary_first_source_session_id = $5
+                AND entry.context_summary_first_entry_id = $6
+                AND entry.context_summary_through_source_session_id = $7
+                AND entry.context_summary_through_entry_id = $8
+                AND compaction.context_compaction_id = $9
+                AND compaction.predecessor_compaction_id IS NOT DISTINCT FROM $10
+                AND compaction.source_frontier_id = $11
+                AND compaction.result_frontier_id = $12
+                AND compaction.producing_call_id = $4
+                AND compaction.first_source_session_id = $5
+                AND compaction.first_entry_id = $6
+                AND compaction.through_source_session_id = $7
+                AND compaction.through_entry_id = $8
+         )",
+    )
+    .bind(session_id_to_uuid(prepared.session))
+    .bind(prepared.summary_entry.into_uuid())
+    .bind(summary)
+    .bind(prepared.call.into_uuid())
+    .bind(session_id_to_uuid(prepared.first.source_session()))
+    .bind(prepared.first.entry().into_uuid())
+    .bind(session_id_to_uuid(prepared.through.source_session()))
+    .bind(prepared.through.entry().into_uuid())
+    .bind(prepared.compaction.into_uuid())
+    .bind(prepared.predecessor.map(ContextCompactionId::into_uuid))
+    .bind(prepared.source_frontier.into_uuid())
+    .bind(prepared.result_frontier.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(Into::into)
 }
 
 impl PreparedContextCompaction {
@@ -533,8 +741,45 @@ async fn prepare_in_transaction(
             return Ok((false, PrepareContextCompactionOutcome::FailedReplay));
         }
     }
-    // Lock inventory: the target session row is the first and only explicit
-    // row lock. Guarded updates and inserts provide later serialization.
+    let claimed = sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'compact_session', 1, clock_timestamp())
+         ON CONFLICT (command_id) DO NOTHING",
+    )
+    .bind(request.command.into_uuid())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if claimed == 0 {
+        let winner = lookup_command_on_connection(
+            transaction,
+            request.command,
+            request.session,
+            request.requested_through_position,
+            request.automatic_for_turn,
+        )
+        .await?;
+        let outcome = match winner {
+            ContextCompactionCommandLookup::Replayed(applied) => {
+                PrepareContextCompactionOutcome::Replayed(applied)
+            }
+            ContextCompactionCommandLookup::ConflictingReuse => {
+                PrepareContextCompactionOutcome::ConflictingReuse
+            }
+            ContextCompactionCommandLookup::Pending => PrepareContextCompactionOutcome::Busy,
+            ContextCompactionCommandLookup::Failed => PrepareContextCompactionOutcome::FailedReplay,
+            ContextCompactionCommandLookup::Unseen => {
+                return Err(ContextCompactionCorruption::Inconsistent(
+                    "compaction command claim winner",
+                )
+                .into());
+            }
+        };
+        return Ok((false, outcome));
+    }
+    // Lock inventory: the target session row follows the owner-global command
+    // claim. Guarded updates and inserts provide later serialization.
     let current_version: Option<Decimal> =
         sqlx::query_scalar(crate::lock_inventory::CONTEXT_COMPACTION_SESSION)
             .bind(session_id_to_uuid(request.session))
@@ -664,14 +909,6 @@ async fn prepare_in_transaction(
         .map(|member| member.position)
         .collect::<Vec<_>>()
         .into_boxed_slice();
-    sqlx::query(
-        "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'compact_session', 1, clock_timestamp())",
-    )
-    .bind(request.command.into_uuid())
-    .execute(&mut **transaction)
-    .await?;
     sqlx::query(
         "INSERT INTO compact_session_command
             (command_id, command_kind, storage_version, session_id,

@@ -285,31 +285,37 @@ One append-only, owner-global `durable_command` registry claims every command
 identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
-`replace_session_metadata`, `submit_input`, `decide_tool_request`) and a
-kind-scoped `storage_version`. Defaults-bearing create, imported-create, and
-replace-defaults records write version 3; they reconstitute version 1 with the
-disabled dangerous-tool posture, and versions 1 and 2 with no system prompt — a
-pre-version-three row carrying one fails closed in both the schema and every
-Rust reader. Metadata, submit, and decision records use version 1. Each kind has
-one typed subordinate record keyed by `command_id` that stores every
-caller-supplied semantic field in typed, `CHECK`-constrained columns, plus the
-terminal `applied`/`rejected` result and its typed result fields; result-shape
-`CHECK` constraints tie each rejection kind to exactly its fields, and deferred
-reverse constraints require exactly one typed record per claimed registry row at
-commit. Why: typed per-kind records keep replay semantics reviewable and
-constraint-checked, where a universal serialized payload would make the
-serializer a second semantic authority.
+`replace_session_metadata`, `submit_input`, `decide_tool_request`,
+`review_workflow`, `compact_session`) and a kind-scoped `storage_version`.
+Defaults-bearing create, imported-create, and replace-defaults records write
+version 3; they reconstitute version 1 with the disabled dangerous-tool posture,
+and versions 1 and 2 with no system prompt — a pre-version-three row carrying
+one fails closed in both the schema and every Rust reader. Metadata, submit, and
+decision records use version 1. Each kind has one typed subordinate record keyed
+by `command_id` that stores every caller-supplied semantic field in typed,
+`CHECK`-constrained columns, plus the kind's closed result or lifecycle fields.
+Result-shape `CHECK` constraints tie each terminal kind to exactly its fields,
+and deferred reverse constraints require exactly one typed record per claimed
+registry row at commit. Why: typed per-kind records keep replay semantics
+reviewable and constraint-checked, where a universal serialized payload would
+make the serializer a second semantic authority.
 
 Adapter mechanics behind the shared protocol: registry inspection is the first
 durable operation, before any current-state read, and an unseen identifier is
 claimed with `INSERT ... ON CONFLICT DO NOTHING`, so duplicate concurrent
 submission is a database conflict rather than an application race and a
-concurrent loser rereads the winner. First handling commits the registry row,
-typed record, terminal result, and every domain effect in one transaction, with
-acknowledgement only after commit (INV-007); the stateful commands
-(`ReplaceSessionDefaults`, `SubmitInput`) prepare that result against locked
-current state inside the claim transaction, while `CreateSession` — which has no
-current session state to lock — arrives as an already-prepared
+concurrent loser rereads the winner. Compaction follows this protocol before its
+session-row lock; a losing insert inspects the committed command and returns its
+exact replay, conflict, pending, or failed disposition rather than proceeding
+with independently selected call identities. Commands whose complete effect is
+one transaction commit the registry row, typed record, terminal result, and
+every domain effect together, with acknowledgement only after commit (INV-007).
+Compaction instead commits its registry row, pending typed command, and Prepared
+dedicated call together before provider work; its later session-locked terminal
+transaction changes that command exactly once to applied or failed. The stateful
+commands (`ReplaceSessionDefaults`, `SubmitInput`) prepare their result against
+locked current state inside the claim transaction, while `CreateSession` — which
+has no current session state to lock — arrives as an already-prepared
 `PreparedCreateSession` value and is inserted after the claim
 (`create_session.rs`). Authoritative rejections claim the identifier and commit
 their typed record exactly as applied results do. Owner-specified pre-claim

@@ -876,6 +876,9 @@ async fn recover_context_compaction(
 fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartupScanRepositoryError {
     match error {
         SubmitInputRepositoryError::Database(error) => error.into(),
+        SubmitInputRepositoryError::ContextSummaryRequiresProtocolVersion17 => {
+            StartupScanCorruption::Inconsistent("origin context-summary version gate").into()
+        }
         SubmitInputRepositoryError::CommitAmbiguous(error) => {
             StartupScanRepositoryError::from_database(error, true)
         }

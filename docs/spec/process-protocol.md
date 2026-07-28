@@ -553,7 +553,11 @@ version-one-through-sixteen `read_transcript`, `follow_session`, or
 `submit_input` request targeting history that contains a context summary returns
 `unsupported_version` naming version seventeen before snapshot construction or
 mutation; version seventeen admits that entry without hiding any physical
-transcript member.
+transcript member. For `submit_input`, the quick read is repeated
+authoritatively under the same session lock as command handling. Equal
+claimed-command replay keeps precedence; an unseen legacy command racing a
+compaction either mutates before that compaction or observes the committed
+summary, returns this gate, and rolls back its tentative claim.
 
 Submitted `content` is limited to 1 MiB of UTF-8. The daemon applies that
 boundary before application construction or mutation and returns

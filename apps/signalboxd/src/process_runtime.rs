@@ -136,6 +136,7 @@ use tokio::{
 use crate::{HubModelConfiguration, LocalProcessListener, LocalSocketError};
 
 const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const PROCESS_UPDATE_CAPACITY: usize = 64;
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
 const MAX_BUFFERED_INBOUND_FRAMES: usize = 8;
@@ -3415,7 +3416,7 @@ where
             .await;
         }
     };
-    if let Err(error) = repository.authorize(&prepared).await {
+    if let Err(error) = authorize_context_compaction_until_resolved(&repository, &prepared).await {
         return write_context_compaction_repository_error(writer, version, request_id, error).await;
     }
     let request = ContextCompactionModelRequest {
@@ -3431,7 +3432,9 @@ where
         Ok(result) => result,
         Err(error) => {
             let disposition = context_compaction_failure_disposition(error);
-            if let Err(repository_error) = repository.fail(&prepared, disposition).await {
+            if let Err(repository_error) =
+                fail_context_compaction_until_resolved(&repository, &prepared, disposition).await
+            {
                 return write_context_compaction_repository_error(
                     writer,
                     version,
@@ -3454,7 +3457,14 @@ where
         .with_output_tokens(result.usage.output_tokens)
         .with_cache_creation_input_tokens(result.usage.cache_creation_input_tokens)
         .with_cache_read_input_tokens(result.usage.cache_read_input_tokens);
-    let applied = match repository.complete(&prepared, &result.summary, usage).await {
+    let applied = match complete_context_compaction_until_resolved(
+        &repository,
+        &prepared,
+        &result.summary,
+        usage,
+    )
+    .await
+    {
         Ok(applied) => applied,
         Err(error) => {
             return write_context_compaction_repository_error(writer, version, request_id, error)
@@ -3580,22 +3590,27 @@ pub(crate) async fn compact_automatically(
     let rendered_range = match load_context_compaction_range(pool, &prepared).await {
         Ok(rendered) => rendered,
         Err(ContextCompactionRangeLoadError::Read(error)) => {
-            repository
-                .fail(&prepared, FailedContextCompactionDisposition::KnownFailed)
-                .await
-                .map_err(AutomaticContextCompactionError::Repository)?;
+            fail_context_compaction_until_resolved(
+                &repository,
+                &prepared,
+                FailedContextCompactionDisposition::KnownFailed,
+            )
+            .await
+            .map_err(AutomaticContextCompactionError::Repository)?;
             return Err(AutomaticContextCompactionError::Read(error));
         }
         Err(ContextCompactionRangeLoadError::Integrity) => {
-            repository
-                .fail(&prepared, FailedContextCompactionDisposition::KnownFailed)
-                .await
-                .map_err(AutomaticContextCompactionError::Repository)?;
+            fail_context_compaction_until_resolved(
+                &repository,
+                &prepared,
+                FailedContextCompactionDisposition::KnownFailed,
+            )
+            .await
+            .map_err(AutomaticContextCompactionError::Repository)?;
             return Err(AutomaticContextCompactionError::Integrity);
         }
     };
-    repository
-        .authorize(&prepared)
+    authorize_context_compaction_until_resolved(&repository, &prepared)
         .await
         .map_err(AutomaticContextCompactionError::Repository)?;
     let request = ContextCompactionModelRequest {
@@ -3610,10 +3625,13 @@ pub(crate) async fn compact_automatically(
     let result = match model.execute(request).await {
         Ok(result) => result,
         Err(error) => {
-            repository
-                .fail(&prepared, context_compaction_failure_disposition(error))
-                .await
-                .map_err(AutomaticContextCompactionError::Repository)?;
+            fail_context_compaction_until_resolved(
+                &repository,
+                &prepared,
+                context_compaction_failure_disposition(error),
+            )
+            .await
+            .map_err(AutomaticContextCompactionError::Repository)?;
             return Err(AutomaticContextCompactionError::Model);
         }
     };
@@ -3622,8 +3640,7 @@ pub(crate) async fn compact_automatically(
         .with_output_tokens(result.usage.output_tokens)
         .with_cache_creation_input_tokens(result.usage.cache_creation_input_tokens)
         .with_cache_read_input_tokens(result.usage.cache_read_input_tokens);
-    repository
-        .complete(&prepared, &result.summary, usage)
+    complete_context_compaction_until_resolved(&repository, &prepared, &result.summary, usage)
         .await
         .map_err(AutomaticContextCompactionError::Repository)
 }
@@ -3949,6 +3966,57 @@ const fn imported_content_kind_label(kind: ProcessImportedContentKind) -> &'stat
     }
 }
 
+async fn authorize_context_compaction_until_resolved(
+    repository: &ContextCompactionRepository,
+    prepared: &PreparedContextCompaction,
+) -> Result<(), ContextCompactionRepositoryError> {
+    loop {
+        match repository.authorize(prepared).await {
+            Ok(()) => return Ok(()),
+            Err(
+                ContextCompactionRepositoryError::Database(_)
+                | ContextCompactionRepositoryError::CommitAmbiguous(_),
+            ) => sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn complete_context_compaction_until_resolved(
+    repository: &ContextCompactionRepository,
+    prepared: &PreparedContextCompaction,
+    summary: &str,
+    usage: ContextCompactionTokenUsage,
+) -> Result<AppliedContextCompaction, ContextCompactionRepositoryError> {
+    loop {
+        match repository.complete(prepared, summary, usage).await {
+            Ok(applied) => return Ok(applied),
+            Err(
+                ContextCompactionRepositoryError::Database(_)
+                | ContextCompactionRepositoryError::CommitAmbiguous(_),
+            ) => sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn fail_context_compaction_until_resolved(
+    repository: &ContextCompactionRepository,
+    prepared: &PreparedContextCompaction,
+    disposition: FailedContextCompactionDisposition,
+) -> Result<(), ContextCompactionRepositoryError> {
+    loop {
+        match repository.fail(prepared, disposition).await {
+            Ok(()) => return Ok(()),
+            Err(
+                ContextCompactionRepositoryError::Database(_)
+                | ContextCompactionRepositoryError::CommitAmbiguous(_),
+            ) => sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 const fn context_compaction_failure_disposition(
     error: ContextCompactionModelError,
 ) -> FailedContextCompactionDisposition {
@@ -3989,9 +4057,12 @@ where
 {
     match error {
         ContextCompactionRangeLoadError::Read(error) => {
-            if let Err(repository_error) = repository
-                .fail(prepared, FailedContextCompactionDisposition::KnownFailed)
-                .await
+            if let Err(repository_error) = fail_context_compaction_until_resolved(
+                repository,
+                prepared,
+                FailedContextCompactionDisposition::KnownFailed,
+            )
+            .await
             {
                 return write_context_compaction_repository_error(
                     writer,
@@ -4004,9 +4075,12 @@ where
             write_context_compaction_read_error(writer, version, request_id, error).await
         }
         ContextCompactionRangeLoadError::Integrity => {
-            if let Err(repository_error) = repository
-                .fail(prepared, FailedContextCompactionDisposition::KnownFailed)
-                .await
+            if let Err(repository_error) = fail_context_compaction_until_resolved(
+                repository,
+                prepared,
+                FailedContextCompactionDisposition::KnownFailed,
+            )
+            .await
             {
                 return write_context_compaction_repository_error(
                     writer,
@@ -5229,6 +5303,7 @@ where
 struct ConfiguredSubmitInputTransaction<'configuration> {
     repository: SubmitInputRepository,
     model_configuration: &'configuration HubModelConfiguration,
+    reject_context_summary_history: bool,
 }
 
 impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
@@ -5254,7 +5329,7 @@ impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
     {
         let outcome = self
             .repository
-            .handle_with_candidates_and_alias_resolver(
+            .handle_with_candidates_alias_resolver_and_summary_guard(
                 command,
                 accepted_input,
                 turn,
@@ -5262,6 +5337,7 @@ impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
                 next_reclassified_turn,
                 next_tool_cancellation,
                 |alias| self.model_configuration.resolve_alias(alias),
+                self.reject_context_summary_history,
             )
             .await?;
 
@@ -5383,6 +5459,7 @@ where
         eligibility_nudge,
         tool_dispatch_gate,
         model_configuration,
+        version.as_u64() < ProtocolVersion::Seventeen.as_u64(),
     )
     .await
 }
@@ -5531,6 +5608,7 @@ where
         eligibility_nudge,
         tool_dispatch_gate,
         model_configuration,
+        false,
     )
     .await
 }
@@ -5622,6 +5700,7 @@ where
         eligibility_nudge,
         tool_dispatch_gate,
         model_configuration,
+        false,
     )
     .await
 }
@@ -5640,6 +5719,7 @@ async fn run_submit_input<Writer>(
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
+    reject_context_summary_history: bool,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -5649,6 +5729,7 @@ where
         ConfiguredSubmitInputTransaction {
             repository,
             model_configuration,
+            reject_context_summary_history,
         },
         eligibility_nudge.clone(),
         tool_dispatch_gate.clone(),
@@ -5720,6 +5801,9 @@ where
     let protocol_error = match error {
         SubmitInputRepositoryError::Database(_) => ProtocolError::mutation_unavailable(false),
         SubmitInputRepositoryError::CommitAmbiguous(_) => ProtocolError::mutation_unavailable(true),
+        SubmitInputRepositoryError::ContextSummaryRequiresProtocolVersion17 => {
+            ProtocolError::unsupported_version(ProtocolVersion::Seventeen.as_u64())
+        }
         SubmitInputRepositoryError::ModelExecution(error) => match error.as_ref() {
             signalbox_persistence::model_execution::ModelCallRepositoryError::Database {
                 commit_ambiguous,
