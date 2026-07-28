@@ -34,6 +34,35 @@ const EXHAUSTIVE_TWO_SPLIT_GUARDED_CASES: usize = 105_743;
 /// and its case count are pinned so any movement fails this test.
 const OPEN_SINGLE_SPLIT_DIVERGENCE_LINES: [usize; 3] = [78, 79, 83];
 const OPEN_SINGLE_SPLIT_DIVERGENCE_CASES: usize = 25;
+/// The residue split by split, so a repaired fragmentation cannot be cancelled
+/// by a newly exposed one on the same line.
+const OPEN_SINGLE_SPLIT_DIVERGENCE: [(usize, usize); 25] = [
+    (78, 12),
+    (78, 16),
+    (78, 19),
+    (79, 2),
+    (79, 3),
+    (79, 4),
+    (79, 5),
+    (79, 7),
+    (79, 11),
+    (79, 12),
+    (79, 13),
+    (79, 14),
+    (79, 17),
+    (79, 18),
+    (79, 19),
+    (79, 20),
+    (79, 21),
+    (83, 2),
+    (83, 3),
+    (83, 5),
+    (83, 7),
+    (83, 8),
+    (83, 12),
+    (83, 15),
+    (83, 17),
+];
 /// The escalated divergence measured one delta deeper. These lines are not
 /// accepted-uncovered — `redact_text` redacts every one of them — and this is
 /// not a limit the pull request claims. It is the current measurement of the
@@ -44,6 +73,11 @@ const MEASURED_TWO_SPLIT_DIVERGENCE_LINES: [usize; 16] = [
     36, 41, 56, 57, 72, 73, 77, 78, 79, 80, 82, 83, 84, 112, 113, 117,
 ];
 const MEASURED_TWO_SPLIT_DIVERGENCE_CASES: usize = 1_069;
+/// The two-split residue is far too large to pin case by case, so it is
+/// pinned as a canonical digest of the same inventory instead.
+const MEASURED_TWO_SPLIT_DIVERGENCE_DIGEST: u64 = 8_047_131_395_358_659_687;
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
 const ASCII_NOISE: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_-";
@@ -134,6 +168,33 @@ impl SplitSummary {
         lines.sort_unstable();
         lines.dedup();
         lines
+    }
+
+    /// The exact divergent fragmentations, canonically ordered. A line set and
+    /// a case count are not enough on their own: repairing one split while
+    /// exposing another on the same line leaves both unchanged, so the pinned
+    /// residue could move without failing anything.
+    fn divergent_splits(&self) -> Vec<(usize, Vec<usize>)> {
+        let mut inventory = self
+            .leaks
+            .iter()
+            .map(|leak| (leak.line, leak.splits.clone()))
+            .collect::<Vec<_>>();
+        inventory.sort_unstable();
+        inventory
+    }
+
+    /// A canonical digest of `divergent_splits`, for a residue too large to
+    /// pin case by case. Any added, removed, or moved split changes it.
+    fn divergent_splits_digest(&self) -> u64 {
+        let mut digest = FNV_OFFSET_BASIS;
+        for (line, splits) in self.divergent_splits() {
+            for byte in format!("{line}:{splits:?};").bytes() {
+                digest ^= u64::from(byte);
+                digest = digest.wrapping_mul(FNV_PRIME);
+            }
+        }
+        digest
     }
 }
 
@@ -1078,6 +1139,14 @@ fn stateful_equals_stateless_for_every_single_corpus_split() {
         summary.leaks
     );
     assert_eq!(summary.leaks.len(), OPEN_SINGLE_SPLIT_DIVERGENCE_CASES);
+    assert_eq!(
+        summary
+            .divergent_splits()
+            .into_iter()
+            .map(|(line, splits)| (line, splits[0]))
+            .collect::<Vec<_>>(),
+        OPEN_SINGLE_SPLIT_DIVERGENCE.to_vec()
+    );
 }
 
 /// STATEFUL-EQUALS-STATELESS: every generated delta/event schedule must
@@ -1120,6 +1189,10 @@ fn two_split_divergence_measures_the_escalated_defect() {
         summary.leaks
     );
     assert_eq!(summary.leaks.len(), MEASURED_TWO_SPLIT_DIVERGENCE_CASES);
+    assert_eq!(
+        summary.divergent_splits_digest(),
+        MEASURED_TWO_SPLIT_DIVERGENCE_DIGEST
+    );
 }
 
 /// Deterministic long-run coverage for STATEFUL-EQUALS-STATELESS.
