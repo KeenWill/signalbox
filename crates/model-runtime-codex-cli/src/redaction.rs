@@ -169,13 +169,20 @@ fn credential_key_is_free_form(key: &str) -> bool {
 
 /// The credential identifier immediately before an assignment separator: a
 /// bare `[A-Za-z0-9_-]+` run or a quoted key, whichever ends the text. Returns
-/// the identifier content for the `credential_key` contains-policy check.
-fn trailing_identifier(before_separator: &str) -> Option<(&str, bool)> {
+/// the identifier content for the `credential_key` contains-policy check, plus
+/// the opening quote (`Some('"')` / `Some('\'')`) when the key was quoted so the
+/// caller can distinguish a double-quoted JSON member from a single-quoted or
+/// bare plaintext assignment.
+fn trailing_identifier(before_separator: &str) -> Option<(&str, Option<char>)> {
     let trimmed = before_separator.trim_end_matches([' ', '\t']);
     for quote in ['"', '\''] {
         if let Some(without_close) = trimmed.strip_suffix(quote) {
-            let start = without_close.rfind(quote)?;
-            return Some((&without_close[start + 1..], true));
+            // Find the opening delimiter escape-aware: a TOML basic key (`"…"`)
+            // can embed an escaped quote (`\"`), and `rfind` would select that
+            // content quote as the opener and return only the tail after it,
+            // hiding the credential shape carried by the full key.
+            let start = last_unescaped_quote(without_close, quote)?;
+            return Some((&without_close[start + 1..], Some(quote)));
         }
     }
     let start = trimmed
@@ -183,7 +190,75 @@ fn trailing_identifier(before_separator: &str) -> Option<(&str, bool)> {
             !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
         })
         .map_or(0, |index| index + 1);
-    (start < trimmed.len()).then_some((&trimmed[start..], false))
+    (start < trimmed.len()).then_some((&trimmed[start..], None))
+}
+
+/// The byte index of the last `quote` in `s` that is not backslash-escaped,
+/// scanning from the end. Basic strings (`"`) honor `\` escapes, so a `\"` is
+/// content and skipped; literal strings (`'`) have no escapes, so every quote
+/// counts. Bounded by the distance back to that quote (plus any backslash run
+/// before an escaped one), so it stays a local lookbehind rather than a scan of
+/// the whole prefix.
+fn last_unescaped_quote(s: &str, quote: char) -> Option<usize> {
+    let honors_escapes = quote == '"';
+    let mut search_end = s.len();
+    while let Some(index) = s[..search_end].rfind(quote) {
+        if !honors_escapes {
+            return Some(index);
+        }
+        let backslashes = s[..index]
+            .bytes()
+            .rev()
+            .take_while(|&byte| byte == b'\\')
+            .count();
+        if backslashes % 2 == 0 {
+            return Some(index);
+        }
+        search_end = index;
+    }
+    None
+}
+
+/// If the identifier content starting at byte `content` in `text` is immediately
+/// preceded by an unescaped `"` or `'`, returns that quote's offset — the
+/// opening delimiter of a quoted key whose closing quote has not yet arrived in
+/// the stream. Holding from the quote keeps the rejoined `"api_key" = value`
+/// recognizable once the close, separator, and value follow; holding from the
+/// bare name would drop the opener and leak the value.
+fn opening_quote_before(text: &str, content: usize) -> Option<usize> {
+    let prefix = &text[..content];
+    for quote in ['"', '\''] {
+        if let Some(before_quote) = prefix.strip_suffix(quote) {
+            let escaped = before_quote
+                .bytes()
+                .rev()
+                .take_while(|&byte| byte == b'\\')
+                .count()
+                % 2
+                == 1;
+            if !escaped {
+                return Some(content - quote.len_utf8());
+            }
+        }
+    }
+    None
+}
+
+/// Whether the value beginning at `value_start` (after leading spaces or tabs)
+/// is one or two quote characters running to the text end — the split opening of
+/// a `"""`/`'''` triple whose third quote and multiline body arrive in a later
+/// delta. Such a suffix must be held: otherwise `credential_value_bounds` reads
+/// the two quotes as a completed empty quoted value and the following secret
+/// body is emitted unheld.
+fn partial_triple_open(text: &str, value_start: usize) -> bool {
+    let whitespace = text[value_start..]
+        .bytes()
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+        .count();
+    matches!(
+        &text[value_start + whitespace..],
+        "\"" | "\"\"" | "'" | "''"
+    )
 }
 
 /// Redacts `identifier = value` / `identifier: value` where the identifier is
@@ -198,11 +273,12 @@ fn redact_identifier_assignment(text: &str) -> String {
         .position(|byte| matches!(byte, b'=' | b':'))
     {
         let is_colon = remaining.as_bytes()[separator] == b':';
-        // A quoted key before `:` is a JSON member the JSON scanner already
-        // owns; only a `=` after a quoted key (TOML) or any separator after a
-        // bare key is a plaintext credential assignment.
-        if let Some((identifier, quoted)) = trailing_identifier(&remaining[..separator])
-            && !(quoted && is_colon)
+        // A *double*-quoted key before `:` is a JSON member the JSON scanner
+        // already owns; a single-quoted key before `:` (`'api_key': value`) is
+        // not JSON, and a `=` after any quoted key (TOML) or any separator after
+        // a bare key is a plaintext credential assignment this scanner must own.
+        if let Some((identifier, quote)) = trailing_identifier(&remaining[..separator])
+            && !(quote == Some('"') && is_colon)
             && credential_key(identifier)
         {
             let termination = if credential_key_is_free_form(identifier) {
@@ -563,12 +639,13 @@ fn credential_value_bounds(
     // A TOML multiline value opens with three quotes; a plain `quoted_value_end`
     // would treat the second quote as the close and emit the body. Consume
     // through the matching triple delimiter, or to the text end when
-    // unterminated.
+    // unterminated. The terminator scan is escape-aware for basic strings
+    // (`"""`), where an escaped quote (`\"`) followed by two quotes is content,
+    // not a close; literal strings (`'''`) have no escapes.
     for triple in ["\"\"\"", "'''"] {
         if text[value_body..].starts_with(triple) {
             let body_start = value_body + triple.len();
-            let value_end = text[body_start..]
-                .find(triple)
+            let value_end = find_unescaped_triple(&text[body_start..], triple)
                 .map_or(text.len(), |offset| body_start + offset + triple.len());
             return (&text[value_start..value_body], value_body, value_end);
         }
@@ -669,6 +746,27 @@ fn structural_value_end(text: &str, value_start: usize) -> usize {
         }
     }
     text.len()
+}
+
+/// The byte offset within `body` where the closing `triple` delimiter begins.
+/// For basic strings (`"""`), the scan honors backslash escapes so an escaped
+/// quote (`\"`) is content and cannot start the closing run; the closing run is
+/// three consecutive quotes whose first is unescaped. Literal strings (`'''`)
+/// have no escapes, so every quote is literal.
+fn find_unescaped_triple(body: &str, triple: &str) -> Option<usize> {
+    let quote = triple.as_bytes()[0] as char;
+    let honors_escapes = quote == '"';
+    let mut escaped = false;
+    for (offset, character) in body.char_indices() {
+        if honors_escapes && escaped {
+            escaped = false;
+        } else if honors_escapes && character == '\\' {
+            escaped = true;
+        } else if character == quote && body[offset..].starts_with(triple) {
+            return Some(offset);
+        }
+    }
+    None
 }
 
 fn quoted_value_end(text: &str, value_start: usize, quote: char) -> usize {
@@ -1211,19 +1309,27 @@ fn spaced_credential_unsafe_start(text: &str) -> Option<usize> {
                 .take_while(|byte| matches!(byte, b' ' | b'\t'))
                 .count();
             let separator = after_name + whitespace;
-            let in_progress = if separator == text.len() {
-                true
+            if separator == text.len() {
+                // A bare trailing name; the separator and value may still arrive.
+                // Earliest in-progress for this name, so stop scanning it.
+                fold(start);
+                break;
             } else if matches!(text.as_bytes().get(separator), Some(b'=' | b':')) {
                 let (_, token_start, value_end) =
                     credential_value_bounds(text, separator + 1, termination);
-                value_end.max(token_start) == text.len()
+                let consumed = value_end.max(token_start);
+                if consumed == text.len() || partial_triple_open(text, separator + 1) {
+                    fold(start);
+                    break;
+                }
+                // The value terminated within the fragment; skip past it rather
+                // than rescanning its interior. A `name=…` nested inside another
+                // credential value cannot be an earlier unterminated candidate,
+                // so this keeps a hostile fragment (many `name={` runs) linear.
+                offset = consumed.max(after_name);
             } else {
-                false
-            };
-            if in_progress {
-                fold(start);
+                offset = after_name;
             }
-            offset = after_name;
         }
     }
     earliest
@@ -1240,13 +1346,18 @@ fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
         earliest = Some(earliest.map_or(start, |current: usize| current.min(start)));
     };
     let base = text.as_ptr() as usize;
-    for (separator, byte) in text.bytes().enumerate() {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
         if !matches!(byte, b'=' | b':') {
+            index += 1;
             continue;
         }
+        let separator = index;
         let is_colon = byte == b':';
-        if let Some((identifier, quoted)) = trailing_identifier(&text[..separator])
-            && !(quoted && is_colon)
+        if let Some((identifier, quote)) = trailing_identifier(&text[..separator])
+            && !(quote == Some('"') && is_colon)
             && credential_key(identifier)
         {
             let termination = if credential_key_is_free_form(identifier) {
@@ -1256,20 +1367,38 @@ fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
             };
             let (_, token_start, value_end) =
                 credential_value_bounds(text, separator + 1, termination);
-            if value_end.max(token_start) == text.len() {
+            let consumed = value_end.max(token_start);
+            if consumed == text.len() || partial_triple_open(text, separator + 1) {
                 let content = identifier.as_ptr() as usize - base;
-                fold(if quoted { content - 1 } else { content });
+                fold(if quote.is_some() {
+                    content - 1
+                } else {
+                    content
+                });
             }
+            // Skip past this value rather than rescanning its interior, so a
+            // hostile fragment (many `secret={` runs) stays linear instead of
+            // walking the remaining suffix once per separator.
+            index = consumed.max(separator + 1);
+        } else {
+            index += 1;
         }
     }
     // A trailing identifier with no separator yet — a separator may arrive in
-    // the next delta.
+    // the next delta. When a bare trailing name is immediately preceded by an
+    // unescaped opening quote (a quoted key whose closing quote has not arrived,
+    // `…"api_key`), hold from that quote so the rejoined `"api_key" = value` is
+    // recognized rather than emitted with the opener stripped.
     let end_trimmed = text.trim_end_matches([' ', '\t']);
-    if let Some((identifier, quoted)) = trailing_identifier(end_trimmed)
+    if let Some((identifier, quote)) = trailing_identifier(end_trimmed)
         && credential_key(identifier)
     {
         let content = identifier.as_ptr() as usize - base;
-        fold(if quoted { content - 1 } else { content });
+        let start = match quote {
+            Some(_) => content - 1,
+            None => opening_quote_before(text, content).unwrap_or(content),
+        };
+        fold(start);
     }
     earliest
 }
@@ -1416,17 +1545,24 @@ fn unterminated_marker_start(
     termination: ValueTermination,
 ) -> Option<usize> {
     let mut offset = 0;
-    let mut last = None;
     while let Some(relative) = find_ascii_case_insensitive(&text[offset..], marker) {
         let start = offset + relative;
         let value_start = start + marker.len();
         let (_, token_start, value_end) = credential_value_bounds(text, value_start, termination);
-        if value_end.max(token_start) == text.len() {
-            last = Some(start);
+        let consumed = value_end.max(token_start);
+        // The first unterminated occurrence begins the unsafe suffix: its value
+        // spans to the text end, so every later occurrence sits inside it and
+        // cannot start earlier. Returning here (rather than recording the last
+        // match) also stops the scan, and skipping past a terminated value's end
+        // avoids re-walking its interior — so a hostile fragment with many
+        // unterminated containers (`secret={secret={…`) stays linear instead of
+        // running a full balanced-container scan per occurrence.
+        if consumed == text.len() {
+            return Some(start);
         }
-        offset = value_start;
+        offset = consumed.max(value_start);
     }
-    last
+    None
 }
 
 fn trailing_marker_prefix(text: &str, marker: &str, ascii_case_insensitive: bool) -> usize {
@@ -2353,5 +2489,76 @@ safe-line"
                 },
             ]
         );
+    }
+
+    /// INV-035: a TOML basic multiline value whose body embeds three literal
+    /// quotes via an escaped quote (`\"` then `""`) is not closed there; the
+    /// terminator scan honors the escape and consumes through the real `"""`,
+    /// so the body between the escaped run and the real close is suppressed.
+    #[test]
+    fn inv_035_triple_quote_terminator_honors_escaped_quotes() {
+        let fixture = "private_key = \"\"\"pre \\\"\"\" still-secret-body \"\"\"\nsafe-tail";
+        let output = redact_text(fixture);
+
+        assert!(!output.contains("still-secret-body"));
+        assert!(output.contains("[redacted]"));
+        assert!(output.contains("safe-tail"));
+    }
+
+    /// INV-035: a quoted TOML key that embeds an escaped quote
+    /// (`"client_secret\"suffix"`) has its opening delimiter found escape-aware,
+    /// so the full key content is checked against the contains policy and the
+    /// credential value is redacted rather than emitted.
+    #[test]
+    fn inv_035_quoted_key_opening_quote_is_escape_aware() {
+        let fixture = "\"client_secret\\\"suffix\" = opaque-embedded-quote-value\ntail";
+        let output = redact_text(fixture);
+
+        assert!(!output.contains("opaque-embedded-quote-value"));
+        assert!(output.contains("[redacted]"));
+        assert!(output.contains("tail"));
+    }
+
+    /// INV-035: a single-quoted plaintext key before a colon
+    /// (`'api_key': value`) is not a JSON member the double-quoted JSON scanner
+    /// can own, so the identifier scanner redacts it instead of exempting it.
+    #[test]
+    fn inv_035_redacts_single_quoted_colon_assignment() {
+        let output = redact_text("'api_key': opaque-single-quote-colon-value tail");
+
+        assert!(!output.contains("opaque-single-quote-colon-value"));
+        assert!(output.contains("[redacted]"));
+        assert!(output.contains("tail"));
+    }
+
+    /// INV-035: a quoted TOML key split before its closing quote, preceded by
+    /// text that keeps both the JSON-key heuristic and the `"<name>":` marker
+    /// prefixes from recognizing it, is held from its opening quote so the
+    /// rejoined `"client_secret" = value` is recognized rather than emitted with
+    /// the opener stripped (which left the value unredactable). A bare composite
+    /// key is caught only by the identifier scanner, which previously folded
+    /// from the name and dropped the opening quote.
+    #[test]
+    fn inv_035_stream_retains_opening_quote_for_split_toml_key() {
+        assert_eq!(unsafe_stream_suffix_start("data \"client_secret"), Some(5));
+    }
+
+    /// INV-035: a credential value whose opening `"""` is split after its first
+    /// two quotes is held as an in-progress triple opener, not read as a
+    /// completed empty quoted value that would release the following body.
+    #[test]
+    fn inv_035_stream_holds_split_triple_quote_opener() {
+        assert_eq!(unsafe_stream_suffix_start("private_key = \"\""), Some(0));
+    }
+
+    /// INV-035: unsafe-suffix scanning stays linear on a hostile fragment of
+    /// many unterminated credential containers — it must still report the
+    /// earliest unsafe byte without a per-occurrence balanced-container rescan
+    /// (which was quadratic and could pin the adapter past its deadline).
+    #[test]
+    fn inv_035_stream_suffix_scan_is_linear_on_repeated_containers() {
+        let hostile = "secret={".repeat(20_000);
+
+        assert_eq!(unsafe_stream_suffix_start(&hostile), Some(0));
     }
 }

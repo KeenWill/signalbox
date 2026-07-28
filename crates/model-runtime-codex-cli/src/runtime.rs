@@ -651,19 +651,19 @@ async fn execute_process<C: Clone + Send + Sync>(
                         if exited_before_cleanup || !was_killed_by_group_cleanup(&status) =>
                     {
                         child.disarm();
-                        // A leader that wrote and closed stderr before exiting
-                        // leaves the reader already finished; consume it so a
-                        // classifiable failure (for example a credential
-                        // rejection) keeps its typed kind instead of degrading
-                        // to the synthetic cleanup message. Only a still-running
-                        // reader — held open by a descendant — is aborted.
-                        let stderr_detail = if stderr_task.is_finished() {
-                            stderr_result((&mut stderr_task).await)
-                        } else {
-                            abort_stderr_task(&mut stderr_task).await;
-                            "Codex stderr was unavailable at the process-cleanup deadline"
-                                .to_string()
-                        };
+                        // A leader that wrote and closed stderr before exiting,
+                        // or a descendant whose stderr write end the group kill
+                        // just closed, leaves classifiable failure text buffered
+                        // in the reader. Await it under the bounded drain so a
+                        // credential rejection or quota failure keeps its typed
+                        // kind instead of degrading to the synthetic cleanup
+                        // message; `is_finished()` is not yet true right after
+                        // the kill, so aborting here would discard that text.
+                        let stderr_detail = drain_stderr_after_cleanup(
+                            &mut stderr_task,
+                            "Codex stderr was unavailable at the process-cleanup deadline",
+                        )
+                        .await;
                         reaped_status = Some(Ok(status));
                         deadline_stderr = Some(stderr_detail);
                         break;
@@ -742,9 +742,16 @@ async fn execute_process<C: Clone + Send + Sync>(
                     if exited_before_cleanup || !was_killed_by_group_cleanup(&status) =>
                 {
                     child.disarm();
-                    abort_stderr_task(&mut stderr_task).await;
                     reaped_status = Some(Ok(status));
-                    "Codex stderr was unavailable at the process-cleanup deadline".to_string()
+                    // Same bounded drain as the exit-wait deadline: a descendant
+                    // whose stderr the group kill just closed may still hold
+                    // buffered classifiable text, so await the reader instead of
+                    // aborting it and losing a typed provider failure.
+                    drain_stderr_after_cleanup(
+                        &mut stderr_task,
+                        "Codex stderr was unavailable at the process-cleanup deadline",
+                    )
+                    .await
                 }
                 Ok(Some(_)) | Ok(None) | Err(_) => {
                     force_kill(&mut child).await;
@@ -924,19 +931,35 @@ async fn reap_exited_leader(
         return None;
     };
     child.disarm();
-    // Killing the group closes the descendants' stderr write ends, so the
-    // reader reaches EOF and finishes with its already-buffered classifiable
-    // failure text; await it under a short bound (rather than aborting an
-    // is_finished()-not-yet reader) so that detail is not discarded and a
-    // recognizable provider failure is not degraded to `Unrecognized`.
-    let detail = match tokio::time::timeout(POST_KILL_REAP_BOUND, &mut *stderr_task).await {
+    let detail = drain_stderr_after_cleanup(
+        stderr_task,
+        "Codex stderr was unavailable after cancellation",
+    )
+    .await;
+    Some((Ok(status), detail))
+}
+
+/// Await a stderr reader after the process group has been killed, under a short
+/// bound.
+///
+/// Killing the group closes the descendants' stderr write ends, so the reader
+/// reaches EOF and finishes with its already-buffered classifiable failure
+/// text. Await it — rather than aborting an `is_finished()`-not-yet reader,
+/// which drops that buffered text and degrades a recognizable provider failure
+/// (a credential rejection, a quota exhaustion) to `Unrecognized`. Only a reader
+/// still held open past the bound — a descendant that ignored the kill — is
+/// aborted and reported with `unavailable_message`.
+async fn drain_stderr_after_cleanup(
+    stderr_task: &mut tokio::task::JoinHandle<std::io::Result<String>>,
+    unavailable_message: &str,
+) -> String {
+    match tokio::time::timeout(POST_KILL_REAP_BOUND, &mut *stderr_task).await {
         Ok(result) => stderr_result(result),
         Err(_) => {
             abort_stderr_task(stderr_task).await;
-            "Codex stderr was unavailable after cancellation".to_string()
+            unavailable_message.to_string()
         }
-    };
-    Some((Ok(status), detail))
+    }
 }
 
 fn incomplete_upload_cause(error: &std::io::Error) -> LossCause {
