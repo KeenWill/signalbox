@@ -7,10 +7,11 @@ converters, the append-only Postgres import store, evidence-derived display
 titles and their startup backfill, and the owner-operated one-file and
 directory-scan import surfaces. The one-file surface was verified against the
 implementing stack through PR #252 (`agent/import-surfaces`); the directory scan
-is verified through PR #284 (`agent/import-directory-scan`). Later session
-creation from one imported frontier is owned by
-[sessions-and-transcript](sessions-and-transcript.md); native turn activation
-and model-call rendering are owned by
+is verified through PR #284 (`agent/import-directory-scan`); and the derived
+display title and its startup backfill are verified through PR #304
+(`agent/unified-conversation-listing`). Later session creation from one imported
+frontier is owned by [sessions-and-transcript](sessions-and-transcript.md);
+native turn activation and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
 [model-call-execution](model-call-execution.md).
 

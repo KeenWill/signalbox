@@ -403,9 +403,10 @@ fn decode_list_item(
     match origin_rank {
         NATIVE_ORIGIN_RANK => {
             let archived: bool = required(row, "archived")?;
-            let defaults_version = row
-                .try_get("defaults_version")
-                .map_err(ConversationListingRepositoryError::Database)?;
+            let defaults_version: Option<rust_decimal::Decimal> =
+                required(row, "defaults_version")?;
+            let defaults_version = defaults_version
+                .ok_or(ConversationListingCorruption::Missing("defaults version"))?;
             let defaults_version = defaults_version_from_numeric(defaults_version)
                 .map_err(|reason| ConversationListingCorruption::InvalidOrdinal {
                     field: "defaults version",

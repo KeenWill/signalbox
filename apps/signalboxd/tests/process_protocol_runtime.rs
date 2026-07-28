@@ -1309,45 +1309,40 @@ async fn s28_version_fifteen_lists_native_and_imported_conversations()
             < second_summary.cursor().conversation_id().into_uuid(),
         "unified summaries must arrive in strict identity order"
     );
-    let mut summaries = [Some(first_summary), Some(second_summary)];
-    let native = summaries
-        .iter_mut()
-        .find_map(|summary| match summary {
-            Some(ConversationSummary::NativeSession { session_id, .. })
-                if *session_id == native_session =>
-            {
-                summary.take()
-            }
-            _ => None,
-        })
-        .expect("the unified page lists the created native session");
+    let (native, imported) = match (first_summary, second_summary) {
+        (
+            native @ ConversationSummary::NativeSession { .. },
+            imported @ ConversationSummary::ImportedConversation { .. },
+        )
+        | (
+            imported @ ConversationSummary::ImportedConversation { .. },
+            native @ ConversationSummary::NativeSession { .. },
+        ) => (native, imported),
+        pair => {
+            return Err(
+                io::Error::other(format!("unexpected unified summary pair: {pair:?}")).into(),
+            );
+        }
+    };
     assert!(matches!(
         native,
         ConversationSummary::NativeSession {
+            session_id,
             title: None,
             archived: false,
             defaults_version,
-            ..
-        } if defaults_version.value() == 1
+        } if session_id == native_session && defaults_version.value() == 1
     ));
-    let imported = summaries
-        .iter_mut()
-        .find_map(|summary| match summary {
-            Some(ConversationSummary::ImportedConversation {
-                imported_conversation_id,
-                ..
-            }) if *imported_conversation_id == imported_id => summary.take(),
-            _ => None,
-        })
-        .expect("the unified page lists the imported conversation");
     assert!(matches!(
         imported,
         ConversationSummary::ImportedConversation {
+            imported_conversation_id,
             title: Some(title),
             entry_count,
             source_format: ImportedConversationSourceFormat::CodexRolloutJsonlV1,
-            ..
-        } if title == "question" && entry_count.value() == 1
+        } if imported_conversation_id == imported_id
+            && title == "question"
+            && entry_count.value() == 1
     ));
 
     drop(connection);

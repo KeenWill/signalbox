@@ -36,7 +36,8 @@ surface adds protocol version eleven, verified through PR #295
 (`agent/review-workflow-surface`). Versions twelve, thirteen, and fourteen are
 reserved by concurrent streaming, steering, and token-usage work. The unified
 conversation-listing surface therefore takes version fifteen for the single
-read-only `list_conversations` request. The implementation in this stack speaks
+read-only `list_conversations` request, verified through PR #304
+(`agent/unified-conversation-listing`). The implementation in this stack speaks
 versions one through eleven and fifteen while twelve, thirteen, and fourteen
 remain unsupported, and its terminal client selects version fifteen. Its
 `search` verb over version four's metadata list was verified through PR #283
