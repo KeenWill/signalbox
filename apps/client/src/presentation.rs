@@ -135,6 +135,10 @@ impl<'a> Output<'a> {
         writeln!(self.stdout, "{session_id}")
     }
 
+    pub(crate) fn template_summary(&mut self, name: &str, version: u64) -> io::Result<()> {
+        writeln!(self.stdout, "{name} version={version}")
+    }
+
     pub(crate) fn steering_submitted(
         &mut self,
         accepted_input_id: CanonicalUuid,

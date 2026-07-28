@@ -51,9 +51,9 @@ use signalbox_domain::{
     ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject,
     ReviewText, ReviewWorkflowKind, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
-    SessionMetadataLastWriter, SessionMetadataSnapshot, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision, ToolDenialReason,
-    ToolRequestId, TurnId, UserContent,
+    SessionMetadataLastWriter, SessionMetadataSnapshot, SessionTemplateName, SubmitInput,
+    SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision,
+    ToolDenialReason, ToolRequestId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{ProviderTextDelta, ProviderTextDeltaSink};
 use signalbox_persistence::{
@@ -123,7 +123,9 @@ use tokio::{
     time::sleep,
 };
 
-use crate::{HubModelConfiguration, LocalProcessListener, LocalSocketError};
+use crate::{
+    HubModelConfiguration, LocalProcessListener, LocalSocketError, SessionTemplateConfiguration,
+};
 
 const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROCESS_UPDATE_CAPACITY: usize = 64;
@@ -141,6 +143,7 @@ struct ConnectionServices {
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: Arc<HubModelConfiguration>,
+    template_configuration: Arc<SessionTemplateConfiguration>,
     fanouts: ProcessFanouts,
     inbound_frame_budget: Arc<Semaphore>,
     import_budget: Arc<Semaphore>,
@@ -157,6 +160,7 @@ pub struct ProcessRuntime {
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
+    template_configuration: SessionTemplateConfiguration,
     fanouts: ProcessFanouts,
 }
 
@@ -175,6 +179,25 @@ impl ProcessRuntime {
         tool_dispatch_gate: InProcessToolDispatchGate,
         model_configuration: HubModelConfiguration,
     ) -> Self {
+        Self::new_with_templates(
+            listener,
+            pool,
+            eligibility_nudge,
+            tool_dispatch_gate,
+            model_configuration,
+            SessionTemplateConfiguration::default(),
+        )
+    }
+
+    /// Composes the guarded runtime with startup-resolved session templates.
+    pub fn new_with_templates(
+        listener: LocalProcessListener,
+        pool: PgPool,
+        eligibility_nudge: InProcessEligibilityNudge,
+        tool_dispatch_gate: InProcessToolDispatchGate,
+        model_configuration: HubModelConfiguration,
+        template_configuration: SessionTemplateConfiguration,
+    ) -> Self {
         let (durable_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         let (streaming_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         Self {
@@ -183,6 +206,7 @@ impl ProcessRuntime {
             eligibility_nudge,
             tool_dispatch_gate,
             model_configuration,
+            template_configuration,
             fanouts: ProcessFanouts {
                 durable: durable_updates,
                 streaming: streaming_updates,
@@ -202,15 +226,15 @@ impl ProcessRuntime {
     /// to true or its sender closes.
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), ProcessRuntimeError> {
         let fanouts = self.fanouts;
-        let server = serve_connections(
-            &self.listener,
-            self.pool.clone(),
-            self.eligibility_nudge,
-            self.tool_dispatch_gate,
-            self.model_configuration,
-            fanouts.clone(),
-            shutdown.clone(),
-        );
+        let connection_dependencies = ConnectionDependencies {
+            pool: self.pool.clone(),
+            eligibility_nudge: self.eligibility_nudge,
+            tool_dispatch_gate: self.tool_dispatch_gate,
+            model_configuration: self.model_configuration,
+            template_configuration: self.template_configuration,
+            fanouts: fanouts.clone(),
+        };
+        let server = serve_connections(&self.listener, connection_dependencies, shutdown.clone());
         let dispatcher = dispatch_updates(self.pool, fanouts, shutdown);
         let result = tokio::try_join!(server, dispatcher);
         let cleanup = self.listener.cleanup();
@@ -266,23 +290,30 @@ async fn dispatch_updates(
     }
 }
 
-async fn serve_connections(
-    listener: &LocalProcessListener,
+struct ConnectionDependencies {
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
+    template_configuration: SessionTemplateConfiguration,
     fanouts: ProcessFanouts,
+}
+
+async fn serve_connections(
+    listener: &LocalProcessListener,
+    dependencies: ConnectionDependencies,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessRuntimeError> {
-    let snapshot_reader_capacity = snapshot_reader_capacity(pool.options().get_max_connections())
-        .ok_or(ProcessRuntimeError::InsufficientPoolCapacity)?;
+    let snapshot_reader_capacity =
+        snapshot_reader_capacity(dependencies.pool.options().get_max_connections())
+            .ok_or(ProcessRuntimeError::InsufficientPoolCapacity)?;
     let services = ConnectionServices {
-        pool,
-        eligibility_nudge,
-        tool_dispatch_gate,
-        model_configuration: Arc::new(model_configuration),
-        fanouts,
+        pool: dependencies.pool,
+        eligibility_nudge: dependencies.eligibility_nudge,
+        tool_dispatch_gate: dependencies.tool_dispatch_gate,
+        model_configuration: Arc::new(dependencies.model_configuration),
+        template_configuration: Arc::new(dependencies.template_configuration),
+        fanouts: dependencies.fanouts,
         inbound_frame_budget: Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES)),
         import_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS)),
         review_command_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS)),
@@ -688,6 +719,21 @@ where
             )
             .await
         }
+        ClientRequest::CreateSessionFromTemplate {
+            command_id,
+            template_name,
+        } => {
+            handle_create_session_from_template(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                template_name,
+                &services.pool,
+                services.template_configuration.as_ref(),
+            )
+            .await
+        }
         ClientRequest::CreateSessionFromImportedFrontier {
             command_id,
             imported_conversation_id,
@@ -720,6 +766,15 @@ where
                 return Ok(());
             };
             handle_list_sessions(writer, version, request_id, &services.pool, snapshot_permit).await
+        }
+        ClientRequest::ListTemplates {} => {
+            handle_list_templates(
+                writer,
+                version,
+                request_id,
+                services.template_configuration.as_ref(),
+            )
+            .await
         }
         ClientRequest::SubmitInput {
             command_id,
@@ -3189,6 +3244,107 @@ where
         )
         .await;
     };
+    execute_create_session_request(writer, version, request_id, request, pool).await
+}
+
+async fn handle_create_session_from_template<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: uuid::Uuid,
+    template_name: String,
+    pool: &PgPool,
+    templates: &SessionTemplateConfiguration,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let Ok(template_name) = SessionTemplateName::try_new(template_name) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let Some(template) = templates.resolve(&template_name) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let request = CreateSessionRequest::try_new_from_template(
+        DurableCommandId::from_uuid(command_id),
+        template.provenance().clone(),
+        template.defaults().clone(),
+    );
+    let Ok(request) = request else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    execute_create_session_request(writer, version, request_id, request, pool).await
+}
+
+async fn handle_list_templates<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    templates: &SessionTemplateConfiguration,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::TemplatesStart {},
+    )
+    .await?;
+    for (name, template_version) in templates.summaries() {
+        write_message(
+            writer,
+            version,
+            request_id,
+            ServerMessage::TemplateSummary {
+                name: name.as_str().to_owned(),
+                version: CanonicalU64::new(template_version.as_u64()),
+            },
+        )
+        .await?;
+    }
+    let template_count = u64::try_from(templates.summaries().len())
+        .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::TemplatesEnd {
+            template_count: CanonicalU64::new(template_count),
+        },
+    )
+    .await
+}
+
+async fn execute_create_session_request<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    request: CreateSessionRequest,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
     let mut service = CreateSessionService::new(
         UuidV7SessionIdGenerator,
         CreateSessionRepository::new(pool.clone()),
