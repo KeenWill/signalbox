@@ -24,7 +24,8 @@ model-call cause codes were verified through PR #280
 projection and identity-before-terminal-evidence precedence were verified
 through PR #288 (`agent/audit-fix-docs-coherence`); the session system prompt on
 the prepared operation was verified through PR #286
-(`agent/session-system-prompt`). Invariant tags cite
+(`agent/session-system-prompt`); the empty-thinking completion rule was verified
+through PR #305 (`agent/sonnet-streamed-tool-use`). Invariant tags cite
 [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
@@ -329,12 +330,16 @@ evidence is mapped, including when that evidence is `Refused`. Once identity
 validation passes, that refusal evidence arises only from an authenticated
 complete exchange by the runtime layer's contract
 ([runtime-substrate](runtime-substrate.md)), not a condition rechecked here.
-Empty text blocks are dropped without creating invalid entries. Tool-call parts
-with a `ToolUse` finish become the normalized proposals owned by
-[tool-loop](tool-loop.md); thinking or redacted-thinking still fail the adapter
-stage closed because no durable semantic representation exists. Scripted
-providers declare their exact terminal observation; nothing is inferred from
-timing or injected I/O errors.
+Empty text blocks are dropped without creating invalid entries, and so are
+thinking blocks whose text is empty — the Claude 5-family omitted-display shape,
+which carries only a provider replay signature that no durable representation
+could replay. The provider documents the resulting tool continuation as graceful
+degradation, disabling thinking for that request rather than rejecting it.
+Tool-call parts with a `ToolUse` finish become the normalized proposals owned by
+[tool-loop](tool-loop.md); thinking with actual text or redacted-thinking still
+fails the adapter stage closed because no durable semantic representation
+exists. Scripted providers declare their exact terminal observation; nothing is
+inferred from timing or injected I/O errors.
 
 ### Provider-target identity
 
