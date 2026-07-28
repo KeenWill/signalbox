@@ -10,6 +10,52 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-27 — Read imported conversations through their own verb
+
+**Context.** `signalbox import` prints an imported conversation identity and
+nothing else, while `signalbox continue --through-position N` requires a valid
+one-based imported position. No client verb could show an imported
+conversation's entries or even its entry count: `transcript` takes session
+identities, and an imported conversation is durable record that creates no
+session. The owner's first hands-on continuation had to guess `N`, and an
+out-of-range guess answered `not_found: the requested session was not found` —
+wrong on both counts, since the identity was valid and named no session.
+
+**Decision.** Add a separate read verb,
+`signalbox imported <imported-conversation-uuid>`, over a new version-fifteen
+`read_imported_conversation` request whose response is a spooled start/entry/end
+sequence. Each entry names its position, imported entry identity, speaker
+attestation, content kind, and a `text_preview` that is null or the entry's
+exact leading scalars bounded to 256 UTF-8 bytes with a truncation marker.
+Version fifteen also adds two typed rejections for
+`create_session_from_imported_frontier`: `imported_conversation_not_found` and
+`imported_frontier_position_out_of_range`, the latter naming the selectable
+range. `continue --through-position` stays required and gains only the exact
+sentinel `latest`, which the client resolves through this read and prints before
+sending the concrete ordinal.
+
+**Rejected alternatives.** Extending `transcript` to accept an imported
+conversation identity would make the two kinds interchangeable on the verb that
+reads live sessions, when the protocol keeps them distinct everywhere else.
+Reusing the undetailed `not_found` for an out-of-range position keeps the
+misdiagnosis the owner hit. Making `--through-position` optional with an
+implicit latest default would silently pick a boundary the recorded decision to
+require it explicitly rejects. Resolving `latest` server-side would put a
+non-concrete position in the durable command and make replay equality depend on
+resolution rather than on the payload. Previewing tool, thinking, or media
+content would widen what the wire exposes about imported content beyond the
+conservative transcript projection, which is a separate foundation-weight
+change. A 256-byte preview is one or two terminal lines: enough to recognize an
+entry, small enough that a several-thousand-entry listing stays scannable.
+Versions twelve through fourteen are reserved by open stacks, so fifteen is the
+next free number and the admitted set carries that gap.
+
+**Affects.** [process protocol](spec/process-protocol.md) (version fifteen, the
+read request, its three messages, the two rejection details, and the `imported`
+and `continue` client surfaces),
+[conversation import](spec/conversation-import.md) (the inspection read),
+`crates/process-protocol`, `apps/signalboxd`, and `apps/client`.
+
 ## 2026-07-27 — Renumber the system-prompt migration after main advanced
 
 **Context.** This branch reserved `202607280301_session_system_prompt.sql` while

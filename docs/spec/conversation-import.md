@@ -3,11 +3,13 @@
 This page specifies immutable imported conversation snapshots, raw source-record
 preservation, source-neutral normalization, addressable imported frontiers, the
 format-versioned converter seam, Claude Code session and Codex rollout JSONL
-converters, the append-only Postgres import store, and the owner-operated
-one-file and directory-scan import surfaces. The one-file surface was verified
-against the implementing stack through PR #252 (`agent/import-surfaces`); the
-directory scan is verified through PR #284 (`agent/import-directory-scan`).
-Later session creation from one imported frontier is owned by
+converters, the append-only Postgres import store, the owner-operated one-file
+and directory-scan import surfaces, and the imported-conversation inspection
+read. The one-file surface was verified against the implementing stack through
+PR #252 (`agent/import-surfaces`); the directory scan is verified through PR
+#284 (`agent/import-directory-scan`); the imported-conversation inspection read
+is verified through PR #303 (`agent/imported-conversation-inspection`). Later
+session creation from one imported frontier is owned by
 [sessions-and-transcript](sessions-and-transcript.md); native turn activation
 and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
@@ -340,6 +342,39 @@ naming the existing identity. The terminal prints these as distinct `inserted`
 and `already_imported` outcomes with that identity. Neither outcome creates or
 seeds a session, and changed raw-record content or order continues to create a
 new exact snapshot under the identity model above.
+
+## Imported-conversation inspection
+
+An import prints only the imported conversation's identity, while
+[later session creation](sessions-and-transcript.md) selects one inclusive
+imported position. `signalbox imported <imported-conversation-uuid>` is the read
+that makes those positions observable: it sends one version-fifteen
+`read_imported_conversation` request and prints one line per normalized entry
+plus a final `entry_count`. Each line names the entry's one-based imported
+position, its imported entry identity, its exact source-speaker attestation, its
+normalized content kind, and — for an entry whose content is attested `Text` —
+that text's exact leading scalars bounded to 256 UTF-8 bytes with an explicit
+truncation marker. The complete message sequence and its bounds are owned by the
+[process protocol](process-protocol.md#server-messages).
+
+The read exposes no imported content a transcript snapshot does not already
+carry: it bounds exactly the attested text that snapshot carries in full and
+adds nothing for source events, tools, results, thinking, media, absence detail,
+or raw records. The immutable aggregate remains the sole authority for complete
+normalized content and verbatim raw source. The read creates nothing, seeds no
+session, and performs no durable write; it loads the same completely checked
+aggregate the continuation command loads, so it inherits that path's integrity
+verification rather than reading members selectively.
+
+`signalbox continue` consumes those positions. Its `--through-position` is
+required, and it accepts either a positive decimal or the exact sentinel
+`latest`. The client resolves `latest` against this read's entry count before
+constructing the durable command, prints the resolved ordinal, and sends that
+concrete position. Because an imported conversation is immutable, the resolution
+is stable and an exact replay names the same boundary. An out-of-range position
+on an existing imported conversation is a rejection naming the selectable range,
+not an absent-identity `not_found`; both classifications are owned by the
+[process protocol](process-protocol.md#server-messages).
 
 ## Claude Code session JSONL versions 1 and 2
 

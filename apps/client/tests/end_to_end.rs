@@ -257,7 +257,7 @@ async fn create_fixture_session(socket: PathBuf) -> Result<String, Box<dyn Error
         vec![
             String::from("create"),
             String::from("--model"),
-            String::from(SEARCH_FIXTURE_SELECTION),
+            String::from(IMPORTED_CONTINUATION_SELECTION),
         ],
         None,
     )
@@ -614,6 +614,223 @@ async fn terminal_client_imports_one_file_and_reports_exact_reimport() -> Result
     socket_directory.cleanup()?;
     drop(container);
     Ok(())
+}
+
+/// The model selection the imported-continuation test installs on the session
+/// it creates. It is the first selection `IMPORT_MODEL_CONFIGURATION` defines;
+/// the test starts no turn, so which model it names does not affect the
+/// boundary under test.
+const IMPORTED_CONTINUATION_SELECTION: &str = "00000000-0000-0000-0000-000000000001";
+
+/// The synthetic imported source both imported-inspection tests read, and the
+/// exact entries its two positions carry.
+struct ImportedInspectionFixture {
+    user_text: &'static str,
+    assistant_text: &'static str,
+}
+
+impl ImportedInspectionFixture {
+    fn new() -> Self {
+        Self {
+            user_text: "synthetic imported question",
+            assistant_text: "synthetic imported answer",
+        }
+    }
+
+    fn source(&self) -> String {
+        format!(
+            "{{\"sessionId\":\"terminal-import-inspect\",\"type\":\"user\",\
+             \"message\":{{\"role\":\"user\",\"content\":\"{}\"}}}}\n\
+             {{\"sessionId\":\"terminal-import-inspect\",\"type\":\"assistant\",\
+             \"message\":{{\"role\":\"assistant\",\"content\":\"{}\"}}}}",
+            self.user_text, self.assistant_text,
+        )
+    }
+}
+
+/// S28: the shipped terminal exposes an imported conversation's selectable
+/// positions with their previews and total, so the position `continue`
+/// consumes never has to be guessed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_terminal_client_completes_an_offline_imported_inspection() -> Result<(), Box<dyn Error>>
+{
+    let fixture = ImportedInspectionFixture::new();
+    let (container, pool) = postgres().await?;
+    let socket_directory = SocketDirectory::create()?;
+    let source_directory = tempfile::tempdir()?;
+    let source_path = source_directory.path().join("inspect-session.jsonl");
+    fs::write(&source_path, fixture.source())?;
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let listener = LocalProcessListener::bind(socket_directory.socket())?;
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        InProcessToolDispatchGate::default(),
+        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+    );
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
+
+    let imported_conversation_id =
+        import_fixture_conversation(socket_directory.socket(), &source_path).await?;
+    let listed = run_client(
+        socket_directory.socket().to_owned(),
+        vec![String::from("imported"), imported_conversation_id],
+        None,
+    )
+    .await?;
+
+    assert!(
+        listed.status.success(),
+        "imported failed: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(listed.stderr.is_empty());
+    let rows: Vec<String> = String::from_utf8(listed.stdout)?
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let first = rows
+        .first()
+        .expect("the first selectable position is listed");
+    assert!(first.starts_with("position=1 "), "first row: {first}");
+    assert!(first.contains(" speaker=user kind=text truncated=false text="));
+    assert!(first.ends_with(fixture.user_text), "first row: {first}");
+    let second = rows
+        .get(1)
+        .expect("the second selectable position is listed");
+    assert!(second.starts_with("position=2 "), "second row: {second}");
+    assert!(second.contains(" speaker=assistant kind=text truncated=false text="));
+    assert!(
+        second.ends_with(fixture.assistant_text),
+        "second row: {second}"
+    );
+    assert_eq!(rows.get(2).map(String::as_str), Some("entry_count=2"));
+    assert_eq!(rows.len(), 3);
+
+    shutdown.send(true)?;
+    timeout(Duration::from_secs(10), process_task).await???;
+    pool.close().await;
+    socket_directory.cleanup()?;
+    drop(container);
+    Ok(())
+}
+
+/// S28: `latest` resolves to the imported conversation's final position,
+/// prints that concrete ordinal, and seeds the created session through it, so
+/// the owner never has to know the count to continue from the end.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_terminal_client_completes_an_offline_latest_position_continuation()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ImportedInspectionFixture::new();
+    let (container, pool) = postgres().await?;
+    let socket_directory = SocketDirectory::create()?;
+    let source_directory = tempfile::tempdir()?;
+    let source_path = source_directory.path().join("latest-session.jsonl");
+    fs::write(&source_path, fixture.source())?;
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let listener = LocalProcessListener::bind(socket_directory.socket())?;
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        InProcessToolDispatchGate::default(),
+        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+    );
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
+
+    let imported_conversation_id =
+        import_fixture_conversation(socket_directory.socket(), &source_path).await?;
+    let continued = run_client(
+        socket_directory.socket().to_owned(),
+        vec![
+            String::from("continue"),
+            imported_conversation_id,
+            String::from("--through-position"),
+            String::from("latest"),
+            String::from("--relationship"),
+            String::from("resume"),
+            String::from("--model"),
+            String::from(IMPORTED_CONTINUATION_SELECTION),
+        ],
+        None,
+    )
+    .await?;
+
+    assert!(
+        continued.status.success(),
+        "continue failed: {}",
+        String::from_utf8_lossy(&continued.stderr)
+    );
+    let session_id = String::from_utf8(continued.stdout)?.trim().to_owned();
+    Uuid::parse_str(&session_id)?;
+    let printed = String::from_utf8(continued.stderr)?;
+    assert!(printed.starts_with("command_id="), "printed: {printed}");
+    assert!(
+        printed.ends_with("through_position=2\n"),
+        "printed: {printed}"
+    );
+
+    let transcript = run_client(
+        socket_directory.socket().to_owned(),
+        vec![String::from("transcript"), session_id],
+        None,
+    )
+    .await?;
+    assert!(transcript.status.success());
+    let transcript = String::from_utf8(transcript.stdout)?;
+    assert!(
+        transcript.contains(fixture.user_text),
+        "transcript: {transcript}"
+    );
+    assert!(
+        transcript.contains(fixture.assistant_text),
+        "transcript: {transcript}"
+    );
+
+    shutdown.send(true)?;
+    timeout(Duration::from_secs(10), process_task).await???;
+    pool.close().await;
+    socket_directory.cleanup()?;
+    drop(container);
+    Ok(())
+}
+
+/// Imports one synthetic source file and returns the durable imported
+/// conversation identity its receipt names.
+async fn import_fixture_conversation(
+    socket: &Path,
+    source_path: &Path,
+) -> Result<String, Box<dyn Error>> {
+    let imported = run_client(
+        socket.to_owned(),
+        vec![
+            String::from("import"),
+            String::from("--format"),
+            String::from("claude-code"),
+            source_path.display().to_string(),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        imported.status.success(),
+        "import failed: {}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let identity = String::from_utf8(imported.stdout)?
+        .strip_prefix("inserted imported_conversation_id=")
+        .expect("the synthetic import returns an inserted receipt")
+        .trim()
+        .to_owned();
+    Uuid::parse_str(&identity)?;
+    Ok(identity)
 }
 
 /// S28 / INV-038: scan mode selects recursive matching regular files and
