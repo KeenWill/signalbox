@@ -1007,6 +1007,25 @@ fn stateful_driver_redacts_escaped_held_text() {
     assert_eq!(status_for(&escaped), CorpusStatus::Redacted);
 }
 
+/// Split enumeration cuts the text a corpus line denotes, not its encoding:
+/// an event token contributes no bytes and an escape contributes its
+/// character, so the boundaries enumerated are the ones a provider can split.
+#[test]
+fn corpus_line_text_drops_events_and_decodes_escapes() {
+    let text = corpus_line_text("api_key=<|D|>value<|TAB|>tail");
+
+    assert_eq!(text, "api_key=value\ttail");
+}
+
+/// Split positions are every character boundary, both ends included, so a
+/// multibyte character is never cut in half and no fragmentation is skipped.
+#[test]
+fn split_boundaries_span_both_ends_and_skip_continuation_bytes() {
+    let boundaries = split_boundaries("añb");
+
+    assert_eq!(boundaries, vec![0, 1, 3, 4]);
+}
+
 /// Every synthetic corpus line has an explicit, exact final
 /// classification across all redaction output surfaces it can drive.
 #[test]
