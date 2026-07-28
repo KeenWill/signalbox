@@ -41,6 +41,12 @@ ALTER TABLE model_call
             )
         );
 
+-- Transcript usage counts and paging both select terminal calls by session.
+-- The trailing correlation keys pair with turn_lifecycle_by_session_position
+-- for the pager's acceptance-position/model-call ordering.
+CREATE INDEX model_call_usage_by_session_state_turn_call
+    ON model_call (session_id, state_kind, turn_id, model_call_id);
+
 -- Prepared-to-terminal transitions are provably unsent, so no provider usage
 -- can exist even when the terminal disposition itself is valid. Keep this as a
 -- separate additive trigger rather than rewriting an applied migration.

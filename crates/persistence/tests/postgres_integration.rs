@@ -4634,6 +4634,26 @@ async fn inv014_model_call_credential_reference_is_total() -> Result<(), Box<dyn
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn model_call_usage_transcript_lookup_is_session_indexed() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef
+           FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND indexname = 'model_call_usage_by_session_state_turn_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(index_definition.contains("(session_id, state_kind, turn_id, model_call_id)"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-006: a call terminalized directly from Prepared cannot carry usage because
 /// no provider send was authorized.
 #[tokio::test(flavor = "multi_thread")]
