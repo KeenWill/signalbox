@@ -25,8 +25,8 @@ tag.
 
 ## Process configuration
 
-`signalboxd` reads exactly six deployment values from the process environment at
-startup:
+`signalboxd` reads exactly six required deployment values from the process
+environment at startup and conditionally reads a seventh:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
@@ -35,6 +35,9 @@ startup:
 - `SIGNALBOX_CONFIG_FILE` — path to the static model/alias catalog (below).
 - `SIGNALBOX_TEMPLATE_CONFIG_FILE` — path to the static session-template catalog
   (below).
+- `HOME` — read only when a template uses a `$HOME/` prompt-file reference. It
+  must then be a nonempty absolute path; absence, an empty value, or a relative
+  value is a typed configuration failure.
 - `ANTHROPIC_API_KEY_FILE` — path to the file holding the current Anthropic API
   key value.
 - `GITHUB_TOKEN_FILE` — path to the file holding the current GitHub code-host
@@ -73,17 +76,17 @@ check confines the URL it is given to a local cluster, so the refusals above are
 what stand between a production cluster and ambient configuration, not that
 path's name.
 
-A missing or empty value, an unreadable or invalid model or template catalog, an
-invalid or unreadable referenced prompt file, or a failed Anthropic or GitHub
-transport construction fails startup at the `Configuration` phase, before any
-database contact. Startup and shutdown logs carry the phase, an operator failure
-class, and small typed fields where present (session and turn ids,
-recovered-turn count, grace-window seconds) — never configuration values, paths,
-or URLs. The typed configuration error does not survive to the log: `run_hub`
-collapses every catalog-parse and adapter-construction variant (and likewise
-connection and migration errors) into a generic `Infrastructure` class carrying
-only its phase, so an operator cannot distinguish an unreadable catalog from an
-unknown field, bad version, or invalid limit (see Open edges). The four
+A missing or empty required value, an unreadable or invalid model or template
+catalog, an invalid or unreadable referenced prompt file, or a failed Anthropic
+or GitHub transport construction fails startup at the `Configuration` phase,
+before any database contact. Startup and shutdown logs carry the phase, an
+operator failure class, and small typed fields where present (session and turn
+ids, recovered-turn count, grace-window seconds) — never configuration values,
+paths, or URLs. The typed configuration error does not survive to the log:
+`run_hub` collapses every catalog-parse and adapter-construction variant (and
+likewise connection and migration errors) into a generic `Infrastructure` class
+carrying only its phase, so an operator cannot distinguish an unreadable catalog
+from an unknown field, bad version, or invalid limit (see Open edges). The four
 deployment paths are accepted without I/O at environment parsing time; both
 catalogs and every template prompt file are read during startup. Neither
 credential file is read at startup (see credential lifecycle below).
@@ -187,11 +190,11 @@ An inline prompt is the exact TOML string value. A prompt-file reference is
 either a relative path resolved from the template document's parent directory,
 or `$HOME/` followed by a relative suffix resolved from the process's `HOME` at
 load. Every component after either root must be normal and nonempty: absolute
-paths, `.` or `..`, another `$`, any other variable spelling, and an unavailable
-home for a `$HOME/` reference fail typed validation. The file must be readable
-UTF-8 and its complete contents must construct the same nonempty, U+0000-free,
-1,048,576-byte-bounded `SessionSystemPrompt` as an inline value. There is no
-newline trimming or interpolation.
+paths, `.` or `..`, another `$`, any other variable spelling, and a missing,
+empty, or non-absolute `HOME` for a `$HOME/` reference fail typed validation.
+The file must be readable UTF-8 and its complete contents must construct the
+same nonempty, U+0000-free, 1,048,576-byte-bounded `SessionSystemPrompt` as an
+inline value. There is no newline trimming or interpolation.
 
 One valid table becomes an immutable resolved bundle containing the exact model
 request, system prompt, and dangerous-tool blanket. Its content digest is

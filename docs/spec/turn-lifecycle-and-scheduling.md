@@ -11,8 +11,10 @@ continuation reconstitution and terminal shapes were verified through PR #292
 at the refused, reconciliation-required, and model-call recovery gates were
 verified through PR #296 (`agent/continuation-reconstitution-siblings`); the
 version-thirteen delivery surface, queued restart behavior, and protocol-driven
-continuation steering were verified through PR #302 (`agent/mid-turn-steering`).
-Code homes: `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
+continuation steering were verified through PR #302 (`agent/mid-turn-steering`);
+the session-template stack implements the conditional home input and
+template-catalog startup order. Code homes:
+`crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,`
@@ -593,16 +595,17 @@ rather than repairs, and no effect is authorized from a failed reconstruction
 
 ## Daemon runtime: startup order and shutdown
 
-signalboxd is the composition root. It reads exactly `DATABASE_URL`,
-`SIGNALBOX_CONFIG_FILE` (the model-configuration TOML naming provider targets,
-selections, and aliases), `SIGNALBOX_TEMPLATE_CONFIG_FILE`,
+signalboxd is the composition root. It reads the six required values
+`DATABASE_URL`, `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML naming
+provider targets, selections, and aliases), `SIGNALBOX_TEMPLATE_CONFIG_FILE`,
 `ANTHROPIC_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, and `SIGNALBOX_SOCKET_PATH` from
-the process environment (the provisional configuration channels are
-[configuration-and-credentials](configuration-and-credentials.md) scope). It
-validates the model catalog, then resolves the template catalog and all of its
-prompt files against that model catalog, before connecting. It then acquires the
-single-daemon guard, fences the prior pool incarnation, migrates and resolves
-the one-time imported display-title backfill
+the process environment, plus `HOME` only under the
+[template path rules](configuration-and-credentials.md#the-static-session-template-catalog).
+The configuration page owns these provisional channels. It validates the model
+catalog, then resolves the template catalog and all of its prompt files against
+that model catalog, before connecting. It then acquires the single-daemon guard,
+fences the prior pool incarnation, migrates and resolves the one-time imported
+display-title backfill
 ([conversation-import](conversation-import.md#derived-display-titles)),
 completes recovery scan, binds the process socket, then concurrently admits
 protocol requests, dispatches the outbox, and schedules eligible work. On a

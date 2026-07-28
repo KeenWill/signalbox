@@ -10,8 +10,9 @@ failed-attempt operator event together with the credential-shaped code-host
 detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
 decision surface through PR #291 (`agent/turn-control-verbs`), and
 runner-protocol batch reconstitution through PR #260
-(`agent/runner-protocol-domain`). It owns logical tool requests, approval policy
-and decisions, physical tool attempts, result admission, intra-turn
+(`agent/runner-protocol-domain`). The session-template stack implements
+template-derived blanket creation. It owns logical tool requests, approval
+policy and decisions, physical tool attempts, result admission, intra-turn
 continuation, crash classification, the compiled registry, and the daemon-local
 catalog. Turn and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
@@ -108,8 +109,9 @@ selected source makes unattended operation inspectable without laundering policy
 as human consent.
 
 The blanket is a field of each immutable `VersionedSessionConfigurationDefaults`
-value and is named `DangerousToolAutoApproval::{Disabled, ApproveAll}`. Safe
-session creation uses `Disabled`. Replacement installs a complete later defaults
+value and is named `DangerousToolAutoApproval::{Disabled, ApproveAll}`. Explicit
+session creation uses `Disabled`; template-derived creation copies the resolved
+template's configured blanket. Replacement installs a complete later defaults
 version through the existing `ReplaceSessionDefaults` command. Origin acceptance
 freezes the posture into `EffectiveConfiguration` alongside model selection;
 steering-derived work inherits its source turn's frozen value. A later defaults
