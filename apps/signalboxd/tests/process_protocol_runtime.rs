@@ -50,8 +50,9 @@ use signalbox_model_runtime::{
 };
 use signalbox_persistence::{
     context_compaction::{
-        ContextCompactionRepository, FailedContextCompactionDisposition,
-        PrepareContextCompactionOutcome, PrepareContextCompactionRequest,
+        ContextCompactionCorruption, ContextCompactionRepository, ContextCompactionRepositoryError,
+        FailedContextCompactionDisposition, PrepareContextCompactionOutcome,
+        PrepareContextCompactionRequest,
     },
     conversation_import::ImportedConversationRepository,
     create_session_from_imported_frontier::ImportedSessionRepository,
@@ -5770,6 +5771,161 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
         ))
     ));
     assert!(fatal_execution.is_triggered());
+
+    drop(connection);
+    runtime.stop().await
+}
+/// S03 / INV-012 / INV-015: a daemon-minted compaction result identity that
+/// already names a durable record is reminted before the provider is called,
+/// exactly as a colliding call identity already is. Discovering it in
+/// `complete` instead would cost a paid summary and admit no remint, because
+/// the in-flight lifecycle pins the identities by then. The rejected claim
+/// rolls back so the reminting caller can reuse its owner-global command.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s03_inv012_inv015_taken_compaction_result_identities_remint_before_sending()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let (connection, session_id) = seed_completed_compaction_session(&mut runtime).await?;
+    let repository = ContextCompactionRepository::new(runtime.pool.clone());
+    let seeded = repository
+        .prepare(direct_compaction_request(
+            session_id,
+            DurableCommandId::from_uuid(Uuid::from_u128(0xfa01)),
+            None,
+            0xfa10,
+        ))
+        .await?;
+    let PrepareContextCompactionOutcome::Prepared(seeded) = seeded else {
+        panic!("the result-identity fixture must prepare its first call");
+    };
+    repository.authorize(&seeded).await?;
+    let applied = repository
+        .complete(
+            &seeded,
+            "result identity fixture summary",
+            ContextCompactionTokenUsage::unreported(),
+        )
+        .await?;
+
+    let summary_command = DurableCommandId::from_uuid(Uuid::from_u128(0xfa02));
+    let mut summary_collision =
+        direct_compaction_request(session_id, summary_command, None, 0xfa20);
+    summary_collision.summary_entry = applied.summary_entry;
+    let summary_outcome = repository.prepare(summary_collision).await;
+    let mut frontier_collision = direct_compaction_request(
+        session_id,
+        DurableCommandId::from_uuid(Uuid::from_u128(0xfa03)),
+        None,
+        0xfa30,
+    );
+    frontier_collision.result_frontier = applied.result_frontier;
+    let frontier_outcome = repository.prepare(frontier_collision).await;
+    let mut compaction_collision = direct_compaction_request(
+        session_id,
+        DurableCommandId::from_uuid(Uuid::from_u128(0xfa04)),
+        None,
+        0xfa40,
+    );
+    compaction_collision.compaction = applied.compaction;
+    let compaction_outcome = repository.prepare(compaction_collision).await;
+
+    assert!(matches!(
+        summary_outcome,
+        Err(ContextCompactionRepositoryError::IdentityCollision)
+    ));
+    assert!(matches!(
+        frontier_outcome,
+        Err(ContextCompactionRepositoryError::IdentityCollision)
+    ));
+    assert!(matches!(
+        compaction_outcome,
+        Err(ContextCompactionRepositoryError::IdentityCollision)
+    ));
+    let claimed: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+            .bind(summary_command.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(claimed, 0);
+    let calls: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM context_compaction_model_call
+          WHERE session_id = $1 AND state_kind <> 'terminal'",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(calls, 0);
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S03 / INV-012 / INV-015: a result identity taken after preparation fails the
+/// completion closed rather than surfacing as a retryable database failure.
+///
+/// `complete_context_compaction_until_resolved` retries exactly the database
+/// and ambiguous-commit classes, so classifying this decided uniqueness
+/// violation as either would resubmit the identical rejected statement forever
+/// and block the session with no error surfaced. The call stays in flight for
+/// startup recovery, which is the audited path for a durable record whose
+/// executor stopped.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s03_inv012_inv015_late_result_identity_collision_fails_completion_closed()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let (connection, session_id) = seed_completed_compaction_session(&mut runtime).await?;
+    let repository = ContextCompactionRepository::new(runtime.pool.clone());
+    let outcome = repository
+        .prepare(direct_compaction_request(
+            session_id,
+            DurableCommandId::from_uuid(Uuid::from_u128(0xfb01)),
+            None,
+            0xfb10,
+        ))
+        .await?;
+    let PrepareContextCompactionOutcome::Prepared(prepared) = outcome else {
+        panic!("the late-collision fixture must prepare its call");
+    };
+    repository.authorize(&prepared).await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(session_id.into_uuid())
+    .bind(prepared.result_frontier().into_uuid())
+    .execute(&runtime.pool)
+    .await?;
+
+    let outcome = repository
+        .complete(
+            &prepared,
+            "late collision fixture summary",
+            ContextCompactionTokenUsage::unreported(),
+        )
+        .await;
+
+    assert!(matches!(
+        outcome,
+        Err(ContextCompactionRepositoryError::Corruption(
+            ContextCompactionCorruption::Inconsistent("compaction result identity")
+        ))
+    ));
+    assert!(!matches!(
+        outcome,
+        Err(ContextCompactionRepositoryError::Database(_)
+            | ContextCompactionRepositoryError::CommitAmbiguous(_))
+    ));
+    let call_state: String = sqlx::query_scalar(
+        "SELECT state_kind FROM context_compaction_model_call WHERE model_call_id = $1",
+    )
+    .bind(prepared.call().into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(call_state, "in_flight");
 
     drop(connection);
     runtime.stop().await

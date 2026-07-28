@@ -430,7 +430,8 @@ impl ContextCompactionRepository {
         .bind(session_id_to_uuid(prepared.through.source_session()))
         .bind(prepared.through.entry().into_uuid())
         .execute(&mut *transaction)
-        .await?;
+        .await
+        .map_err(classify_completion_write)?;
         sqlx::query(
             "INSERT INTO context_frontier
                 (owning_session_id, context_frontier_id,
@@ -442,7 +443,8 @@ impl ContextCompactionRepository {
         .bind(prepared.source_frontier.into_uuid())
         .bind(Decimal::from(result_count))
         .execute(&mut *transaction)
-        .await?;
+        .await
+        .map_err(classify_completion_write)?;
         sqlx::query(
             "INSERT INTO context_frontier_delta
                 (owning_session_id, context_frontier_id, member_position,
@@ -454,7 +456,8 @@ impl ContextCompactionRepository {
         .bind(Decimal::from(result_count))
         .bind(prepared.summary_entry.into_uuid())
         .execute(&mut *transaction)
-        .await?;
+        .await
+        .map_err(classify_completion_write)?;
         sqlx::query(
             "INSERT INTO context_compaction
                 (context_compaction_id, session_id, predecessor_compaction_id,
@@ -475,7 +478,8 @@ impl ContextCompactionRepository {
         .bind(prepared.through.entry().into_uuid())
         .bind(prepared.summary_entry.into_uuid())
         .execute(&mut *transaction)
-        .await?;
+        .await
+        .map_err(classify_completion_write)?;
         let command_rows = sqlx::query(
             "UPDATE compact_session_command
                 SET result_kind = 'applied',
@@ -777,6 +781,36 @@ async fn prepare_in_transaction(
             }
         };
         return Ok((false, outcome));
+    }
+    // The three result identities are remintable only here. `complete` writes
+    // them under global uniqueness after the provider has produced the summary,
+    // and by then the in-flight lifecycle pins them, so a collision discovered
+    // there costs a paid call and can only fail closed. Deciding it now routes
+    // it through the same remint path the call identity already takes. This
+    // reads rather than reserves — nothing durable can name an unproduced
+    // summary — so `complete` still fails closed on a later collision.
+    let result_identity_taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM semantic_transcript_entry
+              WHERE semantic_entry_id = $1
+         ) OR EXISTS (
+             SELECT 1
+               FROM context_frontier
+              WHERE context_frontier_id = $2
+         ) OR EXISTS (
+             SELECT 1
+               FROM context_compaction
+              WHERE context_compaction_id = $3
+         )",
+    )
+    .bind(request.summary_entry.into_uuid())
+    .bind(request.result_frontier.into_uuid())
+    .bind(request.compaction.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if result_identity_taken {
+        return Err(ContextCompactionRepositoryError::IdentityCollision);
     }
     // Lock inventory: the session scheduler follows the owner-global command
     // claim, then the current-defaults pointer. Holding the scheduler while
@@ -1247,6 +1281,25 @@ fn decode_u64(
     u64::try_from(value).map_err(|_| ContextCompactionCorruption::InvalidOrdinal(field).into())
 }
 
+/// Classifies one failed completion write that carries a result identity.
+///
+/// A uniqueness violation here names durable rows the prepared identities
+/// cannot own. Repeating the transition is futile: the identities are pinned by
+/// the in-flight lifecycle and every attempt writes exactly the same rows, so
+/// the daemon's resolve loop must stop rather than resubmit the identical
+/// statement forever. `prepare` rejects an identity already taken before the
+/// provider is called; this is the fail-closed backstop for one taken after
+/// that read.
+fn classify_completion_write(error: sqlx::Error) -> ContextCompactionRepositoryError {
+    if error
+        .as_database_error()
+        .is_some_and(|database| database.code().as_deref() == Some("23505"))
+    {
+        return ContextCompactionCorruption::Inconsistent("compaction result identity").into();
+    }
+    error.into()
+}
+
 fn require_single(
     rows: u64,
     relationship: &'static str,
@@ -1288,7 +1341,8 @@ pub enum ContextCompactionRepositoryError {
     Database(sqlx::Error),
     /// Commit outcome could not be proven.
     CommitAmbiguous(sqlx::Error),
-    /// A daemon-minted call identity collided globally and may be reminted.
+    /// A daemon-minted call or result identity collided globally and may be
+    /// reminted.
     IdentityCollision,
     /// Durable rows contradicted the closed lifecycle.
     Corruption(ContextCompactionCorruption),

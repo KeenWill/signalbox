@@ -4003,6 +4003,15 @@ async fn authorize_context_compaction_until_resolved(
     }
 }
 
+/// Applies the completion, retrying only the outcomes an identical retry can
+/// still change.
+///
+/// A transient database failure may succeed next time, and an unproven commit
+/// is resolved by `complete` rereading its own terminal facts under the session
+/// lock and returning the applied result. Every other class is a decided fact —
+/// including a uniqueness violation on a result identity, which repeating the
+/// same statements can never clear — so it returns rather than blocking the
+/// session forever.
 async fn complete_context_compaction_until_resolved(
     repository: &ContextCompactionRepository,
     prepared: &PreparedContextCompaction,

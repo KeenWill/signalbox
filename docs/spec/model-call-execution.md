@@ -222,6 +222,15 @@ summary result commits, later model inputs in that session follow the projection
 rule. Command replay returns the same compaction identity, call, exact through
 position, summary entry, and result frontier.
 
+Preparation also rejects a freshly minted summary-entry, result-frontier, or
+compaction identity that already names a durable record, so the daemon remints
+and retries before any provider interaction exactly as it does for a colliding
+call identity; the rejected claim rolls back, leaving the owner-global command
+reusable. A uniqueness violation observed later, while applying the completion,
+is a decided fact rather than a retryable database failure: the completion fails
+closed and its in-flight call is left to startup recovery, because the prepared
+identities are pinned by then and every identical retry fails the same way.
+
 Every catalog model selection also declares `context_window_tokens` as a
 required nonzero integer beside `max_output_tokens`; configuration is invalid
 when the maximum output reservation exceeds the context window. The window is
