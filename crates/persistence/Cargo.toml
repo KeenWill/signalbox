@@ -49,6 +49,11 @@ path = "tests/conversation_import_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]
+name = "conversation_listing_postgres"
+path = "tests/conversation_listing_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
 name = "imported_session_postgres"
 path = "tests/imported_session_postgres.rs"
 required-features = ["postgres-integration"]
@@ -61,6 +66,11 @@ required-features = ["postgres-integration"]
 [[test]]
 name = "postgres_integration"
 path = "tests/postgres_integration.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "runner_protocol_postgres"
+path = "tests/runner_protocol_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]

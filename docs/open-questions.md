@@ -337,13 +337,12 @@ questions below remain open.
   snapshot and durable-update semantics are defined by
   [process-protocol](spec/process-protocol.md), while transient model-update
   streaming remains open below. (S02, S24)
-- **Runner transport and durable store.** The accepted boundary requires one
-  runner-initiated held outbound streaming connection, no runner inbound
-  listener, and durable registration, lease, claim, and result authority
-  independent of the channel. Exact transport technology, framing,
-  authentication binding, compatibility version, backpressure, heartbeat, store
-  schema, transactions, reconnect snapshot, and stale-evidence retention remain
-  undecided. Blocks the runner binary and remote dispatch. (S12, S16, S30–S32)
+- **Runner transport and reconnect.** Durable runner facts are owned by
+  [runner protocol and placement](spec/runner-protocol.md). Exact transport
+  technology, framing, authentication binding, compatibility version,
+  backpressure, heartbeat, application transaction orchestration, reconnect
+  snapshot, and stale-evidence retention remain undecided. Blocks the runner
+  binary and remote dispatch. (S12, S16, S30–S32)
 - **Compatibility beyond the retained process-protocol versions.** Versions one
   through four have their owning [specification](spec/process-protocol.md). A
   future compatibility window, negotiation scheme, and generated-client policy

@@ -245,7 +245,10 @@ execution and continuation. For each next approved request:
    `InFlight` and the turn attempt from `Prepared` to `Running` when necessary.
 3. **Execution.** No database transaction spans the in-process effect. The
    executor receives a correlation containing request, tool attempt, issuing
-   turn attempt, and dispatch generation and returns one evidence value.
+   turn attempt, and dispatch generation and returns one evidence value. Only
+   the issued authorization mints the executor fence that can bind returned
+   evidence into a committable observation; a correlation reconstituted from raw
+   durable facts compares and persists but cannot bind.
 4. **Commit-result transaction.** Fresh locked state validates the complete
    correlation and that the dispatch generation is current before changing the
    attempt. A stale or duplicate result cannot advance logical state (INV-011,

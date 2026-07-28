@@ -3,13 +3,15 @@
 This page specifies immutable imported conversation snapshots, raw source-record
 preservation, source-neutral normalization, addressable imported frontiers, the
 format-versioned converter seam, Claude Code session and Codex rollout JSONL
-converters, the append-only Postgres import store, and the owner-operated
-one-file and directory-scan import surfaces. The one-file surface was verified
-against the implementing stack through PR #252 (`agent/import-surfaces`); the
-directory scan is verified through PR #284 (`agent/import-directory-scan`).
-Later session creation from one imported frontier is owned by
-[sessions-and-transcript](sessions-and-transcript.md); native turn activation
-and model-call rendering are owned by
+converters, the append-only Postgres import store, evidence-derived display
+titles and their startup backfill, and the owner-operated one-file and
+directory-scan import surfaces. The one-file surface was verified against the
+implementing stack through PR #252 (`agent/import-surfaces`); the directory scan
+is verified through PR #284 (`agent/import-directory-scan`); and the derived
+display title and its startup backfill are verified through PR #304
+(`agent/unified-conversation-listing`). Later session creation from one imported
+frontier is owned by [sessions-and-transcript](sessions-and-transcript.md);
+native turn activation and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
 [model-call-execution](model-call-execution.md).
 
@@ -566,16 +568,76 @@ One transaction resolves or inserts a complete aggregate:
 
 No partial aggregate can commit (INV-038).
 `ImportedConversationRepository::load` returns `None` only when the requested
-header does not exist. Once a header exists, a hash mismatch, missing blob or
-member, gap, duplicate, unknown discriminator/version, contradictory variant
-columns, invalid source value, non-null source-session lineage mismatch, or
-domain correlation failure is typed corruption. Complete storage records pass
-through the domain-owned reconstitution seam; adapters never default or drop a
-malformed value. For each Claude Code and Codex converter version, that seam
-independently re-derives every expected entry using that version's fixed
-interpretation and requires exact agreement in entry count, order, content,
-speaker, and source metadata. It also reapplies the 128-container bound to
-complete records and entry-carried structured values (INV-002).
+header does not exist. A resolved display-title column that disagrees with pure
+re-derivation from the reconstituted records is likewise typed corruption
+([derived display titles](#derived-display-titles) below). Once a header exists,
+a hash mismatch, missing blob or member, gap, duplicate, unknown
+discriminator/version, contradictory variant columns, invalid source value,
+non-null source-session lineage mismatch, or domain correlation failure is typed
+corruption. Complete storage records pass through the domain-owned
+reconstitution seam; adapters never default or drop a malformed value. For each
+Claude Code and Codex converter version, that seam independently re-derives
+every expected entry using that version's fixed interpretation and requires
+exact agreement in entry count, order, content, speaker, and source metadata. It
+also reapplies the 128-container bound to complete records and entry-carried
+structured values (INV-002).
+
+## Derived display titles
+
+Every imported conversation carries one optional bounded display title on its
+header row (`imported_conversation.display_title` plus the closed
+`display_title_state` discriminator, migration
+`202607290201_imported_conversation_display_title.sql`), derived once from the
+preserved source records so the unified conversation listing owned by
+[process-protocol](process-protocol.md) can present imported rows by name. The
+title is presentation evidence, not identity: it never participates in the
+source digest, the imported-conversation identity, or the unique source-identity
+constraint, and the
+[derivation decision](../decisions.md#2026-07-27--derive-imported-display-titles-at-import-time)
+records the placement choice.
+
+`ImportedConversationDisplayTitle::derive` reads only the immutable aggregate —
+never a filename, wall clock, or import-time context — so re-deriving from the
+same aggregate always returns the same value. Candidate strings are tried in a
+fixed per-format order and the first candidate that shapes to a nonempty title
+wins:
+
+- Claude Code versions 1 and 2: for every raw record in physical order whose
+  normalized value is an object whose first `type` member is the string
+  `summary`, the string value of its first `summary` member; then every
+  attested-text entry with an attested `user` speaker, in imported order.
+- Codex rollout version 1: for every raw record in physical order whose
+  normalized value is an object whose first `type` member is the string
+  `session_meta` and whose first `payload` member is an object, the string value
+  of the payload's first `title` member; then the string value of each such
+  payload's first `instructions` member; then every attested-text entry with an
+  attested `user` speaker, in imported order.
+
+Each path step selects the first member with that exact name; an absent member
+or a value of another shape exhausts that record without failing the derivation.
+The shape of a candidate is its prefix up to the first line feed, carriage
+return, or U+0000, with leading and trailing ASCII space and tab removed,
+truncated to the first 256 Unicode scalars, and stripped of any
+truncation-exposed trailing ASCII space or tab; an empty shape exhausts the
+candidate. A conversation with no shapeable candidate has no display title,
+recorded as the `underivable` state, never a fabricated placeholder. Storage
+CHECK constraints seal the derived shape — nonempty single-line text of at most
+256 scalars without edge ASCII whitespace, present exactly in the `derived`
+state.
+
+Insertion always resolves the title, so the transitional `pending` state names
+only rows inserted before the column existed. The daemon resolves every pending
+row once at startup — after migration and before serving — by loading each
+complete aggregate through the checked reconstitution seam, re-deriving, and
+applying the one guarded update the header's append-only trigger admits: a
+`pending` row resolving to `derived` or `underivable` with every other column
+unchanged. The backfill is a pure derivation from durably stored raw bytes; it
+fails closed rather than guessing, and a serving unified-listing read that
+observes a pending row fails closed as corruption because startup owns that
+transition. Checked complete loads re-derive and reject a resolved title that
+disagrees with the records; exact reingestion continues to resolve through the
+digest and conversion-equivalence check unchanged, since the deterministic
+derivation adds no new degree of freedom.
 
 ## Test data and local validation
 

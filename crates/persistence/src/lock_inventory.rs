@@ -58,6 +58,95 @@ pub(crate) const HUB_FENCE_GENERATION: &str = "SELECT generation
           WHERE singleton
           FOR UPDATE";
 
+pub(crate) const RUNNER_ENROLLMENT: &str = "SELECT enrollment_id
+               FROM runner_enrollment
+              WHERE enrollment_id = $1
+              FOR UPDATE";
+
+pub(crate) const RUNNER_GRANT: &str = "SELECT credential_profile_name
+               FROM runner_credential_grant
+              WHERE session_id = $1
+                AND lineage_origin_event_ordinal = $2
+                AND runner_id = $3
+                AND grant_revision = $4
+              FOR UPDATE";
+
+pub(crate) const RUNNER_LEASE_ENROLLMENT_AUTHORITY: &str = "SELECT state_kind
+               FROM runner_enrollment
+              WHERE enrollment_id = $1
+              FOR SHARE";
+
+pub(crate) const RUNNER_LEASE_GRANT_AUTHORITY: &str = "SELECT grant_record.credential_profile_name
+               FROM runner_current_credential_grant_audit AS current_audit
+               JOIN runner_credential_grant AS grant_record
+                 ON grant_record.session_id = current_audit.session_id
+                AND grant_record.lineage_origin_event_ordinal =
+                    current_audit.lineage_origin_event_ordinal
+                AND grant_record.runner_id = current_audit.runner_id
+                AND grant_record.grant_revision = current_audit.grant_revision
+              WHERE current_audit.session_id = $1
+                AND current_audit.lineage_origin_event_ordinal = $2
+                AND current_audit.runner_id = $3
+                AND current_audit.grant_revision = $4
+              FOR SHARE OF current_audit";
+
+pub(crate) const RUNNER_REGISTRATION_HEAD: &str = "SELECT registration_revision
+               FROM runner_current_registration
+              WHERE enrollment_id = $1
+              FOR UPDATE";
+
+pub(crate) const RUNNER_PLACEMENT_HEAD: &str =
+    "SELECT record.event_ordinal, record.placement_revision,
+                    record.state_kind, record.pinned_runner_id,
+                    record.pinned_credential_profile_name,
+                    record.credential_grant_runner_id,
+                    record.credential_grant_lineage_origin_ordinal,
+                    record.credential_grant_revision
+               FROM runner_current_session_placement AS current_placement
+               JOIN runner_session_placement_record AS record
+                 ON record.session_id = current_placement.session_id
+                AND record.event_ordinal = current_placement.event_ordinal
+              WHERE current_placement.session_id = $1
+              FOR UPDATE OF current_placement";
+
+pub(crate) const RUNNER_LEASE_HEAD: &str = "SELECT current_event.event_ordinal, event.state_kind,
+                    lease_generation.attempt_id,
+                    lease_generation.session_id,
+                    lease_generation.runner_id,
+                    lease_generation.tool_name,
+                    lease_generation.effect_class,
+                    lease_generation.credential_profile_name,
+                    lease_generation.credential_grant_lineage_origin_ordinal,
+                    lease_generation.credential_grant_revision,
+                    lease_generation.credential_approval_kind,
+                    attempt.session_id AS canonical_dispatch_session,
+                    attempt.turn_id AS canonical_dispatch_turn,
+                    attempt.issuing_turn_attempt_id
+                        AS canonical_dispatch_issuing_attempt,
+                    attempt.request_id AS canonical_dispatch_request,
+                    attempt.dispatch_generation
+                        AS canonical_dispatch_generation
+               FROM runner_current_lease_event AS current_event
+               JOIN runner_lease_event AS event
+                 ON event.lease_id = current_event.lease_id
+                AND event.generation = current_event.generation
+                AND event.event_ordinal = current_event.event_ordinal
+               JOIN runner_lease_generation AS lease_generation
+                 ON lease_generation.lease_id = current_event.lease_id
+                AND lease_generation.generation = current_event.generation
+               JOIN tool_attempt AS attempt
+                 ON attempt.attempt_id = lease_generation.attempt_id
+              WHERE current_event.lease_id = $1
+                AND current_event.generation = $2
+              FOR UPDATE OF current_event";
+
+pub(crate) const RUNNER_LEASE_PLACEMENT: &str = "SELECT record.*
+           FROM runner_current_session_placement AS current_placement
+           JOIN runner_session_placement_record AS record
+             ON record.session_id = current_placement.session_id
+            AND record.event_ordinal = current_placement.event_ordinal
+          WHERE current_placement.session_id = $1
+          FOR UPDATE OF current_placement";
 pub(crate) const REVIEW_RUN_TRANSITION: &str = "SELECT
             workflow_run.run_id, workflow_run.target_id,
             workflow_run.workflow_kind, workflow_run.policy_version,
