@@ -171,14 +171,21 @@ in
   # developer having to derive its path from DEVENV_RUNTIME.
   env.SIGNALBOX_SOCKET_PATH = daemonSocketPath;
 
-  # Run the working-tree client, letting Cargo rebuild it whenever its sources
-  # have changed.
+  # Build from the workspace so a caller project's Cargo configuration is not
+  # discovered. The subshell returns to the caller's directory before exec, so
+  # client arguments containing relative paths retain their expected base.
   scripts.signalbox = {
     description = "Run the Signalbox terminal client from the working tree.";
     exec = ''
-      exec env RUSTUP_TOOLCHAIN=${shellArg workspaceRustToolchain} \
-        cargo run -q --manifest-path "$DEVENV_ROOT/Cargo.toml" \
-          -p signalbox-client -- "$@"
+      (
+        cd "$DEVENV_ROOT" || exit $?
+        unset CARGO_BUILD_TARGET
+        env RUSTUP_TOOLCHAIN=${shellArg workspaceRustToolchain} \
+          cargo build -q --manifest-path "$DEVENV_ROOT/Cargo.toml" \
+            --target-dir "$DEVENV_ROOT/target" \
+            -p signalbox-client --bin signalbox
+      ) || exit $?
+      exec "$DEVENV_ROOT/target/debug/signalbox" "$@"
     '';
   };
 

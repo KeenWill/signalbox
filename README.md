@@ -122,9 +122,7 @@ socket parent meeting the ownership and permission rules the
 states. The devenv dev-instance launcher creates that directory and sets mode
 `0700` before executing the daemon; the daemon then binds the socket there. The
 devenv shell
-[exports that path as `SIGNALBOX_SOCKET_PATH` and provides a `signalbox <verb>` convenience](docs/decisions.md#2026-07-28--expose-the-dev-instance-client-from-every-shell-directory);
-the convenience runs the working-tree client through Cargo, rebuilding it after
-source changes.
+[exports that path as `SIGNALBOX_SOCKET_PATH` and provides a `signalbox <verb>` convenience](docs/decisions.md#2026-07-28--expose-the-dev-instance-client-from-every-shell-directory).
 
 The daemon's default Anthropic key path is
 `$HOME/.config/signalbox/anthropic-api-key` and its default code-host token path
