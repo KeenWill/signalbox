@@ -32,10 +32,11 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use signalbox_model_runtime::{
-    CancellationSignal, CompletionEvidence, CompletionFinish, ConversationMessage,
-    CredentialReference, DeliveryMode, ExchangeFacts, ModelOperation, ModelRuntime, ModelSettings,
-    PreparationDefect, PreparationFailure, PreparationOutcome, ProviderRequestId, RefusalEvidence,
-    RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage,
+    BoundaryLossEvidence, CancellationSignal, CompletionEvidence, CompletionFinish,
+    ConversationMessage, CredentialReference, DeliveryMode, ExchangeFacts, LossCause,
+    ModelOperation, ModelRuntime, ModelSettings, PreparationDefect, PreparationFailure,
+    PreparationOutcome, ProviderRequestId, RefusalEvidence, RequestedTarget, ResolvedTarget,
+    TerminalEvidence, TokenUsage,
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliPreparedRequest, CodexCliRuntime, SUPPORTED_CODEX_CLI_VERSION,
@@ -67,7 +68,7 @@ const FIXTURE_OUTPUT_TOKENS: u64 = 1;
 #[tokio::test]
 #[ignore = "spends one real Codex CLI exchange; run only from the gated compatibility smoke"]
 async fn the_pinned_codex_cli_completes_one_exchange() {
-    let executable = absolute_executable(&variable_or(EXECUTABLE_VARIABLE, DEFAULT_EXECUTABLE));
+    let executable = absolute_executable(&executable_override_or_default());
     let model = variable_or(MODEL_VARIABLE, DEFAULT_MODEL);
 
     assert_pinned_version(&executable).await;
@@ -691,7 +692,7 @@ fn proc_stat_without_boundary_is_not_a_zombie() {
 #[should_panic(expected = "PATH is unset")]
 fn bare_command_with_unset_path_fails() {
     let directory = tempfile::tempdir().expect("fixture directory is created");
-    let _ = resolved_executable("codex", directory.path(), None);
+    let _ = resolved_executable(std::ffi::OsStr::new("codex"), directory.path(), None);
 }
 
 /// A probe that floods stdout is stopped at the byte bound and fails the gate
@@ -930,6 +931,51 @@ fn decoded_response_accepts_refusal_without_completion_material() {
     assert_eq!(decoded.usage, usage);
 }
 
+/// The smoke accepts only a decoded response: every other terminal variant —
+/// cancellation, failure, defect, boundary loss — is rejected rather than
+/// reported as a successful exchange, so a compatibility break cannot pass the
+/// gate as a completed turn.
+#[test]
+#[should_panic(expected = "the pinned Codex CLI returned no decoded response")]
+fn decoded_response_rejects_an_unexpected_terminal_variant() {
+    let evidence = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+        cause: LossCause::ResponseUnintelligible {
+            detail: "fixture terminal variant".to_string(),
+        },
+        exchange: ExchangeFacts {
+            provider_request_id: Some(ProviderRequestId::new(FIXTURE_THREAD_ID)),
+            http_status: None,
+        },
+        reported_model: None,
+        finish_reported: None,
+        usage: TokenUsage {
+            input_tokens: Some(FIXTURE_INPUT_TOKENS),
+            output_tokens: Some(FIXTURE_OUTPUT_TOKENS),
+            ..TokenUsage::default()
+        },
+    });
+
+    let _ = require_decoded_response(evidence);
+}
+
+/// The executable override keeps raw OS bytes: a valid Unix path that is not
+/// UTF-8 names the executable the operator asked for, rather than being read as
+/// absent and silently resolving the bare-command default.
+#[cfg(unix)]
+#[test]
+fn non_utf8_executable_override_is_resolved_verbatim() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let root = tempfile::tempdir().expect("fixture directory is created");
+    let executable = root.path().join(std::ffi::OsString::from_vec(vec![
+        b'c', b'o', b'd', b'e', b'x', 0xff,
+    ]));
+
+    let resolved = resolved_executable(executable.as_os_str(), root.path(), None);
+
+    assert_eq!(resolved, executable);
+}
+
 fn variable_or(name: &str, fallback: &str) -> String {
     selected_or(std::env::var(name).ok(), fallback)
 }
@@ -980,7 +1026,19 @@ fn smoke_variable_selection_falls_back_for_a_whitespace_variable() {
 /// local default is resolved through `PATH` exactly once, here. CI is
 /// unaffected: the workflow always passes the absolute path of the binary
 /// installed from the pin manifest.
-fn absolute_executable(executable: &str) -> std::path::PathBuf {
+/// The executable override as raw OS bytes, or the bare-command default. Read
+/// with `var_os` rather than `var`: a valid Unix path need not be UTF-8, and
+/// `var(..).ok()` turns such a path's `NotUnicode` into absence, silently
+/// resolving the default instead of the executable the operator named. The
+/// model override stays a `String` — it is protocol text, not a path.
+fn executable_override_or_default() -> std::ffi::OsString {
+    match std::env::var_os(EXECUTABLE_VARIABLE) {
+        Some(value) if !value.is_empty() => value,
+        _ => std::ffi::OsString::from(DEFAULT_EXECUTABLE),
+    }
+}
+
+fn absolute_executable(executable: &std::ffi::OsStr) -> std::path::PathBuf {
     resolved_executable(
         executable,
         &std::env::current_dir().expect("the smoke process has a working directory"),
@@ -992,7 +1050,7 @@ fn absolute_executable(executable: &str) -> std::path::PathBuf {
 /// working directory and search path, so every branch is testable without
 /// mutating process-global state.
 fn resolved_executable(
-    executable: &str,
+    executable: &std::ffi::OsStr,
     current_directory: &std::path::Path,
     // `None` distinguishes an *unset* `PATH` from a present-but-empty one: an
     // unset PATH offers no search directories, so a bare command name cannot be
@@ -1010,8 +1068,9 @@ fn resolved_executable(
     }
     let search = search.unwrap_or_else(|| {
         panic!(
-            "PATH is unset, so the bare command `{executable}` cannot be located; \
-             set {EXECUTABLE_VARIABLE} to an absolute executable path"
+            "PATH is unset, so the bare command `{}` cannot be located; \
+             set {EXECUTABLE_VARIABLE} to an absolute executable path",
+            path.display()
         )
     });
     // The resolved candidate is kept as a `PathBuf`, never lossily converted to
@@ -1031,8 +1090,9 @@ fn resolved_executable(
         .find(|candidate| executable_file(candidate))
         .unwrap_or_else(|| {
             panic!(
-                "`{executable}` was not found on PATH; set {EXECUTABLE_VARIABLE} \
-                 to an absolute executable path"
+                "`{}` was not found on PATH; set {EXECUTABLE_VARIABLE} \
+                 to an absolute executable path",
+                path.display()
             )
         })
 }
@@ -1064,7 +1124,7 @@ fn executable_resolution_passes_an_absolute_path_through() {
     let absolute = directory.path().join("codex-absolute");
 
     let resolved = resolved_executable(
-        absolute.to_str().expect("the fixture path is UTF-8"),
+        absolute.as_os_str(),
         directory.path(),
         Some(std::ffi::OsStr::new("")),
     );
@@ -1077,7 +1137,11 @@ fn executable_resolution_anchors_a_relative_path_to_the_working_directory() {
     let directory = tempfile::tempdir().expect("resolution fixture directory is created");
     let relative = "tooling/codex-relative";
 
-    let resolved = resolved_executable(relative, directory.path(), Some(std::ffi::OsStr::new("")));
+    let resolved = resolved_executable(
+        std::ffi::OsStr::new(relative),
+        directory.path(),
+        Some(std::ffi::OsStr::new("")),
+    );
 
     assert_eq!(resolved, directory.path().join(relative));
 }
@@ -1106,7 +1170,11 @@ fn executable_resolution_finds_a_bare_command_on_the_search_path() {
     let search = std::env::join_paths([empty.path(), populated.path()])
         .expect("the fixture search path joins");
 
-    let resolved = resolved_executable("codex-on-path", empty.path(), Some(&search));
+    let resolved = resolved_executable(
+        std::ffi::OsStr::new("codex-on-path"),
+        empty.path(),
+        Some(&search),
+    );
 
     assert_eq!(resolved, on_path);
 }
@@ -1146,7 +1214,11 @@ fn verify_other_only_execute_bit_is_skipped() {
     let search = std::env::join_paths([shadowing.path(), populated.path()])
         .expect("the fixture search path joins");
 
-    let resolved = resolved_executable("codex-other-only", shadowing.path(), Some(&search));
+    let resolved = resolved_executable(
+        std::ffi::OsStr::new("codex-other-only"),
+        shadowing.path(),
+        Some(&search),
+    );
 
     assert_eq!(resolved, on_path);
 }
@@ -1168,7 +1240,11 @@ fn executable_resolution_preserves_a_non_utf8_path_directory() {
     let on_path = executable_fixture(&directory, "codex-nonutf8");
     let search = std::env::join_paths([&directory]).expect("the fixture search path joins");
 
-    let resolved = resolved_executable("codex-nonutf8", root.path(), Some(&search));
+    let resolved = resolved_executable(
+        std::ffi::OsStr::new("codex-nonutf8"),
+        root.path(),
+        Some(&search),
+    );
 
     assert_eq!(resolved, on_path);
 }
@@ -1183,7 +1259,7 @@ fn executable_resolution_anchors_a_relative_search_entry() {
     let on_path = executable_fixture(&working.path().join("bin"), "codex-rel");
 
     let resolved = resolved_executable(
-        "codex-rel",
+        std::ffi::OsStr::new("codex-rel"),
         working.path(),
         Some(std::ffi::OsStr::new("bin")),
     );
@@ -1204,7 +1280,11 @@ fn executable_resolution_skips_a_non_executable_shadow() {
     let search = std::env::join_paths([shadowing.path(), populated.path()])
         .expect("the fixture search path joins");
 
-    let resolved = resolved_executable("codex-shadowed", shadowing.path(), Some(&search));
+    let resolved = resolved_executable(
+        std::ffi::OsStr::new("codex-shadowed"),
+        shadowing.path(),
+        Some(&search),
+    );
 
     assert_eq!(resolved, on_path);
 }
@@ -1215,5 +1295,9 @@ fn executable_resolution_panics_for_a_missing_bare_command() {
     let empty = tempfile::tempdir().expect("resolution fixture directory is created");
     let search = std::env::join_paths([empty.path()]).expect("the fixture search path joins");
 
-    let _ = resolved_executable("codex-missing", empty.path(), Some(&search));
+    let _ = resolved_executable(
+        std::ffi::OsStr::new("codex-missing"),
+        empty.path(),
+        Some(&search),
+    );
 }
