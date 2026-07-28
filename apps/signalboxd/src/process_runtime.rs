@@ -97,9 +97,9 @@ use signalbox_process_protocol::{
     ImportedContentKind, ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, InputContent, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter,
-    ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection, ProtocolVersion,
-    RejectionDetail, RequestId, ReviewDiffSide as WireReviewDiffSide,
-    ReviewExternalObjectKind as WireReviewExternalObjectKind,
+    ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection,
+    PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId,
+    ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingDisposition as WireReviewFindingDisposition, ReviewFindingInput,
     ReviewFindingSnapshot, ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle,
     ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot,
@@ -5116,7 +5116,7 @@ where
             return write_process_read_error(writer, version, request_id, error).await;
         }
     }
-    let mut subscription = if version == ProtocolVersion::Twelve {
+    let mut subscription = if admits_provider_text_deltas(version) {
         fanouts.streaming.subscribe()
     } else {
         fanouts.durable.subscribe()
@@ -5162,7 +5162,7 @@ where
             return write_snapshot_spool_error(writer, version, request_id, error).await;
         }
     };
-    let mut updates_queued_at_snapshot = if version == ProtocolVersion::Twelve {
+    let mut updates_queued_at_snapshot = if admits_provider_text_deltas(version) {
         subscription.len()
     } else {
         0
@@ -5240,7 +5240,7 @@ where
             }
             ProcessUpdate::ProviderTextDelta(delta) => {
                 if queued_at_snapshot
-                    || version != ProtocolVersion::Twelve
+                    || !admits_provider_text_deltas(version)
                     || delta.session() != selected_session
                 {
                     continue;
@@ -6351,6 +6351,13 @@ where
         () = wait_for_shutdown(shutdown) => None,
         output = operation => Some(output),
     }
+}
+
+/// Returns whether the admitted version's closed vocabulary contains the
+/// ephemeral `provider_text_delta` message: version twelve introduced it and
+/// every later admitted version retains it.
+const fn admits_provider_text_deltas(version: ProtocolVersion) -> bool {
+    version.as_u64() >= PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION
 }
 
 fn wire_uuid(value: uuid::Uuid) -> CanonicalUuid {
