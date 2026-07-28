@@ -77,6 +77,10 @@ impl ClientError {
             | Self::TurnReconciliationRequired => Self::AmbiguousMutation,
         }
     }
+
+    pub(crate) const fn is_ambiguous_mutation(&self) -> bool {
+        matches!(self, Self::AmbiguousMutation)
+    }
 }
 
 impl fmt::Display for ClientError {

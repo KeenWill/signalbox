@@ -109,6 +109,10 @@ enum TextField {
 pub(crate) enum ChatTurnStatus {
     Queued(CanonicalUuid),
     Active(CanonicalUuid),
+    AwaitingApproval {
+        turn_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+    },
 }
 
 pub(crate) struct Output<'a> {
@@ -140,6 +144,13 @@ impl<'a> Output<'a> {
             Some(ChatTurnStatus::Active(turn_id)) => writeln!(
                 self.stdout,
                 "chat session={session_id} state=following turn={turn_id} commands={commands}"
+            )?,
+            Some(ChatTurnStatus::AwaitingApproval {
+                turn_id,
+                tool_request_id,
+            }) => writeln!(
+                self.stdout,
+                "chat session={session_id} state=awaiting_approval turn={turn_id} request={tool_request_id} commands={commands}"
             )?,
             Some(ChatTurnStatus::Queued(turn_id)) => writeln!(
                 self.stdout,
@@ -206,9 +217,31 @@ impl<'a> Output<'a> {
         self.stderr.flush()
     }
 
+    pub(crate) fn chat_approval_interrupt_offered(
+        &mut self,
+        tool_request_id: CanonicalUuid,
+        commands: &str,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stderr,
+            "chat: turn awaits approval request {tool_request_id}; use :approve ID or :deny ID REASON, or press Ctrl-C again to exit leaving it running; commands: {commands}"
+        )?;
+        self.stderr.flush()
+    }
+
+    pub(crate) fn chat_mutation_abandoned(&mut self) -> io::Result<()> {
+        writeln!(
+            self.stderr,
+            "chat: exiting with an in-flight mutation whose outcome may be ambiguous; use the printed recovery values for any exact standalone retry"
+        )?;
+        self.stderr.flush()
+    }
+
     pub(crate) fn chat_exiting(&mut self, status: Option<ChatTurnStatus>) -> io::Result<()> {
         match status {
-            Some(ChatTurnStatus::Active(turn_id)) => writeln!(
+            Some(
+                ChatTurnStatus::Active(turn_id) | ChatTurnStatus::AwaitingApproval { turn_id, .. },
+            ) => writeln!(
                 self.stderr,
                 "chat: exiting; turn {turn_id} remains running in the daemon"
             ),

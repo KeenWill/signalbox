@@ -45,6 +45,20 @@ impl TranscriptSnapshot {
         Ok(None)
     }
 
+    /// Returns the first acceptance-ordered queued turn, or `None` when no
+    /// turn is queued.
+    pub(crate) fn first_queued_turn(&mut self) -> Result<Option<CanonicalUuid>, ClientError> {
+        let mut replay = self.replay()?;
+        for record in &mut replay {
+            if let SnapshotRecord::Turn(turn) = record?
+                && matches!(turn.state, TurnState::Queued { .. })
+            {
+                return Ok(Some(turn.turn_id));
+            }
+        }
+        Ok(None)
+    }
+
     /// Returns the turn holding the session's single active slot, or `None`
     /// when every turn is queued or terminal.
     pub(crate) fn active_turn(&mut self) -> Result<Option<CanonicalUuid>, ClientError> {

@@ -534,6 +534,7 @@ async fn chat_streams_and_approves_one_scripted_tool_turn() -> Result<(), Box<dy
         .ok_or_else(|| io::Error::other("approval state omitted its request"))?
         .1;
     Uuid::parse_str(request)?;
+    input.write_all(STOP_INPUT_LINE.as_bytes()).await?;
     input
         .write_all(format!(":approve {request}\n").as_bytes())
         .await?;
@@ -550,6 +551,7 @@ async fn chat_streams_and_approves_one_scripted_tool_turn() -> Result<(), Box<dy
     assert!(stderr.contains("command_id="));
     assert!(stderr.contains("defaults_version="));
     assert!(stderr.contains("no turn is queued or running"));
+    assert!(stderr.contains("decide it before stopping"));
     assert!(
         line_position(&rendered, "provider_text_delta")?
             < line_position(&rendered, "assistant_tool_use")?
@@ -563,7 +565,8 @@ async fn chat_streams_and_approves_one_scripted_tool_turn() -> Result<(), Box<dy
             < line_position(&rendered, "tool_execution_result")?
     );
     assert!(
-        line_position(&rendered, "tool_execution_result")? < line_position(&rendered, FINAL_REPLY)?
+        line_position(&rendered, "tool_execution_result")?
+            < last_line_position(&rendered, FINAL_REPLY)?
     );
     assert!(line_position(&rendered, FINAL_REPLY)? < last_line_position(&rendered, FINAL_REPLY)?);
     assert!(
