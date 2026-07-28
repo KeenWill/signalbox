@@ -247,6 +247,15 @@ impl fmt::Display for RejectionDisplay {
                 "interrupt_unavailable_while_awaiting_approval session={session_id} \
                  active_turn={active_turn_id}; deny the pending tool request first"
             ),
+            RejectionDetail::SafePointUnavailableWhileStopping {
+                session_id,
+                active_turn_id,
+                existing_command_id,
+            } => write!(
+                formatter,
+                "safe_point_unavailable_while_stopping session={session_id} \
+                 active_turn={active_turn_id} existing_command={existing_command_id}"
+            ),
             RejectionDetail::ToolRequestNotFound { tool_request_id } => {
                 write!(
                     formatter,

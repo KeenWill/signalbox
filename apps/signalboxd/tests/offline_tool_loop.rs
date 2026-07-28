@@ -6,9 +6,10 @@
 
 use std::{
     error::Error,
-    fmt,
+    fmt, fs,
+    os::unix::fs::PermissionsExt,
     sync::{Arc, Mutex},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use signalbox_application::{
@@ -49,6 +50,11 @@ use signalbox_persistence::{
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
     submit_input::SubmitInputRepository, tool_loop::PostgresToolLoopRepository,
 };
+use signalbox_process_protocol::{
+    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
+    InputDelivery, ProtocolVersion, RequestId, ServerMessage, decode_server_line,
+    encode_client_line,
+};
 use signalboxd::{
     ActivatedTurnExecution, CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
     CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME,
@@ -60,21 +66,28 @@ use signalboxd::{
     ChangeRequestSummaryResult, ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult,
     CiJobLogResult, CodeHostOperation, CodeHostResult, CodeHostResultCompleteness,
     CodeHostTransport, CodeHostTransportFailure, ConvergenceStateFields, ConvergenceStateResult,
-    DaemonTools, FilePatchResult, PostgresProviderModelExecution,
-    PostgresProviderToolLoopExecution, PostgresSessionStatusWriter, REVIEW_GATE_CHECK_NAME,
-    RerunFailedJobsResult, ReviewAuthorClass, ReviewDispositionClass, ReviewGateCheckResult,
-    ReviewGatePurpose, ReviewThread, ReviewThreadComment, ReviewThreadFields,
-    ReviewThreadInventoryFields, ReviewThreadInventoryItem, ReviewThreadResolution,
-    ReviewThreadsResult, ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus,
-    SessionStatusWrite, SessionStatusWriteOutcome, SessionStatusWriter, StackStateFields,
-    StackStateResult, ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult,
-    WebFetchBodyCompleteness, WebFetchRequest, WebFetchResponse, WebFetchTransport,
-    WebFetchTransportFailure,
+    DaemonTools, FilePatchResult, HubModelConfiguration, LocalProcessListener,
+    PostgresProviderModelExecution, PostgresProviderToolLoopExecution, PostgresSessionStatusWriter,
+    ProcessRuntime, REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult, ReviewAuthorClass,
+    ReviewDispositionClass, ReviewGateCheckResult, ReviewGatePurpose, ReviewThread,
+    ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
+    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult,
+    ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, SessionStatusWrite,
+    SessionStatusWriteOutcome, SessionStatusWriter, StackStateFields, StackStateResult,
+    ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult, WebFetchBodyCompleteness,
+    WebFetchRequest, WebFetchResponse, WebFetchTransport, WebFetchTransportFailure,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
+use tempfile::tempdir;
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
+    sync::watch,
+    time::timeout,
 };
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
@@ -84,6 +97,16 @@ const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const FIXTURE_ID_SEED: u128 = 0x3100;
 const DECISION_COMMAND_ID: u128 = 0x3110;
 const OFFLINE_CODE_HOST_TOKEN: &[u8] = b"offline-code-host-token";
+const PROCESS_MODEL_CONFIGURATION: &str = r#"
+version = 1
+
+[[models]]
+selection_id = "00000000-0000-0000-0000-000000000001"
+target_id = "00000000-0000-0000-0000-000000000002"
+provider = "anthropic"
+provider_model = "fixture-model"
+max_output_tokens = 64
+"#;
 
 #[derive(Clone, Debug)]
 struct RecordingScriptedModel {
@@ -2966,6 +2989,41 @@ async fn s02_s10_inv006_failed_continuation_call_admits_and_runs_later_turn()
     Ok(())
 }
 
+async fn submit_frame_through_process(
+    fixture: &ToolLoopFixture,
+    frame: &ClientFrame,
+) -> Result<ServerMessage, Box<dyn Error>> {
+    let directory = tempdir()?;
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+    let socket = directory.path().join("hub.sock");
+    let listener = LocalProcessListener::bind(&socket)?;
+    let sweep = PostgresEligibilitySweep::new(fixture.pool.clone());
+    let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let runtime = ProcessRuntime::new(
+        listener,
+        fixture.pool.clone(),
+        eligibility_nudge,
+        fixture.tool_dispatch_gate.clone(),
+        HubModelConfiguration::parse(PROCESS_MODEL_CONFIGURATION)?,
+    );
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
+
+    let stream = UnixStream::connect(&socket).await?;
+    let (reader, mut writer) = stream.into_split();
+    writer.write_all(&encode_client_line(frame)?).await?;
+    let mut reader = BufReader::new(reader);
+    let mut line = Vec::new();
+    reader.read_until(b'\n', &mut line).await?;
+    let response = decode_server_line(&line)?.message().clone();
+
+    drop(reader);
+    drop(writer);
+    shutdown.send(true)?;
+    timeout(Duration::from_secs(10), runtime_task).await???;
+    Ok(response)
+}
+
 /// S02 / S10 / INV-006: a provider refusal on the continuation model call of
 /// a completed tool round terminalizes the turn as refused naming that call,
 /// and the committed refused shape reloads through the scheduling
@@ -3060,8 +3118,9 @@ async fn s02_s10_inv006_refused_continuation_call_admits_and_runs_later_turn()
     Ok(())
 }
 
-/// S02 / S08 / S10 / INV-016 / INV-036: a NextSafePoint input accepted while
-/// a tool round is parked is consumed by the continuation call, the
+/// S02 / S08 / S10 / INV-016 / INV-036: a NextSafePoint input accepted through
+/// process protocol version thirteen while a tool round is parked is consumed by the
+/// continuation call, the
 /// steering-bearing continuation completes the turn, and the committed shape
 /// reloads through the scheduling projection — the startup scan completes and
 /// the next submit activates and runs.
@@ -3089,33 +3148,38 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_completes()
         .await?;
     let request = fixture.wait_for_requests(1).await?[0];
 
-    let sweep = PostgresEligibilitySweep::new(fixture.pool.clone());
-    let (nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
-    let mut submit = SubmitInputService::new(
-        UuidV7SubmitInputIdGenerator,
-        SubmitInputRepository::new(fixture.pool.clone()),
-        nudge,
-        fixture.tool_dispatch_gate.clone(),
-    );
-    let steering = submit
-        .execute(SubmitInputRequest::try_new(
-            DurableCommandId::from_uuid(Uuid::from_u128(0x3610)),
-            fixture.session,
-            UserContent::try_text(String::from("steer the parked tool round"))
-                .expect("fixture steering content is admitted"),
-            DeliveryRequest::NextSafePoint {
-                expected_active_turn: fixture.turn,
-            },
-        )?)
-        .await?;
-    assert!(
-        matches!(
-            steering,
-            SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
-                SubmitInputAppliedResult::PendingSteering(_)
-            ))
-        ),
-        "a safe-point input against the parked round is accepted as pending steering"
+    let steering_content = InputContent::new(String::from("steer the parked tool round"));
+    let steering_frame = ClientFrame::try_new_for_version(
+        ProtocolVersion::Thirteen,
+        RequestId::try_new(1)?,
+        ClientRequest::SubmitInput {
+            command_id: CommandId::try_from_uuid(Uuid::from_u128(0x3610))?,
+            session_id: CanonicalUuid::from_uuid(fixture.session.into_uuid()),
+            content: steering_content,
+            expected_defaults_version: None,
+            delivery: Some(InputDelivery::Steer {
+                expected_active_turn_id: CanonicalUuid::from_uuid(fixture.turn.into_uuid()),
+            }),
+        },
+    )?;
+    let steering_response = submit_frame_through_process(&fixture, &steering_frame).await?;
+    let accepted_input_id: Uuid = sqlx::query_scalar(
+        "SELECT accepted_input_id
+           FROM accepted_input
+          WHERE session_id = $1
+            AND acceptance_position = 2",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        steering_response,
+        ServerMessage::SteeringSubmitted {
+            session_id: CanonicalUuid::from_uuid(fixture.session.into_uuid()),
+            accepted_input_id: CanonicalUuid::from_uuid(accepted_input_id),
+            acceptance_position: CanonicalU64::new(2),
+            source_turn_id: CanonicalUuid::from_uuid(fixture.turn.into_uuid()),
+        }
     );
 
     fixture
