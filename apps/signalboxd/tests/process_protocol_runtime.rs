@@ -52,11 +52,12 @@ use signalbox_persistence::{
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationImportFormat,
-    ConversationImportSource, CurrentModelCallState, ErrorCode, ImportedContentKind,
-    ImportedSourceSpeaker, ImportedSpeaker, InputContent, InputDelivery, MetadataActor,
-    ModelSelection, ProtocolVersion, RejectionDetail, RequestId, ServerFrame, ServerMessage,
-    SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText, ToolDecision,
-    TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
+    ConversationImportSource, ConversationOriginFilter, ConversationSummary, CurrentModelCallState,
+    ErrorCode, ImportedContentKind, ImportedConversationSourceFormat, ImportedSourceSpeaker,
+    ImportedSpeaker, InputContent, InputDelivery, MetadataActor, ModelSelection, ProtocolVersion,
+    RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent, SessionMetadata,
+    SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry,
+    TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
@@ -1617,6 +1618,136 @@ async fn metadata_list_uses_bounded_keyset_pages() -> Result<(), Box<dyn Error>>
     runtime.stop().await
 }
 
+/// Requires the next response to be the inserted-import receipt and returns
+/// the inserted imported-conversation identity.
+async fn require_inserted_import_receipt(
+    connection: &mut Connection,
+) -> Result<CanonicalUuid, Box<dyn Error>> {
+    match response_within(connection).await?.message() {
+        ServerMessage::ConversationImportInserted {
+            imported_conversation_id,
+        } => Ok(*imported_conversation_id),
+        message => Err(io::Error::other(format!("unexpected import receipt: {message:?}")).into()),
+    }
+}
+
+/// Requires the next response to be one unified conversation summary.
+async fn require_conversation_summary(
+    connection: &mut Connection,
+) -> Result<ConversationSummary, Box<dyn Error>> {
+    match response_within(connection).await?.message() {
+        ServerMessage::ConversationSummary { conversation } => Ok(conversation.clone()),
+        message => Err(io::Error::other(format!("unexpected unified summary: {message:?}")).into()),
+    }
+}
+
+/// Splits one native and one imported summary out of a pair listed in either
+/// order.
+fn partition_native_and_imported(
+    first: ConversationSummary,
+    second: ConversationSummary,
+) -> Result<(ConversationSummary, ConversationSummary), Box<dyn Error>> {
+    match (first, second) {
+        (
+            native @ ConversationSummary::NativeSession { .. },
+            imported @ ConversationSummary::ImportedConversation { .. },
+        )
+        | (
+            imported @ ConversationSummary::ImportedConversation { .. },
+            native @ ConversationSummary::NativeSession { .. },
+        ) => Ok((native, imported)),
+        pair => Err(io::Error::other(format!("unexpected unified summary pair: {pair:?}")).into()),
+    }
+}
+
+/// S28: version sixteen lists native sessions and imported conversations in
+/// one unified page whose imported row carries the derived title, entry
+/// count, and stored source format.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_version_sixteen_lists_native_and_imported_conversations() -> Result<(), Box<dyn Error>>
+{
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let native_session = create_alias_session(&mut connection).await?;
+    let source = ConversationImportSource::new(
+        concat!(
+            "{\"timestamp\":\"2026-07-25T00:00:00Z\",\"type\":\"response_item\",",
+            "\"payload\":{\"type\":\"message\",\"role\":\"user\",",
+            "\"content\":[{\"type\":\"input_text\",\"text\":\"question\"}]}}"
+        )
+        .as_bytes()
+        .to_vec(),
+    );
+    connection
+        .request_version(
+            ProtocolVersion::Five,
+            30,
+            ClientRequest::ImportConversation {
+                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                source,
+            },
+        )
+        .await?;
+    let imported_id = require_inserted_import_receipt(&mut connection).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Sixteen,
+            31,
+            ClientRequest::ListConversations {
+                title_contains: None,
+                origin: ConversationOriginFilter::All,
+                include_archived: false,
+                page_size: CanonicalU64::new(10),
+                after: None,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::ConversationPageStart {}
+    ));
+    let first_summary = require_conversation_summary(&mut connection).await?;
+    let second_summary = require_conversation_summary(&mut connection).await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::ConversationPageEnd {
+            conversation_count,
+            next_after: None,
+        } if conversation_count.value() == 2
+    ));
+    assert!(
+        first_summary.cursor().conversation_id().into_uuid()
+            < second_summary.cursor().conversation_id().into_uuid(),
+        "unified summaries must arrive in strict identity order"
+    );
+    let (native, imported) = partition_native_and_imported(first_summary, second_summary)?;
+    assert!(matches!(
+        native,
+        ConversationSummary::NativeSession {
+            session_id,
+            title: None,
+            archived: false,
+            defaults_version,
+        } if session_id == native_session && defaults_version.value() == 1
+    ));
+    assert!(matches!(
+        imported,
+        ConversationSummary::ImportedConversation {
+            imported_conversation_id,
+            title: Some(title),
+            entry_count,
+            source_format: ImportedConversationSourceFormat::CodexRolloutJsonlV1,
+        } if imported_conversation_id == imported_id
+            && title == "question"
+            && entry_count.value() == 1
+    ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
 /// INV-033: a version-four metadata read returns the complete current wire
 /// projection.
 #[tokio::test]
@@ -2579,9 +2710,10 @@ async fn s24_inv032_inv033_version_thirteen_inherits_provider_text_streaming()
 }
 
 /// S01 / S02 / S24 / INV-032 / INV-035: the provider bridge asks the scripted
-/// runtime for streamed delivery, and two already-attached version-twelve
-/// followers each observe the exact already-redacted deltas before the durable
-/// terminal entries expose the same complete assistant reply.
+/// runtime for streamed delivery, and two already-attached followers — one at
+/// version twelve and one at version sixteen, both of which admit the delta
+/// message — each observe the exact already-redacted deltas before the
+/// durable terminal entries expose the same complete assistant reply.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_durable_truth()
@@ -2592,7 +2724,7 @@ async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_dur
     let first_follow =
         attach_empty_follower(runtime.socket(), ProtocolVersion::Twelve, 10, session_id).await?;
     let second_follow =
-        attach_empty_follower(runtime.socket(), ProtocolVersion::Twelve, 11, session_id).await?;
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Sixteen, 11, session_id).await?;
     let expected_delta_count = 2;
     let (script, assistant) =
         streamed_script(expected_delta_count, String::from("already [redacted] "));

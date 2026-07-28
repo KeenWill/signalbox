@@ -5,12 +5,13 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_application::{ImportedConversationStore, ImportedConversationStoreOutcome};
 use signalbox_domain::{
-    ImportedConversation, ImportedConversationFormat, ImportedConversationId,
-    ImportedConversationReconstitutionFailure, ImportedConversationReconstitutionInput,
-    ImportedConversationSourceDigest, ImportedRawRecordConversionDigest, ImportedRawRecordHash,
-    ImportedRawRecordPosition, ImportedRawSourceRecordReconstitutionInput,
-    ImportedRecordEntryPosition, ImportedSourceAttestation, ImportedSpeaker,
-    ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
+    ImportedConversation, ImportedConversationDisplayTitle, ImportedConversationFormat,
+    ImportedConversationId, ImportedConversationReconstitutionFailure,
+    ImportedConversationReconstitutionInput, ImportedConversationSourceDigest,
+    ImportedRawRecordConversionDigest, ImportedRawRecordHash, ImportedRawRecordPosition,
+    ImportedRawSourceRecordReconstitutionInput, ImportedRecordEntryPosition,
+    ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptEntryId,
+    ImportedTranscriptEntryInput, ImportedTranscriptPosition,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -30,6 +31,9 @@ const CLAUDE_CODE_VERSION_TWO: i16 = 2;
 const CODEX_FORMAT: &str = "codex_rollout_jsonl";
 const CODEX_VERSION_ONE: i16 = 1;
 const TRANSCRIPT_ENTRY_IDENTITY_UNIQUE: &str = "imported_transcript_entry_identity_unique";
+pub(crate) const DISPLAY_TITLE_STATE_PENDING: &str = "pending";
+pub(crate) const DISPLAY_TITLE_STATE_DERIVED: &str = "derived";
+pub(crate) const DISPLAY_TITLE_STATE_UNDERIVABLE: &str = "underivable";
 
 /// Why a versioned imported domain-algebra encoding is invalid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,6 +118,8 @@ pub enum ImportedConversationCorruption {
     },
     /// Non-null source-session evidence disagrees with the reconstructed entries.
     SourceSessionLineageMismatch,
+    /// A resolved display title disagrees with re-derivation from the records.
+    DisplayTitleMismatch,
     /// One source digest resolved to a structurally different snapshot.
     ExistingSnapshotMismatch,
     /// Complete durable fields failed domain-owned correlation.
@@ -155,6 +161,8 @@ impl fmt::Display for ImportedConversationCorruption {
             ),
             Self::SourceSessionLineageMismatch => formatter
                 .write_str("imported source-session lineage disagrees with reconstructed entries"),
+            Self::DisplayTitleMismatch => formatter
+                .write_str("imported display title disagrees with re-derivation from the records"),
             Self::ExistingSnapshotMismatch => {
                 formatter.write_str("imported source digest resolved to a different snapshot")
             }
@@ -269,8 +277,9 @@ impl ImportedConversationRepository {
             "INSERT INTO imported_conversation
                 (imported_conversation_id, storage_version, source_format,
                  converter_version, source_digest, source_session_id,
-                 declared_raw_record_count, declared_entry_count)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 declared_raw_record_count, declared_entry_count,
+                 display_title, display_title_state)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT DO NOTHING",
         )
         .bind(candidate_id.into_uuid())
@@ -281,6 +290,10 @@ impl ImportedConversationRepository {
         .bind(encoded.source_session_id.as_deref())
         .bind(Decimal::from(declared_raw_record_count))
         .bind(Decimal::from(declared_entry_count))
+        .bind(encoded.display_title.as_deref())
+        .bind(resolved_display_title_state(
+            encoded.display_title.as_deref(),
+        ))
         .execute(&mut *transaction)
         .await?
         .rows_affected()
@@ -345,6 +358,7 @@ struct EncodedConversation {
     format: &'static str,
     converter_version: i16,
     source_session_id: Option<Vec<u8>>,
+    display_title: Option<String>,
     raws: Vec<EncodedRawRecord>,
     entries: Vec<EncodedEntry>,
 }
@@ -355,6 +369,8 @@ impl EncodedConversation {
     ) -> Result<Self, ImportedConversationRepositoryError> {
         let (format, converter_version) = encode_format(conversation.format());
         let source_session_id = consistent_source_session_id(conversation).map(<[u8]>::to_vec);
+        let display_title = ImportedConversationDisplayTitle::derive(conversation)
+            .map(ImportedConversationDisplayTitle::into_string);
         let mut entry_counts = vec![0_u64; conversation.raw_records().len()];
         for entry in conversation.entries() {
             let raw_index = usize::try_from(entry.raw_record_position().as_u64())
@@ -404,9 +420,22 @@ impl EncodedConversation {
             format,
             converter_version,
             source_session_id,
+            display_title,
             raws,
             entries,
         })
+    }
+}
+
+/// Maps a derived-or-absent display title to its closed resolved state.
+///
+/// Insertion always resolves the title, so the transitional `'pending'` state
+/// belongs only to rows inserted before the column existed.
+fn resolved_display_title_state(display_title: Option<&str>) -> &'static str {
+    if display_title.is_some() {
+        DISPLAY_TITLE_STATE_DERIVED
+    } else {
+        DISPLAY_TITLE_STATE_UNDERIVABLE
     }
 }
 
@@ -623,7 +652,8 @@ pub(crate) async fn load_from_connection(
     let header = sqlx::query(
         "SELECT imported_conversation_id, storage_version, source_format,
                 converter_version, source_digest, source_session_id,
-                declared_raw_record_count, declared_entry_count
+                declared_raw_record_count, declared_entry_count,
+                display_title, display_title_state
            FROM imported_conversation
           WHERE imported_conversation_id = $1",
     )
@@ -654,6 +684,8 @@ async fn decode_complete(
         ImportedConversationSourceDigest::from_bytes,
     )?;
     let source_session_id: Option<Vec<u8>> = header.try_get("source_session_id")?;
+    let display_title: Option<String> = header.try_get("display_title")?;
+    let display_title_state: String = header.try_get("display_title_state")?;
     let declared_raw_record_count = positive_u64(header.try_get("declared_raw_record_count")?)
         .map_err(|reason| invalid_ordinal_with_reason("declared raw-record count", reason))?;
     let declared_entry_count = positive_u64(header.try_get("declared_entry_count")?)
@@ -779,7 +811,106 @@ async fn decode_complete(
     {
         return Err(ImportedConversationCorruption::SourceSessionLineageMismatch.into());
     }
+    validate_display_title(&conversation, display_title, &display_title_state)?;
     Ok(conversation)
+}
+
+/// Requires a resolved stored display title to agree exactly with pure
+/// re-derivation from the reconstituted records.
+///
+/// The transitional `'pending'` state names a row inserted before the title
+/// column existed and not yet resolved by the startup backfill; it carries no
+/// stored derivation to check.
+fn validate_display_title(
+    conversation: &ImportedConversation,
+    display_title: Option<String>,
+    display_title_state: &str,
+) -> Result<(), ImportedConversationRepositoryError> {
+    let derived = ImportedConversationDisplayTitle::derive(conversation);
+    match display_title_state {
+        DISPLAY_TITLE_STATE_PENDING => Ok(()),
+        DISPLAY_TITLE_STATE_DERIVED => {
+            let stored = display_title
+                .ok_or(ImportedConversationCorruption::Missing("display title"))
+                .and_then(|stored| {
+                    ImportedConversationDisplayTitle::try_new(stored)
+                        .map_err(|_| ImportedConversationCorruption::DisplayTitleMismatch)
+                })?;
+            if Some(stored) != derived {
+                return Err(ImportedConversationCorruption::DisplayTitleMismatch.into());
+            }
+            Ok(())
+        }
+        DISPLAY_TITLE_STATE_UNDERIVABLE => {
+            if derived.is_some() || display_title.is_some() {
+                return Err(ImportedConversationCorruption::DisplayTitleMismatch.into());
+            }
+            Ok(())
+        }
+        other => Err(ImportedConversationCorruption::Unsupported {
+            field: "display_title_state",
+            value: String::from(other),
+        }
+        .into()),
+    }
+}
+
+/// Resolves every transitional `'pending'` display title by pure
+/// re-derivation from the preserved records, returning the resolved count.
+///
+/// The daemon runs this once at startup, after migration and before serving,
+/// so every row the serving read surfaces observe carries a resolved title
+/// state. Each row resolves in its own transaction through the one guarded
+/// update the append-only trigger admits; a lost row or unexpected update
+/// count fails closed.
+pub async fn backfill_imported_conversation_display_titles(
+    pool: &PgPool,
+) -> Result<u64, ImportedConversationRepositoryError> {
+    let mut connection = pool.acquire().await?;
+    let pending: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT imported_conversation_id
+           FROM imported_conversation
+          WHERE display_title_state = 'pending'
+          ORDER BY imported_conversation_id",
+    )
+    .fetch_all(&mut *connection)
+    .await?;
+    drop(connection);
+    let mut resolved = 0_u64;
+    for pending_id in pending {
+        let mut transaction = pool.begin().await?;
+        let requested = ImportedConversationId::from_uuid(pending_id);
+        let conversation = load_from_connection(&mut transaction, requested)
+            .await?
+            .ok_or(ImportedConversationCorruption::Missing(
+                "pending display-title header",
+            ))?;
+        let display_title = ImportedConversationDisplayTitle::derive(&conversation)
+            .map(ImportedConversationDisplayTitle::into_string);
+        let updated = sqlx::query(
+            "UPDATE imported_conversation
+                SET display_title = $2, display_title_state = $3
+              WHERE imported_conversation_id = $1
+                AND display_title_state = 'pending'",
+        )
+        .bind(pending_id)
+        .bind(display_title.as_deref())
+        .bind(resolved_display_title_state(display_title.as_deref()))
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if updated != 1 {
+            return Err(ImportedConversationCorruption::Missing(
+                "pending display-title row for its guarded backfill update",
+            )
+            .into());
+        }
+        transaction.commit().await?;
+        resolved = resolved
+            .checked_add(1)
+            .ok_or_else(|| invalid_ordinal("resolved display-title count"))?;
+    }
+    Ok(resolved)
 }
 
 fn equivalent_snapshot(candidate: &ImportedConversation, existing: &ImportedConversation) -> bool {
@@ -813,7 +944,7 @@ fn encode_format(format: ImportedConversationFormat) -> (&'static str, i16) {
     }
 }
 
-fn decode_format(
+pub(crate) fn decode_format(
     format: &str,
     converter_version: i16,
 ) -> Result<ImportedConversationFormat, ImportedConversationRepositoryError> {
@@ -901,7 +1032,7 @@ fn require_i16(
     }
 }
 
-fn positive_u64(value: Decimal) -> Result<u64, PositiveOrdinalMappingError> {
+pub(crate) fn positive_u64(value: Decimal) -> Result<u64, PositiveOrdinalMappingError> {
     if !value.fract().is_zero() {
         return Err(PositiveOrdinalMappingError::Fractional);
     }

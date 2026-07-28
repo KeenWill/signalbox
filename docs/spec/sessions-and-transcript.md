@@ -419,6 +419,13 @@ next cursor is the last emitted session identity. A later page is a new
 snapshot: pagination guarantees deterministic keyset traversal, not a cross-page
 snapshot under concurrent creation or replacement.
 
+The unified conversation listing owned by
+[process-protocol](process-protocol.md) reads the same session, current
+defaults, and metadata facts for its native rows — title, archive state, and
+current defaults version — alongside imported-conversation headers, in one
+bounded keyset page of its own. It adds no session state and changes none of the
+rules above.
+
 Because `OwnerInitiated` is the only constructible creation cause and every
 current session-creation boundary lacks actor attribution, the implemented
 default view is exactly all non-archived sessions. No visibility taxonomy,

@@ -4,14 +4,18 @@ use clap::{
     ArgGroup, Args as ClapArgs, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind,
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, CommandId, ConversationImportFormat, ImportedSessionRelationship,
+    CanonicalU64, CanonicalUuid, CommandId, ConversationCursor, ConversationImportFormat,
+    ConversationOrigin, ConversationOriginFilter, ImportedSessionRelationship,
     MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
     MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, ModelSelection, ReviewDiffSide, ReviewFindingInput,
     ReviewSeverity, ReviewTargetSubject, ReviewWorkflow,
 };
 use uuid::Uuid;
 
-use crate::{MAX_METADATA_PAGE_SIZE, MIN_METADATA_PAGE_SIZE, SessionMetadataPageRequest};
+use crate::{
+    ConversationsPageRequest, MAX_METADATA_PAGE_SIZE, MIN_METADATA_PAGE_SIZE,
+    SessionMetadataPageRequest,
+};
 
 /// The specification's ordinary default metadata page size.
 const DEFAULT_SEARCH_RESULT_LIMIT: &str = "50";
@@ -47,6 +51,7 @@ pub(crate) enum Command {
     },
     List,
     Search(SessionMetadataPageRequest),
+    Conversations(ConversationsPageRequest),
     Send {
         session_id: CanonicalUuid,
         command_id: Option<CommandId>,
@@ -202,6 +207,9 @@ enum CliCommand {
     List,
     /// Read one filtered page of current session metadata.
     Search(SearchArguments),
+    /// Read one filtered page listing native sessions and imported
+    /// conversations together.
+    Conversations(ConversationsArguments),
     /// Submit standard input and print the reply after completion.
     Send(SendArguments),
     /// Steer the active turn with standard-input content.
@@ -461,6 +469,50 @@ struct SearchArguments {
     /// Continue after the exact session identity a prior page printed.
     #[arg(long, value_name = "SESSION", value_parser = canonical_uuid)]
     after: Option<CanonicalUuid>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ConversationsArguments {
+    /// Require an exact case-sensitive title substring.
+    #[arg(long, value_name = "SUBSTRING", value_parser = metadata_filter_text)]
+    title: Option<String>,
+    /// Select native sessions, imported conversations, or both.
+    #[arg(long, value_name = "ORIGIN", value_enum, default_value_t = ConversationOriginArgument::All)]
+    origin: ConversationOriginArgument,
+    /// Include archived native sessions, which the default view excludes.
+    #[arg(long)]
+    include_archived: bool,
+    /// Read at most this many results, from 1 through 100.
+    #[arg(
+        long,
+        value_name = "COUNT",
+        default_value = DEFAULT_SEARCH_RESULT_LIMIT,
+        value_parser = metadata_page_size
+    )]
+    limit: CanonicalU64,
+    /// Continue after the exact origin-qualified cursor a prior page printed.
+    #[arg(long, value_name = "ORIGIN:UUID", value_parser = conversation_cursor)]
+    after: Option<ConversationCursor>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
+enum ConversationOriginArgument {
+    /// Native sessions only.
+    Native,
+    /// Imported conversations only.
+    Imported,
+    /// Both origin classes.
+    All,
+}
+
+impl ConversationOriginArgument {
+    const fn wire(self) -> ConversationOriginFilter {
+        match self {
+            Self::Native => ConversationOriginFilter::Native,
+            Self::Imported => ConversationOriginFilter::Imported,
+            Self::All => ConversationOriginFilter::All,
+        }
+    }
 }
 
 #[derive(Debug, ClapArgs)]
@@ -798,6 +850,26 @@ pub(crate) fn parse(
                 after_session_id: arguments.after,
             })
         }
+        CliCommand::Conversations(arguments) => {
+            if arguments.title.as_deref().map_or(0, str::len)
+                > MAX_SESSION_METADATA_TOTAL_UTF8_BYTES
+            {
+                return Err(UsageError(Cli::command().error(
+                    ErrorKind::ValueValidation,
+                    format!(
+                        "the --title query carries at most \
+                         {MAX_SESSION_METADATA_TOTAL_UTF8_BYTES} UTF-8 bytes"
+                    ),
+                )));
+            }
+            Command::Conversations(ConversationsPageRequest {
+                title_contains: arguments.title,
+                origin: arguments.origin.wire(),
+                include_archived: arguments.include_archived,
+                page_size: arguments.limit,
+                after: arguments.after,
+            })
+        }
         CliCommand::Send(arguments) => {
             if arguments.queue
                 && !matches!(
@@ -1030,6 +1102,20 @@ fn metadata_filter_text(value: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
+/// Parses one origin-qualified unified cursor exactly as a prior page printed
+/// it: `native:<uuid>` or `imported:<uuid>`.
+fn conversation_cursor(value: &str) -> Result<ConversationCursor, String> {
+    let Some((origin, identity)) = value.split_once(':') else {
+        return Err("the cursor must be native:<uuid> or imported:<uuid>".to_owned());
+    };
+    let origin = match origin {
+        "native" => ConversationOrigin::NativeSession,
+        "imported" => ConversationOrigin::ImportedConversation,
+        _ => return Err("the cursor origin must be native or imported".to_owned()),
+    };
+    Ok(ConversationCursor::new(origin, canonical_uuid(identity)?))
+}
+
 fn metadata_page_size(value: &str) -> Result<CanonicalU64, String> {
     let parsed = canonical_u64(value)?;
     if !(MIN_METADATA_PAGE_SIZE..=MAX_METADATA_PAGE_SIZE).contains(&parsed.value()) {
@@ -1088,15 +1174,17 @@ mod tests {
     use std::{ffi::OsString, path::Path};
 
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, ConversationImportFormat, ImportedSessionRelationship,
+        CanonicalU64, CanonicalUuid, ConversationCursor, ConversationImportFormat,
+        ConversationOrigin, ConversationOriginFilter, ImportedSessionRelationship,
         MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
         MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
     };
     use uuid::Uuid;
 
     use super::{
-        Arguments, Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome,
-        SendDeliveryArgument, SessionMetadataPageRequest, UsageError, parse,
+        Arguments, Command, ConversationsPageRequest, DangerousToolAutoApprovalArgument,
+        ImportSourceArgument, ParseOutcome, SendDeliveryArgument, SessionMetadataPageRequest,
+        UsageError, parse,
     };
 
     #[derive(Clone, Copy)]
@@ -1611,6 +1699,157 @@ mod tests {
             values.push(OsString::from(tag.to_string()));
         }
         values
+    }
+
+    #[test]
+    fn conversations_defaults_to_the_unfiltered_unified_view() {
+        let parsed =
+            parse(["conversations"].map(Into::into)).expect("the bare conversations verb parses");
+
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the successful conversations parse runs the client");
+        };
+        let Command::Conversations(page) = arguments.command else {
+            panic!("the successful conversations parse selects the conversations command");
+        };
+        assert_eq!(
+            page,
+            ConversationsPageRequest {
+                title_contains: None,
+                origin: ConversationOriginFilter::All,
+                include_archived: false,
+                page_size: CanonicalU64::new(50),
+                after: None,
+            }
+        );
+    }
+
+    #[test]
+    fn conversations_carries_every_named_filter_to_one_bounded_page() {
+        let cursor_identity = "00000000-0000-0000-0000-000000000001";
+        let parsed = parse(
+            [
+                "conversations",
+                "--title",
+                "Active plan",
+                "--origin",
+                "imported",
+                "--include-archived",
+                "--limit",
+                "1",
+                "--after",
+                "imported:00000000-0000-0000-0000-000000000001",
+            ]
+            .map(Into::into),
+        )
+        .expect("every named conversations filter parses");
+
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the successful conversations parse runs the client");
+        };
+        let Command::Conversations(page) = arguments.command else {
+            panic!("the successful conversations parse selects the conversations command");
+        };
+        assert_eq!(
+            page,
+            ConversationsPageRequest {
+                title_contains: Some(String::from("Active plan")),
+                origin: ConversationOriginFilter::Imported,
+                include_archived: true,
+                page_size: CanonicalU64::new(1),
+                after: Some(ConversationCursor::new(
+                    ConversationOrigin::ImportedConversation,
+                    CanonicalUuid::from_uuid(
+                        Uuid::parse_str(cursor_identity)
+                            .expect("the fixture cursor identity is canonical UUID text")
+                    ),
+                )),
+            }
+        );
+    }
+
+    #[test]
+    fn conversations_accepts_the_native_cursor_origin_spelling() {
+        let parsed = parse(
+            [
+                "conversations",
+                "--after",
+                "native:00000000-0000-0000-0000-000000000002",
+            ]
+            .map(Into::into),
+        )
+        .expect("the native cursor origin parses");
+
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the successful conversations parse runs the client");
+        };
+        let Command::Conversations(page) = arguments.command else {
+            panic!("the successful conversations parse selects the conversations command");
+        };
+        assert_eq!(
+            page.after,
+            Some(ConversationCursor::new(
+                ConversationOrigin::NativeSession,
+                CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            ))
+        );
+    }
+
+    #[test]
+    fn conversations_rejects_a_result_limit_outside_the_admitted_page_bound() {
+        assert!(parse(["conversations", "--limit", "0"].map(Into::into)).is_err());
+        assert!(parse(["conversations", "--limit", "101"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn conversations_rejects_empty_or_nul_title_text() {
+        assert!(parse(["conversations", "--title", ""].map(Into::into)).is_err());
+        assert!(parse(["conversations", "--title", "before\0after"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn conversations_rejects_a_title_beyond_the_query_byte_bound() {
+        let whole_bound_title = "t".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES);
+        let one_byte_beyond = "t".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES + 1);
+
+        assert!(
+            parse(["conversations", "--title", whole_bound_title.as_str()].map(Into::into)).is_ok()
+        );
+        assert!(
+            parse(["conversations", "--title", one_byte_beyond.as_str()].map(Into::into)).is_err()
+        );
+    }
+
+    #[test]
+    fn conversations_rejects_an_unknown_origin_filter() {
+        assert!(parse(["conversations", "--origin", "everything"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn conversations_rejects_a_malformed_cursor_before_socket_use() {
+        assert!(
+            parse(
+                [
+                    "conversations",
+                    "--after",
+                    "00000000-0000-0000-0000-000000000001"
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                [
+                    "conversations",
+                    "--after",
+                    "archived:00000000-0000-0000-0000-000000000001",
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+        assert!(parse(["conversations", "--after", "native:not-a-uuid"].map(Into::into)).is_err());
     }
 
     #[test]
