@@ -1541,10 +1541,8 @@ async fn await_turn_terminal(
         if let Some(terminal) = terminal_snapshot_state(state.as_ref())? {
             return Ok(terminal);
         }
-        if wait_mode == TurnWaitMode::QueuedTurn
-            && let Some(terminal) = queued_turn_blocker_recovery(&mut snapshot, turn_id)?
-        {
-            return Ok(terminal);
+        if wait_mode == TurnWaitMode::QueuedTurn {
+            queued_turn_blocker_recovery(&mut snapshot, turn_id)?;
         }
         let mut observed_cursor = snapshot.cursor();
         loop {
@@ -1581,11 +1579,7 @@ async fn await_turn_terminal(
                         if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
                             return Ok(terminal);
                         }
-                        if let Some(terminal) =
-                            queued_turn_blocker_recovery(&mut refreshed, turn_id)?
-                        {
-                            return Ok(terminal);
-                        }
+                        queued_turn_blocker_recovery(&mut refreshed, turn_id)?;
                     }
                 }
                 ServerMessage::ProviderTextDelta {
@@ -1614,49 +1608,40 @@ async fn await_turn_terminal(
 fn queued_turn_blocker_recovery(
     snapshot: &mut TranscriptSnapshot,
     selected_turn: CanonicalUuid,
-) -> Result<Option<TurnTerminal>, ClientError> {
-    let selected_position = {
-        let mut replay = snapshot.replay()?;
-        let mut selected_position = None;
-        for record in &mut replay {
-            if let SnapshotRecord::Turn(turn) = record?
-                && turn.turn_id == selected_turn
-            {
-                selected_position = Some(turn.acceptance_position);
-                break;
-            }
-        }
-        selected_position.ok_or(ClientError::Protocol(
+) -> Result<(), ClientError> {
+    let selected_state = snapshot
+        .turn_state(selected_turn)?
+        .ok_or(ClientError::Protocol(
             "follow snapshot omitted the submitted queued turn",
-        ))?
-    };
-
-    let mut replay = snapshot.replay()?;
-    for record in &mut replay {
-        if let SnapshotRecord::Turn(turn) = record?
-            && turn.acceptance_position < selected_position
-            && let Some(terminal) = blocker_recovery_snapshot_state(&turn.state)?
-        {
-            return Ok(Some(terminal));
-        }
+        ))?;
+    if !matches!(selected_state, TurnState::Queued { .. }) {
+        return Ok(());
     }
-    Ok(None)
+
+    let Some(active_turn) = snapshot.active_turn()? else {
+        return Ok(());
+    };
+    let active_state = snapshot
+        .turn_state(active_turn)?
+        .ok_or(ClientError::Protocol(
+            "follow snapshot omitted the session active turn",
+        ))?;
+    blocker_recovery_snapshot_state(&active_state)
 }
 
-fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<Option<TurnTerminal>, ClientError> {
+fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), ClientError> {
     match state {
         TurnState::ActiveAwaitingModelCallRecovery { .. }
         | TurnState::ActiveAwaitingToolRecovery { .. } => Err(ClientError::TurnRecoveryRequired),
-        TurnState::ReconciliationRequired { .. } | TurnState::ToolReconciliationRequired { .. } => {
-            Ok(Some(TurnTerminal::ReconciliationRequired))
-        }
         TurnState::Queued { .. }
         | TurnState::ActiveRunning { .. }
         | TurnState::ActiveAwaitingToolApproval { .. }
         | TurnState::Completed { .. }
         | TurnState::Failed { .. }
         | TurnState::Refused { .. }
-        | TurnState::Cancelled { .. } => Ok(None),
+        | TurnState::Cancelled { .. }
+        | TurnState::ReconciliationRequired { .. }
+        | TurnState::ToolReconciliationRequired { .. } => Ok(()),
     }
 }
 
@@ -2510,13 +2495,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_send_wait_reports_live_recovery_on_its_current_active_blocker()
+    async fn queued_send_wait_uses_active_slot_not_acceptance_order_or_terminal_history()
     -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let listener = UnixListener::bind(&socket)?;
         let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
-        let original_predecessor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let historical_terminal_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
         let current_blocker_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
         let queued_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(4));
         let server = tokio::spawn(async move {
@@ -2542,21 +2527,13 @@ mod tests {
                     .map_err(io::Error::other)?;
                 response.extend_from_slice(
                     &encode_server_line(&frame(ServerMessage::TranscriptTurn {
-                        turn_id: original_predecessor_turn_id,
+                        turn_id: historical_terminal_turn_id,
                         acceptance_position: CanonicalU64::new(1),
-                        state: TurnState::Completed {
+                        state: TurnState::ReconciliationRequired {
                             terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
                             terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(6)),
                             terminal_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(7)),
                         },
-                    })?)
-                    .map_err(io::Error::other)?,
-                );
-                response.extend_from_slice(
-                    &encode_server_line(&frame(ServerMessage::TranscriptTurn {
-                        turn_id: current_blocker_turn_id,
-                        acceptance_position: CanonicalU64::new(2),
-                        state: blocker_state,
                     })?)
                     .map_err(io::Error::other)?,
                 );
@@ -2568,6 +2545,14 @@ mod tests {
                             accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(10)),
                             content: InputContent::new(String::from("wait behind recovery")),
                         },
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptTurn {
+                        turn_id: current_blocker_turn_id,
+                        acceptance_position: CanonicalU64::new(4),
+                        state: blocker_state,
                     })?)
                     .map_err(io::Error::other)?,
                 );
