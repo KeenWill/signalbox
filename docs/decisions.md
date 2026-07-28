@@ -10,6 +10,33 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-28 — Expose the deployment model-alias catalog to local clients
+
+**Context.** Session creation already accepts an alias UUID, but the process
+boundary offered no read that let a native client discover the aliases the
+running daemon would accept. Bundling UUIDs in the app or deriving them from
+existing sessions would drift from deployment configuration and could submit an
+unknown or retired alias. Version seventeen is allocated to the open imported
+conversation inspection stack.
+
+**Decision.** Protocol version eighteen adds the read-only `list_model_aliases`
+sequence. The daemon emits every configured alias and its current
+direct-selection target in alias-identity order with an exact terminal count.
+This is current deployment configuration, not durable session state and not a
+provider catalog: creation still records an alias request and the existing
+acceptance path freezes its meaning. The native app retains a bounded inventory
+and offers only returned aliases in its creation picker.
+
+**Rejected alternatives.** Shipping app-owned alias UUIDs would create a second,
+stale configuration authority. Accepting arbitrary UUID text would expose
+avoidable runtime rejection instead of a picker. Returning provider-native names
+would cross the configuration boundary and risk exposing deployment details
+irrelevant to the selection identity.
+
+**Affects.** `crates/process-protocol`, `apps/signalboxd` configuration and
+process serving, [process protocol](spec/process-protocol.md), and the native
+session-creation client.
+
 ## 2026-07-27 — Drop empty thinking parts instead of failing completions closed
 
 **Context.** Claude 5-family models run adaptive thinking by default, and with

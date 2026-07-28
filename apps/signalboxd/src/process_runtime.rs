@@ -893,6 +893,15 @@ where
             )
             .await
         }
+        ClientRequest::ListModelAliases {} => {
+            handle_list_model_aliases(
+                writer,
+                version,
+                request_id,
+                services.model_configuration.as_ref(),
+            )
+            .await
+        }
         ClientRequest::ReadSessionMetadata { session_id } => {
             handle_read_session_metadata(writer, version, request_id, session_id, &services.pool)
                 .await
@@ -3553,6 +3562,50 @@ where
         }
     };
     write_spooled_file(writer, &mut spool.file).await
+}
+
+async fn handle_list_model_aliases<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    configuration: &HubModelConfiguration,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let mut aliases = configuration.model_aliases().collect::<Vec<_>>();
+    aliases.sort_unstable_by_key(|(alias, _)| alias.into_uuid());
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::ModelAliasesStart {},
+    )
+    .await?;
+    for (alias, selection) in &aliases {
+        write_message(
+            writer,
+            version,
+            request_id,
+            ServerMessage::ModelAliasSummary {
+                alias_id: wire_uuid(alias.into_uuid()),
+                selection_id: wire_uuid(selection.into_uuid()),
+            },
+        )
+        .await?;
+    }
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::ModelAliasesEnd {
+            alias_count: CanonicalU64::new(
+                u64::try_from(aliases.len())
+                    .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
+            ),
+        },
+    )
+    .await
 }
 
 struct SessionListSpool {
@@ -6721,7 +6774,7 @@ impl ProtocolError {
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1 through 13, 16, and 17"
+                    "the protocol version is unsupported; supported versions: 1 through 13, 16, 17, and 18"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
@@ -7446,6 +7499,7 @@ mod tests {
         assert!(admits_provider_text_deltas(ProtocolVersion::Twelve));
         assert!(admits_provider_text_deltas(ProtocolVersion::Thirteen));
         assert!(admits_provider_text_deltas(ProtocolVersion::Sixteen));
+        assert!(admits_provider_text_deltas(ProtocolVersion::Eighteen));
     }
 
     #[test]
@@ -7476,7 +7530,7 @@ mod tests {
         assert!(
             ProtocolError::without_detail(ErrorCode::UnsupportedVersion)
                 .message
-                .contains("1 through 13, 16, and 17")
+                .contains("1 through 13, 16, 17, and 18")
         );
     }
 

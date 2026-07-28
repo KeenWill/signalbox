@@ -5,16 +5,19 @@
 
 Native SwiftUI client for the Signalbox process protocol.
 
-The production path encodes and decodes the version 5 session and transcript
+The production path encodes and decodes the version 18 session and transcript
 vocabulary as newline-delimited JSON. It does not use the earlier REST,
 WebSocket, or OpenAI-compatible surfaces.
 
-## Phase A surface
+## Live macOS surface
 
-- List, search, open, archive, and unarchive sessions from metadata operations.
+- List native and imported conversations through the unified conversation read;
+  open, archive, and unarchive native sessions.
 - Follow a session through explicit connect, hello, history, replay, steady, and
   bounded-recovery states.
 - Project transcript snapshots into the existing timeline normalizer.
+- Layer ephemeral provider text above the durable transcript until a snapshot
+  supersedes it.
 - Preserve queued input separately until matching transcript content appears.
 - Submit one exact, nonblank composer draft at a time with the session's
   defaults version and retry the exact prepared command after `commit_ambiguous`
@@ -23,31 +26,33 @@ WebSocket, or OpenAI-compatible surfaces.
   composer draft is unchanged and prepare a new identity after an edit.
 - Treat unknown wire kinds conservatively without losing an entire page or
   stream.
-- Exercise the real v5 encoder, decoder, request identity, and JSONL framing in
+- Approve or deny pending tool requests, and stop an active turn while sending
+  its required successor input.
+- Create a session by selecting a model alias read from the running daemon and
+  optionally supplying a system prompt.
+- Exercise the real v18 encoder, decoder, request identity, and JSONL framing in
   deterministic mock UI flows.
 
-The process protocol exposes no tool-decision operation or successful-result
-discriminator. Tool cards therefore show observed results as neutral completed
-state and never offer approve or deny controls. It also exposes no runner,
-template, monitor, artifact, or model-discovery catalog; those views and
-new-session creation are explicit capability gates rather than fabricated client
-behavior.
+The process protocol exposes no runner, template, monitor, or artifact catalog;
+those views remain explicit capability gates rather than fabricated client
+behavior. Imported conversations appear in the unified list, while transcript
+inspection and continuation await the separately landing imported inspection
+read.
 
 ## Transport gate
 
 `signalboxd` currently serves the protocol only on a local Unix socket, without
-an authentication field. On macOS, set an absolute socket path in Settings or
-launch with:
+an authentication field. On macOS the app defaults to
+`$DEVENV_RUNTIME/signalbox/signalboxd.sock` when that environment value is
+present. Override it with an absolute socket path in Settings or launch with:
 
 ```bash
 export SIGNALBOX_SOCKET_PATH='/absolute/path/to/signalbox.sock'
 ```
 
 There is no owner-approved network transport reachable by a remote or mobile
-client. Phase A does not invent one. iPhone and iPad builds run against the
-in-memory v5 harness; real remote/mobile connectivity remains an owner design
-gate tracked by
-[Authenticated transports and remote clients](../../docs/open-questions.md#protocols-and-persistence).
+client. iPhone and iPad builds run against the in-memory v18 harness; real
+remote/mobile connectivity remains an owner design gate tracked in the backlog.
 
 ## Build and test
 
@@ -71,8 +76,8 @@ scripts/capture-macos-screenshots.sh
 scripts/check-screenshot-goldens.sh
 ```
 
-The `new-session`, operations, and remote setup captures intentionally present
-capability gates. They are not previews of unimplemented server behavior.
+The operations and remote setup captures intentionally present capability
+gates. They are not previews of unimplemented server behavior.
 Selective capture fails before building when a requested screenshot name is not
 in the checked-in matrix or the selection normalizes to no names, so a typo or
 blank selector cannot silently validate an empty selection. The iPad capture
@@ -101,7 +106,8 @@ none in a URL or log.
 
 ## Rewire inventory
 
-Phase A closes the imported transport and synchronization findings: settings now
+The live process path closes the imported transport and synchronization findings:
+settings now
 install only the client for the tested socket path, and stale connection or
 session-list probes cannot publish; every reconnect path is capped; deadlines
 are typed separately from heartbeat concerns; snapshot/stream ordering is owned
@@ -117,10 +123,10 @@ The following work remains:
 
 - Remote/mobile transport, authentication, authorization, and revocation await
   an owner-approved server design.
-- Session creation awaits model discovery or another owner-approved way to
-  select the protocol's required model UUID.
-- Tool decisions, runners, templates, monitor summaries, and artifacts await
-  real process-protocol operations.
+- Imported transcript inspection and continuation await the imported inspection
+  protocol stack.
+- Runners, templates, monitor summaries, and artifacts await real
+  process-protocol operations.
 - Compact-width navigation omits Templates until its information architecture is
   owner-approved; regular-width and macOS navigation retain the explicit
   capability gate.

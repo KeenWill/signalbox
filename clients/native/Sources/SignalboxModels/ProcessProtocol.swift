@@ -1,15 +1,17 @@
 import Foundation
 
 public enum SignalboxProcessProtocol {
-  public static let currentVersion = SignalboxProcessProtocolVersion.five
+  public static let currentVersion = SignalboxProcessProtocolVersion.eighteen
   public static let maximumFrameBytes = 8 * 1024 * 1024
   public static let maximumContentFragmentUTF8Bytes = 1024 * 1024
-  // docs/spec/process-protocol.md owns the version-five metadata projection bounds.
+  // docs/spec/process-protocol.md owns the metadata and conversation-list bounds.
   public static let maximumMetadataTags = 256
   public static let maximumMetadataAttributes = 256
   public static let maximumIndexedMetadataUTF8Bytes = 1_024
   public static let maximumMetadataUTF8Bytes = 262_144
   public static let maximumMetadataSummaryUTF8Bytes = maximumMetadataUTF8Bytes
+  public static let maximumConversationPageSize: UInt64 = 100
+  public static let maximumConversationTitleUTF8Bytes = 262_144
 }
 
 public enum SignalboxProcessProtocolVersion: UInt64, Codable, CaseIterable, Sendable {
@@ -18,6 +20,16 @@ public enum SignalboxProcessProtocolVersion: UInt64, Codable, CaseIterable, Send
   case three = 3
   case four = 4
   case five = 5
+  case six = 6
+  case seven = 7
+  case eight = 8
+  case nine = 9
+  case ten = 10
+  case eleven = 11
+  case twelve = 12
+  case thirteen = 13
+  case sixteen = 16
+  case eighteen = 18
 }
 
 public enum SignalboxCanonicalValueError: LocalizedError, Equatable {
@@ -222,7 +234,11 @@ public enum SignalboxMetadataActor: Codable, Equatable, Sendable {
 }
 
 public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
-  case createSession(commandID: SignalboxCommandID, initialModelSelection: SignalboxModelSelection)
+  case createSession(
+    commandID: SignalboxCommandID,
+    initialModelSelection: SignalboxModelSelection,
+    systemPrompt: String?
+  )
   case listSessions
   case submitInput(
     commandID: SignalboxCommandID,
@@ -246,14 +262,40 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     metadata: SignalboxProcessSessionMetadata
   )
   case importConversation(format: SignalboxConversationImportFormat, source: Data)
+  case stopTurn(
+    commandID: SignalboxCommandID,
+    sessionID: SignalboxCanonicalUUID,
+    expectedActiveTurnID: SignalboxCanonicalUUID,
+    content: String,
+    expectedDefaultsVersion: SignalboxCanonicalUInt64
+  )
+  case decideToolRequest(
+    commandID: SignalboxCommandID,
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID,
+    decision: SignalboxProcessToolDecision
+  )
+  case readSessionDefaults(
+    sessionID: SignalboxCanonicalUUID,
+    defaultsVersion: SignalboxCanonicalUInt64?
+  )
+  case listConversations(
+    titleContains: String?,
+    origin: SignalboxConversationOriginFilter,
+    includeArchived: Bool,
+    pageSize: SignalboxCanonicalUInt64,
+    after: SignalboxConversationCursor?
+  )
+  case listModelAliases
 
   public func encode(to encoder: Encoder) throws {
     var container = encoder.container(keyedBy: SignalboxDynamicCodingKey.self)
     switch self {
-    case .createSession(let commandID, let selection):
+    case .createSession(let commandID, let selection, let systemPrompt):
       try container.encode("create_session", forKey: "type")
       try container.encode(commandID, forKey: "command_id")
       try container.encode(selection, forKey: "initial_model_selection")
+      try container.encode(systemPrompt, forKey: "system_prompt")
     case .listSessions:
       try container.encode("list_sessions", forKey: "type")
     case .submitInput(let commandID, let sessionID, let content, let expectedVersion):
@@ -287,7 +329,114 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode("import_conversation", forKey: "type")
       try container.encode(format, forKey: "format")
       try container.encode(source.base64EncodedString(), forKey: "source")
+    case .stopTurn(
+      let commandID,
+      let sessionID,
+      let activeTurnID,
+      let content,
+      let expectedDefaultsVersion
+    ):
+      try container.encode("stop_turn", forKey: "type")
+      try container.encode(commandID, forKey: "command_id")
+      try container.encode(sessionID, forKey: "session_id")
+      try container.encode(activeTurnID, forKey: "expected_active_turn_id")
+      try container.encode(content, forKey: "content")
+      try container.encode(expectedDefaultsVersion, forKey: "expected_defaults_version")
+    case .decideToolRequest(let commandID, let sessionID, let toolRequestID, let decision):
+      try container.encode("decide_tool_request", forKey: "type")
+      try container.encode(commandID, forKey: "command_id")
+      try container.encode(sessionID, forKey: "session_id")
+      try container.encode(toolRequestID, forKey: "tool_request_id")
+      try container.encode(decision, forKey: "decision")
+    case .readSessionDefaults(let sessionID, let defaultsVersion):
+      try container.encode("read_session_defaults", forKey: "type")
+      try container.encode(sessionID, forKey: "session_id")
+      try container.encode(defaultsVersion, forKey: "defaults_version")
+    case .listConversations(let title, let origin, let archived, let pageSize, let after):
+      try container.encode("list_conversations", forKey: "type")
+      try container.encode(title, forKey: "title_contains")
+      try container.encode(origin, forKey: "origin")
+      try container.encode(archived, forKey: "include_archived")
+      try container.encode(pageSize, forKey: "page_size")
+      try container.encode(after, forKey: "after")
+    case .listModelAliases:
+      try container.encode("list_model_aliases", forKey: "type")
     }
+  }
+}
+
+public enum SignalboxProcessToolDecision: Codable, Equatable, Sendable {
+  case approve
+  case deny(reason: String)
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    switch tagged.kind {
+    case "approve":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
+      self = .approve
+    case "deny":
+      try tagged.rejectUnadmittedFields(["type", "reason"], decoder: decoder)
+      self = .deny(reason: try decoder.decode("reason"))
+    default:
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Unknown tool-decision type."
+        )
+      )
+    }
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: SignalboxDynamicCodingKey.self)
+    switch self {
+    case .approve:
+      try container.encode("approve", forKey: "type")
+    case .deny(let reason):
+      try container.encode("deny", forKey: "type")
+      try container.encode(reason, forKey: "reason")
+    }
+  }
+}
+
+public enum SignalboxConversationOriginFilter: String, Codable, Equatable, Sendable {
+  case native
+  case imported
+  case all
+}
+
+public enum SignalboxConversationCursorOrigin: String, Codable, Equatable, Sendable {
+  case nativeSession = "native_session"
+  case importedConversation = "imported_conversation"
+}
+
+public struct SignalboxConversationCursor: Codable, Equatable, Sendable {
+  public let origin: SignalboxConversationCursorOrigin
+  public let conversationID: SignalboxCanonicalUUID
+
+  public init(
+    origin: SignalboxConversationCursorOrigin,
+    conversationID: SignalboxCanonicalUUID
+  ) {
+    self.origin = origin
+    self.conversationID = conversationID
+  }
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      ["origin", "conversation_id"],
+      decoder: decoder
+    )
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    origin = try container.decode(SignalboxConversationCursorOrigin.self, forKey: .origin)
+    conversationID = try container.decode(SignalboxCanonicalUUID.self, forKey: .conversationID)
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case origin
+    case conversationID = "conversation_id"
   }
 }
 
@@ -377,6 +526,8 @@ private struct SignalboxProcessServerWireFrame: Decodable {
 public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   case sessionCreated(sessionID: SignalboxCanonicalUUID)
   case inputSubmitted(SignalboxInputSubmitted)
+  case toolRequestDecided(SignalboxToolRequestDecided)
+  case sessionDefaults(SignalboxSessionDefaultsRead)
   case sessionsStart
   case sessionSummary(SignalboxProcessSessionSummary)
   case sessionsEnd(sessionCount: SignalboxCanonicalUInt64)
@@ -387,6 +538,12 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   case sessionMetadataReplaced(SignalboxProcessSessionMetadataRead)
   case conversationImportInserted(importedConversationID: SignalboxCanonicalUUID)
   case conversationImportAlreadyImported(importedConversationID: SignalboxCanonicalUUID)
+  case conversationPageStart
+  case conversationSummary(SignalboxConversationSummary)
+  case conversationPageEnd(SignalboxConversationPageEnd)
+  case modelAliasesStart
+  case modelAliasSummary(SignalboxModelAliasSummary)
+  case modelAliasesEnd(aliasCount: SignalboxCanonicalUInt64)
   case transcriptSnapshotStart(SignalboxTranscriptSnapshotBoundary)
   case transcriptTurn(SignalboxTranscriptTurn)
   case transcriptEntry(SignalboxTranscriptEntryMessage)
@@ -394,6 +551,7 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   case transcriptContent(SignalboxTranscriptContent)
   case transcriptSnapshotEnd(SignalboxTranscriptSnapshotEnd)
   case sessionEvent(SignalboxFollowedSessionEvent)
+  case providerTextDelta(SignalboxProviderTextDelta)
   case protocolError(SignalboxProcessError)
   case unknown(
     kind: String,
@@ -430,6 +588,10 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
         self = .sessionCreated(sessionID: try decoder.decode("session_id"))
       case "input_submitted":
         self = .inputSubmitted(try SignalboxInputSubmitted(from: decoder))
+      case "tool_request_decided":
+        self = .toolRequestDecided(try SignalboxToolRequestDecided(from: decoder))
+      case "session_defaults":
+        self = .sessionDefaults(try SignalboxSessionDefaultsRead(from: decoder))
       case "sessions_start":
         self = .sessionsStart
       case "session_summary":
@@ -452,6 +614,25 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
       case "conversation_import_already_imported":
         self = .conversationImportAlreadyImported(
           importedConversationID: try decoder.decode("imported_conversation_id"))
+      case "conversation_page_start":
+        try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
+        self = .conversationPageStart
+      case "conversation_summary":
+        try tagged.rejectUnadmittedFields(
+          ["type", "conversation"],
+          decoder: decoder
+        )
+        self = .conversationSummary(try decoder.decode("conversation"))
+      case "conversation_page_end":
+        self = .conversationPageEnd(try SignalboxConversationPageEnd(from: decoder))
+      case "model_aliases_start":
+        try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
+        self = .modelAliasesStart
+      case "model_alias_summary":
+        self = .modelAliasSummary(try SignalboxModelAliasSummary(from: decoder))
+      case "model_aliases_end":
+        try tagged.rejectUnadmittedFields(["type", "alias_count"], decoder: decoder)
+        self = .modelAliasesEnd(aliasCount: try decoder.decode("alias_count"))
       case "transcript_snapshot_start":
         try tagged.rejectUnadmittedFields(
           ["type", "session_id", "cursor"],
@@ -494,6 +675,8 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
           decoder: decoder
         )
         self = .sessionEvent(try SignalboxFollowedSessionEvent(from: decoder))
+      case "provider_text_delta":
+        self = .providerTextDelta(try SignalboxProviderTextDelta(from: decoder))
       case "error":
         self = .protocolError(try SignalboxProcessError(from: decoder))
       default:
@@ -506,6 +689,314 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
         decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
       )
     }
+  }
+}
+
+public struct SignalboxToolRequestDecided: Decodable, Equatable, Sendable {
+  public let toolRequestID: SignalboxCanonicalUUID
+  public let decision: SignalboxProcessToolDecision
+
+  public init(
+    toolRequestID: SignalboxCanonicalUUID,
+    decision: SignalboxProcessToolDecision
+  ) {
+    self.toolRequestID = toolRequestID
+    self.decision = decision
+  }
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    try tagged.rejectUnadmittedFields(
+      ["type", "tool_request_id", "decision"],
+      decoder: decoder
+    )
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    toolRequestID = try container.decode(SignalboxCanonicalUUID.self, forKey: .toolRequestID)
+    decision = try container.decode(SignalboxProcessToolDecision.self, forKey: .decision)
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case toolRequestID = "tool_request_id"
+    case decision
+  }
+}
+
+public struct SignalboxSessionDefaultsRead: Decodable, Equatable, Sendable {
+  public let sessionID: SignalboxCanonicalUUID
+  public let defaultsVersion: SignalboxCanonicalUInt64
+  public let modelSelection: SignalboxModelSelection
+  public let dangerousToolAutoApproval: Bool
+  public let systemPrompt: String?
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    try tagged.rejectUnadmittedFields(
+      [
+        "type", "session_id", "defaults_version", "model_selection",
+        "dangerous_tool_auto_approval", "system_prompt",
+      ],
+      decoder: decoder
+    )
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    sessionID = try container.decode(SignalboxCanonicalUUID.self, forKey: .sessionID)
+    defaultsVersion = try container.decode(SignalboxCanonicalUInt64.self, forKey: .defaultsVersion)
+    modelSelection = try container.decode(SignalboxModelSelection.self, forKey: .modelSelection)
+    dangerousToolAutoApproval = try container.decode(
+      Bool.self,
+      forKey: .dangerousToolAutoApproval
+    )
+    guard container.contains(.systemPrompt) else {
+      throw DecodingError.keyNotFound(
+        CodingKeys.systemPrompt,
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Session defaults require the system-prompt member."
+        )
+      )
+    }
+    systemPrompt = try container.decodeIfPresent(String.self, forKey: .systemPrompt)
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case sessionID = "session_id"
+    case defaultsVersion = "defaults_version"
+    case modelSelection = "model_selection"
+    case dangerousToolAutoApproval = "dangerous_tool_auto_approval"
+    case systemPrompt = "system_prompt"
+  }
+}
+
+public struct SignalboxModelAliasSummary: Decodable, Equatable, Identifiable, Sendable {
+  public let aliasID: SignalboxCanonicalUUID
+  public let selectionID: SignalboxCanonicalUUID
+
+  public var id: SignalboxCanonicalUUID {
+    aliasID
+  }
+
+  public init(aliasID: SignalboxCanonicalUUID, selectionID: SignalboxCanonicalUUID) {
+    self.aliasID = aliasID
+    self.selectionID = selectionID
+  }
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    try tagged.rejectUnadmittedFields(
+      ["type", "alias_id", "selection_id"],
+      decoder: decoder
+    )
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    aliasID = try container.decode(SignalboxCanonicalUUID.self, forKey: .aliasID)
+    selectionID = try container.decode(SignalboxCanonicalUUID.self, forKey: .selectionID)
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case aliasID = "alias_id"
+    case selectionID = "selection_id"
+  }
+}
+
+public enum SignalboxImportedConversationSourceFormat: String, Decodable, Equatable, Sendable {
+  case claudeCodeSessionJSONLV1 = "claude_code_session_jsonl_v1"
+  case claudeCodeSessionJSONLV2 = "claude_code_session_jsonl_v2"
+  case codexRolloutJSONLV1 = "codex_rollout_jsonl_v1"
+}
+
+public struct SignalboxNativeConversationSummary: Equatable, Sendable {
+  public let sessionID: SignalboxCanonicalUUID
+  public let title: String?
+  public let archived: Bool
+  public let defaultsVersion: SignalboxCanonicalUInt64
+
+  public init(
+    sessionID: SignalboxCanonicalUUID,
+    title: String?,
+    archived: Bool,
+    defaultsVersion: SignalboxCanonicalUInt64
+  ) {
+    self.sessionID = sessionID
+    self.title = title
+    self.archived = archived
+    self.defaultsVersion = defaultsVersion
+  }
+}
+
+public struct SignalboxImportedConversationSummary: Equatable, Sendable {
+  public let importedConversationID: SignalboxCanonicalUUID
+  public let title: String?
+  public let entryCount: SignalboxCanonicalUInt64
+  public let sourceFormat: SignalboxImportedConversationSourceFormat
+}
+
+public enum SignalboxConversationSummary: Decodable, Equatable, Sendable {
+  case native(SignalboxNativeConversationSummary)
+  case imported(SignalboxImportedConversationSummary)
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    guard case .string(let origin) = payload.payload["origin"] else {
+      throw DecodingError.keyNotFound(
+        SignalboxDynamicCodingKey("origin"),
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Conversation summary is missing its origin."
+        )
+      )
+    }
+    switch origin {
+    case "native_session":
+      try payload.rejectUnadmittedFields(
+        ["origin", "session_id", "title", "archived", "defaults_version"],
+        decoder: decoder
+      )
+      let container = try decoder.container(keyedBy: NativeCodingKeys.self)
+      self = .native(
+        SignalboxNativeConversationSummary(
+          sessionID: try container.decode(SignalboxCanonicalUUID.self, forKey: .sessionID),
+          title: try container.decodeIfPresent(String.self, forKey: .title),
+          archived: try container.decode(Bool.self, forKey: .archived),
+          defaultsVersion: try container.decode(
+            SignalboxCanonicalUInt64.self,
+            forKey: .defaultsVersion
+          )
+        )
+      )
+    case "imported_conversation":
+      try payload.rejectUnadmittedFields(
+        [
+          "origin", "imported_conversation_id", "title", "entry_count",
+          "source_format",
+        ],
+        decoder: decoder
+      )
+      let container = try decoder.container(keyedBy: ImportedCodingKeys.self)
+      self = .imported(
+        SignalboxImportedConversationSummary(
+          importedConversationID: try container.decode(
+            SignalboxCanonicalUUID.self,
+            forKey: .importedConversationID
+          ),
+          title: try container.decodeIfPresent(String.self, forKey: .title),
+          entryCount: try container.decode(SignalboxCanonicalUInt64.self, forKey: .entryCount),
+          sourceFormat: try container.decode(
+            SignalboxImportedConversationSourceFormat.self,
+            forKey: .sourceFormat
+          )
+        )
+      )
+    default:
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Unknown conversation-summary origin."
+        )
+      )
+    }
+  }
+
+  private enum NativeCodingKeys: String, CodingKey {
+    case sessionID = "session_id"
+    case title
+    case archived
+    case defaultsVersion = "defaults_version"
+  }
+
+  private enum ImportedCodingKeys: String, CodingKey {
+    case importedConversationID = "imported_conversation_id"
+    case title
+    case entryCount = "entry_count"
+    case sourceFormat = "source_format"
+  }
+}
+
+public struct SignalboxConversationPageEnd: Decodable, Equatable, Sendable {
+  public let conversationCount: SignalboxCanonicalUInt64
+  public let nextAfter: SignalboxConversationCursor?
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    try tagged.rejectUnadmittedFields(
+      ["type", "conversation_count", "next_after"],
+      decoder: decoder
+    )
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    conversationCount = try container.decode(
+      SignalboxCanonicalUInt64.self,
+      forKey: .conversationCount
+    )
+    guard conversationCount.rawValue <= SignalboxProcessProtocol.maximumConversationPageSize else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .conversationCount,
+        in: container,
+        debugDescription: "Conversation page count exceeded the protocol bound."
+      )
+    }
+    guard container.contains(.nextAfter) else {
+      throw DecodingError.keyNotFound(
+        CodingKeys.nextAfter,
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Conversation page end requires its cursor member."
+        )
+      )
+    }
+    nextAfter = try container.decodeIfPresent(SignalboxConversationCursor.self, forKey: .nextAfter)
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case conversationCount = "conversation_count"
+    case nextAfter = "next_after"
+  }
+}
+
+public struct SignalboxProviderTextDelta: Decodable, Equatable, Sendable {
+  public let sessionID: SignalboxCanonicalUUID
+  public let turnID: SignalboxCanonicalUUID
+  public let modelCallID: SignalboxCanonicalUUID
+  public let partIndex: SignalboxCanonicalUInt64
+  public let content: String
+
+  public init(
+    sessionID: SignalboxCanonicalUUID,
+    turnID: SignalboxCanonicalUUID,
+    modelCallID: SignalboxCanonicalUUID,
+    partIndex: SignalboxCanonicalUInt64,
+    content: String
+  ) {
+    self.sessionID = sessionID
+    self.turnID = turnID
+    self.modelCallID = modelCallID
+    self.partIndex = partIndex
+    self.content = content
+  }
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    try tagged.rejectUnadmittedFields(
+      ["type", "session_id", "turn_id", "model_call_id", "part_index", "content"],
+      decoder: decoder
+    )
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    sessionID = try container.decode(SignalboxCanonicalUUID.self, forKey: .sessionID)
+    turnID = try container.decode(SignalboxCanonicalUUID.self, forKey: .turnID)
+    modelCallID = try container.decode(SignalboxCanonicalUUID.self, forKey: .modelCallID)
+    partIndex = try container.decode(SignalboxCanonicalUInt64.self, forKey: .partIndex)
+    content = try container.decode(String.self, forKey: .content)
+    guard content.utf8.count <= SignalboxProcessProtocol.maximumContentFragmentUTF8Bytes else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .content,
+        in: container,
+        debugDescription: "Provider text delta exceeded the fragment bound."
+      )
+    }
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case sessionID = "session_id"
+    case turnID = "turn_id"
+    case modelCallID = "model_call_id"
+    case partIndex = "part_index"
+    case content
   }
 }
 

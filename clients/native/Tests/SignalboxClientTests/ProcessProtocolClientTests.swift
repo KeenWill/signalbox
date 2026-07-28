@@ -9,8 +9,8 @@ final class ProcessProtocolClientTests: XCTestCase {
       chunks: [
         Data(
           """
-          {"version":5,"request_id":"1","message":{"type":"session_created","session_id":17}}
-          {"version":5,"request_id":"1","message":
+          {"version":18,"request_id":"1","message":{"type":"session_created","session_id":17}}
+          {"version":18,"request_id":"1","message":
           """.utf8
         ),
         Data(
@@ -52,7 +52,7 @@ final class ProcessProtocolClientTests: XCTestCase {
       chunks: [
         Data(
           ("""
-          {"version":5,"request_id":"1","message":{"type":"sessions_end","session_count":"0"}}
+          {"version":18,"request_id":"1","message":{"type":"sessions_end","session_count":"0"}}
           """ + "\n").utf8
         )
       ]
@@ -67,7 +67,7 @@ final class ProcessProtocolClientTests: XCTestCase {
 
     XCTAssertEqual(
       String(decoding: sent, as: UTF8.self),
-      #"{"request":{"type":"list_sessions"},"request_id":"1","version":5}"# + "\n"
+      #"{"request":{"type":"list_sessions"},"request_id":"1","version":18}"# + "\n"
     )
   }
 
@@ -76,12 +76,12 @@ final class ProcessProtocolClientTests: XCTestCase {
       chunks: [
         Data(
           ("""
-          {"version":5,"request_id":"1","message":{"type":"sessions_start"}}
+          {"version":18,"request_id":"1","message":{"type":"sessions_start"}}
           """ + "\n").utf8
         ),
         Data(
           ("""
-          {"version":5,"request_id":"1","message":{"type":"sessions_end","session_count":"0"}}
+          {"version":18,"request_id":"1","message":{"type":"sessions_end","session_count":"0"}}
           """ + "\n").utf8
         ),
       ]

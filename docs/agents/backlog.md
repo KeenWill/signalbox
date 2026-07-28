@@ -744,6 +744,22 @@ Owns: network transport beside the local socket, authentication. Collides-with:
 process protocol surfaces. Gates iOS, the web surface, and any off-machine
 client. Bolted-on shared-key auth is the anti-pattern to avoid.
 
+Owner direction, 2026-07-28 (orientation only): prioritize a near-local
+Tailscale path for a real macOS client before broad internet exposure. The
+design pass must cover authenticated identity, authorization, revocation, and
+transport binding together; it must not present a raw local process socket on
+the tailnet or treat tailnet membership alone as application authorization.
+iPhone and iPad remain deferred behind this slice.
+
+## Native imported-conversation inspection [blocked-on: imported inspection stack landing] [size: S]
+
+Owns: native SwiftUI imported transcript projection and continuation creation.
+Collides-with: process-protocol imported inspection and native conversation
+detail. The native v16 list identifies imported conversations, but transcript
+entry reading is landing separately; once available, add the read-only
+transcript and continue-from-frontier action without a client-owned transcript
+interpretation.
+
 ## Web surface [blocked-on: monitor stream; remote transport] [size: L]
 
 Owns: new web client. Collides-with: nothing daemon-side once its feeds exist.

@@ -3,6 +3,32 @@ import XCTest
 @testable import SignalboxNative
 
 final class ProcessServiceIntegrationTests: XCTestCase {
+  func testModelAliasCatalogCreatesAUnifiedNativeConversation() async throws {
+    let service = makeService()
+
+    let aliases = try await service.listModelAliases()
+    let alias = try XCTUnwrap(aliases.first)
+    let prepared = try await service.prepareSessionCreation(
+      modelSelection: .alias(aliasID: alias.aliasID),
+      systemPrompt: ProcessSubmissionFixture.systemPrompt
+    )
+    let createdSessionID = try await service.createSession(prepared)
+    let conversations = try await service.listConversations(includeArchived: true)
+    let createdConversation = try XCTUnwrap(
+      conversations.first {
+        $0.conversationID.rawValue == MockProcessProtocolFixtures.createdSessionID
+      }
+    )
+
+    XCTAssertEqual(alias.aliasID.rawValue, MockProcessProtocolFixtures.aliasID)
+    XCTAssertEqual(alias.selectionID.rawValue, MockProcessProtocolFixtures.selectionID)
+    XCTAssertEqual(createdSessionID.rawValue, MockProcessProtocolFixtures.createdSessionID)
+    XCTAssertEqual(
+      createdConversation.conversationID.rawValue,
+      MockProcessProtocolFixtures.createdSessionID
+    )
+  }
+
   func testMockHarnessListsRealMetadataFrames() async throws {
     let service = makeService(policy: ProcessDriverFixture.oneRowMetadataPolicy)
 
@@ -330,15 +356,15 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
   @MainActor
   func testOlderSessionRefreshCannotReplaceNewerServiceResult() async throws {
-    let fixtures = try await makeService().listSessions(includeArchived: true)
-    let olderSessions = [
-      try fixtureSession(MockSignalboxFixtures.activeSessionID, in: fixtures)
+    let fixtures = try await makeService().listConversations(includeArchived: true)
+    let olderConversations = [
+      try fixtureConversation(MockSignalboxFixtures.activeSessionID, in: fixtures)
     ]
-    let newerSessions = [
-      try fixtureSession(MockSignalboxFixtures.approvalSessionID, in: fixtures)
+    let newerConversations = [
+      try fixtureConversation(MockSignalboxFixtures.approvalSessionID, in: fixtures)
     ]
-    let olderService = SuspendedSessionListProcessService(sessions: olderSessions)
-    let newerService = SuspendedSessionListProcessService(sessions: newerSessions)
+    let olderService = SuspendedSessionListProcessService(conversations: olderConversations)
+    let newerService = SuspendedSessionListProcessService(conversations: newerConversations)
     var currentService: (any SignalboxProcessServiceProtocol)? = olderService
     let viewModel = ProcessSessionListViewModel { currentService }
 
@@ -352,47 +378,53 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     await olderService.completeList()
     await olderRefresh.value
 
-    XCTAssertEqual(viewModel.sessions, newerSessions)
+    XCTAssertEqual(viewModel.conversations, newerConversations)
     XCTAssertFalse(viewModel.isLoading)
   }
 
   @MainActor
   func testArchiveCommitWinsOverRacingStaleRefresh() async throws {
     let backingService = makeService()
-    let fixtures = try await backingService.listSessions(includeArchived: true)
-    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: fixtures)
-    let archived = try await backingService.setArchived(true, session: session)
+    let fixtures = try await backingService.listConversations(includeArchived: true)
+    let conversation = try fixtureConversation(MockSignalboxFixtures.activeSessionID, in: fixtures)
+    let archived = try await backingService.setConversationArchived(
+      true,
+      conversation: conversation
+    )
     let service = SuspendedArchiveProcessService(
-      staleSessions: [session],
+      staleConversations: [conversation],
       replacement: archived
     )
     let viewModel = ProcessSessionListViewModel { service }
     await viewModel.refresh()
 
-    let mutation = Task { await viewModel.toggleArchive(session) }
+    let mutation = Task { await viewModel.toggleArchive(conversation) }
     await service.waitUntilMutationStarted()
     await viewModel.refresh()
     await service.completeMutation()
     await mutation.value
 
-    XCTAssertEqual(viewModel.sessions, [archived])
+    XCTAssertEqual(viewModel.conversations, [archived])
     XCTAssertFalse(viewModel.isLoading)
   }
 
   @MainActor
   func testReplacingListServiceClearsRowsAndInvalidatesOldArchive() async throws {
     let backingService = makeService()
-    let fixtures = try await backingService.listSessions(includeArchived: true)
-    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: fixtures)
-    let archived = try await backingService.setArchived(true, session: session)
+    let fixtures = try await backingService.listConversations(includeArchived: true)
+    let conversation = try fixtureConversation(MockSignalboxFixtures.activeSessionID, in: fixtures)
+    let archived = try await backingService.setConversationArchived(
+      true,
+      conversation: conversation
+    )
     let oldService = SuspendedArchiveProcessService(
-      staleSessions: [session],
+      staleConversations: [conversation],
       replacement: archived
     )
     var currentService: (any SignalboxProcessServiceProtocol)? = oldService
     let viewModel = ProcessSessionListViewModel { currentService }
     await viewModel.refresh()
-    let mutation = Task { await viewModel.toggleArchive(session) }
+    let mutation = Task { await viewModel.toggleArchive(conversation) }
     await oldService.waitUntilMutationStarted()
 
     currentService = RejectingProcessService()
@@ -400,7 +432,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     await oldService.completeMutation()
     await mutation.value
 
-    XCTAssertTrue(viewModel.sessions.isEmpty)
+    XCTAssertTrue(viewModel.conversations.isEmpty)
     XCTAssertNil(viewModel.errorMessage)
   }
 
@@ -1400,6 +1432,20 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     return session
   }
 
+  private func fixtureConversation(
+    _ conversationID: String,
+    in conversations: [SignalboxProcessConversation]
+  ) throws -> SignalboxProcessConversation {
+    guard
+      let conversation = conversations.first(where: {
+        $0.conversationID.rawValue == conversationID
+      })
+    else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureSession
+    }
+    return conversation
+  }
+
   private func unknownEvent(
     _ event: SignalboxConversationEvent
   ) throws -> SignalboxUnknownEvent {
@@ -1445,6 +1491,7 @@ private enum ProcessPresentationFixture {
 }
 
 private enum ProcessSubmissionFixture {
+  static let systemPrompt = "Stay concise."
   static let content = "fixture composer draft"
   static let replacementContent = "fixture replacement composer draft"
   static let precomposedContent = "fixture caf\u{00e9}"
@@ -1707,25 +1754,31 @@ private actor SuspendedConnectionProcessService: SignalboxProcessServiceProtocol
 }
 
 private actor SuspendedSessionListProcessService: SignalboxProcessServiceProtocol {
-  private let sessions: [SignalboxProcessSession]
+  private let conversations: [SignalboxProcessConversation]
   private var listStarted = false
   private var listStartedWaiter: CheckedContinuation<Void, Never>?
   private var completionWaiter: CheckedContinuation<Void, Never>?
 
-  init(sessions: [SignalboxProcessSession]) {
-    self.sessions = sessions
+  init(conversations: [SignalboxProcessConversation]) {
+    self.conversations = conversations
   }
 
   func testConnection() async {}
 
-  func listSessions(includeArchived: Bool) async -> [SignalboxProcessSession] {
+  func listConversations(
+    includeArchived: Bool
+  ) async -> [SignalboxProcessConversation] {
     listStarted = true
     listStartedWaiter?.resume()
     listStartedWaiter = nil
     await withCheckedContinuation { continuation in
       completionWaiter = continuation
     }
-    return sessions
+    return conversations
+  }
+
+  func listSessions(includeArchived: Bool) async -> [SignalboxProcessSession] {
+    []
   }
 
   func waitUntilListStarted() async {
@@ -1771,30 +1824,36 @@ private actor SuspendedSessionListProcessService: SignalboxProcessServiceProtoco
 }
 
 private actor SuspendedArchiveProcessService: SignalboxProcessServiceProtocol {
-  private let staleSessions: [SignalboxProcessSession]
-  private let replacement: SignalboxProcessSession
+  private let staleConversations: [SignalboxProcessConversation]
+  private let replacement: SignalboxProcessConversation
   private var mutationStarted = false
   private var mutationStartedWaiter: CheckedContinuation<Void, Never>?
   private var completionWaiter: CheckedContinuation<Void, Never>?
 
   init(
-    staleSessions: [SignalboxProcessSession],
-    replacement: SignalboxProcessSession
+    staleConversations: [SignalboxProcessConversation],
+    replacement: SignalboxProcessConversation
   ) {
-    self.staleSessions = staleSessions
+    self.staleConversations = staleConversations
     self.replacement = replacement
   }
 
   func testConnection() async {}
 
-  func listSessions(includeArchived: Bool) async -> [SignalboxProcessSession] {
-    staleSessions
+  func listConversations(
+    includeArchived: Bool
+  ) async -> [SignalboxProcessConversation] {
+    staleConversations
   }
 
-  func setArchived(
+  func listSessions(includeArchived: Bool) async -> [SignalboxProcessSession] {
+    []
+  }
+
+  func setConversationArchived(
     _ archived: Bool,
-    session: SignalboxProcessSession
-  ) async -> SignalboxProcessSession {
+    conversation: SignalboxProcessConversation
+  ) async -> SignalboxProcessConversation {
     mutationStarted = true
     mutationStartedWaiter?.resume()
     mutationStartedWaiter = nil
@@ -1802,6 +1861,13 @@ private actor SuspendedArchiveProcessService: SignalboxProcessServiceProtocol {
       completionWaiter = continuation
     }
     return replacement
+  }
+
+  func setArchived(
+    _ archived: Bool,
+    session: SignalboxProcessSession
+  ) async -> SignalboxProcessSession {
+    session
   }
 
   func waitUntilMutationStarted() async {
@@ -2809,7 +2875,7 @@ private enum ProcessDriverFixture {
       from: Data(
         """
         {
-          "version":5,
+          "version":18,
           "request_id":"1",
           "message":\(message)
         }

@@ -47,8 +47,10 @@ surface takes version seventeen for the single `read_imported_conversation`
 request and the two typed imported-continuation rejections, verified through PR
 #303 (`agent/imported-conversation-inspection`). Versions one through thirteen
 and sixteen retain their closed request and message vocabularies unchanged. The
-implementation here speaks versions one through thirteen, sixteen, and seventeen
-while fourteen and fifteen remain unsupported, and its terminal client selects
+native client wiring stack adds version eighteen for the deployment model-alias
+catalog read. The implementation here speaks versions one through thirteen,
+sixteen, seventeen, and eighteen while fourteen and fifteen remain unsupported;
+the native client selects version eighteen and the terminal client selects
 version seventeen. Its `search` verb over version four's metadata list was
 verified through PR #283 (`agent/session-search-cli`; terminal client surface
 only). This page's version-four last-writer member spelling was verified through
@@ -223,6 +225,7 @@ that variant.
 | `read_session_defaults`                 | 9               | `session_id` (canonical UUID string), `defaults_version` (canonical decimal string or null)                                                                                                                                                                          | Read one complete immutable defaults epoch: the current one for null, otherwise exactly the named one.                                                                                                                                            |
 | `list_conversations`                    | 16              | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                  | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                    |
 | `read_imported_conversation`            | 17              | `imported_conversation_id` (canonical UUID string)                                                                                                                                                                                                                   | Read one immutable imported conversation's complete entry inventory, including the positions `create_session_from_imported_frontier` consumes.                                                                                                    |
+| `list_model_aliases`                    | 18              | none                                                                                                                                                                                                                                                                 | Read the deployment's complete configured alias-to-direct-selection catalog.                                                                                                                                                                      |
 
 Version thirteen adds one optional closed `delivery` object to `submit_input`.
 Its exact variants are `start_when_idle {}`,
@@ -707,6 +710,21 @@ cursor is null when no later match existed in the page snapshot; otherwise it
 names the last emitted summary's origin and identity. The page sequence is
 spooled before output and becomes authoritative only after its count, ordering,
 and cursor validate.
+
+Version eighteen's deployment model-alias catalog is one ordered sequence:
+
+1. `model_aliases_start`;
+2. zero or more `model_alias_summary { alias_id, selection_id }` messages in
+   strictly increasing alias-identity order; and
+3. `model_aliases_end { alias_count }`.
+
+Both identities are canonical UUID strings. The catalog is a current
+deployment-configuration read, not durable session state: an alias summary
+states the direct selection that accepting a new alias request would freeze at
+that moment. The read exposes no provider credential, provider-native model
+identifier, or mutable configuration operation. Existing sessions and accepted
+inputs retain their previously frozen model-selection semantics when the
+deployment later changes an alias.
 
 `session_metadata` is the successful single-session read and
 `session_metadata_replaced` is the successful write receipt. Both carry

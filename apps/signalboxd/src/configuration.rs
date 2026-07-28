@@ -154,6 +154,13 @@ impl HubModelConfiguration {
     pub fn resolve_alias(&self, alias: ModelAlias) -> Option<FrozenAliasDefinition> {
         self.aliases.get(&alias).copied()
     }
+
+    /// Iterates the complete deployment-owned alias catalog.
+    pub fn model_aliases(&self) -> impl Iterator<Item = (ModelAlias, DirectModelSelection)> + '_ {
+        self.aliases
+            .iter()
+            .map(|(alias, definition)| (*alias, definition.selected()))
+    }
 }
 
 fn reject_unknown_fields(
@@ -375,6 +382,10 @@ selection_id = "10000000-0000-4000-8000-000000000001"
                 .expect("fixture alias resolves")
                 .selected(),
             selection
+        );
+        assert_eq!(
+            configuration.model_aliases().collect::<Vec<_>>(),
+            vec![(alias, selection)]
         );
         assert!(
             configuration
