@@ -1189,6 +1189,27 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         redact_text(message)
     }
 
+    /// Redacts a provider-derived diagnostic the adapter will then wrap in its
+    /// own prose. Wrapping inserts adapter text — and, for a serde detail, that
+    /// library's own prose and quoting — between a held credential marker and
+    /// the continuation the diagnostic quotes, so the joined-form scan
+    /// [`Self::redact_terminal_failure_text`] performs cannot see the pair
+    /// rejoin and reads the join as clean. While any lookbehind context is live
+    /// the quoted provider bytes are therefore replaced whole rather than
+    /// scanned; with nothing held there is no marker for them to complete, so
+    /// the ordinary stateless redaction applies and the diagnostic keeps its
+    /// content.
+    pub(crate) fn redact_wrapped_provider_detail(&self, detail: &str) -> String {
+        if self.suppressing
+            || self.pending.is_some()
+            || !self.emitted_context.is_empty()
+            || !self.dropped_context.is_empty()
+        {
+            return REDACTED.to_string();
+        }
+        redact_text(detail)
+    }
+
     /// Redacts the final envelope text like a terminal failure message, then
     /// resolves the dropped-reasoning chain through it: after this text, a
     /// dropped-marker candidate has either completed inside it (and was

@@ -573,15 +573,17 @@ async fn execute_process<C: Clone + Send + Sync>(
         match next {
             ProcessStep::Line(Ok(Some(line))) => {
                 if let Err(error) = decoder.push(&line, &mut redacting_sink) {
-                    // Serde details can quote provider-controlled bytes, so
-                    // the detail consults the held lookbehind state before
-                    // the sink flushes, exactly as failure messages do: a
-                    // detail that extends a held credential marker is
-                    // suppressed whole.
-                    let detail = redacting_sink.redact_terminal_failure_text(&format!(
+                    // Serde details quote provider-controlled bytes, and both
+                    // that library's prose and the adapter's own wrapper sit
+                    // between a held credential marker and the continuation the
+                    // detail quotes — so a joined-form scan reads the join as
+                    // clean however the pieces are ordered. The detail is
+                    // therefore content-silent whenever any context is held,
+                    // and keeps its content only when nothing could complete.
+                    let detail = format!(
                         "undecodable Codex event: {}",
-                        error.into_detail()
-                    ));
+                        redacting_sink.redact_wrapped_provider_detail(&error.into_detail())
+                    );
                     force_kill(&mut child).await;
                     abort_stderr_task(&mut stderr_task).await;
                     redacting_sink.finish();
@@ -947,16 +949,6 @@ async fn execute_process<C: Clone + Send + Sync>(
 /// operator value would silently re-root the credential store beneath the
 /// working directory. Absolutize both against the parent's own current
 /// directory; every other allowlisted value passes through unchanged.
-fn spawn_environment_value(name: &str, value: std::ffi::OsString) -> std::ffi::OsString {
-    if name != "CODEX_HOME" && name != "HOME" {
-        return value;
-    }
-    // `allowlisted_environment` refused every value this cannot resolve, so
-    // the absolutization below succeeds; the unreachable fallback keeps the
-    // assembly total rather than panicking on a future caller.
-    absolute_credential_home(&value, absolutize_against_current_directory).unwrap_or(value)
-}
-
 /// The parent's own absolutization, named so the injectable
 /// [`absolute_credential_home`] receives a higher-ranked function item rather
 /// than one lifetime instantiation of the generic `std::path::absolute`.
@@ -1016,10 +1008,10 @@ fn allowlisted_environment(
     let mut environment = Vec::new();
     for name in CODEX_ENVIRONMENT_ALLOWLIST {
         if let Some(value) = read(name) {
-            if let Some(reason) = environment_rejection(name, &value) {
-                return Err(EnvironmentRejection { name, reason });
+            match prepared_environment_value(name, value) {
+                Ok(prepared) => environment.push((*name, prepared)),
+                Err(reason) => return Err(EnvironmentRejection { name, reason }),
             }
-            environment.push((*name, spawn_environment_value(name, value)));
         }
     }
     Ok(environment)
@@ -1070,22 +1062,36 @@ impl EnvironmentRejection {
     }
 }
 
-/// Why an allowlisted variable's value is refused, or `None` when it is
-/// acceptable. A `HOME`/`CODEX_HOME` that cannot be made absolute is refused as
-/// `UnresolvableCredentialHome`. For proxy variables, the authority is the span
-/// after any `scheme://` up to the first `/`, `?`, or `#`; userinfo is an `@`
-/// inside it, and a value that cannot be read as UTF-8 cannot be verified
-/// credential-free and fails closed as `Unverifiable` — a distinct reason from
-/// an actual embedded credential.
-fn environment_rejection(
+/// The value the child receives for one allowlisted variable, or why it is
+/// refused.
+///
+/// A credential home is absolutized exactly once here, and the value that
+/// passed validation is the value assembled: resolving it a second time during
+/// assembly would let a parent working directory that became unresolvable in
+/// between — the very case this boundary exists for — fail the second
+/// resolution and forward the original relative path, which the child would
+/// then re-root beneath its own working directory.
+fn prepared_environment_value(
     name: &str,
-    value: &std::ffi::OsStr,
-) -> Option<EnvironmentRejectionReason> {
-    if matches!(name, "HOME" | "CODEX_HOME")
-        && absolute_credential_home(value, absolutize_against_current_directory).is_none()
-    {
-        return Some(EnvironmentRejectionReason::UnresolvableCredentialHome);
+    value: std::ffi::OsString,
+) -> Result<std::ffi::OsString, EnvironmentRejectionReason> {
+    if matches!(name, "HOME" | "CODEX_HOME") {
+        return absolute_credential_home(&value, absolutize_against_current_directory)
+            .ok_or(EnvironmentRejectionReason::UnresolvableCredentialHome);
     }
+    match proxy_rejection(name, &value) {
+        Some(reason) => Err(reason),
+        None => Ok(value),
+    }
+}
+
+/// Why a proxy variable's value is refused, or `None` when it is acceptable.
+/// The authority is the span after any `scheme://` up to the first `/`, `?`, or
+/// `#`; userinfo is an `@` inside it, and a value that cannot be read as UTF-8
+/// cannot be verified credential-free and fails closed as `Unverifiable` — a
+/// distinct reason from an actual embedded credential. A variable that is not a
+/// proxy URL is not checked.
+fn proxy_rejection(name: &str, value: &std::ffi::OsStr) -> Option<EnvironmentRejectionReason> {
     if !PROXY_URL_VARIABLES.contains(&name) {
         return None;
     }
@@ -1186,6 +1192,12 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
+            // End of stream resolves a deferred `\r`: no `\n` can follow it, so
+            // it was payload rather than half a delimiter. It is still attached
+            // to the line the decoder receives, so charge it before admitting.
+            if deferred_carriage_return && counted.saturating_add(1) > limit {
+                return Err(oversize_event(limit));
+            }
             return if line.is_empty() {
                 Ok(None)
             } else {
@@ -1219,10 +1231,7 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
             None => available.len(),
         };
         if counted.saturating_add(payload) > limit {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Codex JSONL event exceeded the {limit}-byte limit"),
-            ));
+            return Err(oversize_event(limit));
         }
         counted += payload;
         line.extend_from_slice(&available[..take]);
@@ -1234,6 +1243,13 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
             return Ok(Some(line));
         }
     }
+}
+
+fn oversize_event(limit: usize) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("Codex JSONL event exceeded the {limit}-byte limit"),
+    )
 }
 
 async fn read_bounded_output<R: AsyncRead + Unpin>(
@@ -1457,29 +1473,29 @@ fn already_fired(signal: &mut CancellationSignal) -> bool {
 mod tests {
     use super::{
         EnvironmentRejection, EnvironmentRejectionReason, absolute_credential_home,
-        allowlisted_environment, read_bounded_line, spawn_environment_value,
+        allowlisted_environment, read_bounded_line,
     };
 
     #[test]
     fn codex_home_is_absolutized_for_the_child() {
-        let value =
-            spawn_environment_value("CODEX_HOME", std::ffi::OsString::from("relative-home"));
+        let value = accepted_value("CODEX_HOME", std::ffi::OsString::from("relative-home"));
 
         assert!(std::path::Path::new(&value).is_absolute());
     }
 
     #[test]
     fn fallback_home_is_absolutized_for_the_child() {
-        let value = spawn_environment_value("HOME", std::ffi::OsString::from("relative-home"));
+        let value = accepted_value("HOME", std::ffi::OsString::from("relative-home"));
 
         assert!(std::path::Path::new(&value).is_absolute());
     }
 
     #[test]
     fn other_allowlisted_environment_values_pass_through_unchanged() {
-        let value = spawn_environment_value("PATH", std::ffi::OsString::from("relative:paths"));
-
-        assert_eq!(value, std::ffi::OsString::from("relative:paths"));
+        assert_eq!(
+            accepted_value("PATH", std::ffi::OsString::from("relative:paths")),
+            std::ffi::OsString::from("relative:paths")
+        );
     }
 
     /// Assembles the environment with exactly `name=value` set and returns the
@@ -1636,6 +1652,24 @@ mod tests {
         assert_eq!(resolved, None);
     }
 
+    /// A credential home that passed validation is the value assembled, not a
+    /// second independent resolution: `allowlisted_environment` never yields a
+    /// relative credential home, whatever happens to the parent's working
+    /// directory between two would-be resolutions.
+    #[test]
+    fn assembled_credential_home_is_never_relative() {
+        let assembled = allowlisted_environment(|queried| {
+            (queried == "CODEX_HOME").then(|| std::ffi::OsString::from("relative-home"))
+        })
+        .expect("a resolvable relative credential home is accepted");
+
+        assert!(
+            assembled
+                .iter()
+                .all(|(_, value)| std::path::Path::new(value).is_absolute())
+        );
+    }
+
     /// A relative credential home the parent *can* absolutize yields the
     /// resolved absolute value, so the ordinary case still reaches the child
     /// re-rooted at the parent's own directory rather than being refused.
@@ -1723,6 +1757,35 @@ mod tests {
             .expect_err("an interior carriage return counts toward the limit");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// A deferred carriage return that end-of-stream resolves as payload is
+    /// charged before the unterminated event is admitted: no `\n` can follow it,
+    /// and it stays attached to the line the decoder receives, so an
+    /// exactly-limit payload plus that trailing `\r` is over the bound.
+    #[tokio::test]
+    async fn bounded_line_charges_a_deferred_carriage_return_at_end_of_stream() {
+        let input = b"1234\r".as_slice();
+        let mut reader = tokio::io::BufReader::with_capacity(5, input);
+
+        let error = read_bounded_line(&mut reader, 4)
+            .await
+            .expect_err("an unterminated trailing carriage return is payload");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// The same trailing carriage return within the bound is still admitted.
+    #[tokio::test]
+    async fn bounded_line_admits_a_deferred_carriage_return_within_the_limit() {
+        let input = b"1234\r".as_slice();
+        let mut reader = tokio::io::BufReader::with_capacity(5, input);
+
+        let line = read_bounded_line(&mut reader, 5)
+            .await
+            .expect("payload plus its trailing carriage return fits the bound");
+
+        assert_eq!(line.as_deref(), Some(b"1234\r".as_slice()));
     }
 
     /// A payload one byte over the limit is still rejected.

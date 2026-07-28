@@ -426,6 +426,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fixtures::SENSITIVE_SPLIT_AUTHORIZATION
             ));
         }
+        "dropped_marker_then_malformed_usage" => {
+            // A dropped error item seeds a marker prefix, then a known event
+            // fails shape decoding with the continuation quoted inside serde's
+            // own prose — which no joined-form scan can rejoin across.
+            error_item("err-marker", "api_");
+            emit(&format!(
+                r#"{{"type":"turn.completed","usage":{{"input_tokens":"key={}","cached_input_tokens":2,"cache_write_input_tokens":1,"output_tokens":7}}}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+        }
         "split_stream_authorization_before_failure" => {
             reasoning("reason-split-authorization-failed", "Authorization:");
             unrecoverable(&format!(" {}", fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
