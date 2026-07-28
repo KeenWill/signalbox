@@ -167,6 +167,15 @@ impl<C: Clone> EventDecoder<C> {
                                 correlation: self.correlation.clone(),
                                 fact: ObservationFact::ThinkingDelta { index, text },
                             });
+                        } else {
+                            // Buffered delivery drops reasoning from the
+                            // output, but a credential marker inside it still
+                            // marks the value that follows in the final text
+                            // as a secret; feed the dropped bytes into the
+                            // match-only lookbehind so that value is
+                            // suppressed exactly as the streamed path
+                            // suppresses it.
+                            sink.extend_dropped_context(&text);
                         }
                     }
                     ItemDetails::Error { message } => {
