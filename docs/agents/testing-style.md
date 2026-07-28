@@ -367,6 +367,13 @@ expect![[r#"
     `expect_err("cross-wired current-session facts must fail closed")` teaches
     at the failure site; a bare `unwrap()` teaches nothing.
 
+21. **Tests are explicit declarations, not macro-generated.** A Rust macro does
+    not emit or forward `#[test]`, `#[tokio::test]`, or a conditional
+    equivalent. Explicit declarations keep each test's name and whole story
+    visible at its source location (rules 1 and 7), and let the
+    invariant-catalog checker bind every INV-tagged test file deterministically
+    without expanding arbitrary macros.
+
 ## Example
 
 A queue-order derivation test written against multi-positional-integer helpers,
