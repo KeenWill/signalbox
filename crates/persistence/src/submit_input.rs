@@ -2612,16 +2612,8 @@ pub(crate) async fn load_scheduling_projection(
 
     let compaction_rows = sqlx::query(
         "SELECT
-            compaction.context_compaction_id,
-            compaction.predecessor_compaction_id,
-            compaction.source_frontier_id,
-            compaction.result_frontier_id,
-            compaction.producing_call_id,
-            compaction.first_source_session_id,
-            compaction.first_entry_id,
-            compaction.through_source_session_id,
-            compaction.through_entry_id,
-            compaction.summary_entry_id,
+            call.model_call_id,
+            call.source_frontier_id AS call_source_frontier_id,
             call.direct_model_selection_id,
             call.resolved_provider_model_identity_id,
             call.state_kind,
@@ -2629,13 +2621,23 @@ pub(crate) async fn load_scheduling_projection(
             call.input_tokens,
             call.output_tokens,
             call.cache_creation_input_tokens,
-            call.cache_read_input_tokens
-         FROM context_compaction AS compaction
-         JOIN context_compaction_model_call AS call
-           ON call.model_call_id = compaction.producing_call_id
-          AND call.session_id = compaction.session_id
-        WHERE compaction.session_id = $1
-        ORDER BY compaction.context_compaction_id",
+            call.cache_read_input_tokens,
+            compaction.context_compaction_id,
+            compaction.predecessor_compaction_id,
+            compaction.source_frontier_id AS compaction_source_frontier_id,
+            compaction.result_frontier_id,
+            compaction.producing_call_id,
+            compaction.first_source_session_id,
+            compaction.first_entry_id,
+            compaction.through_source_session_id,
+            compaction.through_entry_id,
+            compaction.summary_entry_id
+         FROM context_compaction_model_call AS call
+         LEFT JOIN context_compaction AS compaction
+           ON compaction.producing_call_id = call.model_call_id
+          AND compaction.session_id = call.session_id
+        WHERE call.session_id = $1
+        ORDER BY call.model_call_id",
     )
     .bind(session_id_to_uuid(session_id))
     .fetch_all(&mut *connection)
@@ -2643,13 +2645,9 @@ pub(crate) async fn load_scheduling_projection(
     let mut compaction_calls = Vec::with_capacity(compaction_rows.len());
     let mut compactions = Vec::with_capacity(compaction_rows.len());
     for row in compaction_rows {
-        let compaction_id =
-            ContextCompactionId::from_uuid(required(&row, "context_compaction_id")?);
-        let call_id = ModelCallId::from_uuid(required(&row, "producing_call_id")?);
-        let source_frontier_uuid: Uuid = required(&row, "source_frontier_id")?;
-        let result_frontier_uuid: Uuid = required(&row, "result_frontier_id")?;
-        required_frontiers.insert(source_frontier_uuid);
-        required_frontiers.insert(result_frontier_uuid);
+        let call_id = ModelCallId::from_uuid(required(&row, "model_call_id")?);
+        let call_source_frontier_uuid: Uuid = required(&row, "call_source_frontier_id")?;
+        required_frontiers.insert(call_source_frontier_uuid);
         let state_kind: String = required(&row, "state_kind")?;
         let disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
         let state = match (state_kind.as_str(), disposition.as_deref()) {
@@ -2691,10 +2689,19 @@ pub(crate) async fn load_scheduling_projection(
                 &row,
                 "resolved_provider_model_identity_id",
             )?)),
-            ContextFrontierId::from_uuid(source_frontier_uuid),
+            ContextFrontierId::from_uuid(call_source_frontier_uuid),
             state,
             usage,
         ));
+        let Some(compaction_uuid) = row.try_get::<Option<Uuid>, _>("context_compaction_id")? else {
+            continue;
+        };
+        let compaction_id = ContextCompactionId::from_uuid(compaction_uuid);
+        let producing_call = ModelCallId::from_uuid(required(&row, "producing_call_id")?);
+        let source_frontier_uuid: Uuid = required(&row, "compaction_source_frontier_id")?;
+        let result_frontier_uuid: Uuid = required(&row, "result_frontier_id")?;
+        required_frontiers.insert(source_frontier_uuid);
+        required_frontiers.insert(result_frontier_uuid);
         let first = SemanticTranscriptEntryRef::from_source(
             session_id_from_uuid(required(&row, "first_source_session_id")?),
             SemanticTranscriptEntryId::from_uuid(required(&row, "first_entry_id")?),
@@ -2710,7 +2717,7 @@ pub(crate) async fn load_scheduling_projection(
             predecessor.map(ContextCompactionId::from_uuid),
             ContextFrontierId::from_uuid(source_frontier_uuid),
             ContextFrontierId::from_uuid(result_frontier_uuid),
-            call_id,
+            producing_call,
             ContextCompactionRange::inclusive(first, through),
             SemanticTranscriptEntryId::from_uuid(required(&row, "summary_entry_id")?),
         ));

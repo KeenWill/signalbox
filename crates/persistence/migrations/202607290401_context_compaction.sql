@@ -335,6 +335,7 @@ DECLARE
     first_position numeric(20, 0);
     through_position numeric(20, 0);
     predecessor_result uuid;
+    predecessor_summary_entry uuid;
     mismatch_count bigint;
 BEGIN
     SELECT count(*)
@@ -428,9 +429,14 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    IF NEW.predecessor_compaction_id IS NOT NULL THEN
-        SELECT result_frontier_id
-          INTO predecessor_result
+    IF NEW.predecessor_compaction_id IS NULL THEN
+        IF first_position <> 1 THEN
+            RAISE EXCEPTION 'root compaction range must start at the visible frontier start'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        SELECT result_frontier_id, summary_entry_id
+          INTO predecessor_result, predecessor_summary_entry
           FROM context_compaction
          WHERE context_compaction_id = NEW.predecessor_compaction_id
            AND session_id = NEW.session_id;
@@ -446,8 +452,12 @@ BEGIN
          WHERE predecessor_member.owning_session_id = NEW.session_id
            AND predecessor_member.context_frontier_id = predecessor_result
            AND source_member.member_position IS NULL;
-        IF predecessor_result IS NULL OR mismatch_count <> 0 THEN
-            RAISE EXCEPTION 'compaction predecessor result must prefix its source'
+        IF predecessor_result IS NULL
+           OR mismatch_count <> 0
+           OR NEW.first_source_session_id <> NEW.session_id
+           OR NEW.first_entry_id <> predecessor_summary_entry
+        THEN
+            RAISE EXCEPTION 'compaction predecessor result and visible start must match'
                 USING ERRCODE = '23514';
         END IF;
     END IF;

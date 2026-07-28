@@ -474,14 +474,40 @@ impl ContextFrontierProjection {
     pub fn from_complete_entries(
         entries: &[SemanticTranscriptEntry],
     ) -> Result<Self, ContextFrontierProjectionFailure> {
-        let latest_summary = entries.iter().enumerate().rev().find_map(|(index, entry)| {
-            let SemanticTranscriptEntryPayload::ContextSummary { summarized, .. } = entry.payload()
+        let positions = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.reference(), index))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut visible_start = entries.first().map(SemanticTranscriptEntry::reference);
+        let mut latest_summary = None;
+        for (summary_index, summary) in entries.iter().enumerate() {
+            let SemanticTranscriptEntryPayload::ContextSummary { summarized, .. } =
+                summary.payload()
             else {
-                return None;
+                continue;
             };
-            Some((index, entry, *summarized))
-        });
-        let Some((summary_index, summary, summarized)) = latest_summary else {
+            if visible_start != Some(summarized.first()) {
+                return Err(ContextFrontierProjectionFailure::RangeStartMismatch);
+            }
+            let first = positions
+                .get(&summarized.first())
+                .copied()
+                .ok_or(ContextFrontierProjectionFailure::RangeEndpointMissing)?;
+            let through = positions
+                .get(&summarized.through())
+                .copied()
+                .ok_or(ContextFrontierProjectionFailure::RangeEndpointMissing)?;
+            if first > through {
+                return Err(ContextFrontierProjectionFailure::RangeOrderInvalid);
+            }
+            if summary_index <= through {
+                return Err(ContextFrontierProjectionFailure::SummaryNotAfterBoundary);
+            }
+            visible_start = Some(summary.reference());
+            latest_summary = Some((summary_index, summary, *summarized, through));
+        }
+        let Some((_summary_index, summary, _summarized, through)) = latest_summary else {
             return Ok(Self {
                 ordered_entries: entries
                     .iter()
@@ -489,20 +515,6 @@ impl ContextFrontierProjection {
                     .collect(),
             });
         };
-        let first = entries
-            .iter()
-            .position(|entry| entry.reference() == summarized.first())
-            .ok_or(ContextFrontierProjectionFailure::RangeEndpointMissing)?;
-        let through = entries
-            .iter()
-            .position(|entry| entry.reference() == summarized.through())
-            .ok_or(ContextFrontierProjectionFailure::RangeEndpointMissing)?;
-        if first > through {
-            return Err(ContextFrontierProjectionFailure::RangeOrderInvalid);
-        }
-        if summary_index <= through {
-            return Err(ContextFrontierProjectionFailure::SummaryNotAfterBoundary);
-        }
         let mut projected = Vec::with_capacity(entries.len() - through);
         projected.push(summary.reference());
         projected.extend(
@@ -527,6 +539,8 @@ impl ContextFrontierProjection {
 /// Why a complete durable frontier cannot be projected safely.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextFrontierProjectionFailure {
+    /// A summary range starts after the model-visible frontier start.
+    RangeStartMismatch,
     /// At least one exact summarized-range endpoint is absent.
     RangeEndpointMissing,
     /// The first summarized endpoint occurs after the through endpoint.
@@ -593,6 +607,22 @@ mod tests {
         assert_eq!(
             projection.ordered_entries().collect::<Vec<_>>(),
             vec![summary.reference(), suffix.reference()]
+        );
+    }
+
+    /// INV-015: stored compaction facts must agree with the summary payload
+    /// and exact source-frontier range.
+    #[test]
+    fn inv015_projection_rejects_a_range_that_hides_unsummarized_prefix() {
+        let first = entry(1);
+        let hidden = entry(2);
+        let through = entry(3);
+        let range = ContextCompactionRange::inclusive(hidden.reference(), through.reference());
+        let summary = summary(4, range);
+
+        assert_eq!(
+            ContextFrontierProjection::from_complete_entries(&[first, hidden, through, summary]),
+            Err(ContextFrontierProjectionFailure::RangeStartMismatch)
         );
     }
 

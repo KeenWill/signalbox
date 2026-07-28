@@ -5475,6 +5475,9 @@ where
             )
             .await
         }
+        ProcessTranscriptEntry::ContextSummary { .. } => {
+            Err(ProcessConnectionError::MessageRequiresVersion(17))
+        }
         ProcessTranscriptEntry::User {
             entry_index,
             source_session,

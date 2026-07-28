@@ -3363,6 +3363,7 @@ fn reconstitute_inner(
         );
     }
     let mut chain_members = BTreeSet::new();
+    let mut chain_ids = Vec::with_capacity(compactions.len());
     let mut chain_cursor = latest_compaction.map(crate::ContextCompaction::id);
     while let Some(compaction) = chain_cursor {
         if !chain_members.insert(compaction) {
@@ -3370,8 +3371,14 @@ fn reconstitute_inner(
                 AcceptedInputSchedulingReconstitutionFailure::InvalidCompactionChain { compaction },
             );
         }
+        chain_ids.push(compaction);
         chain_cursor = compactions[&compaction].predecessor();
     }
+    chain_ids.reverse();
+    let compaction_chain = chain_ids
+        .iter()
+        .map(|compaction| &compactions[compaction])
+        .collect::<Vec<_>>();
     if let Some(compaction) = compactions
         .keys()
         .find(|compaction| !chain_members.contains(compaction))
@@ -3937,7 +3944,6 @@ fn reconstitute_inner(
     let mut active_executing_tool_batch = None;
     let mut queued_seen = false;
     let mut referenced_snapshots = consumed_snapshots;
-    referenced_snapshots.extend(compaction_snapshots.iter().copied());
     referenced_snapshots.extend(initial_seed_frontier);
     let mut attempt_owners = BTreeMap::new();
     let mut claimed_continuation_rounds = BTreeSet::new();
@@ -4035,7 +4041,7 @@ fn reconstitute_inner(
                     previous_terminal.as_ref(),
                     &origin_by_turn,
                     model_identity_entry,
-                    latest_compaction,
+                    &compaction_chain,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -4507,7 +4513,7 @@ fn reconstitute_inner(
                     previous_terminal.as_ref(),
                     &origin_by_turn,
                     model_identity_entry,
-                    latest_compaction,
+                    &compaction_chain,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -4728,7 +4734,7 @@ fn reconstitute_inner(
                     previous_terminal.as_ref(),
                     &origin_by_turn,
                     model_identity_entry,
-                    latest_compaction,
+                    &compaction_chain,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -4851,7 +4857,7 @@ fn reconstitute_inner(
                     previous_terminal.as_ref(),
                     &origin_by_turn,
                     model_identity_entry,
-                    latest_compaction,
+                    &compaction_chain,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -5008,7 +5014,7 @@ fn reconstitute_inner(
                     previous_terminal.as_ref(),
                     &origin_by_turn,
                     model_identity_entry,
-                    latest_compaction,
+                    &compaction_chain,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -5230,7 +5236,7 @@ fn reconstitute_inner(
                     previous_terminal.as_ref(),
                     &origin_by_turn,
                     model_identity_entry,
-                    latest_compaction,
+                    &compaction_chain,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -5400,7 +5406,7 @@ fn reconstitute_inner(
                     previous_terminal.as_ref(),
                     &origin_by_turn,
                     model_identity_entry,
-                    latest_compaction,
+                    &compaction_chain,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -5471,6 +5477,7 @@ fn reconstitute_inner(
         });
     }
 
+    referenced_snapshots.extend(compaction_snapshots);
     referenced_snapshots.extend(assistant_call_snapshots);
     if let Some(snapshot) = snapshots
         .keys()
@@ -6001,7 +6008,7 @@ fn validate_start(
     previous_terminal: Option<&(TurnId, ResolvedContextFrontierSnapshot)>,
     origin_by_turn: &BTreeMap<TurnId, SemanticTranscriptEntryRef>,
     model_identity_entry: Option<SemanticTranscriptEntryRef>,
-    latest_compaction: Option<&crate::ContextCompaction>,
+    compaction_chain: &[&crate::ContextCompaction],
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
     referenced_snapshots: &mut BTreeSet<ContextFrontierId>,
 ) -> Result<AcceptedInputTurnStart, AcceptedInputSchedulingReconstitutionFailure> {
@@ -6050,10 +6057,18 @@ fn validate_start(
         },
         |prefix| snapshot.has_semantic_prefix_and_suffix(prefix, suffix.iter().copied()),
     );
-    let applicable_compaction = latest_compaction.and_then(|compaction| {
-        let source = snapshots.get(&compaction.source_frontier().snapshot())?;
-        let result = snapshots.get(&compaction.result_frontier().snapshot())?;
-        (!snapshot.is_semantic_prefix_of(source)).then_some(result)
+    let mut compaction_before_start = None;
+    for compaction in compaction_chain {
+        let Some(source) = snapshots.get(&compaction.source_frontier().snapshot()) else {
+            break;
+        };
+        if snapshot.is_semantic_prefix_of(source) {
+            break;
+        }
+        compaction_before_start = snapshots.get(&compaction.result_frontier().snapshot());
+    }
+    let applicable_compaction = prefix.and_then(|prefix| {
+        compaction_before_start.filter(|result| !result.is_semantic_prefix_of(prefix))
     });
     let membership_matches = applicable_compaction.map_or(uncompacted_matches, |result| {
         prefix.is_some_and(|prefix| {
@@ -14521,7 +14536,7 @@ mod tests {
             &call,
         )
         .expect("the exact compaction facts reconstruct");
-        let compactions = BTreeMap::from([(compaction.id(), compaction)]);
+        let mut compactions = BTreeMap::from([(compaction.id(), compaction)]);
         let mut snapshots = BTreeMap::from([
             (
                 predecessor_snapshot.frontier().snapshot(),
@@ -14538,6 +14553,7 @@ mod tests {
         ]);
         let origins = BTreeMap::from([(active_turn, origin_entry.reference())]);
         let mut referenced_snapshots = BTreeSet::new();
+        let compaction_chain = compactions.values().collect::<Vec<_>>();
 
         let start = validate_start(
             1,
@@ -14550,13 +14566,117 @@ mod tests {
             Some(&(predecessor_turn, predecessor_snapshot.clone())),
             &origins,
             None,
-            compactions.values().next(),
+            &compaction_chain,
             &snapshots,
             &mut referenced_snapshots,
         )
         .expect("the validated compacted frontier remains an exact start");
 
         assert_eq!(start.frontier(), starting_snapshot.frontier());
+
+        let successor_range = crate::ContextCompactionRange::inclusive(
+            summary_entry.reference(),
+            origin_entry.reference(),
+        );
+        let successor_call = model_call_id(13);
+        let successor_summary = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(14),
+            session.id(),
+            InitialSemanticTranscriptEntryPayload::ContextSummary {
+                producing_call: successor_call,
+                summarized: successor_range,
+                value: AssistantText::try_new(String::from("newer summary"))
+                    .expect("fixture summary is nonempty"),
+            },
+        );
+        let successor_result = ResolvedContextFrontierSnapshot::try_from_candidate(
+            session.id(),
+            context_frontier_id(15),
+            vec![
+                predecessor_entry.reference(),
+                summary_entry.reference(),
+                origin_entry.reference(),
+                successor_summary.reference(),
+            ],
+        )
+        .expect("the successor compaction appends its summary");
+        let successor_call_record = crate::ContextCompactionModelCallReconstitutionInput::new(
+            successor_call,
+            session.id(),
+            direct(9),
+            ResolvedProviderTarget::naming(provider_model_identity(10)),
+            starting_snapshot.frontier().snapshot(),
+            crate::ContextCompactionModelCallState::Terminal(
+                crate::ModelCallDisposition::Completed,
+            ),
+            crate::ContextCompactionTokenUsage::unreported(),
+        )
+        .reconstitute(&starting_snapshot)
+        .expect("the successor call names its exact source");
+        let predecessor_compaction = compactions
+            .values()
+            .next()
+            .expect("the first compaction is present");
+        let successor_compaction = crate::ContextCompactionReconstitutionInput::new(
+            crate::ContextCompactionId::from_uuid(uuid::Uuid::from_u128(16)),
+            session.id(),
+            Some(predecessor_compaction.id()),
+            starting_snapshot.frontier().snapshot(),
+            successor_result.frontier().snapshot(),
+            successor_call,
+            successor_range,
+            successor_summary.identity(),
+        )
+        .reconstitute(
+            &starting_snapshot,
+            &successor_result,
+            &[
+                predecessor_entry.clone(),
+                summary_entry.clone(),
+                origin_entry.clone(),
+            ],
+            &[
+                predecessor_entry.clone(),
+                summary_entry.clone(),
+                origin_entry.clone(),
+                successor_summary.clone(),
+            ],
+            &successor_summary,
+            &successor_call_record,
+        )
+        .expect("the successor compaction reconstructs");
+        compactions.insert(successor_compaction.id(), successor_compaction);
+        snapshots.insert(successor_result.frontier().snapshot(), successor_result);
+        let compaction_chain = [
+            compactions
+                .values()
+                .find(|compaction| compaction.predecessor().is_none())
+                .expect("the root compaction is present"),
+            compactions
+                .values()
+                .find(|compaction| compaction.predecessor().is_some())
+                .expect("the successor compaction is present"),
+        ];
+        let mut historical_references = BTreeSet::new();
+
+        let historical_start = validate_start(
+            1,
+            active_turn,
+            AcceptedInputStartingLineage::After {
+                immediate_predecessor: predecessor_turn,
+            },
+            starting_snapshot.frontier().snapshot(),
+            None,
+            Some(&(predecessor_turn, predecessor_snapshot.clone())),
+            &origins,
+            None,
+            &compaction_chain,
+            &snapshots,
+            &mut historical_references,
+        )
+        .expect("the intervening historical start retains the earlier summary");
+
+        assert_eq!(historical_start.frontier(), starting_snapshot.frontier());
 
         let stale_snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
             session.id(),
@@ -14578,7 +14698,7 @@ mod tests {
             Some(&(predecessor_turn, predecessor_snapshot)),
             &origins,
             None,
-            compactions.values().next(),
+            &compaction_chain,
             &snapshots,
             &mut stale_references,
         )

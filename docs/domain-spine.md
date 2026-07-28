@@ -2929,6 +2929,7 @@ impl ContextFrontierProjection {
     ) -> impl ExactSizeIterator<Item = SemanticTranscriptEntryRef> + '_;
 }
 pub enum ContextFrontierProjectionFailure {
+    RangeStartMismatch,
     RangeEndpointMissing,
     RangeOrderInvalid,
     SummaryNotAfterBoundary,
@@ -3018,6 +3019,11 @@ pub enum SemanticTranscriptEntryPayload {
         turn: TurnId,
         defaults_version: SessionConfigurationDefaultsVersion,
         selected: DirectModelSelection,
+    },
+    ContextSummary {
+        producing_call: ModelCallId,
+        summarized: ContextCompactionRange,
+        value: AssistantText,
     },
     TurnFailed { turn: TurnId },
     AssistantText { producing_call: ModelCallId, value: AssistantText },
@@ -4303,6 +4309,12 @@ pub enum ModelConversationMessage {
         defaults_version: SessionConfigurationDefaultsVersion,
         selected: DirectModelSelection,
     },
+    ContextSummary {
+        source: SemanticTranscriptEntryRef,
+        producing_call: ModelCallId,
+        summarized: ContextCompactionRange,
+        content: AssistantText,
+    },
     User {
         source: SemanticTranscriptEntryRef,
         accepted_input: AcceptedInputId,
@@ -4356,6 +4368,8 @@ pub enum ModelFrontierRenderingError {
     MissingOrMismatchedToolEvidence { entry: SemanticTranscriptEntryRef },
     UnrenderableToolResult { entry: SemanticTranscriptEntryRef },
     UnexpectedToolEvidence { entry: SemanticTranscriptEntryRef },
+    MissingProjectedEntry { entry: SemanticTranscriptEntryRef },
+    InvalidContextProjection(ContextFrontierProjectionFailure),
 }
 // impl Display + std::error::Error + ClassifyOperatorFailure
 

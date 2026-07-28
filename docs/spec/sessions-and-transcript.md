@@ -587,6 +587,12 @@ continue-from-boundary operation remains the escape hatch: choosing a position
 before the summary creates a different session whose ancestry frontier does not
 contain that compaction.
 
+Each compaction range starts at the current model-visible frontier start: the
+complete frontier's first entry for a root compaction, or the predecessor
+summary entry for a successor. Its through endpoint selects how much of that
+visible frontier the new summary replaces; a compaction cannot hide an
+unsummarized visible prefix.
+
 For model input only, a complete frontier containing summaries is projected from
 its latest summary: render that summary first and then every complete-frontier
 entry physically after the summary's through-boundary, excluding the selected

@@ -479,6 +479,23 @@ pub enum ProcessTranscriptEntry {
         /// Exact direct model identity frozen for that turn.
         selected: DirectModelSelection,
     },
+    /// Model-produced summary of one exact earlier semantic range.
+    ContextSummary {
+        /// Zero-based position in the complete frontier.
+        entry_index: u64,
+        /// Session that owns the immutable summary entry.
+        source_session: SessionId,
+        /// Semantic summary-entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Dedicated producing model call.
+        model_call: ModelCallId,
+        /// Inclusive summarized-range first entry.
+        first: signalbox_domain::SemanticTranscriptEntryRef,
+        /// Inclusive summarized-range final entry.
+        through: signalbox_domain::SemanticTranscriptEntryRef,
+        /// Exact model-produced summary text.
+        content: String,
+    },
     /// Exact accepted owner input.
     User {
         /// Zero-based position in the projected frontier.
@@ -2200,6 +2217,12 @@ async fn open_transcript_entry_cursor(
             entry.model_identity_turn_id,
             entry.model_identity_defaults_version,
             entry.model_identity_direct_selection_id,
+            entry.context_summary_value,
+            entry.context_summary_producing_call_id,
+            entry.context_summary_first_source_session_id,
+            entry.context_summary_first_entry_id,
+            entry.context_summary_through_source_session_id,
+            entry.context_summary_through_entry_id,
             imported.source_speaker_kind AS imported_source_speaker_kind,
             imported.content_encoding AS imported_content_encoding,
             accepted.content_text AS origin_content,
@@ -2317,6 +2340,16 @@ fn decode_transcript_entry(
         row.try_get("model_identity_defaults_version")?;
     let model_identity_direct_selection: Option<Uuid> =
         row.try_get("model_identity_direct_selection_id")?;
+    let context_summary_value: Option<String> = row.try_get("context_summary_value")?;
+    let context_summary_call: Option<Uuid> = row.try_get("context_summary_producing_call_id")?;
+    let context_summary_first_source_session: Option<Uuid> =
+        row.try_get("context_summary_first_source_session_id")?;
+    let context_summary_first_entry: Option<Uuid> =
+        row.try_get("context_summary_first_entry_id")?;
+    let context_summary_through_source_session: Option<Uuid> =
+        row.try_get("context_summary_through_source_session_id")?;
+    let context_summary_through_entry: Option<Uuid> =
+        row.try_get("context_summary_through_entry_id")?;
     let imported_source_speaker: Option<String> = row.try_get("imported_source_speaker_kind")?;
     let imported_content: Option<Vec<u8>> = row.try_get("imported_content_encoding")?;
     let origin_content: Option<String> = row.try_get("origin_content")?;
@@ -2331,6 +2364,71 @@ fn decode_transcript_entry(
     let result_error_detail: Option<String> = row.try_get("result_error_detail")?;
     let transcript_decision_kind: Option<String> = row.try_get("transcript_decision_kind")?;
     let transcript_denial_reason: Option<String> = row.try_get("transcript_denial_reason")?;
+
+    if payload_kind == "context_summary" {
+        let (
+            Some(content),
+            Some(call),
+            Some(first_source_session),
+            Some(first_entry),
+            Some(through_source_session),
+            Some(through_entry),
+        ) = (
+            context_summary_value,
+            context_summary_call,
+            context_summary_first_source_session,
+            context_summary_first_entry,
+            context_summary_through_source_session,
+            context_summary_through_entry,
+        )
+        else {
+            return Err(ProcessReadCorruption::Inconsistent("context-summary entry shape").into());
+        };
+        if origin.is_some()
+            || steering_source_turn.is_some()
+            || failed_turn.is_some()
+            || assistant_text.is_some()
+            || producing_call.is_some()
+            || tool_request.is_some()
+            || tool_result_request.is_some()
+            || tool_result_attempt.is_some()
+            || completed_turn.is_some()
+            || cancelled_turn.is_some()
+            || imported_conversation.is_some()
+            || imported_entry.is_some()
+            || model_identity_turn.is_some()
+            || model_identity_defaults_version.is_some()
+            || model_identity_direct_selection.is_some()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("context-summary entry shape").into());
+        }
+        return Ok(ProcessTranscriptEntry::ContextSummary {
+            entry_index,
+            source_session,
+            entry,
+            model_call: ModelCallId::from_uuid(call),
+            first: signalbox_domain::SemanticTranscriptEntryRef::from_source(
+                session_id_from_uuid(first_source_session),
+                SemanticTranscriptEntryId::from_uuid(first_entry),
+            ),
+            through: signalbox_domain::SemanticTranscriptEntryRef::from_source(
+                session_id_from_uuid(through_source_session),
+                SemanticTranscriptEntryId::from_uuid(through_entry),
+            ),
+            content,
+        });
+    }
+    if context_summary_value.is_some()
+        || context_summary_call.is_some()
+        || context_summary_first_source_session.is_some()
+        || context_summary_first_entry.is_some()
+        || context_summary_through_source_session.is_some()
+        || context_summary_through_entry.is_some()
+    {
+        return Err(
+            ProcessReadCorruption::Inconsistent("non-summary context-summary fields").into(),
+        );
+    }
 
     if payload_kind == "model_identity_changed" {
         if origin.is_some()
