@@ -546,6 +546,227 @@ async fn terminal_client_search_prints_the_cursor_that_continues_a_full_page()
     runtime.stop().await
 }
 
+/// One synthetic Claude Code export whose summary record supplies the derived
+/// display title the unified listing presents.
+const CONVERSATIONS_IMPORT_SOURCE: &str = concat!(
+    "{\"type\":\"summary\",\"summary\":\"Imported planning summary\"}\n",
+    "{\"sessionId\":\"terminal-conversations\",\"type\":\"user\",",
+    "\"message\":{\"role\":\"user\",\"content\":\"imported question\"}}"
+);
+/// The exact title [`CONVERSATIONS_IMPORT_SOURCE`]'s summary record derives.
+const CONVERSATIONS_IMPORT_TITLE: &str = "Imported planning summary";
+/// The normalized entry count of [`CONVERSATIONS_IMPORT_SOURCE`], which is
+/// also the greatest `--through-position` a continuation may select.
+const CONVERSATIONS_IMPORT_ENTRY_COUNT: &str = "2";
+
+/// Imports [`CONVERSATIONS_IMPORT_SOURCE`] through the shipped import verb
+/// and returns the inserted imported-conversation identity text.
+async fn import_fixture_conversation(socket: PathBuf) -> Result<String, Box<dyn Error>> {
+    let source_directory = tempfile::tempdir()?;
+    let source_path = source_directory.path().join("conversations-fixture.jsonl");
+    fs::write(&source_path, CONVERSATIONS_IMPORT_SOURCE)?;
+    let imported = run_client(
+        socket,
+        vec![
+            String::from("import"),
+            String::from("--format"),
+            String::from("claude-code"),
+            source_path.display().to_string(),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        imported.status.success(),
+        "import failed: {}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let imported_output = String::from_utf8(imported.stdout)?;
+    let imported_identity = imported_output
+        .strip_prefix("inserted imported_conversation_id=")
+        .expect("the fixture import carries the inserted outcome")
+        .trim()
+        .to_owned();
+    Uuid::parse_str(&imported_identity)?;
+    Ok(imported_identity)
+}
+
+/// The unified listing presents one origin-tagged line per conversation:
+/// native sessions with their organizational facts and imported conversations
+/// with their derived title, entry count, and source format.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn terminal_client_conversations_lists_native_and_imported_rows()
+-> Result<(), Box<dyn Error>> {
+    let runtime = MetadataSearchRuntime::start().await?;
+    let native_session = create_fixture_session(runtime.socket()).await?;
+    let imported_identity = import_fixture_conversation(runtime.socket()).await?;
+
+    let listed = run_client(runtime.socket(), vec![String::from("conversations")], None).await?;
+
+    assert!(
+        listed.status.success(),
+        "conversations failed: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(listed.stderr.is_empty());
+    let output = String::from_utf8(listed.stdout)?;
+    assert_eq!(output.lines().count(), 2);
+    assert!(output.contains(&format!(
+        "origin=native session_id={native_session} archived=false defaults_version=1 title=\n"
+    )));
+    assert!(output.contains(&format!(
+        "origin=imported imported_conversation_id={imported_identity} \
+         format=claude-code-session-jsonl-v2 \
+         entry_count={CONVERSATIONS_IMPORT_ENTRY_COUNT} \
+         title={CONVERSATIONS_IMPORT_TITLE}\n"
+    )));
+
+    runtime.stop().await
+}
+
+/// A full unified page prints its origin-qualified continuation cursor to
+/// standard error, and the next invocation resumes exactly after it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn terminal_client_conversations_prints_the_cursor_that_continues_a_full_page()
+-> Result<(), Box<dyn Error>> {
+    let runtime = MetadataSearchRuntime::start().await?;
+    let native_session = create_fixture_session(runtime.socket()).await?;
+    let imported_identity = import_fixture_conversation(runtime.socket()).await?;
+
+    let first_page = run_client(
+        runtime.socket(),
+        vec![
+            String::from("conversations"),
+            String::from("--limit"),
+            String::from("1"),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        first_page.status.success(),
+        "conversations failed: {}",
+        String::from_utf8_lossy(&first_page.stderr)
+    );
+    let first_listed = String::from_utf8(first_page.stdout)?;
+    assert_eq!(first_listed.lines().count(), 1);
+    let cursor = String::from_utf8(first_page.stderr)?
+        .strip_prefix("next_after=")
+        .expect("a full page prints its continuation cursor")
+        .trim()
+        .to_owned();
+
+    let second_page = run_client(
+        runtime.socket(),
+        vec![
+            String::from("conversations"),
+            String::from("--limit"),
+            String::from("1"),
+            String::from("--after"),
+            cursor,
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        second_page.status.success(),
+        "conversations failed: {}",
+        String::from_utf8_lossy(&second_page.stderr)
+    );
+    assert!(second_page.stderr.is_empty());
+    let second_listed = String::from_utf8(second_page.stdout)?;
+    assert_eq!(second_listed.lines().count(), 1);
+
+    let both_pages = format!("{first_listed}{second_listed}");
+    assert!(both_pages.contains(&native_session));
+    assert!(both_pages.contains(&imported_identity));
+
+    runtime.stop().await
+}
+
+/// A listed imported row names exactly what `continue` requires — its
+/// identity and greatest position — and the continuation's live session then
+/// appears among the native rows of the same unified surface.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn terminal_client_conversations_imported_row_feeds_continue()
+-> Result<(), Box<dyn Error>> {
+    let runtime = MetadataSearchRuntime::start().await?;
+    let imported_identity = import_fixture_conversation(runtime.socket()).await?;
+
+    let imported_only = run_client(
+        runtime.socket(),
+        vec![
+            String::from("conversations"),
+            String::from("--origin"),
+            String::from("imported"),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        imported_only.status.success(),
+        "conversations failed: {}",
+        String::from_utf8_lossy(&imported_only.stderr)
+    );
+    let imported_listed = String::from_utf8(imported_only.stdout)?;
+    assert_eq!(
+        imported_listed,
+        format!(
+            "origin=imported imported_conversation_id={imported_identity} \
+             format=claude-code-session-jsonl-v2 \
+             entry_count={CONVERSATIONS_IMPORT_ENTRY_COUNT} \
+             title={CONVERSATIONS_IMPORT_TITLE}\n"
+        )
+    );
+
+    let continued = run_client(
+        runtime.socket(),
+        vec![
+            String::from("continue"),
+            imported_identity,
+            String::from("--through-position"),
+            String::from(CONVERSATIONS_IMPORT_ENTRY_COUNT),
+            String::from("--relationship"),
+            String::from("resume"),
+            String::from("--model"),
+            String::from(SEARCH_FIXTURE_SELECTION),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        continued.status.success(),
+        "continue failed: {}",
+        String::from_utf8_lossy(&continued.stderr)
+    );
+    let continued_session = String::from_utf8(continued.stdout)?.trim().to_owned();
+    Uuid::parse_str(&continued_session)?;
+
+    let native_only = run_client(
+        runtime.socket(),
+        vec![
+            String::from("conversations"),
+            String::from("--origin"),
+            String::from("native"),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        native_only.status.success(),
+        "conversations failed: {}",
+        String::from_utf8_lossy(&native_only.stderr)
+    );
+    let native_listed = String::from_utf8(native_only.stdout)?;
+    assert_eq!(native_listed.lines().count(), 1);
+    assert!(native_listed.contains(&continued_session));
+
+    runtime.stop().await
+}
+
 /// S28 / INV-038: the shipped terminal verb reads one named file and exposes
 /// first insertion separately from exact-snapshot reimport.
 #[tokio::test(flavor = "multi_thread")]

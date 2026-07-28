@@ -29,7 +29,8 @@ use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
-    migrate, model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
+    conversation_import::backfill_imported_conversation_display_titles, migrate,
+    model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
 };
 use signalboxd::{
@@ -404,7 +405,15 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             migrate(&migration_pool)
                 .await
                 .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Migration))?;
-            tracing::info!(phase = ?RuntimePhase::Migration, "daemon startup phase completed");
+            let resolved_display_titles =
+                backfill_imported_conversation_display_titles(&migration_pool)
+                    .await
+                    .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Migration))?;
+            tracing::info!(
+                phase = ?RuntimePhase::Migration,
+                resolved_display_titles,
+                "daemon startup phase completed"
+            );
             Ok(())
         },
         async move {

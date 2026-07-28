@@ -47,7 +47,9 @@ use signalbox_persistence::{
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationImportFormat,
-    ConversationImportSource, CurrentModelCallState, ErrorCode, ImportedContentKind,
+    ConversationImportSource, ConversationOriginFilter, ConversationSummary,
+    CurrentModelCallState, ErrorCode, ImportedContentKind,
+    ImportedConversationSourceFormat,
     ImportedSourceSpeaker, ImportedSpeaker, InputContent, MetadataActor, ModelSelection,
     ProtocolVersion, RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
     SessionMetadata, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
@@ -1215,6 +1217,137 @@ async fn metadata_list_uses_bounded_keyset_pages() -> Result<(), Box<dyn Error>>
             session_count,
             next_after_session_id: None,
         } if session_count.value() == 1
+    ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S28: version fifteen lists native sessions and imported conversations in
+/// one unified page whose imported row carries the derived title, entry
+/// count, and stored source format.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_version_fifteen_lists_native_and_imported_conversations()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let native_session = create_alias_session(&mut connection).await?;
+    let source = ConversationImportSource::new(
+        concat!(
+            "{\"timestamp\":\"2026-07-25T00:00:00Z\",\"type\":\"response_item\",",
+            "\"payload\":{\"type\":\"message\",\"role\":\"user\",",
+            "\"content\":[{\"type\":\"input_text\",\"text\":\"question\"}]}}"
+        )
+        .as_bytes()
+        .to_vec(),
+    );
+    connection
+        .request_version(
+            ProtocolVersion::Five,
+            30,
+            ClientRequest::ImportConversation {
+                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                source,
+            },
+        )
+        .await?;
+    let imported_id = match response_within(&mut connection).await?.message() {
+        ServerMessage::ConversationImportInserted {
+            imported_conversation_id,
+        } => *imported_conversation_id,
+        message => {
+            return Err(
+                io::Error::other(format!("unexpected import receipt: {message:?}")).into(),
+            );
+        }
+    };
+
+    connection
+        .request_version(
+            ProtocolVersion::Fifteen,
+            31,
+            ClientRequest::ListConversations {
+                title_contains: None,
+                origin: ConversationOriginFilter::All,
+                include_archived: false,
+                page_size: CanonicalU64::new(10),
+                after: None,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::ConversationPageStart {}
+    ));
+    let first_summary = match response_within(&mut connection).await?.message() {
+        ServerMessage::ConversationSummary { conversation } => conversation.clone(),
+        message => {
+            return Err(
+                io::Error::other(format!("unexpected first unified summary: {message:?}")).into(),
+            );
+        }
+    };
+    let second_summary = match response_within(&mut connection).await?.message() {
+        ServerMessage::ConversationSummary { conversation } => conversation.clone(),
+        message => {
+            return Err(io::Error::other(format!(
+                "unexpected second unified summary: {message:?}"
+            ))
+            .into());
+        }
+    };
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::ConversationPageEnd {
+            conversation_count,
+            next_after: None,
+        } if conversation_count.value() == 2
+    ));
+    assert!(
+        first_summary.cursor().conversation_id().into_uuid()
+            < second_summary.cursor().conversation_id().into_uuid(),
+        "unified summaries must arrive in strict identity order"
+    );
+    let mut summaries = [Some(first_summary), Some(second_summary)];
+    let native = summaries
+        .iter_mut()
+        .find_map(|summary| match summary {
+            Some(ConversationSummary::NativeSession { session_id, .. })
+                if *session_id == native_session =>
+            {
+                summary.take()
+            }
+            _ => None,
+        })
+        .expect("the unified page lists the created native session");
+    assert!(matches!(
+        native,
+        ConversationSummary::NativeSession {
+            title: None,
+            archived: false,
+            defaults_version,
+            ..
+        } if defaults_version.value() == 1
+    ));
+    let imported = summaries
+        .iter_mut()
+        .find_map(|summary| match summary {
+            Some(ConversationSummary::ImportedConversation {
+                imported_conversation_id,
+                ..
+            }) if *imported_conversation_id == imported_id => summary.take(),
+            _ => None,
+        })
+        .expect("the unified page lists the imported conversation");
+    assert!(matches!(
+        imported,
+        ConversationSummary::ImportedConversation {
+            title: Some(title),
+            entry_count,
+            source_format: ImportedConversationSourceFormat::CodexRolloutJsonlV1,
+            ..
+        } if title == "question" && entry_count.value() == 1
     ));
 
     drop(connection);

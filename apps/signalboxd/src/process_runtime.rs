@@ -11,12 +11,15 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use signalbox_application::{
-    CreateSessionError, CreateSessionFromImportedFrontierOutcome,
+    ConversationListCursor, ConversationListItem, ConversationListQuery,
+    ConversationOriginFilter, ConversationPageReader, CreateSessionError,
+    CreateSessionFromImportedFrontierOutcome,
     CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
     EligibilityNudge, ImportConversationError, ImportConversationOutcome,
     ImportConversationService, ImportedConversationConverter, InProcessEligibilityNudge,
-    InProcessToolDispatchGate, ListSessionMetadataService, LoadSessionMetadataService,
+    InProcessToolDispatchGate, ListConversationsService, ListSessionMetadataService,
+    LoadSessionMetadataService,
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
     ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
     ReplaceSessionMetadataService, ReviewWorkflowCommand, ReviewWorkflowCommandOutcome,
@@ -32,7 +35,8 @@ use signalbox_domain::{
     AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextFrontierId,
     DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestRejectedResult,
     DecideToolRequestResult, DeliveryRequest, DirectModelSelection, DurableCommandId,
-    ImportedConversationId, ImportedSessionRelationship as DomainImportedSessionRelationship,
+    ImportedConversationFormat, ImportedConversationId,
+    ImportedSessionRelationship as DomainImportedSessionRelationship,
     ImportedTranscriptPosition, ModelAlias, ModelSelectionOverride, ModelSelectionRequest,
     PerInputConfigurationChoices, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
@@ -57,6 +61,7 @@ use signalbox_persistence::{
         ImportedConversationIdentityCollision, ImportedConversationRepository,
         ImportedConversationRepositoryError,
     },
+    conversation_listing::{ConversationListingRepository, ConversationListingRepositoryError},
     create_session::{CreateSessionRepository, CreateSessionRepositoryError},
     create_session_from_imported_frontier::{
         ImportedSessionRepository, ImportedSessionRepositoryError,
@@ -83,10 +88,14 @@ use signalbox_persistence::{
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientRequest, ConversationImportFormat, CurrentModelCall,
+    CanonicalU64, CanonicalUuid, ClientRequest, ConversationCursor as WireConversationCursor,
+    ConversationImportFormat, ConversationOrigin as WireConversationOrigin,
+    ConversationOriginFilter as WireConversationOriginFilter,
+    ConversationSummary as WireConversationSummary, CurrentModelCall,
     CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallDisposition,
     FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError,
     IMPORTED_TRANSCRIPT_PROTOCOL_VERSION, ImportedContentKind,
+    ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, InputContent, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter,
     ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection, ProtocolVersion,
@@ -788,6 +797,37 @@ where
                     include_archived,
                     page_size,
                     after_session_id,
+                },
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
+        }
+        ClientRequest::ListConversations {
+            title_contains,
+            origin,
+            include_archived,
+            page_size,
+            after,
+        } => {
+            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
+                Arc::clone(&services.snapshot_reader_budget),
+                &mut shutdown,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            handle_list_conversations(
+                writer,
+                version,
+                request_id,
+                WireConversationPageRequest {
+                    title_contains,
+                    origin,
+                    include_archived,
+                    page_size,
+                    after,
                 },
                 &services.pool,
                 snapshot_permit,
@@ -3480,6 +3520,232 @@ async fn spool_session_metadata_page(
         .map_err(SnapshotSpoolError::Io)
         .map_err(MetadataPageSpoolError::Spool)?;
     Ok(SessionListSpool { file })
+}
+
+struct WireConversationPageRequest {
+    title_contains: Option<String>,
+    origin: WireConversationOriginFilter,
+    include_archived: bool,
+    page_size: CanonicalU64,
+    after: Option<WireConversationCursor>,
+}
+
+async fn handle_list_conversations<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    request: WireConversationPageRequest,
+    pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let query = ConversationListQuery::try_new(
+        request.title_contains,
+        application_origin_filter(request.origin),
+        request.include_archived,
+        request.page_size.value(),
+        request.after.map(application_cursor),
+    );
+    let Ok(query) = query else {
+        drop(snapshot_permit);
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let spool_result = spool_conversation_page(
+        ConversationListingRepository::new(pool.clone()),
+        query,
+        version,
+        request_id,
+    )
+    .await;
+    drop(snapshot_permit);
+    let mut spool = match spool_result {
+        Ok(spool) => spool,
+        Err(ConversationPageSpoolError::Read(error)) => {
+            return write_conversation_listing_read_error(writer, version, request_id, error).await;
+        }
+        Err(ConversationPageSpoolError::Spool(error)) => {
+            return write_snapshot_spool_error(writer, version, request_id, error).await;
+        }
+    };
+    write_spooled_file(writer, &mut spool.file).await
+}
+
+enum ConversationPageSpoolError {
+    Read(ConversationListingRepositoryError),
+    Spool(SnapshotSpoolError),
+}
+
+async fn spool_conversation_page(
+    repository: ConversationListingRepository,
+    query: ConversationListQuery,
+    version: ProtocolVersion,
+    request_id: RequestId,
+) -> Result<SessionListSpool, ConversationPageSpoolError> {
+    let mut page = ListConversationsService::new(repository)
+        .execute(query)
+        .await
+        .map_err(ConversationPageSpoolError::Read)?;
+    let standard_file = tempfile::tempfile()
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(ConversationPageSpoolError::Spool)?;
+    let mut file = tokio::fs::File::from_std(standard_file);
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::ConversationPageStart {},
+    )
+    .await
+    .map_err(ConversationPageSpoolError::Spool)?;
+    let mut conversation_count = 0_u64;
+    while let Some(item) = page
+        .next_item()
+        .await
+        .map_err(ConversationPageSpoolError::Read)?
+    {
+        write_spool_message(
+            &mut file,
+            version,
+            request_id,
+            ServerMessage::ConversationSummary {
+                conversation: wire_conversation_summary(item),
+            },
+        )
+        .await
+        .map_err(ConversationPageSpoolError::Spool)?;
+        conversation_count = conversation_count
+            .checked_add(1)
+            .ok_or(SnapshotSpoolError::EncodeInvariant)
+            .map_err(ConversationPageSpoolError::Spool)?;
+    }
+    let next_after = page.next_after().map(wire_cursor);
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::ConversationPageEnd {
+            conversation_count: CanonicalU64::new(conversation_count),
+            next_after,
+        },
+    )
+    .await
+    .map_err(ConversationPageSpoolError::Spool)?;
+    file.flush()
+        .await
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(ConversationPageSpoolError::Spool)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(ConversationPageSpoolError::Spool)?;
+    Ok(SessionListSpool { file })
+}
+
+const fn application_origin_filter(origin: WireConversationOriginFilter) -> ConversationOriginFilter {
+    match origin {
+        WireConversationOriginFilter::Native => ConversationOriginFilter::Native,
+        WireConversationOriginFilter::Imported => ConversationOriginFilter::Imported,
+        WireConversationOriginFilter::All => ConversationOriginFilter::All,
+    }
+}
+
+fn application_cursor(cursor: WireConversationCursor) -> ConversationListCursor {
+    match cursor.origin() {
+        WireConversationOrigin::NativeSession => ConversationListCursor::NativeSession(
+            SessionId::from_uuid(cursor.conversation_id().into_uuid()),
+        ),
+        WireConversationOrigin::ImportedConversation => {
+            ConversationListCursor::ImportedConversation(ImportedConversationId::from_uuid(
+                cursor.conversation_id().into_uuid(),
+            ))
+        }
+    }
+}
+
+fn wire_cursor(cursor: ConversationListCursor) -> WireConversationCursor {
+    match cursor {
+        ConversationListCursor::NativeSession(session) => WireConversationCursor::new(
+            WireConversationOrigin::NativeSession,
+            wire_uuid(session.into_uuid()),
+        ),
+        ConversationListCursor::ImportedConversation(conversation) => WireConversationCursor::new(
+            WireConversationOrigin::ImportedConversation,
+            wire_uuid(conversation.into_uuid()),
+        ),
+    }
+}
+
+fn wire_conversation_summary(item: ConversationListItem) -> WireConversationSummary {
+    match item {
+        ConversationListItem::NativeSession {
+            session,
+            title,
+            archived,
+            defaults_version,
+        } => WireConversationSummary::NativeSession {
+            session_id: wire_uuid(session.into_uuid()),
+            title,
+            archived,
+            defaults_version: CanonicalU64::new(defaults_version.as_u64()),
+        },
+        ConversationListItem::ImportedConversation {
+            conversation,
+            title,
+            entry_count,
+            format,
+        } => WireConversationSummary::ImportedConversation {
+            imported_conversation_id: wire_uuid(conversation.into_uuid()),
+            title,
+            entry_count: CanonicalU64::new(entry_count),
+            source_format: wire_imported_source_format(format),
+        },
+    }
+}
+
+const fn wire_imported_source_format(
+    format: ImportedConversationFormat,
+) -> WireImportedConversationSourceFormat {
+    match format {
+        ImportedConversationFormat::ClaudeCodeSessionJsonlV1 => {
+            WireImportedConversationSourceFormat::ClaudeCodeSessionJsonlV1
+        }
+        ImportedConversationFormat::ClaudeCodeSessionJsonlV2 => {
+            WireImportedConversationSourceFormat::ClaudeCodeSessionJsonlV2
+        }
+        ImportedConversationFormat::CodexRolloutJsonlV1 => {
+            WireImportedConversationSourceFormat::CodexRolloutJsonlV1
+        }
+    }
+}
+
+async fn write_conversation_listing_read_error<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    error: ConversationListingRepositoryError,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let code = match error {
+        ConversationListingRepositoryError::Database(_) => ErrorCode::Unavailable,
+        ConversationListingRepositoryError::Corruption(_) => ErrorCode::Internal,
+    };
+    write_error(
+        writer,
+        version,
+        request_id,
+        ProtocolError::without_detail(code),
+    )
+    .await
 }
 
 async fn handle_read_session_metadata<Writer>(

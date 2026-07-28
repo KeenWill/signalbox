@@ -464,6 +464,23 @@ impl ImportedConversation {
     ) -> Option<&[ImportedTranscriptEntry]>;
     // accessors: id(), format(), source_digest(), raw_records(), entries()
 }
+
+pub struct ImportedConversationDisplayTitle(/* private String */);
+impl ImportedConversationDisplayTitle {
+    pub const MAX_SCALARS: usize;
+    pub fn try_new(value: String) -> Result<Self, ImportedConversationDisplayTitleError>;
+    pub fn derive(conversation: &ImportedConversation) -> Option<Self>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+
+pub enum ImportedConversationDisplayTitleError {
+    Empty,
+    ContainsNul,
+    ContainsLineBreak,
+    ExceedsMaxScalars { scalars: usize },
+    UntrimmedEdgeWhitespace,
+}
 ```
 
 ## domain: session
@@ -4041,6 +4058,97 @@ impl<
 }
 ```
 
+## application: list_conversations
+
+```rust
+pub enum ConversationOriginFilter {
+    Native,
+    Imported,
+    All,
+}
+impl ConversationOriginFilter {
+    pub const fn selects_native(self) -> bool;
+    pub const fn selects_imported(self) -> bool;
+}
+
+pub enum ConversationListCursor {
+    NativeSession(SessionId),
+    ImportedConversation(ImportedConversationId),
+}
+impl ConversationListCursor {
+    pub const fn identity_uuid(self) -> uuid::Uuid;
+}
+
+pub struct ConversationListQuery { /* private */ }
+impl ConversationListQuery {
+    pub fn default_page() -> Self;
+    pub fn try_new(
+        title_contains: Option<String>,
+        origin: ConversationOriginFilter,
+        include_archived: bool,
+        page_size: u64,
+        after: Option<ConversationListCursor>,
+    ) -> Result<Self, ConversationListQueryError>;
+    // accessors: title_contains(), origin(), include_archived(), page_size(),
+    // after()
+}
+
+pub enum ConversationListQueryError {
+    EmptyTitleSearch,
+    TitleSearchContainsNul,
+    TitleSearchExceedsUtf8Bytes,
+    PageSizeOutOfRange,
+}
+
+pub enum ConversationListItem {
+    NativeSession {
+        session: SessionId,
+        title: Option<String>,
+        archived: bool,
+        defaults_version: SessionConfigurationDefaultsVersion,
+    },
+    ImportedConversation {
+        conversation: ImportedConversationId,
+        title: Option<String>,
+        entry_count: u64,
+        format: ImportedConversationFormat,
+    },
+}
+impl ConversationListItem {
+    pub const fn cursor(&self) -> ConversationListCursor;
+    pub fn title(&self) -> Option<&str>;
+}
+
+pub trait ConversationPageReader {
+    type Error;
+    fn next_item(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<ConversationListItem>, Self::Error>> + Send;
+    fn next_after(&self) -> Option<ConversationListCursor>;
+}
+
+pub trait ConversationLister {
+    type Error;
+    type Page: ConversationPageReader<Error = Self::Error>;
+    fn open_conversation_page(
+        &self,
+        query: ConversationListQuery,
+    ) -> impl Future<Output = Result<Self::Page, Self::Error>> + Send;
+}
+
+pub struct ListConversationsService<Lister> { /* private */ }
+impl<Lister> ListConversationsService<Lister> {
+    pub const fn new(lister: Lister) -> Self;
+    pub fn into_lister(self) -> Lister;
+}
+impl<Lister: ConversationLister> ListConversationsService<Lister> {
+    pub async fn execute(
+        &self,
+        query: ConversationListQuery,
+    ) -> Result<Lister::Page, Lister::Error>;
+}
+```
+
 ## application: load_session
 
 ```rust
@@ -6590,7 +6698,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | -------------------------------------------------- | -------------------- |
 | domain: lib.rs identities                          | 20                   |
 | domain: actor                                      | 1                    |
-| domain: imported_conversation                      | 29                   |
+| domain: imported_conversation                      | 31                   |
 | domain: session                                    | 21                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 22                   |
@@ -6616,10 +6724,11 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 51                   |
-| **signalbox-domain total**                         | **511 (+1 free fn)** |
+| **signalbox-domain total**                         | **513 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
+| application: list_conversations                    | 8 (incl. 2 traits)   |
 | application: load_session                          | 2 (incl. 1 trait)    |
 | application: model_execution                       | 30 (incl. 7 traits)  |
 | application: tool_loop                             | 23 (incl. 5 traits)  |
@@ -6633,4 +6742,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **145**              |
+| **signalbox-application total**                    | **153**              |

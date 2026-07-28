@@ -70,6 +70,25 @@ pub(crate) struct SessionMetadataRow<'a> {
     pub(crate) title: Option<&'a str>,
 }
 
+/// One unified conversation summary as the conversations verb presents it.
+pub(crate) enum ConversationRow<'a> {
+    /// One native session line.
+    Native {
+        session_id: CanonicalUuid,
+        archived: bool,
+        defaults_version: u64,
+        title: Option<&'a str>,
+    },
+    /// One imported conversation line; the entry count is the greatest
+    /// `--through-position` a continuation may select.
+    Imported {
+        imported_conversation_id: CanonicalUuid,
+        format: &'static str,
+        entry_count: u64,
+        title: Option<&'a str>,
+    },
+}
+
 /// What one process-derived text field may carry unescaped, given where it
 /// sits in the output that carries it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -372,6 +391,50 @@ impl<'a> Output<'a> {
         next_after_session_id: CanonicalUuid,
     ) -> io::Result<()> {
         writeln!(self.stderr, "next_after_session_id={next_after_session_id}")?;
+        self.stderr.flush()
+    }
+
+    pub(crate) fn conversation_summary(&mut self, row: &ConversationRow<'_>) -> io::Result<()> {
+        match row {
+            ConversationRow::Native {
+                session_id,
+                archived,
+                defaults_version,
+                title,
+            } => {
+                let title =
+                    title.map(|title| self.render_field(title, TextField::TrailingOnLine));
+                writeln!(
+                    self.stdout,
+                    "origin=native session_id={session_id} archived={archived} \
+                     defaults_version={defaults_version} title={}",
+                    title.unwrap_or_default()
+                )
+            }
+            ConversationRow::Imported {
+                imported_conversation_id,
+                format,
+                entry_count,
+                title,
+            } => {
+                let title =
+                    title.map(|title| self.render_field(title, TextField::TrailingOnLine));
+                writeln!(
+                    self.stdout,
+                    "origin=imported imported_conversation_id={imported_conversation_id} \
+                     format={format} entry_count={entry_count} title={}",
+                    title.unwrap_or_default()
+                )
+            }
+        }
+    }
+
+    pub(crate) fn next_conversation_cursor(
+        &mut self,
+        origin_label: &str,
+        conversation_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(self.stderr, "next_after={origin_label}:{conversation_id}")?;
         self.stderr.flush()
     }
 
@@ -1359,7 +1422,9 @@ mod tests {
     };
     use uuid::Uuid;
 
-    use super::{Output, SessionMetadataRow, SnapshotSelection, TextField, control_safe};
+    use super::{
+        ConversationRow, Output, SessionMetadataRow, SnapshotSelection, TextField, control_safe,
+    };
     use crate::{
         error::ClientError,
         transcript::{SnapshotIdentitySet, TranscriptSnapshot},
@@ -1572,6 +1637,74 @@ mod tests {
         .assert_eq(&rendered);
         assert_eq!(rendered.lines().count(), 1);
         assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn conversations_render_origin_tagged_native_and_imported_rows() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        output
+            .conversation_summary(&ConversationRow::Native {
+                session_id: wire_uuid(1),
+                archived: true,
+                defaults_version: 2,
+                title: Some("Active plan"),
+            })
+            .expect("in-memory output cannot fail");
+        output
+            .conversation_summary(&ConversationRow::Imported {
+                imported_conversation_id: wire_uuid(2),
+                format: "codex-rollout-jsonl-v1",
+                entry_count: 7,
+                title: None,
+            })
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            origin=native session_id=00000000-0000-0000-0000-000000000001 archived=true defaults_version=2 title=Active plan
+            origin=imported imported_conversation_id=00000000-0000-0000-0000-000000000002 format=codex-rollout-jsonl-v1 entry_count=7 title=
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn conversation_title_cannot_forge_another_row() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .conversation_summary(&ConversationRow::Imported {
+                imported_conversation_id: wire_uuid(1),
+                format: "claude-code-session-jsonl-v2",
+                entry_count: 1,
+                title: Some("forged\norigin=native session_id=00000000-0000-0000-0000-000000000002"),
+            })
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            origin=imported imported_conversation_id=00000000-0000-0000-0000-000000000001 format=claude-code-session-jsonl-v2 entry_count=1 title=forged\u{a}origin=native session_id=00000000-0000-0000-0000-000000000002
+        "#]]
+        .assert_eq(&rendered);
+        assert_eq!(rendered.lines().count(), 1);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn conversation_cursor_is_printed_to_standard_error() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .next_conversation_cursor("imported", wire_uuid(3))
+            .expect("in-memory output cannot fail");
+
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).expect("rendered output is UTF-8"),
+            "next_after=imported:00000000-0000-0000-0000-000000000003\n"
+        );
     }
 
     #[test]
