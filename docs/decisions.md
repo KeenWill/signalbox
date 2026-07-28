@@ -54,6 +54,46 @@ credential meaning, so coverage stays with the enumerated key families.
 **Affects.** INV-035, the Codex CLI credential contract in
 [runtime-substrate](spec/runtime-substrate.md), and
 `crates/model-runtime-codex-cli/src/redaction.rs`.
+## 2026-07-28 — Load versioned session templates and copy them at creation
+
+**Context.** Session creation can already set a model selection and one bounded
+system prompt, while the dangerous-tool blanket is part of the same immutable
+defaults epoch. Repeating that bundle at each call site makes long prompts
+awkward and gives clients configuration-file responsibilities. The owner
+commissioned a deliberately narrow first template slice and fixed copy-on-create
+as its provenance law.
+
+**Decision.** `SIGNALBOX_TEMPLATE_CONFIG_FILE` names a separate version-one TOML
+document loaded once beside the model catalog at daemon startup. Each uniquely
+named template carries a positive version, exactly one configured direct model
+or alias, exactly one inline prompt or prompt-file reference, and the complete
+dangerous-tool blanket. Prompt files are resolved and validated at load; paths
+are either relative to the template file or begin `$HOME/`, and every other
+absolute, parent-traversing, or variable-bearing spelling is rejected. The
+content digest is domain-separated SHA-256 over the template version and exact
+resolved bundle, not its source spelling.
+
+Protocol version eighteen adds daemon-side creation by template name and a
+read-only name/version listing. Creation copies the resolved bundle into
+defaults version one and records template name plus content digest on the
+session. Equal replay is keyed by the original command and template name and
+returns the copied result even after configuration changes; a new command sees
+the new bundle. The terminal's `create --template NAME` is mutually exclusive
+with `--model`, `--alias`, and `--system-prompt-file`; explicit overrides are
+excluded so one invocation has one complete source of defaults.
+
+**Rejected alternatives.** Client-side parsing would duplicate daemon validation
+and expose deployment files. Explicit flags overriding a template would create a
+composition algebra and ambiguous digest meaning. Storing a template reference
+for later lookup would let edits rewrite existing sessions. Durable template
+objects and CRUD are deferred rather than hidden behind the static file.
+
+**Affects.** Session configuration and creation provenance, process protocol
+version eighteen, terminal creation and template listing, migration
+`202607300101_session_template_provenance.sql`,
+[configuration and credentials](spec/configuration-and-credentials.md),
+[sessions and transcript](spec/sessions-and-transcript.md), and
+[process protocol](spec/process-protocol.md).
 
 ## 2026-07-27 — Drop empty thinking parts instead of failing completions closed
 
