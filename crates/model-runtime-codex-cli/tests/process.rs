@@ -368,6 +368,99 @@ async fn inv_035_error_item_marker_suppresses_streamed_continuation() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a credential marker ending an agent message superseded by a later
+/// one, with the value in the final message, is folded into the lookbehind and
+/// suppressed rather than reconstructed across the discard.
+#[tokio::test]
+async fn inv_035_superseded_agent_message_marker_suppresses_the_value() {
+    let result = execute_scenario(
+        "credential_split_across_superseded_agent_message",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a credential marker carried by an ignored lifecycle event's
+/// additive field governs the following final text.
+#[tokio::test]
+async fn inv_035_lifecycle_event_marker_suppresses_the_value() {
+    let result = execute_scenario(
+        "credential_split_across_lifecycle_event",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a credential marker in an additively-tolerated unknown top-level
+/// event governs the following final text.
+#[tokio::test]
+async fn inv_035_unknown_event_marker_suppresses_the_value() {
+    let result = execute_scenario(
+        "credential_split_across_unknown_event",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: an unmodeled item's ordered-array leaves that jointly form a
+/// marker (`["api", "_key="]`) seed the lookbehind in document order, so the
+/// following value is suppressed even though no single leaf is a marker.
+#[tokio::test]
+async fn inv_035_ordered_unsupported_leaves_form_a_marker() {
+    let result = execute_scenario(
+        "credential_split_across_ordered_unsupported_leaves",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: an agent-message id ending in a credential-marker prefix whose
+/// continuation opens the final text is redacted, breaking the credential
+/// reconstruction across the id and content fields of terminal evidence.
+#[tokio::test]
+async fn inv_035_message_id_prefixing_final_text_is_redacted() {
+    let result = execute_scenario(
+        "message_id_prefixes_final_text",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    // The unsafe id prefix is redacted, so neither the `api_` marker prefix
+    // nor the reconstructed `api_key=` marker survives across the id and
+    // content fields — the credential shape cannot reassemble even though the
+    // value continues to appear only in its marker-less `key=…` form.
+    assert!(!diagnostic.contains("api_"));
+    assert!(!diagnostic.contains("api_key="));
+    assert_eq!(result.spawns, 1);
+}
+
 /// INV-035: an unsupported (unmodeled) streamed item whose text ends in a
 /// credential marker prefix (`api_`) seeds the dropped lookbehind, so a final
 /// text beginning with the continuation (`key=<secret>`) is suppressed rather

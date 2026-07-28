@@ -182,6 +182,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             completed();
         }
+        "credential_split_across_superseded_agent_message" => {
+            // An earlier agent message is superseded by a later one; its
+            // trailing marker plus the final message's value must not
+            // reconstruct across the discard.
+            agent_message("msg-superseded", "leaked Authorization:");
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "credential_split_across_lifecycle_event" => {
+            // An ignored item.started carries a credential marker in an
+            // additive field; the final text supplies the value.
+            emit(
+                r#"{"type":"item.started","item":{"id":"life","type":"future_item","aggregated_output":"Authorization:"}}"#,
+            );
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "credential_split_across_unknown_event" => {
+            // An additively-tolerated unknown top-level event carries the
+            // marker; the final text supplies the value.
+            emit(r#"{"type":"diagnostic_event","content":"Authorization:"}"#);
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "credential_split_across_ordered_unsupported_leaves" => {
+            // An unmodeled item's ordered array leaves jointly form the marker
+            // `api_key=` that no single leaf shows.
+            emit(
+                r#"{"type":"item.completed","item":{"id":"arr","type":"future_item","fields":["api","_key="]}}"#,
+            );
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "message_id_prefixes_final_text" => {
+            // The agent-message id ends in a credential-marker prefix and the
+            // final text opens with its continuation, reconstructing across the
+            // id and content fields of terminal evidence.
+            agent_message(
+                "api_",
+                &format!(
+                    r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                    fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+                ),
+            );
+            completed();
+        }
         "credential_split_across_unsupported_item" => {
             unsupported_item("diag-marker", "api_");
             envelope(&format!(
