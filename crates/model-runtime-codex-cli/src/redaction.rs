@@ -906,44 +906,48 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         if self.suppressing {
             return;
         }
-        // Chronological chain: the existing `dropped_context` preceded the
-        // currently held stream text (pending is resolved on every dropped
-        // item, so any held text was held *after* the last one), which
-        // precedes these new dropped bytes. So the order is
-        // `dropped_context ++ pending.text ++ dropped`.
-        //
-        // The held text is evaluated *in that context* — it can be
-        // credential-clean alone yet unsafe as a continuation of an earlier
-        // dropped marker (dropped `api_`, held `key`). Its clean-in-context
-        // prefix is emitted and the unsafe remainder suppressed (dropped bytes
-        // never reach output, so a released prefix would sit adjacent to a
-        // later emitted value and reconstruct the credential). The suppressed
-        // remainder carries in the emitted-adjacency chain (so a held `api_`
-        // still redacts a later `key=value` even when an unrelated dropped
-        // item broke the internal candidate) and in the dropped chain (so a
-        // marker completed by the dropped bytes or a future delta is caught).
-        let mut chain = std::mem::take(&mut self.dropped_context);
-        let pending_start = chain.len();
+        // Two live match-only chains precede the held text, and the held text
+        // must be judged against BOTH (a fragment safe against one can still be
+        // unsafe against the other):
+        //   * the emitted-adjacency chain `emitted_context` (the thread id,
+        //     and suppressed held markers) — future *emitted* output sits
+        //     beside it directly, dropped bytes being invisible; and
+        //   * the full chronological chain `emitted_context ++ dropped_context
+        //     ++ pending`, which also threads the dropped bytes.
+        // The held text's clean prefix is the shorter of what each chain
+        // allows; the rest is suppressed (a released prefix would reconstruct a
+        // credential beside later output) and carried into both chains so a
+        // marker completed by future emitted output, the dropped bytes, or a
+        // later delta is caught.
+        let mut chain = self.emitted_context.clone();
+        chain.push_str(&self.dropped_context);
+        let pre_pending_len = chain.len();
         if let Some(pending) = self.pending.take() {
             chain.push_str(&pending.text);
-            let unsafe_suffix = trailing_credential_context(&chain);
-            let unsafe_start = chain.len() - unsafe_suffix.len();
-            let clean_in_pending = unsafe_start
-                .saturating_sub(pending_start)
-                .min(pending.text.len());
+            let chrono_unsafe = trailing_credential_context(&chain);
+            let chrono_clean = (chain.len() - chrono_unsafe.len()).saturating_sub(pre_pending_len);
+            let mut adjacency = self.emitted_context.clone();
+            let adjacency_prefix_len = adjacency.len();
+            adjacency.push_str(&pending.text);
+            let adjacency_unsafe = trailing_credential_context(&adjacency);
+            let adjacency_clean =
+                (adjacency.len() - adjacency_unsafe.len()).saturating_sub(adjacency_prefix_len);
+            let clean_in_pending = chrono_clean.min(adjacency_clean).min(pending.text.len());
             let (safe, unsafe_fragments) =
                 split_stream_fragments(pending.fragments, clean_in_pending);
             self.emit_original(safe);
             self.emit_redacted(unsafe_fragments);
             let held_unsafe = &pending.text[clean_in_pending..];
             if !held_unsafe.is_empty() {
-                let mut merged = std::mem::take(&mut self.emitted_context);
+                let mut merged = self.emitted_context.clone();
                 merged.push_str(held_unsafe);
                 self.emitted_context = trailing_credential_context(&merged).to_string();
             }
-            // Only the unsafe tail of `dropped_context ++ pending.text`
-            // carries forward; the emitted clean prefix must not double-count.
-            chain = chain[unsafe_start..].to_string();
+            // The dropped chain carries the unsafe tail of the full
+            // chronological chain (which already folds in any emitted/dropped
+            // prefix that reached into the held text).
+            let chrono_unsafe_start = chain.len() - chrono_unsafe.len();
+            chain = chain[chrono_unsafe_start..].to_string();
         }
         chain.push_str(dropped);
         let context = trailing_credential_context(&chain);
@@ -2951,6 +2955,32 @@ safe-line"
 
         assert_eq!(
             sink.redact_terminal_failure_text(" opaque-dropped-value"),
+            REDACTED
+        );
+    }
+
+    /// INV-035: held stream bytes must be judged against the emitted
+    /// (thread-id) chain too, not only the dropped chain. A thread id ending
+    /// `api_` seeds the emitted chain; a streamed `key` is held because it
+    /// continues it; a dropped `=` then arrives. Evaluating `key` against only
+    /// the (empty) dropped chain would emit it and later release the value.
+    #[test]
+    fn inv_035_pending_is_judged_against_the_emitted_chain() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.seed_emitted_context("api_");
+        // `key` alone is clean, but continues the seeded `api_`; held.
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "key".to_string(),
+            },
+        });
+        sink.extend_dropped_context("=");
+
+        assert_eq!(
+            sink.redact_terminal_failure_text("opaque-thread-continuation"),
             REDACTED
         );
     }
