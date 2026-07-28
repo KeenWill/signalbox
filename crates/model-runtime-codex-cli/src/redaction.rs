@@ -248,6 +248,12 @@ fn credential_key_is_free_form(key: &str) -> bool {
     ]
     .iter()
     .any(|shape| normalized.contains(shape))
+        // A normalized `pwd` name is a password under another spelling, so it
+        // takes the same line-consuming value shape. Token termination would
+        // cut `MYSQL_PWD=correct horse battery staple` at its first word and
+        // emit the rest, which is most of the secret.
+        || normalized == "pwd"
+        || normalized.ends_with("pwd")
 }
 
 /// The credential identifier immediately before an assignment separator: a
@@ -4275,6 +4281,19 @@ mod tests {
     #[test]
     fn names_held_at_a_separator_remain_byte_exact() {
         assert_two_delta_split_is_byte_exact("prefix REGION_", "NAME = us-east tail");
+    }
+
+    /// INV-035: a normalized `pwd` name takes the line-consuming value shape,
+    /// so a multiword passphrase is not cut at its first token.
+    #[test]
+    fn inv_035_normalized_pwd_names_consume_a_multiword_value() {
+        let mysql = redact_text(&format!(
+            "MYSQL_PWD=correct horse {PLANTED_SYNTHETIC_SECRET}"
+        ));
+        let bare = redact_text(&format!("pwd=correct horse {PLANTED_SYNTHETIC_SECRET}"));
+
+        assert!(!mysql.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!bare.contains(PLANTED_SYNTHETIC_SECRET));
     }
 
     /// The trailing credential context is the unsafe suffix; a clean-ending
