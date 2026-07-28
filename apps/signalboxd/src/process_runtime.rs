@@ -96,8 +96,8 @@ use signalbox_process_protocol::{
     FrameDecodeErrorKind, FrameEncodeError, IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
     ImportedContentKind, ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
-    ImportedSpeaker, InputContent, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter,
-    ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection,
+    ImportedSpeaker, InputContent, InputDelivery, MAX_FRAME_BYTES, MetadataActor,
+    MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection,
     PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId,
     ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingDisposition as WireReviewFindingDisposition, ReviewFindingInput,
@@ -726,6 +726,7 @@ where
             session_id,
             content,
             expected_defaults_version,
+            delivery,
         } => {
             handle_submit_input(
                 writer,
@@ -735,6 +736,7 @@ where
                 session_id,
                 content,
                 expected_defaults_version,
+                delivery,
                 &services.pool,
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
@@ -4331,7 +4333,8 @@ async fn handle_submit_input<Writer>(
     command_id: uuid::Uuid,
     session_id: CanonicalUuid,
     content: InputContent,
-    expected_defaults_version: CanonicalU64,
+    expected_defaults_version: Option<CanonicalU64>,
+    delivery: Option<InputDelivery>,
     pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
@@ -4376,9 +4379,30 @@ where
             }
         }
     }
-    let Some(expected_version) =
-        SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
-    else {
+    let expected_version = expected_defaults_version
+        .and_then(|version| SessionConfigurationDefaultsVersion::try_from_u64(version.value()));
+    let configuration = || {
+        expected_version.map(|version| {
+            PerInputConfigurationChoices::new(version, ModelSelectionOverride::UseSessionDefault)
+        })
+    };
+    let delivery = match delivery {
+        None | Some(InputDelivery::StartWhenIdle {}) => configuration()
+            .map(|configuration| DeliveryRequest::StartWhenNoActiveTurn { configuration }),
+        Some(InputDelivery::Steer {
+            expected_active_turn_id,
+        }) if expected_defaults_version.is_none() => Some(DeliveryRequest::NextSafePoint {
+            expected_active_turn: TurnId::from_uuid(expected_active_turn_id.into_uuid()),
+        }),
+        Some(InputDelivery::Queue {
+            expected_active_turn_id,
+        }) => configuration().map(|configuration| DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: TurnId::from_uuid(expected_active_turn_id.into_uuid()),
+            configuration,
+        }),
+        Some(InputDelivery::Steer { .. }) => None,
+    };
+    let Some(delivery) = delivery else {
         return write_error(
             writer,
             version,
@@ -4387,17 +4411,7 @@ where
         )
         .await;
     };
-    let request = SubmitInputRequest::try_new(
-        command_id,
-        session,
-        content,
-        DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: PerInputConfigurationChoices::new(
-                expected_version,
-                ModelSelectionOverride::UseSessionDefault,
-            ),
-        },
-    );
+    let request = SubmitInputRequest::try_new(command_id, session, content, delivery);
     let Ok(request) = request else {
         return write_error(
             writer,
@@ -4723,13 +4737,18 @@ where
             .await
         }
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::PendingSteering(_),
+            SubmitInputAppliedResult::PendingSteering(result),
         ))) => {
-            write_error(
+            write_message(
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                ServerMessage::SteeringSubmitted {
+                    session_id,
+                    accepted_input_id: wire_uuid(result.accepted_input().into_uuid()),
+                    acceptance_position: CanonicalU64::new(result.acceptance_position().as_u64()),
+                    source_turn_id: wire_uuid(result.binding().source_turn().into_uuid()),
+                },
             )
             .await
         }
@@ -5830,11 +5849,15 @@ fn map_rejection(
             session_id: wire_uuid(session.into_uuid()),
             active_turn_id: wire_uuid(active_turn.into_uuid()),
         },
-        // No wire request can carry the next-safe-point treatment, so its
-        // stopping-turn refusal has no version-eight projection.
-        SubmitInputRejectedResult::SafePointUnavailableWhileStopping { .. } => {
-            return Err(ProcessConnectionError::EncodeInvariant);
-        }
+        SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
+            session,
+            active_turn,
+            existing_command,
+        } => RejectionDetail::SafePointUnavailableWhileStopping {
+            session_id: wire_uuid(session.into_uuid()),
+            active_turn_id: wire_uuid(active_turn.into_uuid()),
+            existing_command_id: wire_uuid(*existing_command.as_uuid()),
+        },
     })
 }
 
@@ -6401,7 +6424,7 @@ impl ProtocolError {
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1 through 12, and 16"
+                    "the protocol version is unsupported; supported versions: 1 through 13, and 16"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
@@ -6925,12 +6948,13 @@ mod tests {
         SelectedSessionRepresentationFacts, SnapshotSpoolError, acquire_import_permit,
         acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
         acquire_review_command_permit, acquire_review_command_permit_while_buffered,
-        acquire_snapshot_reader_permit, admitted_user_content, canonical_review_request_digest,
-        consume_snapshot_queued_update, execute_import, inspect_connection_completion,
-        map_rejection, read_frame_line, replacement_model_is_admitted,
-        required_protocol_version_for_selected_session, run_until_shutdown,
-        snapshot_reader_capacity, wire_model_call_state, wire_tool_decision, wire_turn_state,
-        wire_uuid, write_content, write_snapshot_spool_error, write_transcript_entry,
+        acquire_snapshot_reader_permit, admits_provider_text_deltas, admitted_user_content,
+        canonical_review_request_digest, consume_snapshot_queued_update, execute_import,
+        inspect_connection_completion, map_rejection, read_frame_line,
+        replacement_model_is_admitted, required_protocol_version_for_selected_session,
+        run_until_shutdown, snapshot_reader_capacity, wire_model_call_state, wire_tool_decision,
+        wire_turn_state, wire_uuid, write_content, write_snapshot_spool_error,
+        write_transcript_entry,
     };
     use signalbox_persistence::{
         outbox::{
@@ -7071,16 +7095,20 @@ mod tests {
                 active_turn_id: wire_uuid(actual_active_turn.into_uuid()),
             }
         );
-        assert!(matches!(
+        assert_eq!(
             map_rejection(
                 SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
                     session,
                     active_turn: actual_active_turn,
                     existing_command,
                 }
-            ),
-            Err(ProcessConnectionError::EncodeInvariant)
-        ));
+            )?,
+            RejectionDetail::SafePointUnavailableWhileStopping {
+                session_id: wire_uuid(session.into_uuid()),
+                active_turn_id: wire_uuid(actual_active_turn.into_uuid()),
+                existing_command_id: wire_uuid(*existing_command.as_uuid()),
+            }
+        );
         Ok(())
     }
 
@@ -7113,6 +7141,16 @@ mod tests {
         Ok(())
     }
 
+    /// INV-033: provider-text streaming remains additive when versions thirteen and
+    /// sixteen extend request vocabularies introduced after streaming.
+    #[test]
+    fn inv033_provider_text_streaming_is_admitted_by_every_later_version() {
+        assert!(!admits_provider_text_deltas(ProtocolVersion::Eleven));
+        assert!(admits_provider_text_deltas(ProtocolVersion::Twelve));
+        assert!(admits_provider_text_deltas(ProtocolVersion::Thirteen));
+        assert!(admits_provider_text_deltas(ProtocolVersion::Sixteen));
+    }
+
     #[test]
     fn commit_ambiguity_selects_the_stable_process_error_code() {
         assert_eq!(
@@ -7141,7 +7179,7 @@ mod tests {
         assert!(
             ProtocolError::without_detail(ErrorCode::UnsupportedVersion)
                 .message
-                .contains("1 through 12, and 16")
+                .contains("1 through 13, and 16")
         );
     }
 

@@ -9,28 +9,31 @@ were verified through PR #272 (`agent/mid-session-model`), the tool-round
 continuation reconstitution and terminal shapes were verified through PR #292
 (`agent/continuation-reconstitution`), and the steering-free continuation shapes
 at the refused, reconciliation-required, and model-call recovery gates were
-verified through PR #296 (`agent/continuation-reconstitution-siblings`). Code
-homes: `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
+verified through PR #296 (`agent/continuation-reconstitution-siblings`); the
+version-thirteen delivery surface, queued restart behavior, and protocol-driven
+continuation steering were verified through PR #302 (`agent/mid-turn-steering`).
+Code homes: `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,`
-`lock_inventory}.rs` and its migrations, and `apps/signalboxd/src/main.rs`. The
-`signalboxd` composition-root name and that `apps/signalboxd` code home were
-verified through PR #258 (`agent/signalboxd-rename`); the additional daemon-held
-code-host credential path is verified through PR #270
-(`agent/tool-batch-tier1`); and the owner reconciliation decision that releases
-an ambiguity wait, together with the startup scan's separate report of sessions
-holding their slot for that decision, were verified through PR #281
-(`agent/turn-reconciliation-recovery`). The finite startup scan and removal of
-the superseded steering blocker were verified through PR #291
-(`agent/turn-control-verbs`). [docs/invariants.md](../invariants.md) remains the
-law catalog; INV tags below reference its rows without restating them. Designed
-lifecycle behavior that has no committed code path appears only under
-[Open edges](#open-edges). Sibling pages named in scope deferrals below
-(identity-and-commands, sessions-and-transcript, persistence-protocol,
-model-call-execution, configuration-and-credentials, runtime-substrate) are
-companion pages of this spec set; each deferral names the owning page rather
-than restating its material.
+`lock_inventory}.rs` and its migrations, and
+`apps/signalboxd/src/{main,process_runtime}.rs`. The `signalboxd`
+composition-root name and that `apps/signalboxd` code home were verified through
+PR #258 (`agent/signalboxd-rename`); the additional daemon-held code-host
+credential path is verified through PR #270 (`agent/tool-batch-tier1`); and the
+owner reconciliation decision that releases an ambiguity wait, together with the
+startup scan's separate report of sessions holding their slot for that decision,
+were verified through PR #281 (`agent/turn-reconciliation-recovery`). The finite
+startup scan and removal of the superseded steering blocker were verified
+through PR #291 (`agent/turn-control-verbs`).
+[docs/invariants.md](../invariants.md) remains the law catalog; INV tags below
+reference its rows without restating them. Designed lifecycle behavior that has
+no committed code path appears only under [Open edges](#open-edges). Sibling
+pages named in scope deferrals below (identity-and-commands,
+sessions-and-transcript, persistence-protocol, model-call-execution,
+configuration-and-credentials, runtime-substrate) are companion pages of this
+spec set; each deferral names the owning page rather than restating its
+material.
 
 ## Turns, states, and the single active slot
 
@@ -361,11 +364,16 @@ rather than silently retry.
 Every terminal restart branch atomically reclassifies pending-steering rows as
 fresh queued successor origins (`reclassified_as_turn_origin`) in ascending
 acceptance position, including evidence-free turns; pending steering therefore
-never defers or blocks startup. A persisted `StopRequested` attempt with its
-`CancellationRequested` call reconstructs the exact proof, ends the abandoned
-attempt through `AfterCancellation(Lost)`, and classifies the unobserved issued
-call as ambiguous, terminalizes proof-bearing reconciliation, and releases the
-slot without discarding stop intent. Identity collisions are retried with fresh
+never defers or blocks startup. An `AfterCurrentTurn` input is already an
+ordinary queued origin, not pending steering and not part of the active-turn
+startup inventory. It survives restart unchanged. When startup terminalizes its
+active predecessor and releases the slot, the ordinary eligibility pass selects
+that durable queued origin by the same acceptance order it had before restart. A
+persisted `StopRequested` attempt with its `CancellationRequested` call
+reconstructs the exact proof, ends the abandoned attempt through
+`AfterCancellation(Lost)`, and classifies the unobserved issued call as
+ambiguous, terminalizes proof-bearing reconciliation, and releases the slot
+without discarding stop intent. Identity collisions are retried with fresh
 candidates; infrastructure and fail-closed corruption stop startup visibly. The
 scan is idempotent — a rerun inventories only work still active, and a stale
 observation rolls back as `NoActiveTurn`. There is no process-incarnation column
@@ -378,25 +386,33 @@ concurrently.
 ## Occupied-slot input handling
 
 Command construction, owner-global deduplication, and acceptance atomicity are
-[identity-and-commands](identity-and-commands.md) scope. The occupied-slot
-delivery outcomes implemented here are:
+[identity-and-commands](identity-and-commands.md) scope. Process protocol
+version thirteen exposes the existing delivery algebra as the closed
+`start_when_idle`, `steer`, and `queue` intents, mapped respectively to
+`StartWhenNoActiveTurn`, `NextSafePoint`, and `AfterCurrentTurn`;
+[process-protocol](process-protocol.md#client-requests) owns the wire shapes.
+The occupied-slot delivery outcomes implemented here are:
 
 - `StartWhenNoActiveTurn` while a turn holds the slot records the typed
-  rejection `ActiveTurnPresent`; a stale `expected_active_turn` on any
-  active-work mode records `ActiveTurnMismatch`. Both are terminal recorded
-  command results, replayed as such (INV-028).
+  rejection `ActiveTurnPresent`; an active-work mode against an idle slot
+  records `NoActiveTurn`, and a stale `expected_active_turn` records
+  `ActiveTurnMismatch`. Both are terminal recorded command results, replayed as
+  such (INV-028).
 - `NextSafePoint` records the input as `PendingSteering` with a
   configuration-free binding to the exact active source turn; its acceptance
   position derives from the validated session acceptance tail. No turn is
-  created. A reclassification path now exists: terminalization of the source
-  turn reclassifies pending steering into a queued successor origin turn that
-  inherits the source turn's configuration
+  created; the daemon returns a normal typed receipt carrying that input,
+  position, and source turn. A reclassification path now exists: terminalization
+  of the source turn reclassifies pending steering into a queued successor
+  origin turn that inherits the source turn's configuration
   (`queued_input_origin.source_configuration_turn_id`). At the next model-call
   preparation, every pending input is consumed under the atomic boundary in
   [model-call-execution](model-call-execution.md) (INV-036).
 - `AfterCurrentTurn` creates an ordinary queued origin turn with frozen
   configuration and an immutable acceptance position; it fixes no predecessor
-  until eligibility.
+  until eligibility. While the source turn holds the slot it cannot activate.
+  After that turn terminalizes, multiple queued origins become eligible and
+  activate in ascending acceptance order.
 - `Interrupt` targeting the active turn atomically accepts a configured
   immediate-successor origin, constructs the exact `AppliedInterruptProof`, and
   applies the predecessor transition (INV-029, INV-037). The version-eight
