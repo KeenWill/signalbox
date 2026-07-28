@@ -599,7 +599,8 @@ The declarations and compact result objects are:
   threads; and reviewer-verdict evidence. Reviewer evidence merges review bodies
   and issue comments in code-host timestamp order. Only the exact
   `chatgpt-codex-connector` bot can supply a verdict or usage-limit response;
-  the last complete, line-anchored `Reviewed commit:` record is the verdict. The
+  the last complete, line-anchored `Reviewed commit:` record is the verdict, and
+  only the complete canonical usage-limit response is starvation evidence. The
   evidence also reports usage-limit starvation and whether the latest explicit
   `@codex review` request by an owner, member, or collaborator has no later
   verdict or starvation response. Its derived verdict is `converged`,
@@ -615,10 +616,11 @@ The declarations and compact result objects are:
   default-branch commits absent from the base chain; and one page of immediate
   child requests whose base names the request's head branch. Each child carries
   the same merge-forward and default-chain comparison for its level. Children
-  are discovered in the request's head repository. After computing those
-  comparisons, the adapter re-reads the request, default branch, and exact child
-  page and rejects evidence if any revision, child inventory, or child-page
-  completeness snapshot changed. The child page carries `children_truncated` and
+  are discovered in the request's head repository. Comparisons use count-only
+  GraphQL projections authenticated against each exact base revision. The
+  adapter then re-reads the request, default branch, and exact child page and
+  rejects evidence if any revision, child inventory, or child-page completeness
+  snapshot changed. The child page carries `children_truncated` and
   `children_next_cursor`.
 - `change_request_thread_inventory` accepts `repository`, `number`, and an
   optional opaque GraphQL `cursor`. It returns the observed head revision and at
@@ -627,14 +629,15 @@ The declarations and compact result objects are:
   bounded first-comment finding title, and its `fix_named` / `declined` /
   `escalation_marker` / `undispositioned` class. A thread without a reply is
   undispositioned. `fix_named` requires a reply beginning with `Fixed in commit`
-  or `Fixed in commits`, followed by a space and a 7-to-40-hex commit token;
-  `declined` requires a reply beginning `Declined:` and a nonempty reason. Only
-  replies whose code-host association is `OWNER`, `MEMBER`, or `COLLABORATOR`
-  can supply disposition evidence. The latest recognized fix or decline survives
-  later non-disposition replies, while `escalation_marker` requires the trimmed
-  last reply to equal the exact marker. Classification rejects a thread whose
-  comment history exceeds the 100-comment read bound. The page carries
-  `truncated` and `next_cursor`.
+  or `Fixed in commits`, followed by exactly one space and an optionally
+  backtick-delimited 7-to-40-hex commit token; `declined` requires a reply
+  beginning `Declined:` and a nonempty reason. Only replies whose code-host
+  association is `OWNER`, `MEMBER`, or `COLLABORATOR` can supply disposition
+  evidence. The latest recognized fix or decline survives later non-disposition
+  replies, while `escalation_marker` requires the trimmed last reply to equal
+  the exact marker. Classification rejects a thread whose comment history
+  exceeds the 100-comment read bound. The page carries `truncated` and
+  `next_cursor`.
 - `review_gate_check` accepts `repository`, `number`, and purpose
   `request_review_wave` or `declare_convergence`. It reads the same fresh typed
   evidence as the three slog tools, re-reading convergence last and using that
@@ -645,7 +648,10 @@ The declarations and compact result objects are:
   or unresolved, escalations are buried, or parent, default-chain, or
   immediate-child ancestry is unhealthy. Declaring convergence additionally
   requires the exact mergeable posture and an actual current-head reviewer
-  verdict not followed by usage-limit starvation.
+  verdict not followed by usage-limit starvation. Requesting a review wave is
+  blocked when a completed reviewer verdict already covers the current head and
+  no later usage-limit response requires a retry, because that quiet or
+  all-declined wave concludes the loop.
 
 Shared typed admission rejects extra object members; repositories are at most
 256 bytes, paths 4 KiB, comment bodies and returned text fields 64 KiB, and

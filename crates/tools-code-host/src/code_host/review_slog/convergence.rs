@@ -9,7 +9,10 @@ use crate::code_host::{
     },
 };
 
-const STARVATION_MARKER: &str = "reached your Codex usage limits";
+const STARVATION_RESPONSE: &str = concat!(
+    "You have reached your Codex usage limits for code reviews. ",
+    "You can see your limits in the [Codex usage dashboard](https://chatgpt.com/codex/cloud/settings/usage)."
+);
 const REVIEWED_COMMIT_LABEL: &str = "Reviewed commit:";
 
 const REVIEW_REQUEST: &str = "@codex review";
@@ -511,7 +514,7 @@ pub(crate) fn reviewer_verdict_evidence(
         if !reviewer {
             continue;
         }
-        if activity.body.contains(STARVATION_MARKER) {
+        if activity.body.trim() == STARVATION_RESPONSE {
             latest_starvation_at = Some(activity.created_at.clone());
         }
         if let Some(revision) = reviewed_commit_from_body(&activity.body) {
@@ -661,7 +664,7 @@ mod tests {
                     author: Some(String::from("chatgpt-codex-connector")),
                     actor_type: Some(String::from("Bot")),
                     author_association: String::from("NONE"),
-                    body: String::from("You have reached your Codex usage limits"),
+                    body: String::from(STARVATION_RESPONSE),
                     created_at: String::from(LATER),
                 },
                 ReviewerActivity {
@@ -680,6 +683,24 @@ mod tests {
 
         assert_eq!(evidence.status(), ReviewerVerdictStatus::CurrentHead);
         assert!(evidence.starved());
+    }
+
+    /// Narrative discussion of the usage-limit text is not itself a
+    /// code-host usage-limit response.
+    #[test]
+    fn narrative_usage_limit_mention_is_not_starvation() {
+        let evidence = evidence(vec![ReviewerActivity {
+            author: Some(String::from("chatgpt-codex-connector")),
+            actor_type: Some(String::from("Bot")),
+            author_association: String::from("NONE"),
+            body: format!(
+                "Reviewed commit: `{HEAD_REVISION}`\n\nA response may say {STARVATION_RESPONSE}"
+            ),
+            created_at: String::from(EARLIER),
+        }]);
+
+        assert_eq!(evidence.status(), ReviewerVerdictStatus::CurrentHead);
+        assert!(!evidence.starved());
     }
 
     /// A partial check rollup cannot claim convergence even when every

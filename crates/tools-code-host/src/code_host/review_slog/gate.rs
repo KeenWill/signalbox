@@ -30,6 +30,8 @@ pub enum ReviewGateBlockerCode {
     ReviewerVerdictMissing,
     /// The latest actual verdict does not cover the current head.
     ReviewerVerdictStale,
+    /// The current head already has a completed reviewer verdict.
+    ReviewerVerdictCurrent,
     /// Usage-limit starvation followed the latest actual verdict.
     ReviewerStarved,
     /// An explicit review request has no later reviewer response.
@@ -55,6 +57,7 @@ impl ReviewGateBlockerCode {
             Self::MergeabilityUnknown => "mergeability_unknown",
             Self::ReviewerVerdictMissing => "reviewer_verdict_missing",
             Self::ReviewerVerdictStale => "reviewer_verdict_stale",
+            Self::ReviewerVerdictCurrent => "reviewer_verdict_current",
             Self::ReviewerStarved => "reviewer_starved",
             Self::ReviewInFlight => "review_in_flight",
             Self::ParentNeedsMergeForward => "parent_needs_merge_forward",
@@ -196,6 +199,14 @@ impl ReviewGateCheckResult {
                     Vec::new(),
                 ));
             }
+        } else if convergence.reviewer().status() == ReviewerVerdictStatus::CurrentHead
+            && !convergence.reviewer().starved()
+            && !convergence.reviewer().request_in_flight()
+        {
+            blockers.push(ReviewGateBlocker::new(
+                ReviewGateBlockerCode::ReviewerVerdictCurrent,
+                Vec::new(),
+            ));
         }
         Self {
             purpose,
@@ -479,5 +490,36 @@ mod tests {
         );
 
         assert_eq!(gate.into_value()["blockers"][0]["code"], "review_in_flight");
+    }
+
+    /// A completed current-head verdict closes the request-wave gate because a
+    /// quiet or all-declined wave concludes the loop on the unchanged head.
+    #[test]
+    fn request_gate_blocks_current_head_verdict() {
+        let gate = ReviewGateCheckResult::compose(
+            ReviewGatePurpose::RequestReviewWave,
+            &convergence(current_reviewer()),
+            &stack(),
+            &inventory(),
+        );
+
+        assert_eq!(
+            gate.into_value()["blockers"][0]["code"],
+            "reviewer_verdict_current"
+        );
+    }
+
+    /// A usage-limit response is starvation rather than a quiet wave, so it
+    /// leaves the request gate open for a later retry.
+    #[test]
+    fn request_gate_allows_retry_after_starvation() {
+        let gate = ReviewGateCheckResult::compose(
+            ReviewGatePurpose::RequestReviewWave,
+            &convergence(starved_reviewer()),
+            &stack(),
+            &inventory(),
+        );
+
+        assert!(gate.ready());
     }
 }

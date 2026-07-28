@@ -245,8 +245,23 @@ fn disposition_reply_class(body: &str) -> Option<ReviewDispositionClass> {
 }
 
 fn contains_commit_token(body: &str) -> bool {
-    body.split(|character: char| !character.is_ascii_hexdigit())
-        .any(|token| (7..=40).contains(&token.len()))
+    let body = body.strip_prefix('`').unwrap_or(body);
+    let revision: String = body
+        .chars()
+        .take_while(|character| character.is_ascii_hexdigit())
+        .take(40)
+        .collect();
+    if !(7..=40).contains(&revision.len()) {
+        return false;
+    }
+    body.get(revision.len()..).is_some_and(|trailing| {
+        trailing
+            .strip_prefix('`')
+            .unwrap_or(trailing)
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+    })
 }
 
 #[cfg(test)]
@@ -270,6 +285,29 @@ mod tests {
         assert_eq!(
             disposition_class(&[("Fixed in commit `0123456789abcdef`", true)]),
             ReviewDispositionClass::FixNamed
+        );
+    }
+
+    /// A hexadecimal fixture later in narrative text cannot impersonate the
+    /// fixing revision required immediately after the disposition prefix.
+    #[test]
+    fn narrative_hex_after_fix_prefix_remains_undispositioned() {
+        assert_eq!(
+            disposition_class(&[(
+                "Fixed in commit not yet; fixture 0123456 demonstrates the issue.",
+                true
+            )]),
+            ReviewDispositionClass::Undispositioned
+        );
+    }
+
+    /// Additional whitespace after the recorded prefix cannot defer the
+    /// required immediate fixing revision.
+    #[test]
+    fn extra_space_before_fixing_revision_remains_undispositioned() {
+        assert_eq!(
+            disposition_class(&[("Fixed in commit  0123456", true)]),
+            ReviewDispositionClass::Undispositioned
         );
     }
 

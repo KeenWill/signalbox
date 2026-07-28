@@ -138,6 +138,22 @@ query ThreadInventory($owner: String!, $name: String!, $number: Int!, $cursor: S
 }
 "#;
 
+const STACK_COMPARISON_QUERY: &str = r#"
+query StackComparison(
+  $owner: String!
+  $name: String!
+  $baseRef: String!
+  $headRevision: String!
+) {
+  repository(owner: $owner, name: $name) {
+    ref(qualifiedName: $baseRef) {
+      target { oid }
+      compare(headRef: $headRevision) { behindBy }
+    }
+  }
+}
+"#;
+
 const THREAD_REPLY_MUTATION: &str = r#"
 mutation ThreadReply($thread: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $thread, body: $body}) {
@@ -593,6 +609,7 @@ impl GitHubCodeHostTransport {
         let base_commits_not_in_head = self
             .compare_behind_by(
                 repository,
+                request.base_ref.as_str(),
                 request.base_revision.as_str(),
                 request.head_revision.as_str(),
                 credential,
@@ -601,6 +618,7 @@ impl GitHubCodeHostTransport {
         let main_commits_not_in_base = self
             .compare_behind_by(
                 repository,
+                request.default_ref.as_str(),
                 default_revision.as_str(),
                 request.base_revision.as_str(),
                 credential,
@@ -609,6 +627,7 @@ impl GitHubCodeHostTransport {
         let main_commits_not_in_child_base = self
             .compare_behind_by(
                 repository,
+                request.default_ref.as_str(),
                 default_revision.as_str(),
                 request.head_revision.as_str(),
                 credential,
@@ -646,6 +665,7 @@ impl GitHubCodeHostTransport {
             let child_base_commits_not_in_head = self
                 .compare_behind_by(
                     &request.head_repository,
+                    request.head_ref.as_str(),
                     child.base_revision.as_str(),
                     child.head_revision.as_str(),
                     credential,
@@ -748,14 +768,28 @@ impl GitHubCodeHostTransport {
     async fn compare_behind_by(
         &self,
         repository: &CodeHostRepository,
+        base_ref: &str,
         base_revision: &str,
         head_revision: &str,
         credential: &CredentialValue,
     ) -> Result<u64, CodeHostTransportFailure> {
-        let comparison = format!("{base_revision}...{head_revision}");
-        let url = self.repository_url(repository, &["compare", comparison.as_str()], None)?;
-        let value = self.get_json(url, credential).await?;
-        required_u64(required_object(&value)?, "behind_by")
+        let (owner, name) = repository
+            .as_str()
+            .split_once('/')
+            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        let value = self
+            .graphql_read(
+                STACK_COMPARISON_QUERY,
+                serde_json::json!({
+                    "baseRef": format!("refs/heads/{base_ref}"),
+                    "headRevision": head_revision,
+                    "name": name,
+                    "owner": owner,
+                }),
+                credential,
+            )
+            .await?;
+        parse_stack_comparison(&value, base_revision)
     }
 
     async fn get_json(
@@ -1528,6 +1562,20 @@ fn parse_stack_child(
     })
 }
 
+fn parse_stack_comparison(
+    value: &serde_json::Value,
+    expected_base_revision: &str,
+) -> Result<u64, CodeHostTransportFailure> {
+    let base_ref = nested(value, &["data", "repository", "ref"])?;
+    let base_ref = required_object(base_ref)?;
+    let target = required_object(required(base_ref, "target")?)?;
+    if required_string(target, "oid")? != expected_base_revision {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    let comparison = required_object(required(base_ref, "compare")?)?;
+    required_u64(comparison, "behindBy")
+}
+
 fn remaining_exchange_timeout(elapsed: Duration) -> Result<Duration, CodeHostTransportFailure> {
     DEFAULT_TIMEOUT
         .checked_sub(elapsed)
@@ -1902,6 +1950,62 @@ mod tests {
         let request = parse_stack_request(&value, 17).expect("fixture request is admitted");
 
         assert_eq!(request.head_repository.as_str(), HEAD_REPOSITORY);
+    }
+
+    /// The ancestry query requests no unbounded commit or changed-file
+    /// collections alongside its authenticated count.
+    #[test]
+    fn stack_comparison_query_is_count_only() {
+        assert!(STACK_COMPARISON_QUERY.contains("behindBy"));
+        assert!(!STACK_COMPARISON_QUERY.contains("commits"));
+        assert!(!STACK_COMPARISON_QUERY.contains("files"));
+    }
+
+    /// Stack ancestry reads retain only the count projection and authenticate
+    /// it against the exact base revision used by the snapshot.
+    #[test]
+    fn stack_comparison_projects_authenticated_behind_count() {
+        const BASE_REVISION: &str = "1111111111111111111111111111111111111111";
+        const EXPECTED_BEHIND_BY: u64 = 7;
+        let value = serde_json::json!({
+            "data": {
+                "repository": {
+                    "ref": {
+                        "target": {"oid": BASE_REVISION},
+                        "compare": {"behindBy": EXPECTED_BEHIND_BY}
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            parse_stack_comparison(&value, BASE_REVISION),
+            Ok(EXPECTED_BEHIND_BY)
+        );
+    }
+
+    /// A comparison resolved from a moved base ref cannot be reported as
+    /// evidence for the earlier stack snapshot.
+    #[test]
+    fn stack_comparison_rejects_moved_base_ref() {
+        const EXPECTED_BASE_REVISION: &str = "1111111111111111111111111111111111111111";
+        const MOVED_BASE_REVISION: &str = "2222222222222222222222222222222222222222";
+        const ARBITRARY_BEHIND_BY: u64 = 7;
+        let value = serde_json::json!({
+            "data": {
+                "repository": {
+                    "ref": {
+                        "target": {"oid": MOVED_BASE_REVISION},
+                        "compare": {"behindBy": ARBITRARY_BEHIND_BY}
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            parse_stack_comparison(&value, EXPECTED_BASE_REVISION),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
     }
 
     /// A changed immediate-base revision invalidates comparisons made from the
