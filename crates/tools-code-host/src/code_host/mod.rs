@@ -510,7 +510,7 @@ impl fmt::Display for CodeHostToolsConstructionError {
 
 impl Error for CodeHostToolsConstructionError {}
 
-/// Credential-resolving executor for all ten code-host declarations.
+/// Credential-resolving executor for all fourteen code-host declarations.
 #[derive(Clone, Debug)]
 pub struct CodeHostExecutor<Credentials, Transport> {
     credentials: Credentials,

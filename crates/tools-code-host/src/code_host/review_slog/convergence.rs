@@ -294,9 +294,8 @@ impl ConvergenceStateResult {
         if !(lists_valid && text_valid && cursors_valid) {
             return None;
         }
-        let incomplete = fields.checks_truncated
-            || fields.threads_truncated
-            || fields.reviewer.source_truncated;
+        let incomplete =
+            fields.checks_truncated || fields.threads_truncated || fields.reviewer.source_truncated;
         let ci_green = fields
             .ci_rollup_state
             .as_deref()

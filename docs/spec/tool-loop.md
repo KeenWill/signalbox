@@ -6,7 +6,8 @@ against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 verified through PR #258 (`agent/signalboxd-rename`), and the Tier 0 catalog
 extension through PR #265 (`agent/tool-batch-tier0`). The Tier 1 code-host
 catalog extension is verified through PR #270 (`agent/tool-batch-tier1`), the
-failed-attempt operator event together with the credential-shaped code-host
+deterministic review-slog extension through PR #306 (`agent/review-slog-tools`),
+the failed-attempt operator event together with the credential-shaped code-host
 detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
 decision surface through PR #291 (`agent/turn-control-verbs`), and
 runner-protocol batch reconstitution through PR #260
@@ -547,12 +548,14 @@ tools:
   mechanics remain owned by
   [sessions-and-transcript](sessions-and-transcript.md#session-metadata-and-list-projection).
 
-The Tier 1 catalog adds ten GitHub change-request tools. Every operation is
-`ExternalEffect` because GitHub observes its authenticated request. The six
+The Tier 1 catalog adds fourteen GitHub change-request tools. Every operation is
+`ExternalEffect` because GitHub observes its authenticated request. The ten
 read-only declarations — `change_request_summary`,
 `change_request_changed_files`, `change_request_file_patch`,
-`change_request_checks_status`, `change_request_review_threads`, and
-`change_request_ci_job_log` — default to `Auto`. The four mutations —
+`change_request_checks_status`, `change_request_review_threads`,
+`change_request_ci_job_log`, `change_request_convergence_state`,
+`change_request_stack_state`, `change_request_thread_inventory`, and
+`review_gate_check` — default to `Auto`. The four mutations —
 `change_request_comment`, `change_request_thread_reply`,
 `change_request_thread_resolve`, and `change_request_rerun_failed_jobs` —
 default to `Confirm`. The normal approval transaction therefore authorizes each
@@ -589,14 +592,50 @@ The declarations and compact result objects are:
   returns that id, at most 64 KiB of lossy UTF-8 log text, and `truncated`.
 - `change_request_rerun_failed_jobs` accepts `repository` and a positive
   workflow `run_id`; it returns the acknowledged run id.
+- `change_request_convergence_state` accepts `repository` and `number`. It
+  returns the exact head and mergeable state; the current-head CI rollup and
+  bounded check contexts; unresolved-thread identities; open and buried
+  escalation-marker identities; and reviewer-verdict evidence. Reviewer evidence
+  merges review bodies and issue comments in code-host timestamp order,
+  recognizes an actual `Reviewed commit:` verdict in either source, and reports
+  whether a later usage-limit response starved that verdict. Its derived verdict
+  is `converged`, `converged_with_escalations`, `not_converged`, or
+  `indeterminate`; any truncated evidence required for the verdict makes it
+  indeterminate.
+- `change_request_stack_state` accepts `repository`, `number`, and an optional
+  positive decimal child-page `cursor`. It returns the immediate base, head, and
+  default-branch refs and revisions; base commits absent from the head;
+  default-branch commits absent from the base chain; and one page of immediate
+  child requests whose base names the request's head branch. Each child carries
+  the same merge-forward and default-chain comparison for its level. The child
+  page carries `children_truncated` and `children_next_cursor`.
+- `change_request_thread_inventory` accepts `repository`, `number`, and an
+  optional opaque GraphQL `cursor`. It returns at most 100 review threads with
+  exact resolution and outdated posture, path and optional line, first-comment
+  author and `bot` / `human` / `unknown` class, the bounded first-comment
+  finding title, and last-comment `fix_named` / `declined` / `escalation_marker`
+  / `undispositioned` class. The page carries `truncated` and `next_cursor`.
+- `review_gate_check` accepts `repository`, `number`, and purpose
+  `request_review_wave` or `declare_convergence`. It reads the same fresh typed
+  evidence as the three slog tools, then purely derives `ready`, the exact head,
+  and stable blocker codes with affected identities. Both purposes block on
+  incomplete evidence, non-green CI, undispositioned or unresolved threads,
+  buried escalations, and unhealthy parent, default-chain, or immediate-child
+  ancestry. Declaring convergence additionally requires a nonconflicting
+  mergeable state and an actual current-head reviewer verdict that was not
+  followed by usage-limit starvation.
 
 Shared typed admission rejects extra object members; repositories are at most
 256 bytes, paths 4 KiB, comment bodies and returned text fields 64 KiB, and
-opaque node ids 512 bytes. A returned node id or head revision is admitted by
-the same predicate its argument counterpart uses, so an identity a result
-carries can always be passed back as an argument, and every returned URL is one
-absolute credential-free HTTPS location. No result has more than 100 collection
-members or more than 512 KiB of encoded JSON.
+opaque node ids and GraphQL cursors 512 bytes. REST child-page cursors are
+positive decimal strings of at most nine digits. A returned node id, cursor, or
+head revision is admitted by the same predicate its argument counterpart uses,
+so an identity or continuation a result carries can be passed back as an
+argument, and every returned URL is one absolute credential-free HTTPS location.
+No result has more than 100 collection members or more than 512 KiB of encoded
+JSON. Every bounded slog list reports whether it is truncated and the matching
+continuation cursor; a verdict never silently treats a partial evidence page as
+complete.
 
 The production adapter uses fixed GitHub REST and GraphQL endpoints. It disables
 ambient proxies, automatic redirects, protocol retries, and idle reuse; uses
@@ -623,7 +662,7 @@ detail.
 
 The merged catalog sorts declarations by checked tool name and rejects
 duplicates during construction. Its executor dispatches only those same four
-preexisting names and the ten code-host names; disagreement between the
+preexisting names and the fourteen code-host names; disagreement between the
 advertised catalog and executor is classified as a daemon defect.
 
 ## Persistence boundaries

@@ -10,6 +10,35 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-27 — Assign deterministic review bookkeeping to code-host tools
+
+**Context.** Review sessions repeatedly spend model context reconstructing the
+same mechanical facts: current-head reviewer coverage, usage-limit starvation,
+thread disposition and resolution, buried escalation markers, CI state, and
+stack ancestry. The owner recorded the direction that language models perform
+judgment while tools perform slog. Existing code-host tools already provide the
+bounded typed transport and external-effect policy for authenticated GitHub
+reads.
+
+**Decision.** Add four read-only `Auto` / `ExternalEffect` tools to that
+boundary. Convergence state, stack state, and thread inventory return exact
+bounded code-host evidence with explicit truncation and continuation cursors;
+the review gate purely composes those evidence shapes into stable blockers for
+requesting a review wave or declaring convergence. Reviewer coverage scans both
+review bodies and issue comments in timestamp order, and a usage-limit response
+is starvation rather than a verdict. Sessions decide how to act on the results;
+this change adds no daemon workflow automation.
+
+**Rejected alternatives.** Keeping the calculations in prompts would continue to
+consume model context and permit session-to-session drift. Automating review
+workflow transitions in the daemon would move policy and owner gates into this
+slice. Returning unbounded or silently capped lists would make a clean verdict
+indistinguishable from incomplete evidence.
+
+**Affects.** The Tier 1 code-host catalog and GitHub adapter, typed tool
+results, golden tool schemas, daemon catalog wiring, and offline tool-loop
+tests.
+
 ## 2026-07-27 — Keep provider-text deltas ephemeral and cursorless
 
 **Context.** Both HTTP model adapters can emit credential-redacted text deltas,
