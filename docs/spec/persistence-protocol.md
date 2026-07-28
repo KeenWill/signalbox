@@ -137,11 +137,12 @@ Representation rules, all enforced in the schema:
   (`template_name`, `template_content_digest`) to `session` and
   `create_session_command`. Both members are absent or present together; names
   satisfy the domain's 1-through-128-byte lowercase ASCII grammar and digests
-  are exactly 32 bytes. The create-command row carries the same pair under a
-  foreign key to its created session, so command replay and checked
-  reconstitution cannot cross-wire provenance. Existing and explicit sessions
-  carry two nulls. Both tables retain their append-only guards; no template
-  catalog or mutable template object exists in Postgres (INV-047).
+  are exactly 32 bytes. The create-command row carries the same pair only at
+  storage version 4; versions 1 through 3 require two nulls. A foreign key binds
+  the pair to its created session, so command replay and checked reconstitution
+  cannot cross-wire provenance. Existing and explicit sessions carry two nulls.
+  Both tables retain their append-only guards; no template catalog or mutable
+  template object exists in Postgres (INV-047).
 - Migration `202607280303` adds the optional bounded `system_prompt` column to
   `session_defaults_version` and the three defaults-bearing command tables, each
   guarded by the 1,048,576-UTF-8-byte and nonempty CHECK constraints and, on
@@ -295,12 +296,16 @@ identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`) and a
-kind-scoped `storage_version`. Defaults-bearing create, imported-create, and
-replace-defaults records write version 3; they reconstitute version 1 with the
+kind-scoped `storage_version`. Create-session records write the provenance-gated
+version specified above; defaults-bearing imported-create and replace-defaults
+records write version 3. Create-session records reconstitute version 1 with the
 disabled dangerous-tool posture, and versions 1 and 2 with no system prompt — a
 pre-version-three row carrying one fails closed in both the schema and every
-Rust reader. Metadata, submit, and decision records use version 1. Each kind has
-one typed subordinate record keyed by `command_id` that stores every
+Rust reader. A pre-version-four create row carrying template provenance likewise
+fails closed; therefore a rollback reader that supports only versions 1 through
+3 rejects every new create record instead of projecting template creation as
+explicit creation. Metadata, submit, and decision records use version 1. Each
+kind has one typed subordinate record keyed by `command_id` that stores every
 caller-supplied semantic field in typed, `CHECK`-constrained columns, plus the
 terminal `applied`/`rejected` result and its typed result fields; result-shape
 `CHECK` constraints tie each rejection kind to exactly its fields, and deferred

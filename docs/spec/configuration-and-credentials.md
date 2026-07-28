@@ -26,7 +26,7 @@ copy-on-create session-template catalog was verified through PR #313
 ## Process configuration
 
 `signalboxd` reads exactly six required deployment values from the process
-environment at startup and conditionally reads a seventh:
+environment at startup and also consults `HOME`:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
@@ -35,9 +35,11 @@ environment at startup and conditionally reads a seventh:
 - `SIGNALBOX_CONFIG_FILE` — path to the static model/alias catalog (below).
 - `SIGNALBOX_TEMPLATE_CONFIG_FILE` — path to the static session-template catalog
   (below).
-- `HOME` — read only when a template uses a `$HOME/` prompt-file reference. It
-  must then be a nonempty absolute path; absence, an empty value, or a relative
-  value is a typed configuration failure.
+- `HOME` — consulted during production database configuration validation to
+  locate the default PostgreSQL password file. When a template uses a `$HOME/`
+  prompt-file reference, the environment value is additionally required to be a
+  nonempty absolute path; absence, an empty value, or a relative value is a
+  typed template-configuration failure.
 - `ANTHROPIC_API_KEY_FILE` — path to the file holding the current Anthropic API
   key value.
 - `GITHUB_TOKEN_FILE` — path to the file holding the current GitHub code-host
@@ -59,22 +61,24 @@ it, so a root named by the environment would verify the production server even
 under an explicit root certificate. The driver also falls back to libpq's
 default password file when the URL carries no password and `PGPASSFILE` is
 unset, so the same path refuses when `~/.pgpass` exists under the process home
-directory; presence alone decides and the file is never opened. With those
-closed the driver still completes an incomplete URL from outside it — an omitted
-user name from the process account, an omitted host by probing the local socket
-directories and then `localhost` — so the same path refuses a URL that states
-either nowhere the driver reads it: the authority, or the `user`, `host`, and
-`hostaddr` query parameters. Port and database name stay with the driver and the
-server, which derive them from the URL alone: an omitted port is the fixed 5432,
-and an omitted database name is the user name the URL states. The refusal names
-the offending channel and never its contents, and it happens before any database
-contact. A deployment carries every connection parameter in the URL. The
-separate local test connection path is unchanged and keeps SQLx's behavior; it
-is a development and test channel by intent — the integration suites and
-`signalbox-debug`, which reads its own `SIGNALBOX_DEBUG_DATABASE_URL` — and no
-check confines the URL it is given to a local cluster, so the refusals above are
-what stand between a production cluster and ambient configuration, not that
-path's name.
+directory; presence alone decides and the file is never opened. Locating that
+default consults `HOME` even when every template prompt is inline or
+config-relative; an earlier ambient-variable refusal can end validation before
+that lookup. With those closed the driver still completes an incomplete URL from
+outside it — an omitted user name from the process account, an omitted host by
+probing the local socket directories and then `localhost` — so the same path
+refuses a URL that states either nowhere the driver reads it: the authority, or
+the `user`, `host`, and `hostaddr` query parameters. Port and database name stay
+with the driver and the server, which derive them from the URL alone: an omitted
+port is the fixed 5432, and an omitted database name is the user name the URL
+states. The refusal names the offending channel and never its contents, and it
+happens before any database contact. A deployment carries every connection
+parameter in the URL. The separate local test connection path is unchanged and
+keeps SQLx's behavior; it is a development and test channel by intent — the
+integration suites and `signalbox-debug`, which reads its own
+`SIGNALBOX_DEBUG_DATABASE_URL` — and no check confines the URL it is given to a
+local cluster, so the refusals above are what stand between a production cluster
+and ambient configuration, not that path's name.
 
 A missing or empty required value, an unreadable or invalid model or template
 catalog, an invalid or unreadable referenced prompt file, or a failed Anthropic

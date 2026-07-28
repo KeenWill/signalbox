@@ -12,8 +12,8 @@ at the refused, reconciliation-required, and model-call recovery gates were
 verified through PR #296 (`agent/continuation-reconstitution-siblings`); the
 version-thirteen delivery surface, queued restart behavior, and protocol-driven
 continuation steering were verified through PR #302 (`agent/mid-turn-steering`);
-the conditional home input and template-catalog startup order were verified
-through PR #313 (`agent/session-templates`). Code homes:
+the template-specific home requirement and template-catalog startup order were
+verified through PR #313 (`agent/session-templates`). Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
@@ -599,8 +599,8 @@ signalboxd is the composition root. It reads the six required values
 `DATABASE_URL`, `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML naming
 provider targets, selections, and aliases), `SIGNALBOX_TEMPLATE_CONFIG_FILE`,
 `ANTHROPIC_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, and `SIGNALBOX_SOCKET_PATH` from
-the process environment, plus `HOME` only under the
-[template path rules](configuration-and-credentials.md#the-static-session-template-catalog).
+the process environment, plus `HOME` as specified by
+[configuration and credentials](configuration-and-credentials.md#process-configuration).
 The configuration page owns these provisional channels. It validates the model
 catalog, then resolves the template catalog and all of its prompt files against
 that model catalog, before connecting. It then acquires the single-daemon guard,
