@@ -120,6 +120,88 @@ impl<'a> Output<'a> {
         }
     }
 
+    pub(crate) fn flush(&mut self) -> io::Result<()> {
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_started(
+        &mut self,
+        session_id: CanonicalUuid,
+        active_turn: Option<CanonicalUuid>,
+        commands: &str,
+    ) -> io::Result<()> {
+        match active_turn {
+            Some(turn_id) => writeln!(
+                self.stdout,
+                "chat session={session_id} state=following turn={turn_id} commands={commands}"
+            )?,
+            None => writeln!(
+                self.stdout,
+                "chat session={session_id} state=ready commands={commands}"
+            )?,
+        }
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_ready(&mut self, session_id: CanonicalUuid) -> io::Result<()> {
+        writeln!(self.stdout, "chat session={session_id} state=ready")?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_submitted(&mut self, turn_id: CanonicalUuid) -> io::Result<()> {
+        writeln!(self.stdout, "chat state=streaming turn={turn_id}")?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_stopped(
+        &mut self,
+        stopped_turn_id: CanonicalUuid,
+        successor_turn_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "chat state=streaming stopped_turn={stopped_turn_id} successor_turn={successor_turn_id}"
+        )?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_awaiting_approval(
+        &mut self,
+        turn_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "chat state=awaiting_approval turn={turn_id} request={tool_request_id}"
+        )?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_usage(&mut self, message: &str, commands: &str) -> io::Result<()> {
+        let message = self.render_field(message, TextField::TrailingOnLine);
+        writeln!(self.stderr, "chat: {message}; commands: {commands}")?;
+        self.stderr.flush()
+    }
+
+    pub(crate) fn chat_interrupt_offered(&mut self, commands: &str) -> io::Result<()> {
+        writeln!(
+            self.stderr,
+            "chat: turn still running; use :stop TEXT to stop and continue, or press Ctrl-C again to exit leaving it running; commands: {commands}"
+        )?;
+        self.stderr.flush()
+    }
+
+    pub(crate) fn chat_exiting(&mut self, active_turn: Option<CanonicalUuid>) -> io::Result<()> {
+        match active_turn {
+            Some(turn_id) => writeln!(
+                self.stderr,
+                "chat: exiting; turn {turn_id} remains running in the daemon"
+            ),
+            None => writeln!(self.stderr, "chat: exiting; no turn is running"),
+        }?;
+        self.stderr.flush()
+    }
+
     pub(crate) fn recovery_value(&mut self, name: &str, value: &str) -> io::Result<()> {
         writeln!(self.stderr, "{name}={value}")?;
         self.stderr.flush()

@@ -1140,7 +1140,39 @@ client accepts a global `--socket <path>` override or reads
 - `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `stop <session-uuid> [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
 - `approve <session-uuid> <tool-request-uuid> [--command-id <uuid>]`;
-- `deny <session-uuid> <tool-request-uuid> --reason <text> [--command-id <uuid>]`.
+- `deny <session-uuid> <tool-request-uuid> --reason <text> [--command-id <uuid>]`;
+- `chat <session-uuid>`.
+
+`chat` is the plain line-oriented interactive surface for one live session. It
+opens one long-lived `follow_session` connection before accepting input and
+keeps that connection dedicated to ordered snapshots, provider-text deltas, and
+durable events. Submissions and in-loop control operations use a second
+connection, opened through the existing one-request connection path; the client
+does not multiplex requests onto the follow connection. The initial and every
+resynchronized follow snapshot replace transient display state with the durable
+transcript, and later provider-text deltas remain ephemeral presentation exactly
+as they do for `follow`.
+
+A line without the `:` prefix submits exact nonempty line content only while no
+turn is active. The closed in-loop command set is `:stop TEXT`, `:approve ID`,
+`:deny ID REASON`, `:transcript`, `:model ALIAS-UUID`, and `:quit`. These map,
+respectively, to `stop_turn`, `decide_tool_request`, `read_transcript`,
+`replace_session_defaults`, or local exit; ordinary input maps to
+`submit_input`. `:stop` requires successor text because the interrupt request
+cannot represent a standalone cancellation. `:model` changes only the alias
+selection and copies the observed dangerous-tool posture and system prompt into
+the forward-only successor defaults epoch. Tool proposals and projected results
+are reread and presented at their durable transition, and an approval wait
+prints its exact request identity. All process-derived text, including live
+deltas and tool content, uses the same terminal-safe escaping as the other
+client verbs unless the invocation selected `--raw-output`.
+
+While a turn is active, the first Ctrl-C leaves the daemon turn running and
+prints the `:stop TEXT` choice. A second Ctrl-C exits the client and explicitly
+reports that the turn remains running. `:quit` and standard-input EOF use the
+same honest exit report. Once the followed turn terminalizes, the client
+presents its exact durable terminal material and accepts another ordinary input
+line.
 
 `list` remains the complete unfiltered version-one summary sequence. `search` is
 the separate verb for version four's `list_session_metadata`, whose filters,
