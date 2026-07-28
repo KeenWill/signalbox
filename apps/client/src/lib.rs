@@ -3009,6 +3009,12 @@ mod tests {
                     .map_err(io::Error::other)?,
                 );
                 response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptModelCallsEnd {
+                        model_call_count: CanonicalU64::new(0),
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                response.extend_from_slice(
                     &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
                         session_id,
                         cursor: CanonicalU64::new(cursor),
@@ -4386,7 +4392,7 @@ mod tests {
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert_eq!(request.version(), ProtocolVersion::Eighteen);
+            assert_eq!(request.version(), ProtocolVersion::Nineteen);
             assert_eq!(
                 request.request(),
                 &ClientRequest::SubmitInput {
