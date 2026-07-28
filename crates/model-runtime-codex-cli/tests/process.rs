@@ -368,6 +368,26 @@ async fn inv_035_error_item_marker_suppresses_streamed_continuation() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a marker held in the stream lookbehind (`Authorization` from a
+/// reasoning delta), its separator supplied by an intervening dropped error
+/// item (`:`), and the value in the final text must rejoin chronologically —
+/// the dropped bytes fold through the pending held text rather than being
+/// scanned in isolation, so the value is suppressed.
+#[tokio::test]
+async fn inv_035_error_item_separator_folds_through_held_reasoning() {
+    let result = execute_scenario(
+        "credential_split_across_error_item_after_held_reasoning",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
 /// INV-035: the dropped error-item marker also governs the buffered final
 /// text, which reaches terminal evidence without streamed deltas.
 #[tokio::test]

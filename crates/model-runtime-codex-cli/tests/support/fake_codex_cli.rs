@@ -182,6 +182,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             completed();
         }
+        "credential_split_across_error_item_after_held_reasoning" => {
+            // A streamed reasoning delta ends in a bare marker word (held as
+            // an unsafe suffix), an intervening error item supplies only the
+            // separator, and the final text begins with the value: the held
+            // `Authorization`, the dropped `:`, and the value must rejoin in
+            // chronological order.
+            reasoning("reason-held-marker", "Authorization");
+            error_item("error-separator", ":");
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
         "credential_split_across_error_item" => {
             error_item("error-marker", "Authorization:");
             envelope(&format!(

@@ -906,14 +906,46 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         if self.suppressing {
             return;
         }
-        let mut joined = std::mem::take(&mut self.dropped_context);
+        // Dropped bytes are chronologically *after* any held stream text, so
+        // the chain is scanned as `pending.text ++ dropped_context ++
+        // dropped`. When that chain reaches back into the held text — a marker
+        // in `pending` whose separator arrives in the dropped item, e.g. a
+        // held `Authorization` completed by a dropped `:` — the held text is
+        // part of an in-progress credential whose value will arrive next; its
+        // credential-clean prefix is emitted and the unsafe remainder
+        // suppressed (exactly as the streamed path already resolves a held
+        // line credential), and the whole unsafe suffix carries forward so
+        // the value delta is caught. Scanning only the dropped bytes here
+        // would leave the standalone `:` an empty context and emit the value.
+        let prefix_len = self
+            .pending
+            .as_ref()
+            .map_or(0, |pending| pending.text.len());
+        let mut joined = self
+            .pending
+            .as_ref()
+            .map_or(String::new(), |pending| pending.text.clone());
+        joined.push_str(&self.dropped_context);
         joined.push_str(dropped);
         let context = trailing_credential_context(&joined);
         if context.len() > MAX_PENDING_STREAM_BYTES {
             self.suppressing = true;
             return;
         }
-        self.dropped_context = context.to_string();
+        let unsafe_start = joined.len() - context.len();
+        if let Some(pending) = self.pending.take_if(|_| unsafe_start < prefix_len) {
+            let (safe, unsafe_fragments) = split_stream_fragments(pending.fragments, unsafe_start);
+            self.emit_original(safe);
+            self.emit_redacted(unsafe_fragments);
+            self.dropped_context = context.to_string();
+        } else {
+            // The chain is confined to the dropped bytes; the held text is
+            // untouched, so the dropped context excludes it (it stays in
+            // `pending`) to avoid double-counting when both are rejoined.
+            let mut only_dropped = std::mem::take(&mut self.dropped_context);
+            only_dropped.push_str(dropped);
+            self.dropped_context = trailing_credential_context(&only_dropped).to_string();
+        }
     }
 
     /// Starts recording every emitted final-text byte, so terminal evidence
