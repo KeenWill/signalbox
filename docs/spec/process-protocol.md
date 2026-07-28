@@ -48,10 +48,11 @@ request and the two typed imported-continuation rejections, verified through PR
 #303 (`agent/imported-conversation-inspection`). Versions one through thirteen
 and sixteen retain their closed request and message vocabularies unchanged. The
 native client wiring stack adds version eighteen for the deployment model-alias
-catalog read. The implementation here speaks versions one through thirteen,
-sixteen, seventeen, and eighteen while fourteen and fifteen remain unsupported;
-the native client selects version eighteen and the terminal client selects
-version seventeen. Its `search` verb over version four's metadata list was
+read, verified through PR #315 (`agent/native-live-process-wiring`). The
+implementation here speaks versions one through thirteen, sixteen, seventeen,
+and eighteen while fourteen and fifteen remain unsupported; the native client
+selects version eighteen and the terminal client selects version seventeen. Its
+`search` verb over version four's metadata list was
 verified through PR #283 (`agent/session-search-cli`; terminal client surface
 only). This page's version-four last-writer member spelling was verified through
 PR #288 (`agent/audit-fix-docs-coherence`). This page is the normative boundary
