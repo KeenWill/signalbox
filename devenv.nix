@@ -186,6 +186,16 @@ in
   # approach as the dev-instance daemon launcher below, factored into
   # tooling/resolve-cargo-bin.sh so it has its own regression coverage
   # (tooling/test_resolve_cargo_bin.py).
+  #
+  # Known limitation, recorded rather than handled: the final `exec` below
+  # runs the resolved binary directly, not through `cargo run`, so it does not
+  # carry the runtime library search path `cargo run` adds. An ambient
+  # `-C prefer-dynamic` (from `RUSTFLAGS` or inherited Cargo configuration)
+  # then builds an executable this exec cannot start; it fails loudly with
+  # exit 127 naming the missing shared object, rather than the silent
+  # stale-binary failure this change fixes, so it is left as a known cost of
+  # an unusual global setting instead of reproducing `cargo run`'s
+  # environment here.
   scripts.signalbox = {
     description = "Run the Signalbox terminal client from the working tree.";
     exec = ''
