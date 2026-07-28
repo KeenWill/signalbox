@@ -150,7 +150,7 @@ impl<C: Clone> EventDecoder<C> {
             "item.completed" => {
                 let identity: ItemLifecycleEvent = decode(value.clone())?;
                 validate_item_identity(&identity.item)?;
-                let event: ItemEvent = decode(value)?;
+                let event: ItemEvent = decode(value.clone())?;
                 match event.item.details {
                     ItemDetails::AgentMessage { text } => {
                         // The id is retained raw and sanitized against the
@@ -187,7 +187,25 @@ impl<C: Clone> EventDecoder<C> {
                         // lookbehind exactly as buffered reasoning is.
                         sink.extend_dropped_context(&message);
                     }
-                    ItemDetails::Other => {}
+                    ItemDetails::Other => {
+                        // An unsupported item is dropped from the output, but
+                        // any credential-bearing text it carries still marks
+                        // following output as a secret. Fail closed by feeding
+                        // its string-valued fields into the match-only
+                        // lookbehind, exactly as the reasoning and error
+                        // branches do for the shapes the typed variants model.
+                        if let Some(item) = value.get("item").and_then(Value::as_object) {
+                            // Only content-bearing fields — never the `id`/
+                            // `type` metadata, which are not credential text and
+                            // whose bytes could otherwise break a marker the
+                            // content carries.
+                            for field in ["text", "message"] {
+                                if let Some(content) = item.get(field).and_then(Value::as_str) {
+                                    sink.extend_dropped_context(content);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             "turn.completed" => {
