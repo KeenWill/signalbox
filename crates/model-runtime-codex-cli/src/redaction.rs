@@ -1471,6 +1471,12 @@ pub(crate) struct RedactingSink<'a, C> {
     /// folding them into the emitted chain would break its adjacency
     /// matching. Match-state only, never emitted.
     dropped_context: String,
+    /// Rescan work already spent by the continuously unresolved candidate now
+    /// represented in match-only context across a finish or boundary barrier.
+    context_rescan_bytes: usize,
+    /// Distinguishes a carried pending candidate from fresh out-of-band
+    /// lookbehind, whose first joined classification is not a reclassification.
+    context_continues_candidate: bool,
     #[cfg(test)]
     pending_rescan_work: PendingRescanWork,
 }
@@ -1484,6 +1490,8 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             terminal_text_capture: None,
             emitted_context: String::new(),
             dropped_context: String::new(),
+            context_rescan_bytes: 0,
+            context_continues_candidate: false,
             #[cfg(test)]
             pending_rescan_work: PendingRescanWork {
                 reclassifications: 0,
@@ -1499,6 +1507,8 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     /// marker's reconstructable continuation beside it.
     pub(crate) fn seed_emitted_context(&mut self, emitted: &str) {
         self.emitted_context = trailing_credential_context(emitted).to_string();
+        self.context_rescan_bytes = 0;
+        self.context_continues_candidate = false;
     }
 
     /// Extends the match-only lookbehind with provider text the adapter is
@@ -1529,6 +1539,8 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         chain.push_str(&self.dropped_context);
         let pre_pending_len = chain.len();
         if let Some(pending) = self.pending.take() {
+            self.context_rescan_bytes = self.context_rescan_bytes.max(pending.rescan_bytes);
+            self.context_continues_candidate = true;
             let clean_limit = if pending.candidate_starts_at_stored_origin() {
                 pending.candidate_start
             } else {
@@ -1613,6 +1625,8 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         self.pending = None;
         self.dropped_context = String::new();
         self.emitted_context = String::new();
+        self.context_rescan_bytes = 0;
+        self.context_continues_candidate = false;
         self.suppressing = true;
     }
 
@@ -1698,6 +1712,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.emitted_context = self.resolve_context_through(emitted, text);
             let dropped = std::mem::take(&mut self.dropped_context);
             self.dropped_context = self.resolve_context_through(dropped, text);
+            self.reset_context_budget_if_spent();
         }
         redacted
     }
@@ -1796,11 +1811,14 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             // continuation instead of being released after its marker was
             // destroyed. Chains with no held text survive the boundary —
             // nothing was emitted, so adjacency is unchanged.
+            let inherited_rescan_bytes = self.context_rescan_bytes.max(pending.rescan_bytes);
             let chained = self.pending_extends_a_chain(&pending.text);
             let continuation = self.flush_continuation(&pending.text);
             let candidate = pending.candidate_starts_at_stored_origin();
             self.emitted_context.clear();
             self.dropped_context.clear();
+            self.context_rescan_bytes = 0;
+            self.context_continues_candidate = false;
             if chained {
                 self.emit_redacted(pending.fragments);
             } else if candidate {
@@ -1813,11 +1831,29 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             } else {
                 self.emit_original(pending.fragments);
             }
-            match continuation {
-                FlushContinuation::None => {}
-                FlushContinuation::One(context) => self.emitted_context = context,
-                FlushContinuation::Ambiguous => self.suppress_remaining(),
+            self.install_flush_continuation(continuation, inherited_rescan_bytes);
+        }
+    }
+
+    fn install_flush_continuation(
+        &mut self,
+        continuation: FlushContinuation,
+        inherited_rescan_bytes: usize,
+    ) {
+        match continuation {
+            FlushContinuation::None => {}
+            FlushContinuation::One(context) => {
+                if context.len() > MAX_PENDING_STREAM_BYTES
+                    || inherited_rescan_bytes > MAX_PENDING_RESCAN_BYTES
+                {
+                    self.suppress_remaining();
+                } else {
+                    self.emitted_context = context;
+                    self.context_rescan_bytes = inherited_rescan_bytes;
+                    self.context_continues_candidate = true;
+                }
             }
+            FlushContinuation::Ambiguous => self.suppress_remaining(),
         }
     }
 
@@ -1873,9 +1909,12 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     /// provider bytes will arrive.
     pub(crate) fn finish(&mut self) {
         if let Some(pending) = self.pending.take() {
+            let inherited_rescan_bytes = self.context_rescan_bytes.max(pending.rescan_bytes);
             let continuation = self.flush_continuation(&pending.text);
             let chained = self.pending_extends_a_chain(&pending.text);
             let candidate = pending.candidate_starts_at_stored_origin();
+            let unfinished_url_password =
+                unfinished_url_userinfo_contains_password(&pending.text[pending.candidate_start..]);
             let dirty = [
                 "",
                 self.emitted_context.as_str(),
@@ -1890,18 +1929,16 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             });
             if chained || (dirty && !candidate) {
                 self.emit_redacted(pending.fragments);
-            } else if dirty && candidate {
+            } else if candidate && (dirty || unfinished_url_password) {
                 self.emit_candidate_from_stored_origin(pending);
             } else {
                 self.emit_original(pending.fragments);
             }
             self.emitted_context.clear();
             self.dropped_context.clear();
-            match continuation {
-                FlushContinuation::None => {}
-                FlushContinuation::One(context) => self.emitted_context = context,
-                FlushContinuation::Ambiguous => self.suppress_remaining(),
-            }
+            self.context_rescan_bytes = 0;
+            self.context_continues_candidate = false;
+            self.install_flush_continuation(continuation, inherited_rescan_bytes);
         }
     }
 
@@ -1936,9 +1973,16 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     fn hold_or_suppress(&mut self, pending: PendingStreamText<C>) {
         if pending.text.len() > MAX_PENDING_STREAM_BYTES {
             self.emit_redacted(pending.fragments);
-            self.suppressing = true;
+            self.suppress_remaining();
         } else {
             self.pending = Some(pending);
+        }
+    }
+
+    fn reset_context_budget_if_spent(&mut self) {
+        if self.emitted_context.is_empty() && self.dropped_context.is_empty() {
+            self.context_rescan_bytes = 0;
+            self.context_continues_candidate = false;
         }
     }
 
@@ -1975,6 +2019,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             let (consumed, live) =
                 self.delta_against_context(emitted, field, index, correlation.clone(), &text);
             self.emitted_context = live;
+            self.reset_context_budget_if_spent();
             if consumed {
                 return;
             }
@@ -1984,10 +2029,12 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             let (consumed, live) =
                 self.delta_against_context(dropped, field, index, correlation.clone(), &text);
             self.dropped_context = live;
+            self.reset_context_budget_if_spent();
             if consumed {
                 return;
             }
         }
+        self.reset_context_budget_if_spent();
         if let Some(mut pending) = self.pending.take() {
             if !text.is_empty() {
                 pending.push(StreamFragment {
@@ -2071,23 +2118,13 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         let candidate = pending.candidate_starts_at_stored_origin();
         let unsafe_start = unsafe_stream_suffix_start(&pending.text);
         match (candidate, unsafe_start) {
-            (true, Some(unsafe_start)) if unsafe_start <= pending.candidate_start => {
+            (true, Some(_)) => {
+                // The original candidate continues to own every later suffix
+                // until it terminates. Splitting at an opening quote or other
+                // suffix inside its value would detach secret bytes from their
+                // credential marker and make the tail independently releasable.
                 pending.mark_scanned();
                 self.hold_or_suppress(pending);
-            }
-            (true, Some(unsafe_start)) => {
-                let (safe, candidate_and_tail) =
-                    split_stream_fragments(pending.fragments, pending.candidate_start);
-                let (redacted, unsafe_fragments) = split_stream_fragments(
-                    candidate_and_tail,
-                    unsafe_start - pending.candidate_start,
-                );
-                self.emit_original(safe);
-                self.emit_redacted(redacted);
-                self.hold_or_suppress(PendingStreamText::candidate(
-                    unsafe_fragments,
-                    pending.text[unsafe_start..].to_string(),
-                ));
             }
             (true, None) => {
                 let (safe, redacted) =
@@ -2148,12 +2185,18 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     ) -> (bool, String) {
         let context_length = context.len();
         let mut pending = self.pending.take();
+        let had_pending = pending.is_some();
+        let continued_across_barrier = !had_pending && self.context_continues_candidate;
         let mut joined = context.clone();
         if let Some(pending) = &pending {
             joined.push_str(&pending.text);
         }
         joined.push_str(text);
-        if let Some(mut rescanned) = pending.take() {
+        if had_pending || continued_across_barrier {
+            let mut rescanned = pending.take().unwrap_or_else(|| {
+                PendingStreamText::context_continuation(Vec::new(), String::new())
+            });
+            rescanned.rescan_bytes = rescanned.rescan_bytes.max(self.context_rescan_bytes);
             let scan_len = joined.len();
             if !self.record_pending_rescan(&mut rescanned, scan_len) {
                 if !text.is_empty() {
@@ -2172,10 +2215,14 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         }
         let unsafe_start = unsafe_stream_suffix_start(&joined);
         let candidate = stream_candidate_starts_at_zero(&joined);
-        if !candidate && !unsafe_start.is_some_and(|start| start < context_length) {
+        let dirty = redact_text(&joined) != joined;
+        if !dirty && !candidate && !unsafe_start.is_some_and(|start| start < context_length) {
             // The join resolved clean: no candidate begins inside the chain's
             // suffix anymore, so adjacency to it is no longer a hazard and
             // the context is spent.
+            if !had_pending {
+                pending = None;
+            }
             self.pending = pending;
             return (false, String::new());
         }
@@ -2188,6 +2235,13 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 correlation,
                 text: text.to_string(),
             });
+        }
+        if dirty && !candidate && unsafe_start.is_none() {
+            // A saved escaped context can complete a credential before a clean
+            // tail, leaving neither a zero-origin candidate nor an unsafe
+            // suffix. The joined redaction still proves the held bytes secret.
+            self.emit_redacted(pending.fragments);
+            return (true, String::new());
         }
         match unsafe_start {
             // A candidate begun in (or spanning) the context is still in
@@ -2423,6 +2477,31 @@ fn url_userinfo_unsafe_start(text: &str) -> Option<usize> {
         offset = authority_end.max(authority_start);
     }
     earliest
+}
+
+/// Whether an unfinished URL authority already carries nonempty bytes after a
+/// user/password separator. Before `@` arrives this is structurally ambiguous
+/// with a host and port, so a forced stream barrier conservatively treats the
+/// bytes as secret while leaving a bare scheme, user, or separator releasable.
+fn unfinished_url_userinfo_contains_password(text: &str) -> bool {
+    let mut offset = 0;
+    while let Some(relative) = text[offset..].find("://") {
+        let authority_start = offset + relative + 3;
+        let authority_end = text[authority_start..]
+            .find(is_url_authority_boundary)
+            .map_or(text.len(), |length| authority_start + length);
+        let authority = &text[authority_start..authority_end];
+        if authority_end == text.len()
+            && !authority.contains('@')
+            && authority
+                .rfind(':')
+                .is_some_and(|separator| separator + 1 < authority.len())
+        {
+            return true;
+        }
+        offset = authority_end.max(authority_start);
+    }
+    false
 }
 
 fn curl_userinfo_candidate(text: &str) -> bool {
@@ -4851,6 +4930,113 @@ safe-line"
         assert!(streamed.contains(REDACTED));
     }
 
+    /// INV-035: an unfinished URL authority that already contains password
+    /// bytes remains secret across a finish barrier.
+    #[test]
+    fn inv_035_finish_holds_an_unfinished_url_password() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-unfinished-url";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: format!("postgres://user:{PLANTED_VALUE}"),
+                },
+            });
+            sink.finish();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: "@host/path".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
+    /// INV-035: a credential completed against an escaped saved context is
+    /// destroyed even when it is no longer an unsafe suffix.
+    #[test]
+    fn inv_035_completed_escaped_context_is_rechecked() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-escaped-context";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: r"note \u0061".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 1,
+                    fragment: String::new(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 2,
+                    text: format!("pi_key={PLANTED_VALUE} tail"),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
+    /// INV-035: an unsafe suffix inside an already recognized quoted value
+    /// remains owned by the original credential span.
+    #[test]
+    fn inv_035_inner_quoted_suffix_stays_in_the_parent_span() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-40";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "\"api_key\" = \"S".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: "YNTHETIC-SECRET-40\"".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
     /// INV-035: forcing a held private-key marker through a non-delta boundary
     /// retains its continuation state, so the following body is destroyed too.
     #[test]
@@ -5134,6 +5320,31 @@ safe-line"
         }
     }
 
+    /// Drives one continuously unresolved credential through repeated finish
+    /// barriers, which must not create fresh rescan budgets.
+    fn observe_finish_interleaved_candidate_deltas(
+        sink: &mut RedactingSink<'_, u8>,
+        delta_count: u32,
+    ) {
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "authorization: ".to_string(),
+            },
+        });
+        for index in 1..=delta_count {
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index,
+                    text: "x".to_string(),
+                },
+            });
+            sink.finish();
+        }
+    }
+
     /// INV-035: context-chain rescans charge both classifiers for the full
     /// joined input and fail closed before exceeding the six-cap allowance.
     #[test]
@@ -5148,6 +5359,20 @@ safe-line"
         observe_long_context_candidate_deltas(&mut sink, 8);
 
         assert_eq!(sink.pending_rescan_work(), &EXPECTED_WORK);
+        assert!(sink.pending_rescan_work().bytes <= MAX_PENDING_RESCAN_BYTES);
+        assert!(sink.is_suppressing());
+    }
+
+    /// INV-035: finish barriers retain one unresolved candidate's rescan
+    /// budget and fail closed before the deterministic allowance is exceeded.
+    #[test]
+    fn inv_035_finish_barriers_preserve_the_rescan_budget() {
+        const DELTA_COUNT: u32 = 1_024;
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        observe_finish_interleaved_candidate_deltas(&mut sink, DELTA_COUNT);
+
         assert!(sink.pending_rescan_work().bytes <= MAX_PENDING_RESCAN_BYTES);
         assert!(sink.is_suppressing());
     }
