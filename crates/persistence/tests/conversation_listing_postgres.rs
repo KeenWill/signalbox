@@ -617,6 +617,26 @@ async fn pending_display_title_fails_closed_in_the_serving_listing() -> Result<(
     // release it before closing the pool, which waits for every connection.
     drop(page);
 
+    let mut filtered_page = ConversationListingRepository::new(pool.clone())
+        .open_conversation_page(query(
+            Some("unrelated filter"),
+            ConversationOriginFilter::Imported,
+            false,
+            50,
+            None,
+        ))
+        .await?;
+    let filtered_error = ConversationPageReader::next_item(&mut filtered_page)
+        .await
+        .expect_err("a title filter must not silently omit a pending row");
+    assert!(matches!(
+        filtered_error,
+        ConversationListingRepositoryError::Corruption(
+            ConversationListingCorruption::UnresolvedDisplayTitle
+        )
+    ));
+    drop(filtered_page);
+
     pool.close().await;
     drop(container);
     Ok(())

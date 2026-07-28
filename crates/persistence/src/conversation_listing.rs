@@ -35,7 +35,10 @@ const IMPORTED_ORIGIN_RANK: i32 = 1;
 /// exclusive cursor identity and origin rank, `$3` selects native rows, `$4`
 /// includes archived native rows, `$5` is the exact case-sensitive title
 /// substring, and `$6` selects imported rows. A `NULL` native title or
-/// imported display title matches no title filter.
+/// resolved-absent imported display title matches no title filter, while a
+/// transitional `pending` row survives every title filter so the serving
+/// decode fails closed on it rather than letting a filtered page silently
+/// omit an unresolved row.
 const UNIFIED_PAGE_ITEM_SQL: &str = "SELECT unified.origin_rank, unified.conversation_id,
            unified.title, unified.archived, unified.defaults_version,
            unified.source_format, unified.converter_version,
@@ -70,7 +73,11 @@ const UNIFIED_PAGE_ITEM_SQL: &str = "SELECT unified.origin_rank, unified.convers
                imported.display_title_state
           FROM imported_conversation AS imported
          WHERE $6
-           AND ($5::text IS NULL OR strpos(imported.display_title, $5) > 0)
+           AND (
+               $5::text IS NULL
+               OR imported.display_title_state = 'pending'
+               OR strpos(imported.display_title, $5) > 0
+           )
     ) AS unified
     WHERE (
         $1::uuid IS NULL
@@ -96,7 +103,11 @@ const UNIFIED_PAGE_PROBE_SQL: &str = "SELECT EXISTS (
                imported.imported_conversation_id AS conversation_id
           FROM imported_conversation AS imported
          WHERE $6
-           AND ($5::text IS NULL OR strpos(imported.display_title, $5) > 0)
+           AND (
+               $5::text IS NULL
+               OR imported.display_title_state = 'pending'
+               OR strpos(imported.display_title, $5) > 0
+           )
     ) AS unified
     WHERE (
         $1::uuid IS NULL

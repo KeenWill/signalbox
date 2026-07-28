@@ -1485,6 +1485,48 @@ async fn metadata_list_uses_bounded_keyset_pages() -> Result<(), Box<dyn Error>>
     runtime.stop().await
 }
 
+/// Requires the next response to be the inserted-import receipt and returns
+/// the inserted imported-conversation identity.
+async fn require_inserted_import_receipt(
+    connection: &mut Connection,
+) -> Result<CanonicalUuid, Box<dyn Error>> {
+    match response_within(connection).await?.message() {
+        ServerMessage::ConversationImportInserted {
+            imported_conversation_id,
+        } => Ok(*imported_conversation_id),
+        message => Err(io::Error::other(format!("unexpected import receipt: {message:?}")).into()),
+    }
+}
+
+/// Requires the next response to be one unified conversation summary.
+async fn require_conversation_summary(
+    connection: &mut Connection,
+) -> Result<ConversationSummary, Box<dyn Error>> {
+    match response_within(connection).await?.message() {
+        ServerMessage::ConversationSummary { conversation } => Ok(conversation.clone()),
+        message => Err(io::Error::other(format!("unexpected unified summary: {message:?}")).into()),
+    }
+}
+
+/// Splits one native and one imported summary out of a pair listed in either
+/// order.
+fn partition_native_and_imported(
+    first: ConversationSummary,
+    second: ConversationSummary,
+) -> Result<(ConversationSummary, ConversationSummary), Box<dyn Error>> {
+    match (first, second) {
+        (
+            native @ ConversationSummary::NativeSession { .. },
+            imported @ ConversationSummary::ImportedConversation { .. },
+        )
+        | (
+            imported @ ConversationSummary::ImportedConversation { .. },
+            native @ ConversationSummary::NativeSession { .. },
+        ) => Ok((native, imported)),
+        pair => Err(io::Error::other(format!("unexpected unified summary pair: {pair:?}")).into()),
+    }
+}
+
 /// S28: version sixteen lists native sessions and imported conversations in
 /// one unified page whose imported row carries the derived title, entry
 /// count, and stored source format.
@@ -1514,14 +1556,7 @@ async fn s28_version_sixteen_lists_native_and_imported_conversations() -> Result
             },
         )
         .await?;
-    let imported_id = match response_within(&mut connection).await?.message() {
-        ServerMessage::ConversationImportInserted {
-            imported_conversation_id,
-        } => *imported_conversation_id,
-        message => {
-            return Err(io::Error::other(format!("unexpected import receipt: {message:?}")).into());
-        }
-    };
+    let imported_id = require_inserted_import_receipt(&mut connection).await?;
 
     connection
         .request_version(
@@ -1540,23 +1575,8 @@ async fn s28_version_sixteen_lists_native_and_imported_conversations() -> Result
         response_within(&mut connection).await?.message(),
         ServerMessage::ConversationPageStart {}
     ));
-    let first_summary = match response_within(&mut connection).await?.message() {
-        ServerMessage::ConversationSummary { conversation } => conversation.clone(),
-        message => {
-            return Err(
-                io::Error::other(format!("unexpected first unified summary: {message:?}")).into(),
-            );
-        }
-    };
-    let second_summary = match response_within(&mut connection).await?.message() {
-        ServerMessage::ConversationSummary { conversation } => conversation.clone(),
-        message => {
-            return Err(io::Error::other(format!(
-                "unexpected second unified summary: {message:?}"
-            ))
-            .into());
-        }
-    };
+    let first_summary = require_conversation_summary(&mut connection).await?;
+    let second_summary = require_conversation_summary(&mut connection).await?;
     assert!(matches!(
         response_within(&mut connection).await?.message(),
         ServerMessage::ConversationPageEnd {
@@ -1569,21 +1589,7 @@ async fn s28_version_sixteen_lists_native_and_imported_conversations() -> Result
             < second_summary.cursor().conversation_id().into_uuid(),
         "unified summaries must arrive in strict identity order"
     );
-    let (native, imported) = match (first_summary, second_summary) {
-        (
-            native @ ConversationSummary::NativeSession { .. },
-            imported @ ConversationSummary::ImportedConversation { .. },
-        )
-        | (
-            imported @ ConversationSummary::ImportedConversation { .. },
-            native @ ConversationSummary::NativeSession { .. },
-        ) => (native, imported),
-        pair => {
-            return Err(
-                io::Error::other(format!("unexpected unified summary pair: {pair:?}")).into(),
-            );
-        }
-    };
+    let (native, imported) = partition_native_and_imported(first_summary, second_summary)?;
     assert!(matches!(
         native,
         ConversationSummary::NativeSession {

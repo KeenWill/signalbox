@@ -385,12 +385,15 @@ cursor at that total position, so no row can be skipped at a page boundary. A
 present `title_contains` is nonempty, rejects U+0000, carries at most 262,144
 UTF-8 bytes, and applies the same exact case-sensitive substring filter to a
 present native metadata title or imported display title; an absent title matches
-no title query. `origin` selects native rows, imported rows, or both;
-`include_archived = false` selects the default view excluding archived native
-sessions, and imported conversations carry no archive state, so the switch never
-affects them. Every bound in this paragraph is client-frame field or size
-validation returning `malformed_frame` before application construction, exactly
-as for the metadata list.
+no title query, and a transitional pending imported title survives every title
+filter so the read fails closed on it
+([conversation-import](conversation-import.md#derived-display-titles)) rather
+than silently omitting an unresolved row. `origin` selects native rows, imported
+rows, or both; `include_archived = false` selects the default view excluding
+archived native sessions, and imported conversations carry no archive state, so
+the switch never affects them. Every bound in this paragraph is client-frame
+field or size validation returning `malformed_frame` before application
+construction, exactly as for the metadata list.
 
 `submit_input` deliberately exposes only the daily sequential-conversation
 treatment in every admitted version. If a turn is already active, the normal
