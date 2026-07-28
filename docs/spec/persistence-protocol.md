@@ -129,9 +129,10 @@ Implemented table families (across the forward-only migrations):
   integrality and full-`u64` range checks reject fractional or out-of-range
   input without rounding. A nonterminal row must keep all four null, and a
   direct Prepared-to-terminal transition likewise requires all four null because
-  no send occurred. The ordinary sent-call terminal update installs the exact
-  provider-reported fields alongside the disposition before terminal-row
-  immutability applies;
+  no send occurred; the `cancelled` terminal disposition also requires all four
+  null because cancellation evidence reports no usage. The ordinary sent-call
+  terminal update installs the exact provider-reported fields alongside the
+  disposition before terminal-row immutability applies;
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_delta`,
   plus the resolved `context_frontier_member` compatibility projection;
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;

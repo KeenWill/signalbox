@@ -52,6 +52,16 @@ ALTER TABLE model_call
                 AND usage_cache_creation_input_tokens IS NULL
                 AND usage_cache_read_input_tokens IS NULL
             )
+        ),
+    ADD CONSTRAINT model_call_cancelled_usage_is_unreported
+        CHECK (
+            terminal_disposition_kind IS DISTINCT FROM 'cancelled'
+            OR (
+                usage_input_tokens IS NULL
+                AND usage_output_tokens IS NULL
+                AND usage_cache_creation_input_tokens IS NULL
+                AND usage_cache_read_input_tokens IS NULL
+            )
         );
 
 -- Transcript usage counts and paging both select terminal calls by session.

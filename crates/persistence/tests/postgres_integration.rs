@@ -5072,6 +5072,39 @@ async fn model_call_usage_rejects_fractional_evidence_without_rounding()
     Ok(())
 }
 
+/// INV-006: cancellation evidence cannot carry provider usage because neither
+/// cancellation-confirmed nor pre-send cancellation reports token evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv006_cancelled_model_call_usage_is_unreported() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x6d80, true).await?;
+    let reported_output_tokens = Decimal::from(1_u64);
+
+    let error = sqlx::query(
+        "UPDATE model_call
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'cancelled',
+                usage_output_tokens = $1
+          WHERE model_call_id = $2",
+    )
+    .bind(reported_output_tokens)
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("cancelled calls cannot carry provider usage");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("model_call_cancelled_usage_is_unreported")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-006: a call terminalized directly from Prepared cannot carry usage because
 /// no provider send was authorized.
 #[tokio::test(flavor = "multi_thread")]
