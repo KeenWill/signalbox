@@ -10,7 +10,7 @@
 //! explicitly.
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::evidence::{TerminalEvidence, TerminalReport};
 use crate::observation::{Observation, ObservationFact, ObservationSink};
@@ -56,9 +56,9 @@ impl Script {
 /// script-consumption order. Preparation beyond the last script reports an
 /// adapter defect, so script exhaustion can never be mistaken for provider
 /// evidence.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ScriptedModel<C> {
-    state: Mutex<ScriptedState<C>>,
+    state: Arc<Mutex<ScriptedState<C>>>,
 }
 
 #[derive(Debug)]
@@ -81,10 +81,10 @@ impl<C> ScriptedModel<C> {
     /// A model that follows the given scripts, one per execution, in order.
     pub fn following(scripts: impl IntoIterator<Item = Script>) -> Self {
         Self {
-            state: Mutex::new(ScriptedState {
+            state: Arc::new(Mutex::new(ScriptedState {
                 scripts: scripts.into_iter().collect(),
                 received: Vec::new(),
-            }),
+            })),
         }
     }
 
@@ -307,6 +307,21 @@ mod tests {
         run_now(model.execute(prepared, &mut observations, CancellationSignal::never()));
 
         assert_eq!(model.received_operations(), vec![sent]);
+    }
+
+    #[test]
+    fn clones_share_script_consumption_and_operation_receipts() {
+        let model = ScriptedModel::single(Script::delivering(completed_terminal()));
+        let execution_clone = model.clone();
+        let sent = operation("call-shared");
+
+        drop(prepare_now(&execution_clone, sent.clone()));
+
+        assert_eq!(model.received_operations(), vec![sent]);
+        assert!(matches!(
+            run_now(model.prepare(operation("call-exhausted"), CancellationSignal::never())),
+            PreparationOutcome::Defect { .. }
+        ));
     }
 
     #[test]

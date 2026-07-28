@@ -51,10 +51,13 @@ pub const IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION: u64 = 10;
 /// The review-workflow protocol version.
 pub const REVIEW_WORKFLOW_PROTOCOL_VERSION: u64 = 11;
 
+/// The ephemeral provider-text streaming protocol version.
+pub const PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION: u64 = 12;
+
 /// The imported-conversation inspection protocol version.
 ///
-/// Versions twelve through fourteen are reserved by other open stacks, so this
-/// implementation admits eleven and then fifteen with no version between them.
+/// Versions thirteen and fourteen are reserved by other open stacks, so this
+/// implementation admits twelve and then fifteen with no version between them.
 pub const IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION: u64 = 15;
 
 /// One admitted process-protocol version.
@@ -82,6 +85,8 @@ pub enum ProtocolVersion {
     Ten,
     /// Review-workflow command and read vocabulary.
     Eleven,
+    /// Ephemeral provider-text presentation events on follow streams.
+    Twelve,
     /// Imported-conversation inspection vocabulary.
     Fifteen,
 }
@@ -101,6 +106,7 @@ impl ProtocolVersion {
             Self::Nine => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::Ten => IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION,
             Self::Eleven => REVIEW_WORKFLOW_PROTOCOL_VERSION,
+            Self::Twelve => PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
             Self::Fifteen => IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
         }
     }
@@ -118,6 +124,7 @@ impl ProtocolVersion {
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION => Some(Self::Nine),
             IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION => Some(Self::Ten),
             REVIEW_WORKFLOW_PROTOCOL_VERSION => Some(Self::Eleven),
+            PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION => Some(Self::Twelve),
             IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION => Some(Self::Fifteen),
             _ => None,
         }
@@ -3024,6 +3031,19 @@ pub enum ServerMessage {
         /// Exact typed update.
         event: SessionEvent,
     },
+    /// One cursorless, process-local provider text fragment.
+    ProviderTextDelta {
+        /// Owning session.
+        session_id: CanonicalUuid,
+        /// Active turn receiving the provider response.
+        turn_id: CanonicalUuid,
+        /// Correlated model call producing the response.
+        model_call_id: CanonicalUuid,
+        /// Provider part position this fragment extends.
+        part_index: CanonicalU64,
+        /// One bounded fragment of already-redacted provider text.
+        content: ContentFragment,
+    },
     /// One immutable target registration was recorded or equally replayed.
     ReviewTargetCreated {
         /// Registered target.
@@ -3125,6 +3145,7 @@ impl ServerMessage {
             Self::TranscriptEntry { entry, .. } => entry.minimum_protocol_version(),
             Self::TranscriptTextEntry { entry, .. } => entry.minimum_protocol_version(),
             Self::SessionEvent { event, .. } => event.minimum_protocol_version(),
+            Self::ProviderTextDelta { .. } => PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
             Self::SessionMetadataPageStart {}
             | Self::SessionMetadataSummary { .. }
             | Self::SessionMetadataPageEnd { .. }
@@ -3454,7 +3475,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, and 15",
+                "process-protocol version is unsupported; supported versions are 1 through 12 and 15",
             ),
         }
     }
@@ -3665,7 +3686,7 @@ fn probe_header(
     }
     if !matches!(
         version_spelling,
-        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" | "15"
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" | "12" | "15"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -3780,6 +3801,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "9" => Some(ProtocolVersion::Nine),
         "10" => Some(ProtocolVersion::Ten),
         "11" => Some(ProtocolVersion::Eleven),
+        "12" => Some(ProtocolVersion::Twelve),
         "15" => Some(ProtocolVersion::Fifteen),
         _ => None,
     }
@@ -3917,7 +3939,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, and 15")
+                .contains("supported versions are 1 through 12 and 15")
         );
     }
 
@@ -3927,7 +3949,7 @@ mod tests {
             r#"{"future":"#.repeat(payload_depth),
             "}".repeat(payload_depth)
         );
-        format!("{{\"version\":12,\"request_id\":\"9\",\"request\":{payload}}}")
+        format!("{{\"version\":13,\"request_id\":\"9\",\"request\":{payload}}}")
     }
 
     #[track_caller]
@@ -4116,7 +4138,7 @@ mod tests {
     #[test]
     fn inv033_unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
-        assert_unsupported_version("12");
+        assert_unsupported_version("13");
         assert_unsupported_version("18446744073709551616");
         assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
@@ -5233,6 +5255,37 @@ mod tests {
         Ok(())
     }
 
+    /// INV-033: version twelve retains version eleven's request vocabulary and
+    /// admits the cursorless provider-text message only at its new boundary.
+    #[test]
+    fn inv033_version_twelve_adds_only_the_provider_text_message()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let retained_request = ClientFrame::try_new_for_version(
+            ProtocolVersion::Twelve,
+            request_id,
+            ClientRequest::ReadReviewTarget { target_id: uuid(2) },
+        )?;
+        let encoded_request = encode_client_line(&retained_request)?;
+        let delta = ServerMessage::ProviderTextDelta {
+            session_id: uuid(3),
+            turn_id: uuid(4),
+            model_call_id: uuid(5),
+            part_index: CanonicalU64::new(6),
+            content: ContentFragment::try_new(String::from("already [redacted]"))?,
+        };
+
+        assert_eq!(decode_client_line(&encoded_request)?, retained_request);
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::Eleven, request_id, delta.clone(),),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::Twelve, request_id, delta)?;
+        let encoded_delta = encode_server_line(&frame)?;
+        assert_eq!(decode_server_line(&encoded_delta)?, frame);
+        Ok(())
+    }
+
     /// INV-033: review target registration enters the closed vocabulary only
     /// at version eleven and retains its exact nullable snapshot shape.
     #[test]
@@ -5633,10 +5686,10 @@ mod tests {
     }
 
     /// INV-033: the admitted version set is closed exactly at one through
-    /// eleven, with version nine seated between turn control and the
+    /// twelve, with version nine seated between turn control and the
     /// imported-frontier creation version.
     #[test]
-    fn inv033_version_eleven_completes_the_admitted_set() {
+    fn inv033_version_twelve_completes_the_admitted_set() {
         assert_eq!(
             ProtocolVersion::Nine.as_u64(),
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
@@ -5645,7 +5698,8 @@ mod tests {
         assert_eq!(ProtocolVersion::from_u64(9), Some(ProtocolVersion::Nine));
         assert_eq!(ProtocolVersion::from_u64(10), Some(ProtocolVersion::Ten));
         assert_eq!(ProtocolVersion::from_u64(11), Some(ProtocolVersion::Eleven));
-        assert_eq!(ProtocolVersion::from_u64(12), None);
+        assert_eq!(ProtocolVersion::from_u64(12), Some(ProtocolVersion::Twelve));
+        assert_eq!(ProtocolVersion::from_u64(13), None);
     }
 
     #[test]
@@ -6766,6 +6820,17 @@ mod tests {
                 },
             },
             r#"{"type":"session_event","cursor":"6","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"model_call_transition","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"terminal","disposition":"refused"}}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(38)?,
+            ServerMessage::ProviderTextDelta {
+                session_id: uuid(1),
+                turn_id: uuid(3),
+                model_call_id: uuid(8),
+                part_index: CanonicalU64::new(2),
+                content: ContentFragment::try_new(String::from("already [redacted]"))?,
+            },
+            r#"{"type":"provider_text_delta","session_id":"00000000-0000-0000-0000-000000000001","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000008","part_index":"2","content":"already [redacted]"}"#,
         )?;
         assert_server_message_round_trip(
             request(29)?,
