@@ -1523,6 +1523,11 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
         /// The duplicated call.
         call: crate::ModelCallId,
     },
+    /// One global model-call identity appeared in both ordinary and compaction facts.
+    DuplicateModelCallIdentityAcrossKinds {
+        /// The cross-kind identity collision.
+        call: crate::ModelCallId,
+    },
     /// The same turn-level pinned-target fact appeared more than once.
     DuplicatePinnedTarget {
         /// The turn whose target was duplicated.
@@ -2030,6 +2035,7 @@ pub struct AcceptedInputSchedulingProjection {
     session: Session,
     initial_seed_frontier: Option<ContextFrontierId>,
     latest_compaction_result: Option<ContextFrontierId>,
+    active_compaction_call: Option<crate::ModelCallId>,
     turns: Box<[AcceptedInputTurnSchedulingProjection]>,
     active_acceptance_tail: Option<SessionAcceptanceTail>,
     semantic_entries: BTreeMap<SemanticTranscriptEntryRef, SemanticTranscriptEntry>,
@@ -2594,6 +2600,11 @@ pub enum AcceptedInputEligibilityFailure {
     ActiveTurnPresent {
         /// The exact active slot owner.
         turn: TurnId,
+    },
+    /// A dedicated compaction call owns the session-wide execution slot.
+    ContextCompactionInProgress {
+        /// The exact unfinished compaction call.
+        call: crate::ModelCallId,
     },
     /// No queued accepted-input turn exists.
     NoQueuedTurn,
@@ -3238,6 +3249,7 @@ fn reconstitute_inner(
     }
 
     let mut compaction_calls = BTreeMap::new();
+    let mut compaction_snapshots = BTreeSet::new();
     for candidate in &input.compaction_calls {
         let call = candidate.id();
         let source = snapshots.get(&candidate.source_snapshot()).ok_or(
@@ -3246,6 +3258,7 @@ fn reconstitute_inner(
         let reconstituted = candidate.clone().reconstitute(source).map_err(|_| {
             AcceptedInputSchedulingReconstitutionFailure::InvalidCompactionCall { call }
         })?;
+        compaction_snapshots.insert(candidate.source_snapshot());
         if compaction_calls.insert(call, reconstituted).is_some() {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::DuplicateCompactionCall { call },
@@ -3253,7 +3266,6 @@ fn reconstitute_inner(
         }
     }
     let mut compactions = BTreeMap::new();
-    let mut compaction_snapshots = BTreeSet::new();
     let mut referenced_compaction_calls = BTreeSet::new();
     for candidate in &input.compactions {
         let compaction = candidate.id();
@@ -3390,15 +3402,43 @@ fn reconstitute_inner(
     }
     let latest_compaction_result =
         latest_compaction.map(|compaction| compaction.result_frontier().snapshot());
-    if let Some(call) = compaction_calls
+    if let Some(call) = summary_by_call
         .keys()
-        .chain(summary_by_call.keys())
         .find(|call| !referenced_compaction_calls.contains(call))
         .copied()
     {
         return Err(
             AcceptedInputSchedulingReconstitutionFailure::UnreferencedCompactionEvidence { call },
         );
+    }
+    if let Some(call) = compaction_calls
+        .values()
+        .find(|call| {
+            call.state()
+                == crate::ContextCompactionModelCallState::Terminal(ModelCallDisposition::Completed)
+                && !referenced_compaction_calls.contains(&call.id())
+        })
+        .map(crate::ContextCompactionModelCall::id)
+    {
+        return Err(
+            AcceptedInputSchedulingReconstitutionFailure::UnreferencedCompactionEvidence { call },
+        );
+    }
+    let mut active_compaction_calls = compaction_calls.values().filter(|call| {
+        matches!(
+            call.state(),
+            crate::ContextCompactionModelCallState::Prepared
+                | crate::ContextCompactionModelCallState::InFlight
+        )
+    });
+    let active_compaction_call = active_compaction_calls
+        .next()
+        .map(crate::ContextCompactionModelCall::id);
+    if let Some(call) = active_compaction_calls
+        .next()
+        .map(crate::ContextCompactionModelCall::id)
+    {
+        return Err(AcceptedInputSchedulingReconstitutionFailure::InvalidCompactionCall { call });
     }
 
     let mut pinned_targets = BTreeMap::new();
@@ -3419,6 +3459,13 @@ fn reconstitute_inner(
     let mut model_calls = BTreeMap::new();
     for candidate in &input.model_calls {
         let call = candidate.id();
+        if compaction_calls.contains_key(&call) {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::DuplicateModelCallIdentityAcrossKinds {
+                    call,
+                },
+            );
+        }
         let snapshot = snapshots.get(&candidate.frontier()).ok_or(
             AcceptedInputSchedulingReconstitutionFailure::ModelCallSnapshotMissing { call },
         )?;
@@ -5513,10 +5560,17 @@ fn reconstitute_inner(
         &accepted_input_turns,
     )?;
 
+    if let Some(call) = active_compaction_call
+        && active.is_some()
+    {
+        return Err(AcceptedInputSchedulingReconstitutionFailure::InvalidCompactionCall { call });
+    }
+
     Ok(AcceptedInputSchedulingProjection {
         session: input.session.clone(),
         initial_seed_frontier,
         latest_compaction_result,
+        active_compaction_call,
         turns: turns.into_boxed_slice(),
         active_acceptance_tail,
         semantic_entries,
@@ -6478,6 +6532,12 @@ fn prepare_earliest_queued_activation(
         return Err(fail(
             projection,
             AcceptedInputEligibilityFailure::ActiveTurnPresent { turn },
+        ));
+    }
+    if let Some(call) = projection.active_compaction_call {
+        return Err(fail(
+            projection,
+            AcceptedInputEligibilityFailure::ContextCompactionInProgress { call },
         ));
     }
     let Some(index) = projection
@@ -14854,6 +14914,166 @@ mod tests {
         assert_eq!(
             failure,
             AcceptedInputEligibilityFailure::StartingFrontierIdentityAlreadyExists
+        );
+    }
+
+    /// S03 / INV-015: a prepared standalone compaction call survives complete
+    /// reconstitution and prevents queued-turn activation until recovery.
+    #[test]
+    fn s03_inv015_prepared_compaction_call_blocks_activation_after_reconstitution() {
+        let session = current_session();
+        let source = ResolvedContextFrontierReconstitutionInput::new(
+            session.id(),
+            context_frontier_id(701),
+            Vec::new(),
+        );
+        let call = model_call_id(702);
+        let input = AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            Vec::new(),
+            Vec::new(),
+            vec![source],
+            None,
+        )
+        .with_context_compaction_facts(
+            vec![crate::ContextCompactionModelCallReconstitutionInput::new(
+                call,
+                session.id(),
+                direct(703),
+                ResolvedProviderTarget::naming(provider_model_identity(704)),
+                context_frontier_id(701),
+                crate::ContextCompactionModelCallState::Prepared,
+                crate::ContextCompactionTokenUsage::unreported(),
+            )],
+            Vec::new(),
+        );
+        let projection = input
+            .reconstitute()
+            .expect("prepared compaction evidence remains recoverable");
+        let error = projection
+            .prepare_earliest_queued_activation(activation(705).identities())
+            .expect_err("unfinished compaction owns the execution slot");
+
+        assert_eq!(
+            error.failure(),
+            AcceptedInputEligibilityFailure::ContextCompactionInProgress { call }
+        );
+    }
+
+    /// S03 / INV-015: an authorized standalone compaction call remains
+    /// recoverable and owns the execution slot after restart reconstitution.
+    #[test]
+    fn s03_inv015_in_flight_compaction_call_blocks_activation_after_reconstitution() {
+        let session = current_session();
+        let source = ResolvedContextFrontierReconstitutionInput::new(
+            session.id(),
+            context_frontier_id(706),
+            Vec::new(),
+        );
+        let call = model_call_id(707);
+        let input = AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            Vec::new(),
+            Vec::new(),
+            vec![source],
+            None,
+        )
+        .with_context_compaction_facts(
+            vec![crate::ContextCompactionModelCallReconstitutionInput::new(
+                call,
+                session.id(),
+                direct(708),
+                ResolvedProviderTarget::naming(provider_model_identity(709)),
+                context_frontier_id(706),
+                crate::ContextCompactionModelCallState::InFlight,
+                crate::ContextCompactionTokenUsage::unreported(),
+            )],
+            Vec::new(),
+        );
+        let projection = input
+            .reconstitute()
+            .expect("in-flight compaction evidence remains recoverable");
+        let error = projection
+            .prepare_earliest_queued_activation(activation(710).identities())
+            .expect_err("authorized compaction owns the execution slot");
+
+        assert_eq!(
+            error.failure(),
+            AcceptedInputEligibilityFailure::ContextCompactionInProgress { call }
+        );
+    }
+
+    /// S03 / INV-015: a terminal non-completed dedicated call is retained as
+    /// historical recovery evidence without requiring a compaction result.
+    #[test]
+    fn s03_inv015_known_failed_compaction_call_is_legal_standalone_evidence() {
+        let session = current_session();
+        let source = ResolvedContextFrontierReconstitutionInput::new(
+            session.id(),
+            context_frontier_id(711),
+            Vec::new(),
+        );
+        let call = crate::ContextCompactionModelCallReconstitutionInput::new(
+            model_call_id(712),
+            session.id(),
+            direct(713),
+            ResolvedProviderTarget::naming(provider_model_identity(714)),
+            context_frontier_id(711),
+            crate::ContextCompactionModelCallState::Terminal(ModelCallDisposition::KnownFailed),
+            crate::ContextCompactionTokenUsage::unreported(),
+        );
+        let input = AcceptedInputSchedulingReconstitutionInput::new(
+            session,
+            Vec::new(),
+            Vec::new(),
+            vec![source],
+            None,
+        )
+        .with_context_compaction_facts(vec![call], Vec::new());
+
+        let projection = input
+            .reconstitute()
+            .expect("known-failed compaction evidence is complete without a summary");
+        let error = projection
+            .prepare_earliest_queued_activation(activation(715).identities())
+            .expect_err("the fixture contains no queued turn");
+
+        assert_eq!(
+            error.failure(),
+            AcceptedInputEligibilityFailure::NoQueuedTurn
+        );
+    }
+
+    /// INV-001 / INV-015: ordinary and compaction call maps cannot claim the
+    /// same identity even when both purpose-specific records are valid alone.
+    #[test]
+    fn inv001_inv015_reconstitution_rejects_cross_kind_model_call_identity() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let consumed = accepted_origin(2);
+        let facts = ConsumedSteeringReconstitutionFacts::matching(&session, active, consumed);
+        let call = facts.model_calls[0].id();
+        let source = facts.model_calls[0].frontier();
+        let collision = crate::ContextCompactionModelCallReconstitutionInput::new(
+            call,
+            session.id(),
+            direct(1),
+            ResolvedProviderTarget::naming(provider_model_identity(51)),
+            source,
+            crate::ContextCompactionModelCallState::Prepared,
+            crate::ContextCompactionTokenUsage::unreported(),
+        );
+        let input = facts
+            .input()
+            .with_context_compaction_facts(vec![collision], Vec::new());
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::DuplicateModelCallIdentityAcrossKinds {
+                call,
+            }
         );
     }
 }

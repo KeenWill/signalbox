@@ -2021,6 +2021,11 @@ impl AcceptedInputSchedulingReconstitutionInput {
         pinned_targets: Vec<PinnedProviderTargetReconstitutionInput>,
         model_calls: Vec<ModelCallReconstitutionInput>,
     ) -> Self;
+    pub fn with_context_compaction_facts(
+        self,
+        calls: Vec<ContextCompactionModelCallReconstitutionInput>,
+        compactions: Vec<ContextCompactionReconstitutionInput>,
+    ) -> Self;
     pub fn with_consumed_steering_facts(
         self,
         consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
@@ -2038,7 +2043,8 @@ impl AcceptedInputSchedulingReconstitutionInput {
         imported_session: ReconstitutedImportedSession,
     ) -> Self;
     // accessors: session(), imported_session(), turns(), semantic_entries(),
-    // snapshots(), pinned_targets(), model_calls(), consumed_steering(),
+    // snapshots(), pinned_targets(), model_calls(), compaction_calls(),
+    // compactions(), consumed_steering(),
     // steering_continuation_rounds(), continuation_rounds(),
     // active_acceptance_tail()
 }
@@ -2077,11 +2083,21 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
         call: ModelCallId,
     },
     DuplicateModelCall { call: ModelCallId },
+    DuplicateModelCallIdentityAcrossKinds { call: ModelCallId },
     DuplicatePinnedTarget { turn: TurnId },
     PinnedTargetMissing { call: ModelCallId },
     UnreferencedPinnedTarget { turn: TurnId },
     ModelCallSnapshotMissing { call: ModelCallId },
     InvalidModelCall { call: ModelCallId },
+    CompactionCallSnapshotMissing { call: ModelCallId },
+    DuplicateCompactionCall { call: ModelCallId },
+    InvalidCompactionCall { call: ModelCallId },
+    CompactionSnapshotMissing { compaction: ContextCompactionId },
+    CompactionEvidenceMissing { compaction: ContextCompactionId },
+    InvalidCompaction { compaction: ContextCompactionId },
+    DuplicateCompaction { compaction: ContextCompactionId },
+    UnreferencedCompactionEvidence { call: ModelCallId },
+    InvalidCompactionChain { compaction: ContextCompactionId },
     UnreferencedModelCall { call: ModelCallId },
     TerminalModelCallMissing { turn: TurnId, call: ModelCallId },
     TerminalModelCallMismatch { turn: TurnId },
@@ -2253,6 +2269,7 @@ impl PreparedAcceptedInputTurnActivation {
 
 pub enum AcceptedInputEligibilityFailure {
     ActiveTurnPresent { turn: TurnId },
+    ContextCompactionInProgress { call: ModelCallId },
     NoQueuedTurn,
     OriginEntryIdentityAlreadyExists,
     ModelIdentityEntryIdentityAlreadyExists,
@@ -2912,9 +2929,11 @@ pub enum ContextCompactionReconstitutionFailure {
     FrontierSessionMismatch,
     FrontierIdentityMismatch,
     FrontierEntryMismatch,
+    SourceProjectionInvalid,
     SummaryEntryMismatch,
     SummaryPayloadMismatch,
     RangeEndpointMissing,
+    RangeStartMismatch,
     RangeOrderInvalid,
     UnsafeToolExchangeBoundary,
     ResultIsNotSummaryAppend,

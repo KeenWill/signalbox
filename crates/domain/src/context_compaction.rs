@@ -408,18 +408,31 @@ impl ContextCompactionReconstitutionInput {
         {
             return Err(ContextCompactionReconstitutionFailure::FrontierEntryMismatch);
         }
-        let first = source_entries
+        let source_projection = ContextFrontierProjection::from_complete_entries(source_entries)
+            .map_err(|_| ContextCompactionReconstitutionFailure::SourceProjectionInvalid)?;
+        let entries_by_reference = source_entries
+            .iter()
+            .map(|entry| (entry.reference(), entry))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let visible_entries = source_projection
+            .ordered_entries()
+            .map(|reference| entries_by_reference[&reference])
+            .collect::<Vec<_>>();
+        let first = visible_entries
             .iter()
             .position(|entry| entry.reference() == self.range.first())
             .ok_or(ContextCompactionReconstitutionFailure::RangeEndpointMissing)?;
-        let through = source_entries
+        let through = visible_entries
             .iter()
             .position(|entry| entry.reference() == self.range.through())
             .ok_or(ContextCompactionReconstitutionFailure::RangeEndpointMissing)?;
+        if first != 0 {
+            return Err(ContextCompactionReconstitutionFailure::RangeStartMismatch);
+        }
         if first > through {
             return Err(ContextCompactionReconstitutionFailure::RangeOrderInvalid);
         }
-        if !range_closes_tool_exchanges(source_entries, first, through) {
+        if !range_closes_tool_exchanges(&visible_entries[first..=through]) {
             return Err(ContextCompactionReconstitutionFailure::UnsafeToolExchangeBoundary);
         }
         if result_entries.len() != source_entries.len() + 1
@@ -450,12 +463,16 @@ pub enum ContextCompactionReconstitutionFailure {
     FrontierIdentityMismatch,
     /// Supplied entries do not exactly resolve their respective snapshots.
     FrontierEntryMismatch,
+    /// Existing summary entries cannot form one valid visible source frontier.
+    SourceProjectionInvalid,
     /// The named summary identity or source session differs.
     SummaryEntryMismatch,
     /// The named entry does not carry matching compaction provenance.
     SummaryPayloadMismatch,
     /// At least one exact range endpoint is absent from the source frontier.
     RangeEndpointMissing,
+    /// The range does not begin at the current model-visible frontier start.
+    RangeStartMismatch,
     /// The first endpoint occurs after the through endpoint.
     RangeOrderInvalid,
     /// The summarized range leaves a correlated tool exchange open.
@@ -466,13 +483,9 @@ pub enum ContextCompactionReconstitutionFailure {
     ProducingCallMismatch,
 }
 
-fn range_closes_tool_exchanges(
-    entries: &[SemanticTranscriptEntry],
-    first: usize,
-    through: usize,
-) -> bool {
+fn range_closes_tool_exchanges(entries: &[&SemanticTranscriptEntry]) -> bool {
     let mut open_requests = 0usize;
-    for entry in &entries[first..=through] {
+    for entry in entries {
         match entry.payload() {
             SemanticTranscriptEntryPayload::AssistantToolUse { .. } => {
                 open_requests = open_requests.saturating_add(1);
@@ -504,60 +517,57 @@ impl ContextFrontierProjection {
     pub fn from_complete_entries(
         entries: &[SemanticTranscriptEntry],
     ) -> Result<Self, ContextFrontierProjectionFailure> {
-        let positions = entries
+        let physical_positions = entries
             .iter()
             .enumerate()
             .map(|(index, entry)| (entry.reference(), index))
             .collect::<std::collections::BTreeMap<_, _>>();
-        let mut visible_start = entries.first().map(SemanticTranscriptEntry::reference);
-        let mut latest_summary = None;
+        let mut visible = entries.iter().collect::<Vec<_>>();
         for (summary_index, summary) in entries.iter().enumerate() {
             let SemanticTranscriptEntryPayload::ContextSummary { summarized, .. } =
                 summary.payload()
             else {
                 continue;
             };
-            if visible_start != Some(summarized.first()) {
+            let first = visible
+                .iter()
+                .position(|entry| entry.reference() == summarized.first())
+                .ok_or(ContextFrontierProjectionFailure::RangeEndpointMissing)?;
+            if first != 0 {
                 return Err(ContextFrontierProjectionFailure::RangeStartMismatch);
             }
-            let first = positions
-                .get(&summarized.first())
-                .copied()
-                .ok_or(ContextFrontierProjectionFailure::RangeEndpointMissing)?;
-            let through = positions
-                .get(&summarized.through())
-                .copied()
+            let through = visible
+                .iter()
+                .position(|entry| entry.reference() == summarized.through())
                 .ok_or(ContextFrontierProjectionFailure::RangeEndpointMissing)?;
             if first > through {
                 return Err(ContextFrontierProjectionFailure::RangeOrderInvalid);
             }
-            if !range_closes_tool_exchanges(entries, first, through) {
+            if !range_closes_tool_exchanges(&visible[first..=through]) {
                 return Err(ContextFrontierProjectionFailure::UnsafeToolExchangeBoundary);
             }
-            if summary_index <= through {
+            let physical_through = physical_positions[&summarized.through()];
+            let visible_summary = visible
+                .iter()
+                .position(|entry| entry.reference() == summary.reference())
+                .ok_or(ContextFrontierProjectionFailure::RangeEndpointMissing)?;
+            if summary_index <= physical_through || visible_summary <= through {
                 return Err(ContextFrontierProjectionFailure::SummaryNotAfterBoundary);
             }
-            visible_start = Some(summary.reference());
-            latest_summary = Some((summary_index, summary, *summarized, through));
+            visible = std::iter::once(summary)
+                .chain(
+                    visible[through + 1..]
+                        .iter()
+                        .copied()
+                        .filter(|entry| entry.reference() != summary.reference()),
+                )
+                .collect();
         }
-        let Some((_summary_index, summary, _summarized, through)) = latest_summary else {
-            return Ok(Self {
-                ordered_entries: entries
-                    .iter()
-                    .map(SemanticTranscriptEntry::reference)
-                    .collect(),
-            });
-        };
-        let mut projected = Vec::with_capacity(entries.len() - through);
-        projected.push(summary.reference());
-        projected.extend(
-            entries[through + 1..]
-                .iter()
-                .filter(|entry| entry.identity() != summary.identity())
-                .map(SemanticTranscriptEntry::reference),
-        );
         Ok(Self {
-            ordered_entries: projected.into_boxed_slice(),
+            ordered_entries: visible
+                .into_iter()
+                .map(SemanticTranscriptEntry::reference)
+                .collect(),
         })
     }
 
@@ -758,5 +768,38 @@ mod tests {
         assert_eq!(compaction.producing_call(), model_call_id(8));
         assert_eq!(compaction.range(), range);
         assert_eq!(compaction.summary_entry(), summary.identity());
+    }
+
+    /// INV-015: successor ranges are interpreted in the current model-visible
+    /// order even when a retained suffix physically precedes the prior summary.
+    #[test]
+    fn inv015_successor_projection_uses_visible_order_across_prior_summary() {
+        let first = entry(1);
+        let through = entry(2);
+        let retained_suffix = entry(3);
+        let first_range = ContextCompactionRange::inclusive(first.reference(), through.reference());
+        let first_summary = summary(4, first_range);
+        let later = entry(5);
+        let successor_range =
+            ContextCompactionRange::inclusive(first_summary.reference(), later.reference());
+        let successor_summary = summary(6, successor_range);
+        let complete = vec![
+            first,
+            through,
+            retained_suffix.clone(),
+            first_summary,
+            later,
+            successor_summary.clone(),
+        ];
+
+        let projection = ContextFrontierProjection::from_complete_entries(&complete)
+            .expect("the successor summarizes the projected predecessor frontier");
+
+        assert_eq!(complete.len(), 6);
+        assert_eq!(complete[2], retained_suffix);
+        assert_eq!(
+            projection.ordered_entries().collect::<Vec<_>>(),
+            vec![successor_summary.reference()]
+        );
     }
 }
