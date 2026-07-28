@@ -1422,13 +1422,20 @@ impl ConversationSummary {
 
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
-            Self::NativeSession { title, .. } => {
+            Self::NativeSession {
+                title,
+                defaults_version,
+                ..
+            } => {
                 if let Some(title) = title {
                     validate_nonempty_metadata_text(title)
                         .map_err(|_| FrameValidationError::ConversationListShape)?;
                     let mut total_utf8_bytes = 0usize;
                     add_metadata_utf8_bytes(&mut total_utf8_bytes, title)
                         .map_err(|_| FrameValidationError::ConversationListShape)?;
+                }
+                if defaults_version.value() == 0 {
+                    return Err(FrameValidationError::ConversationListShape);
                 }
                 Ok(())
             }
@@ -4996,6 +5003,9 @@ mod tests {
         );
         assert_server_malformed(
             r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":null,"entry_count":"0","source_format":"codex_rollout_jsonl_v1"}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"native_session","session_id":"00000000-0000-0000-0000-000000000001","title":null,"archived":false,"defaults_version":"0"}}}"#,
         );
     }
 
