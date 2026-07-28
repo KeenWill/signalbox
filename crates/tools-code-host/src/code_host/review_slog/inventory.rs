@@ -215,7 +215,7 @@ pub(crate) fn disposition_class(reply_evidence: &[(&str, bool)]) -> ReviewDispos
     let Some((last_body, last_authorized)) = reply_evidence.last() else {
         return ReviewDispositionClass::Undispositioned;
     };
-    if *last_authorized && last_body.contains(ESCALATION_MARKER) {
+    if *last_authorized && last_body.trim() == ESCALATION_MARKER {
         return ReviewDispositionClass::EscalationMarker;
     }
 
@@ -288,6 +288,19 @@ mod tests {
         assert_eq!(
             disposition_class(&[("Escalated without disposition", true)]),
             ReviewDispositionClass::EscalationMarker
+        );
+    }
+
+    /// A narrative mention of the marker is not the named hard-stop
+    /// disposition.
+    #[test]
+    fn narrative_escalation_mention_remains_undispositioned() {
+        assert_eq!(
+            disposition_class(&[(
+                "This should not be marked Escalated without disposition.",
+                true
+            )]),
+            ReviewDispositionClass::Undispositioned
         );
     }
 

@@ -631,8 +631,8 @@ The declarations and compact result objects are:
   `declined` requires a reply beginning `Declined:` and a nonempty reason. Only
   replies whose code-host association is `OWNER`, `MEMBER`, or `COLLABORATOR`
   can supply disposition evidence. The latest recognized fix or decline survives
-  later non-disposition replies, while `escalation_marker` requires the actual
-  last reply to carry the exact marker. Classification rejects a thread whose
+  later non-disposition replies, while `escalation_marker` requires the trimmed
+  last reply to equal the exact marker. Classification rejects a thread whose
   comment history exceeds the 100-comment read bound. The page carries
   `truncated` and `next_cursor`.
 - `review_gate_check` accepts `repository`, `number`, and purpose
