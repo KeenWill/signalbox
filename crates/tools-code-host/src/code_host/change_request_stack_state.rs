@@ -6,8 +6,8 @@ use signalbox_tool_contract::ToolContract;
 use super::{
     CodeHostOperation,
     arguments::{
-        CodeHostChangeRequestNumber, CodeHostPageCursor, CodeHostRepository,
-        InvalidCodeHostArguments, decode as decode_arguments,
+        CodeHostChangeRequestNumber, CodeHostCursor, CodeHostRepository, InvalidCodeHostArguments,
+        decode as decode_arguments,
     },
 };
 
@@ -25,7 +25,7 @@ pub struct StackStateArguments {
     number: CodeHostChangeRequestNumber,
     /// Optional opaque child-page continuation cursor.
     #[serde(default)]
-    cursor: Option<CodeHostPageCursor>,
+    cursor: Option<CodeHostCursor>,
 }
 
 pub(super) struct Contract;
@@ -47,15 +47,11 @@ impl StackStateArguments {
         self.number
     }
 
-    /// Returns the requested child page, defaulting to the first page.
-    pub const fn child_page(&self) -> u32 {
-        match self.cursor {
-            Some(cursor) => cursor.page(),
-            None => 1,
-        }
+    /// Borrows the optional opaque child-page continuation cursor.
+    pub fn cursor(&self) -> Option<&CodeHostCursor> {
+        self.cursor.as_ref()
     }
 }
-
 pub(super) fn decode(
     arguments: &NormalizedToolArguments,
 ) -> Result<CodeHostOperation, InvalidCodeHostArguments> {

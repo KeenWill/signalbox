@@ -603,7 +603,9 @@ The declarations and compact result objects are:
   only the complete canonical usage-limit response is starvation evidence. The
   evidence also reports usage-limit starvation and whether the latest explicit
   `@codex review` request by an owner, member, or collaborator has no later
-  verdict or starvation response. Its derived verdict is `converged`,
+  verdict or starvation response. A request tied with the latest response
+  timestamp is treated as still pending because the code host does not expose a
+  reliable order within that timestamp. Its derived verdict is `converged`,
   `converged_with_escalations`, `not_converged`, or `indeterminate`. A missing
   or non-successful CI rollup, conflicting mergeability, any unresolved
   non-escalation or undispositioned thread, reviewer starvation, or a
@@ -611,17 +613,19 @@ The declarations and compact result objects are:
   state or any truncated evidence required for the verdict makes it
   indeterminate.
 - `change_request_stack_state` accepts `repository`, `number`, and an optional
-  positive decimal child-page `cursor`. It returns the immediate base, head, and
-  default-branch refs and revisions; base commits absent from the head;
-  default-branch commits absent from the base chain; and one page of immediate
-  child requests whose base names the request's head branch. Each child carries
-  the same merge-forward and default-chain comparison for its level. Children
-  are discovered in the request's head repository. Comparisons use count-only
-  GraphQL projections authenticated against each exact base revision. The
-  adapter then re-reads the request, default branch, and exact child page and
-  rejects evidence if any revision, child inventory, or child-page completeness
-  snapshot changed. The child page carries `children_truncated` and
-  `children_next_cursor`.
+  opaque GraphQL child-page `cursor`. It returns the current immediate-base,
+  head, and default-branch refs and revisions; current-base commits absent from
+  the head; default-branch commits absent from the current base chain; and one
+  projected page of at most 100 immediate child requests whose base names the
+  request's head branch. Each child carries the same merge-forward and
+  default-chain comparison for its level. Children are discovered in the
+  request's head repository. Comparisons use count-only GraphQL projections
+  authenticated against each current base revision, with at most eight child
+  comparisons in flight. The complete stack transaction has the transport's
+  30-second aggregate deadline. The adapter then re-reads the request, current
+  and default branches, and exact projected child page and rejects evidence if
+  any revision, child inventory, or child-page continuation snapshot changed.
+  The child page carries `children_truncated` and `children_next_cursor`.
 - `change_request_thread_inventory` accepts `repository`, `number`, and an
   optional opaque GraphQL `cursor`. It returns the observed head revision and at
   most 100 review threads with exact resolution and outdated posture, path and
@@ -640,26 +644,27 @@ The declarations and compact result objects are:
   `next_cursor`.
 - `review_gate_check` accepts `repository`, `number`, and purpose
   `request_review_wave` or `declare_convergence`. It reads the same fresh typed
-  evidence as the three slog tools, re-reading convergence last and using that
-  final read for thread blockers, then purely derives `ready`, the exact head,
-  and stable blocker codes with affected identities. Both purposes block when
-  the three evidence sources name different heads, a review request is still in
-  flight, evidence is incomplete, CI is not green, threads are undispositioned
-  or unresolved, escalations are buried, or parent, default-chain, or
-  immediate-child ancestry is unhealthy. Declaring convergence additionally
-  requires the exact mergeable posture and an actual current-head reviewer
-  verdict not followed by usage-limit starvation. Requesting a review wave is
-  blocked when a completed reviewer verdict already covers the current head and
-  no later usage-limit response requires a retry, because that quiet or
+  evidence as the three slog tools, then re-reads stack ancestry after inventory
+  and convergence. It rejects the composed read if the before-and-after stack
+  evidence differs and uses the final stack read for ancestry blockers, then
+  purely derives `ready`, the exact head, and stable blocker codes with affected
+  identities within the transport's 30-second aggregate deadline. Both purposes
+  block when the three evidence sources name different heads, a review request
+  is still in flight, evidence is incomplete, CI is not green, threads are
+  undispositioned or unresolved, escalations are buried, or parent,
+  default-chain, or immediate-child ancestry is unhealthy. Declaring convergence
+  additionally requires the exact mergeable posture and an actual current-head
+  reviewer verdict not followed by usage-limit starvation. Requesting a review
+  wave is blocked when a completed reviewer verdict already covers the current
+  head and no later usage-limit response requires a retry, because that quiet or
   all-declined wave concludes the loop.
 
 Shared typed admission rejects extra object members; repositories are at most
 256 bytes, paths 4 KiB, comment bodies and returned text fields 64 KiB, and
-opaque node ids and GraphQL cursors 512 bytes. REST child-page cursors are
-positive decimal strings of at most nine digits. A returned node id, head
-revision, or stack or inventory continuation is admitted by the same predicate
-its argument counterpart uses, so those identities and continuations can be
-passed back as arguments. Convergence-state cursors identify a diagnostic
+opaque node ids and GraphQL cursors are at most 512 bytes. A returned node id,
+head revision, or stack or inventory continuation is admitted by the same
+predicate its argument counterpart uses, so those identities and continuations
+can be passed back as arguments. Convergence-state cursors identify a diagnostic
 truncation boundary; that tool and the gate remain indeterminate rather than
 performing an unbounded continuation scan. Every returned URL is one absolute
 credential-free HTTPS location. Typed construction rejects aggregate convergence

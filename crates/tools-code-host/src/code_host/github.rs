@@ -42,6 +42,7 @@ const MAX_JSON_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_JOB_LOG_BYTES: usize = 64 * 1024;
 const MAX_REDIRECT_URL_BYTES: usize = 8 * 1024;
 const PAGE_SIZE: &str = "100";
+const MAX_STACK_COMPARISONS_IN_FLIGHT: usize = 8;
 
 const REVIEW_THREADS_QUERY: &str = r#"
 query ReviewThreads($owner: String!, $name: String!, $number: Int!) {
@@ -149,6 +150,22 @@ query StackComparison(
     ref(qualifiedName: $baseRef) {
       target { oid }
       compare(headRef: $headRevision) { behindBy }
+    }
+  }
+}
+"#;
+
+const STACK_CHILDREN_QUERY: &str = r#"
+query StackChildren(
+  $owner: String!
+  $name: String!
+  $baseRef: String!
+  $cursor: String
+) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: 100, after: $cursor, states: OPEN, baseRefName: $baseRef) {
+      nodes { number baseRefName baseRefOid headRefName headRefOid }
+      pageInfo { hasNextPage endCursor }
     }
   }
 }
@@ -576,7 +593,7 @@ impl GitHubCodeHostTransport {
         self.stack_state_for(
             arguments.repository(),
             arguments.number(),
-            arguments.child_page(),
+            arguments.cursor(),
             credential,
         )
         .await
@@ -587,7 +604,22 @@ impl GitHubCodeHostTransport {
         &self,
         repository: &CodeHostRepository,
         number: CodeHostChangeRequestNumber,
-        child_page: u32,
+        child_cursor: Option<&CodeHostCursor>,
+        credential: &CredentialValue,
+    ) -> Result<StackStateResult, CodeHostTransportFailure> {
+        tokio::time::timeout(
+            DEFAULT_TIMEOUT,
+            self.stack_state_transaction(repository, number, child_cursor, credential),
+        )
+        .await
+        .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
+    }
+
+    async fn stack_state_transaction(
+        &self,
+        repository: &CodeHostRepository,
+        number: CodeHostChangeRequestNumber,
+        child_cursor: Option<&CodeHostCursor>,
         credential: &CredentialValue,
     ) -> Result<StackStateResult, CodeHostTransportFailure> {
         let request_url =
@@ -595,144 +627,135 @@ impl GitHubCodeHostTransport {
         let request_value = self.get_json(request_url.clone(), credential).await?;
         let request = parse_stack_request(&request_value, number.get())?;
 
-        let branch_url = self.repository_url(
+        let base_branch_url =
+            self.repository_url(repository, &["branches", request.base_ref.as_str()], None)?;
+        let default_branch_url = self.repository_url(
             repository,
             &["branches", request.default_ref.as_str()],
             None,
         )?;
-        let branch_value = self.get_json(branch_url.clone(), credential).await?;
-        let default_revision = required_string(
-            required_object(required(required_object(&branch_value)?, "commit")?)?,
-            "sha",
+        let (base_branch_value, default_branch_value) = tokio::try_join!(
+            self.get_json(base_branch_url.clone(), credential),
+            self.get_json(default_branch_url.clone(), credential),
         )?;
+        let base_revision = parse_branch_revision(&base_branch_value)?;
+        let default_revision = parse_branch_revision(&default_branch_value)?;
 
-        let base_commits_not_in_head = self
-            .compare_behind_by(
-                repository,
-                request.base_ref.as_str(),
-                request.base_revision.as_str(),
-                request.head_revision.as_str(),
-                credential,
-            )
-            .await?;
-        let main_commits_not_in_base = self
-            .compare_behind_by(
-                repository,
-                request.default_ref.as_str(),
-                default_revision.as_str(),
-                request.base_revision.as_str(),
-                credential,
-            )
-            .await?;
-        let main_commits_not_in_child_base = self
-            .compare_behind_by(
-                repository,
-                request.default_ref.as_str(),
-                default_revision.as_str(),
-                request.head_revision.as_str(),
-                credential,
-            )
-            .await?;
-
-        let child_page_text = child_page.to_string();
-        let children_url = self.repository_url(
-            &request.head_repository,
-            &["pulls"],
-            Some(&[
-                ("state", "open"),
-                ("base", request.head_ref.as_str()),
-                ("per_page", PAGE_SIZE),
-                ("page", child_page_text.as_str()),
-            ]),
-        )?;
-        let children_response = self
-            .send_authenticated(Method::GET, children_url.clone(), None, credential)
-            .await?;
-        let (children_value, completeness) =
-            self.json_page(children_response, StatusCode::OK).await?;
-        let child_values = children_value
-            .as_array()
-            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-        let child_snapshot = child_values
-            .iter()
-            .map(parse_stack_child)
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut children = Vec::with_capacity(child_snapshot.len());
-        for child in &child_snapshot {
-            if child.base_ref != request.head_ref || child.base_revision != request.head_revision {
-                return Err(CodeHostTransportFailure::InvalidResponse);
-            }
-            let child_base_commits_not_in_head = self
-                .compare_behind_by(
-                    &request.head_repository,
-                    request.head_ref.as_str(),
-                    child.base_revision.as_str(),
-                    child.head_revision.as_str(),
+        let (base_commits_not_in_head, main_commits_not_in_base, main_commits_not_in_child_base) =
+            tokio::try_join!(
+                self.compare_behind_by(
+                    repository,
+                    request.base_ref.as_str(),
+                    base_revision.as_str(),
+                    request.head_revision.as_str(),
                     credential,
-                )
-                .await?;
-            children.push(
-                ChildStackState::try_new(
-                    child.number,
-                    child.head_ref.clone(),
-                    child.head_revision.clone(),
-                    child_base_commits_not_in_head,
-                    main_commits_not_in_child_base,
-                )
-                .ok_or(CodeHostTransportFailure::InvalidResponse)?,
-            );
-        }
-        let children_truncated = completeness == CodeHostResultCompleteness::Truncated;
-        let children_next_cursor = if children_truncated {
-            Some(
-                child_page
-                    .checked_add(1)
-                    .ok_or(CodeHostTransportFailure::InvalidResponse)?
-                    .to_string(),
+                ),
+                self.compare_behind_by(
+                    repository,
+                    request.default_ref.as_str(),
+                    default_revision.as_str(),
+                    base_revision.as_str(),
+                    credential,
+                ),
+                self.compare_behind_by(
+                    repository,
+                    request.default_ref.as_str(),
+                    default_revision.as_str(),
+                    request.head_revision.as_str(),
+                    credential,
+                ),
+            )?;
+
+        let (child_snapshot, children_truncated, children_next_cursor) = self
+            .stack_children_page(
+                &request.head_repository,
+                request.head_ref.as_str(),
+                child_cursor,
+                credential,
             )
-        } else {
-            None
-        };
-        let current_request =
-            parse_stack_request(&self.get_json(request_url, credential).await?, number.get())?;
-        let current_default_revision = required_string(
-            required_object(required(
-                required_object(&self.get_json(branch_url, credential).await?)?,
-                "commit",
-            )?)?,
-            "sha",
+            .await?;
+        let parent_head_ref = request.head_ref.as_str();
+        let parent_head_revision = request.head_revision.as_str();
+        let head_repository = &request.head_repository;
+        let mut indexed_children =
+            futures_util::stream::iter(child_snapshot.iter().cloned().enumerate())
+                .map(|(index, child)| async move {
+                    if child.base_ref != parent_head_ref {
+                        return Err(CodeHostTransportFailure::InvalidResponse);
+                    }
+                    let child_base_commits_not_in_head = self
+                        .compare_behind_by(
+                            head_repository,
+                            parent_head_ref,
+                            parent_head_revision,
+                            child.head_revision.as_str(),
+                            credential,
+                        )
+                        .await?;
+                    let state = ChildStackState::try_new(
+                        child.number,
+                        child.head_ref,
+                        child.head_revision,
+                        child_base_commits_not_in_head,
+                        main_commits_not_in_child_base,
+                    )
+                    .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+                    Ok((index, state))
+                })
+                .buffer_unordered(MAX_STACK_COMPARISONS_IN_FLIGHT)
+                .collect::<Vec<Result<_, _>>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?;
+        indexed_children.sort_by_key(|(index, _)| *index);
+        let children = indexed_children
+            .into_iter()
+            .map(|(_, child)| child)
+            .collect();
+
+        let (
+            current_request_value,
+            current_base_branch_value,
+            current_default_branch_value,
+            current_children,
+        ) = tokio::try_join!(
+            self.get_json(request_url, credential),
+            self.get_json(base_branch_url, credential),
+            self.get_json(default_branch_url, credential),
+            self.stack_children_page(
+                &request.head_repository,
+                request.head_ref.as_str(),
+                child_cursor,
+                credential,
+            ),
         )?;
-        let current_children_response = self
-            .send_authenticated(Method::GET, children_url, None, credential)
-            .await?;
-        let (current_children_value, current_completeness) = self
-            .json_page(current_children_response, StatusCode::OK)
-            .await?;
-        let current_child_values = current_children_value
-            .as_array()
-            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-        let current_child_snapshot = current_child_values
-            .iter()
-            .map(parse_stack_child)
-            .collect::<Result<Vec<_>, _>>()?;
+        let current_request = parse_stack_request(&current_request_value, number.get())?;
+        let current_base_revision = parse_branch_revision(&current_base_branch_value)?;
+        let current_default_revision = parse_branch_revision(&current_default_branch_value)?;
+        let (current_child_snapshot, current_children_truncated, current_children_next_cursor) =
+            current_children;
         ensure_stack_snapshot_unchanged(
             StackSnapshot {
                 request: &request,
+                base_revision: base_revision.as_str(),
                 default_revision: default_revision.as_str(),
                 children: &child_snapshot,
-                completeness,
+                children_truncated,
+                children_next_cursor: children_next_cursor.as_deref(),
             },
             StackSnapshot {
                 request: &current_request,
+                base_revision: current_base_revision.as_str(),
                 default_revision: current_default_revision.as_str(),
                 children: &current_child_snapshot,
-                completeness: current_completeness,
+                children_truncated: current_children_truncated,
+                children_next_cursor: current_children_next_cursor.as_deref(),
             },
         )?;
         StackStateResult::try_new(StackStateFields {
             number: number.get(),
             base_ref: request.base_ref,
-            base_revision: request.base_revision,
+            base_revision,
             head_ref: request.head_ref,
             head_revision: request.head_revision,
             default_ref: request.default_ref,
@@ -746,13 +769,60 @@ impl GitHubCodeHostTransport {
         .ok_or(CodeHostTransportFailure::InvalidResponse)
     }
 
+    async fn stack_children_page(
+        &self,
+        repository: &CodeHostRepository,
+        base_ref: &str,
+        cursor: Option<&CodeHostCursor>,
+        credential: &CredentialValue,
+    ) -> Result<(Vec<StackChildFacts>, bool, Option<String>), CodeHostTransportFailure> {
+        let (owner, name) = repository
+            .as_str()
+            .split_once('/')
+            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        let value = self
+            .graphql_read(
+                STACK_CHILDREN_QUERY,
+                serde_json::json!({
+                    "baseRef": base_ref,
+                    "cursor": cursor.map(CodeHostCursor::as_str),
+                    "name": name,
+                    "owner": owner,
+                }),
+                credential,
+            )
+            .await?;
+        let connection = required_object(nested(&value, &["data", "repository", "pullRequests"])?)?;
+        let children = required(connection, "nodes")?
+            .as_array()
+            .ok_or(CodeHostTransportFailure::InvalidResponse)?
+            .iter()
+            .map(parse_stack_child)
+            .collect::<Result<Vec<_>, _>>()?;
+        let (truncated, next_cursor) = next_page(connection)?;
+        Ok((children, truncated, next_cursor))
+    }
+
     async fn review_gate_check(
         &self,
         arguments: ReviewGateCheckArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
-        let stack = self
-            .stack_state_for(arguments.repository(), arguments.number(), 1, credential)
+        tokio::time::timeout(
+            DEFAULT_TIMEOUT,
+            self.review_gate_transaction(arguments, credential),
+        )
+        .await
+        .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
+    }
+
+    async fn review_gate_transaction(
+        &self,
+        arguments: ReviewGateCheckArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        let initial_stack = self
+            .stack_state_for(arguments.repository(), arguments.number(), None, credential)
             .await?;
         let inventory = self
             .thread_inventory_for(arguments.repository(), arguments.number(), None, credential)
@@ -760,6 +830,12 @@ impl GitHubCodeHostTransport {
         let convergence = self
             .convergence_state_for(arguments.repository(), arguments.number(), credential)
             .await?;
+        let stack = self
+            .stack_state_for(arguments.repository(), arguments.number(), None, credential)
+            .await?;
+        if initial_stack != stack {
+            return Err(CodeHostTransportFailure::InvalidResponse);
+        }
         Ok(CodeHostResult::ReviewGateCheck(
             ReviewGateCheckResult::compose(arguments.purpose(), &convergence, &stack, &inventory),
         ))
@@ -1479,7 +1555,7 @@ fn parse_rollup_context(
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StackRequestFacts {
     base_ref: String,
-    base_revision: String,
+    base_snapshot_revision: String,
     head_ref: String,
     head_revision: String,
     head_repository: CodeHostRepository,
@@ -1503,7 +1579,7 @@ fn parse_stack_request(
     let base_repository = required_object(required(base, "repo")?)?;
     Ok(StackRequestFacts {
         base_ref: required_string(base, "ref")?,
-        base_revision: required_string(base, "sha")?,
+        base_snapshot_revision: required_string(base, "sha")?,
         head_ref: required_string(head, "ref")?,
         head_revision: required_string(head, "sha")?,
         head_repository: CodeHostRepository::try_new(required_string(
@@ -1515,11 +1591,20 @@ fn parse_stack_request(
     })
 }
 
+fn parse_branch_revision(value: &serde_json::Value) -> Result<String, CodeHostTransportFailure> {
+    required_string(
+        required_object(required(required_object(value)?, "commit")?)?,
+        "sha",
+    )
+}
+
 struct StackSnapshot<'a> {
     request: &'a StackRequestFacts,
+    base_revision: &'a str,
     default_revision: &'a str,
     children: &'a [StackChildFacts],
-    completeness: CodeHostResultCompleteness,
+    children_truncated: bool,
+    children_next_cursor: Option<&'a str>,
 }
 
 fn ensure_stack_snapshot_unchanged(
@@ -1527,19 +1612,22 @@ fn ensure_stack_snapshot_unchanged(
     current: StackSnapshot<'_>,
 ) -> Result<(), CodeHostTransportFailure> {
     if initial.request != current.request
+        || initial.base_revision != current.base_revision
         || initial.default_revision != current.default_revision
         || initial.children != current.children
-        || initial.completeness != current.completeness
+        || initial.children_truncated != current.children_truncated
+        || initial.children_next_cursor != current.children_next_cursor
     {
         return Err(CodeHostTransportFailure::InvalidResponse);
     }
     Ok(())
 }
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StackChildFacts {
     number: u32,
     base_ref: String,
-    base_revision: String,
+    base_snapshot_revision: String,
     head_ref: String,
     head_revision: String,
 }
@@ -1551,14 +1639,12 @@ fn parse_stack_child(
     let number = required_u64(object, "number")?
         .try_into()
         .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
-    let base = required_object(required(object, "base")?)?;
-    let head = required_object(required(object, "head")?)?;
     Ok(StackChildFacts {
         number,
-        base_ref: required_string(base, "ref")?,
-        base_revision: required_string(base, "sha")?,
-        head_ref: required_string(head, "ref")?,
-        head_revision: required_string(head, "sha")?,
+        base_ref: required_string(object, "baseRefName")?,
+        base_snapshot_revision: required_string(object, "baseRefOid")?,
+        head_ref: required_string(object, "headRefName")?,
+        head_revision: required_string(object, "headRefOid")?,
     })
 }
 
@@ -1961,6 +2047,45 @@ mod tests {
         assert!(!STACK_COMPARISON_QUERY.contains("files"));
     }
 
+    /// Child discovery projects only the bounded identities needed for ancestry.
+    #[test]
+    fn stack_children_query_is_field_projected() {
+        assert!(STACK_CHILDREN_QUERY.contains("number baseRefName baseRefOid"));
+        assert!(STACK_CHILDREN_QUERY.contains("headRefName headRefOid"));
+        assert!(!STACK_CHILDREN_QUERY.contains("title"));
+        assert!(!STACK_CHILDREN_QUERY.contains("body"));
+        assert!(!STACK_CHILDREN_QUERY.contains("commits"));
+        assert!(!STACK_CHILDREN_QUERY.contains("files"));
+    }
+
+    /// Child parsing preserves the code host's potentially stale base snapshot.
+    #[test]
+    fn stack_child_parser_preserves_base_snapshot() {
+        const BASE_REF: &str = "feature";
+        const BASE_SNAPSHOT: &str = "1111111111111111111111111111111111111111";
+        const HEAD_REF: &str = "child";
+        const HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
+        const NUMBER: u32 = 18;
+        let value = serde_json::json!({
+            "number": NUMBER,
+            "baseRefName": BASE_REF,
+            "baseRefOid": BASE_SNAPSHOT,
+            "headRefName": HEAD_REF,
+            "headRefOid": HEAD_REVISION,
+        });
+
+        assert_eq!(
+            parse_stack_child(&value),
+            Ok(StackChildFacts {
+                number: NUMBER,
+                base_ref: String::from(BASE_REF),
+                base_snapshot_revision: String::from(BASE_SNAPSHOT),
+                head_ref: String::from(HEAD_REF),
+                head_revision: String::from(HEAD_REVISION),
+            })
+        );
+    }
+
     /// Stack ancestry reads retain only the count projection and authenticate
     /// it against the exact base revision used by the snapshot.
     #[test]
@@ -2008,10 +2133,10 @@ mod tests {
         );
     }
 
-    /// A changed immediate-base revision invalidates comparisons made from the
-    /// earlier stack snapshot.
+    /// A changed request-level base snapshot invalidates the surrounding stack
+    /// transaction even though comparisons use the separately read branch tip.
     #[test]
-    fn stack_snapshot_rejects_changed_base_revision() {
+    fn stack_snapshot_rejects_changed_request_base_snapshot() {
         const INITIAL_BASE: &str = "1111111111111111111111111111111111111111";
         const CURRENT_BASE: &str = "3333333333333333333333333333333333333333";
         const DEFAULT_REVISION: &str = "1111111111111111111111111111111111111111";
@@ -2054,15 +2179,19 @@ mod tests {
             ensure_stack_snapshot_unchanged(
                 StackSnapshot {
                     request: &initial,
+                    base_revision: DEFAULT_REVISION,
                     default_revision: DEFAULT_REVISION,
                     children: &[],
-                    completeness: CodeHostResultCompleteness::Complete,
+                    children_truncated: false,
+                    children_next_cursor: None,
                 },
                 StackSnapshot {
                     request: &current,
+                    base_revision: DEFAULT_REVISION,
                     default_revision: DEFAULT_REVISION,
                     children: &[],
-                    completeness: CodeHostResultCompleteness::Complete,
+                    children_truncated: false,
+                    children_next_cursor: None,
                 },
             ),
             Err(CodeHostTransportFailure::InvalidResponse)
@@ -2093,15 +2222,19 @@ mod tests {
             ensure_stack_snapshot_unchanged(
                 StackSnapshot {
                     request: &request,
+                    base_revision: INITIAL_DEFAULT,
                     default_revision: INITIAL_DEFAULT,
                     children: &[],
-                    completeness: CodeHostResultCompleteness::Complete,
+                    children_truncated: false,
+                    children_next_cursor: None,
                 },
                 StackSnapshot {
                     request: &request,
+                    base_revision: INITIAL_DEFAULT,
                     default_revision: CURRENT_DEFAULT,
                     children: &[],
-                    completeness: CodeHostResultCompleteness::Complete,
+                    children_truncated: false,
+                    children_next_cursor: None,
                 },
             ),
             Err(CodeHostTransportFailure::InvalidResponse)
@@ -2116,7 +2249,7 @@ mod tests {
         const HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
         let request = StackRequestFacts {
             base_ref: String::from("main"),
-            base_revision: String::from(DEFAULT_REVISION),
+            base_snapshot_revision: String::from(DEFAULT_REVISION),
             head_ref: String::from("feature"),
             head_revision: String::from(HEAD_REVISION),
             head_repository: CodeHostRepository::try_new(String::from("owner/repository"))
@@ -2126,14 +2259,14 @@ mod tests {
         let initial = [StackChildFacts {
             number: 18,
             base_ref: String::from("feature"),
-            base_revision: String::from(HEAD_REVISION),
+            base_snapshot_revision: String::from(HEAD_REVISION),
             head_ref: String::from("child"),
             head_revision: String::from("3333333333333333333333333333333333333333"),
         }];
         let current = [StackChildFacts {
             number: 19,
             base_ref: String::from("feature"),
-            base_revision: String::from(HEAD_REVISION),
+            base_snapshot_revision: String::from(HEAD_REVISION),
             head_ref: String::from("other-child"),
             head_revision: String::from("4444444444444444444444444444444444444444"),
         }];
@@ -2142,15 +2275,19 @@ mod tests {
             ensure_stack_snapshot_unchanged(
                 StackSnapshot {
                     request: &request,
+                    base_revision: DEFAULT_REVISION,
                     default_revision: DEFAULT_REVISION,
                     children: &initial,
-                    completeness: CodeHostResultCompleteness::Complete,
+                    children_truncated: false,
+                    children_next_cursor: None,
                 },
                 StackSnapshot {
                     request: &request,
+                    base_revision: DEFAULT_REVISION,
                     default_revision: DEFAULT_REVISION,
                     children: &current,
-                    completeness: CodeHostResultCompleteness::Complete,
+                    children_truncated: false,
+                    children_next_cursor: None,
                 },
             ),
             Err(CodeHostTransportFailure::InvalidResponse)

@@ -535,7 +535,7 @@ pub(crate) fn reviewer_verdict_evidence(
     let latest_response_at = reviewed_at.iter().chain(latest_starvation_at.iter()).max();
     let review_request_in_flight = latest_review_request_at
         .as_ref()
-        .is_some_and(|requested| latest_response_at.is_none_or(|responded| requested > responded));
+        .is_some_and(|requested| latest_response_at.is_none_or(|responded| requested >= responded));
     ReviewerVerdictEvidence::try_new(ReviewerVerdictFields {
         status,
         reviewed_revision,
@@ -834,7 +834,7 @@ mod tests {
     #[test]
     fn substring_login_is_not_reviewer_evidence() {
         let evidence = evidence(vec![ReviewerActivity {
-            author: Some(String::from("not-codex-reviewer")),
+            author: Some(String::from("chatgpt-codex-connector-mirror")),
             actor_type: Some(String::from("Bot")),
             author_association: String::from("NONE"),
             body: format!("Reviewed commit: `{HEAD_REVISION}`"),
@@ -892,6 +892,29 @@ mod tests {
                 author_association: String::from("OWNER"),
                 body: String::from("@codex review\nReviewed head: current"),
                 created_at: String::from(LATER),
+            },
+        ]);
+
+        assert!(evidence.request_in_flight());
+    }
+
+    /// Equal protocol timestamps have no reliable response ordering and fail closed.
+    #[test]
+    fn tied_review_request_remains_in_flight() {
+        let evidence = evidence(vec![
+            ReviewerActivity {
+                author: Some(String::from("chatgpt-codex-connector")),
+                actor_type: Some(String::from("Bot")),
+                author_association: String::from("NONE"),
+                body: format!("Reviewed commit: `{HEAD_REVISION}`"),
+                created_at: String::from(EARLIER),
+            },
+            ReviewerActivity {
+                author: Some(String::from("owner")),
+                actor_type: Some(String::from("User")),
+                author_association: String::from("OWNER"),
+                body: String::from("@codex review"),
+                created_at: String::from(EARLIER),
             },
         ]);
 

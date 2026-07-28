@@ -34,7 +34,7 @@ use signalbox_tool_contract::{ToolContractCompileError, compile_contract_definit
 
 pub use arguments::{
     CodeHostChangeRequestNumber, CodeHostCommentBody, CodeHostCursor, CodeHostFilePath,
-    CodeHostOpaqueId, CodeHostPageCursor, CodeHostRepository, CodeHostRevision,
+    CodeHostOpaqueId, CodeHostRepository, CodeHostRevision,
 };
 pub use change_request_changed_files::ChangedFilesArguments;
 pub use change_request_checks_status::ChecksStatusArguments;
@@ -1198,9 +1198,9 @@ mod tests {
                   "properties": {
                     "cursor": {
                       "description": "Optional opaque child-page continuation cursor.",
-                      "maxLength": 9,
+                      "maxLength": 512,
                       "minLength": 1,
-                      "pattern": "^[1-9][0-9]{0,8}$",
+                      "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
                       "type": [
                         "string",
                         "null"
@@ -1467,7 +1467,7 @@ mod tests {
         assert_valid(
             &catalog(),
             change_request_stack_state::NAME,
-            r#"{"cursor":"2","number":17,"repository":"owner/repository"}"#,
+            r#"{"cursor":"opaque-child-page","number":17,"repository":"owner/repository"}"#,
         );
     }
 

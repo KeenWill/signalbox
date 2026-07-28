@@ -901,7 +901,7 @@ enum ExpectedCodeHostOperation {
     StackState {
         repository: &'static str,
         number: u32,
-        page: u32,
+        cursor: Option<&'static str>,
     },
     ThreadInventory {
         repository: &'static str,
@@ -1000,12 +1000,12 @@ fn assert_code_host_operation(actual: &CodeHostOperation, expected: ExpectedCode
             ExpectedCodeHostOperation::StackState {
                 repository,
                 number,
-                page,
+                cursor,
             },
         ) => {
             assert_eq!(arguments.repository().as_str(), repository);
             assert_eq!(arguments.number().get(), number);
-            assert_eq!(arguments.child_page(), page);
+            assert_eq!(arguments.cursor().map(|value| value.as_str()), cursor);
         }
         (
             CodeHostOperation::ThreadInventory(arguments),
@@ -1261,11 +1261,19 @@ fn rerun_failed_jobs_result() -> CodeHostResult {
     )
 }
 
+const REVIEW_SLOG_HEAD_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+const REVIEW_SLOG_BASE_REVISION: &str = "1111111111111111111111111111111111111111";
+const REVIEW_SLOG_REVIEWED_AT: &str = "2026-07-27T10:00:00Z";
+const REVIEW_SLOG_REPOSITORY: &str = "owner/repository";
+const REVIEW_SLOG_NUMBER: u32 = 17;
+const REVIEW_SLOG_BASE_REF: &str = "main";
+const REVIEW_SLOG_HEAD_REF: &str = "feature";
+
 fn reviewer_verdict_result() -> ReviewerVerdictEvidence {
     ReviewerVerdictEvidence::try_new(ReviewerVerdictFields {
         status: ReviewerVerdictStatus::CurrentHead,
-        reviewed_revision: Some(String::from("0123456789abcdef0123456789abcdef01234567")),
-        reviewed_at: Some(String::from("2026-07-27T10:00:00Z")),
+        reviewed_revision: Some(String::from(REVIEW_SLOG_HEAD_REVISION)),
+        reviewed_at: Some(String::from(REVIEW_SLOG_REVIEWED_AT)),
         starvation_after_verdict: false,
         latest_starvation_at: None,
         latest_review_request_at: None,
@@ -1279,7 +1287,7 @@ fn reviewer_verdict_result() -> ReviewerVerdictEvidence {
 
 fn convergence_state_evidence() -> ConvergenceStateResult {
     ConvergenceStateResult::try_new(ConvergenceStateFields {
-        head_revision: String::from("0123456789abcdef0123456789abcdef01234567"),
+        head_revision: String::from(REVIEW_SLOG_HEAD_REVISION),
         mergeable_state: String::from("MERGEABLE"),
         ci_rollup_state: Some(String::from("SUCCESS")),
         checks: Vec::new(),
@@ -1302,13 +1310,13 @@ fn convergence_state_result() -> CodeHostResult {
 
 fn stack_state_evidence() -> StackStateResult {
     StackStateResult::try_new(StackStateFields {
-        number: 17,
-        base_ref: String::from("main"),
-        base_revision: String::from("1111111111111111111111111111111111111111"),
-        head_ref: String::from("feature"),
-        head_revision: String::from("0123456789abcdef0123456789abcdef01234567"),
-        default_ref: String::from("main"),
-        default_revision: String::from("1111111111111111111111111111111111111111"),
+        number: REVIEW_SLOG_NUMBER,
+        base_ref: String::from(REVIEW_SLOG_BASE_REF),
+        base_revision: String::from(REVIEW_SLOG_BASE_REVISION),
+        head_ref: String::from(REVIEW_SLOG_HEAD_REF),
+        head_revision: String::from(REVIEW_SLOG_HEAD_REVISION),
+        default_ref: String::from(REVIEW_SLOG_BASE_REF),
+        default_revision: String::from(REVIEW_SLOG_BASE_REVISION),
         base_commits_not_in_head: 0,
         main_commits_not_in_base: 0,
         children: Vec::new(),
@@ -1336,7 +1344,7 @@ fn thread_inventory_evidence() -> ThreadInventoryResult {
     })
     .expect("fixture inventory item is bounded");
     ThreadInventoryResult::try_new(
-        String::from("0123456789abcdef0123456789abcdef01234567"),
+        String::from(REVIEW_SLOG_HEAD_REVISION),
         vec![thread],
         false,
         None,
@@ -2097,7 +2105,8 @@ async fn tier_one_change_request_convergence_state_completes_offline_tool_loop()
 -> Result<(), Box<dyn Error>> {
     code_host_tool_completes_offline(
         CHANGE_REQUEST_CONVERGENCE_STATE_NAME,
-        serde_json::json!({"number": 17, "repository": "owner/repository"}).to_string(),
+        serde_json::json!({"number": REVIEW_SLOG_NUMBER, "repository": REVIEW_SLOG_REPOSITORY})
+            .to_string(),
         convergence_state_result(),
         serde_json::json!({
             "buried_escalations": [],
@@ -2106,7 +2115,7 @@ async fn tier_one_change_request_convergence_state_completes_offline_tool_loop()
             "checks_truncated": false,
             "ci_green": true,
             "ci_rollup_state": "SUCCESS",
-            "head_revision": "0123456789abcdef0123456789abcdef01234567",
+            "head_revision": REVIEW_SLOG_HEAD_REVISION,
             "mergeable_state": "MERGEABLE",
             "open_escalations": [],
             "reviewer_verdict": {
@@ -2114,8 +2123,8 @@ async fn tier_one_change_request_convergence_state_completes_offline_tool_loop()
                 "latest_starvation_at": null,
                 "latest_review_request_at": null,
                 "review_request_in_flight": false,
-                "reviewed_at": "2026-07-27T10:00:00Z",
-                "reviewed_revision": "0123456789abcdef0123456789abcdef01234567",
+                "reviewed_at": REVIEW_SLOG_REVIEWED_AT,
+                "reviewed_revision": REVIEW_SLOG_HEAD_REVISION,
                 "reviews_previous_cursor": null,
                 "source_truncated": false,
                 "starvation_after_verdict": false,
@@ -2130,8 +2139,8 @@ async fn tier_one_change_request_convergence_state_completes_offline_tool_loop()
             "verdict": "converged",
         }),
         ExpectedCodeHostOperation::ConvergenceState {
-            repository: "owner/repository",
-            number: 17,
+            repository: REVIEW_SLOG_REPOSITORY,
+            number: REVIEW_SLOG_NUMBER,
         },
         ExpectedCodeHostApproval::Auto,
     )
@@ -2146,32 +2155,32 @@ async fn tier_one_change_request_stack_state_completes_offline_tool_loop()
     code_host_tool_completes_offline(
         CHANGE_REQUEST_STACK_STATE_NAME,
         serde_json::json!({
-            "cursor": "2",
-            "number": 17,
-            "repository": "owner/repository",
+            "cursor": "opaque-child-page",
+            "number": REVIEW_SLOG_NUMBER,
+            "repository": REVIEW_SLOG_REPOSITORY,
         })
         .to_string(),
         stack_state_result(),
         serde_json::json!({
             "base_commits_not_in_head": 0,
             "base_needs_merge_forward": false,
-            "base_ref": "main",
-            "base_revision": "1111111111111111111111111111111111111111",
+            "base_ref": REVIEW_SLOG_BASE_REF,
+            "base_revision": REVIEW_SLOG_BASE_REVISION,
             "children": [],
             "children_next_cursor": null,
             "children_truncated": false,
-            "default_ref": "main",
-            "default_revision": "1111111111111111111111111111111111111111",
-            "head_ref": "feature",
-            "head_revision": "0123456789abcdef0123456789abcdef01234567",
+            "default_ref": REVIEW_SLOG_BASE_REF,
+            "default_revision": REVIEW_SLOG_BASE_REVISION,
+            "head_ref": REVIEW_SLOG_HEAD_REF,
+            "head_revision": REVIEW_SLOG_HEAD_REVISION,
             "main_commits_not_in_base": 0,
             "main_missing_from_base_chain": false,
-            "number": 17,
+            "number": REVIEW_SLOG_NUMBER,
         }),
         ExpectedCodeHostOperation::StackState {
-            repository: "owner/repository",
-            number: 17,
-            page: 2,
+            repository: REVIEW_SLOG_REPOSITORY,
+            number: REVIEW_SLOG_NUMBER,
+            cursor: Some("opaque-child-page"),
         },
         ExpectedCodeHostApproval::Auto,
     )
@@ -2188,14 +2197,14 @@ async fn tier_one_change_request_thread_inventory_completes_offline_tool_loop()
         CHANGE_REQUEST_THREAD_INVENTORY_NAME,
         serde_json::json!({
             "cursor": "opaque-cursor",
-            "number": 17,
-            "repository": "owner/repository",
+            "number": REVIEW_SLOG_NUMBER,
+            "repository": REVIEW_SLOG_REPOSITORY,
         })
         .to_string(),
         thread_inventory_result(),
         serde_json::json!({
             "next_cursor": null,
-            "head_revision": "0123456789abcdef0123456789abcdef01234567",
+            "head_revision": REVIEW_SLOG_HEAD_REVISION,
             "threads": [{
                 "author": "review-bot",
                 "author_class": "bot",
@@ -2210,8 +2219,8 @@ async fn tier_one_change_request_thread_inventory_completes_offline_tool_loop()
             "truncated": false,
         }),
         ExpectedCodeHostOperation::ThreadInventory {
-            repository: "owner/repository",
-            number: 17,
+            repository: REVIEW_SLOG_REPOSITORY,
+            number: REVIEW_SLOG_NUMBER,
             cursor: Some("opaque-cursor"),
         },
         ExpectedCodeHostApproval::Auto,
@@ -2227,21 +2236,21 @@ async fn tier_one_review_gate_check_completes_offline_tool_loop() -> Result<(), 
     code_host_tool_completes_offline(
         REVIEW_GATE_CHECK_NAME,
         serde_json::json!({
-            "number": 17,
+            "number": REVIEW_SLOG_NUMBER,
             "purpose": "declare_convergence",
-            "repository": "owner/repository",
+            "repository": REVIEW_SLOG_REPOSITORY,
         })
         .to_string(),
         review_gate_result(),
         serde_json::json!({
             "blockers": [],
-            "head_revision": "0123456789abcdef0123456789abcdef01234567",
+            "head_revision": REVIEW_SLOG_HEAD_REVISION,
             "purpose": "declare_convergence",
             "ready": true,
         }),
         ExpectedCodeHostOperation::ReviewGateCheck {
-            repository: "owner/repository",
-            number: 17,
+            repository: REVIEW_SLOG_REPOSITORY,
+            number: REVIEW_SLOG_NUMBER,
             purpose: ReviewGatePurpose::DeclareConvergence,
         },
         ExpectedCodeHostApproval::Auto,

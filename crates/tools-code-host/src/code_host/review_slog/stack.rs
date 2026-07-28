@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 use crate::code_host::{
-    arguments::valid_revision,
+    arguments::{valid_cursor, valid_revision},
     result::{MAX_RESULT_ITEMS, valid_required_text},
 };
 
@@ -107,12 +107,10 @@ pub struct StackStateFields {
 impl StackStateResult {
     /// Validates one bounded stack-state result.
     pub fn try_new(fields: StackStateFields) -> Option<Self> {
-        let cursor_valid = fields.children_next_cursor.as_deref().is_none_or(|cursor| {
-            !cursor.is_empty()
-                && cursor.len() <= 9
-                && !cursor.starts_with('0')
-                && cursor.bytes().all(|byte| byte.is_ascii_digit())
-        });
+        let cursor_valid = fields
+            .children_next_cursor
+            .as_deref()
+            .is_none_or(valid_cursor);
         let valid = fields.number > 0
             && valid_required_text(&fields.base_ref)
             && valid_revision(&fields.base_revision)
@@ -193,5 +191,33 @@ impl StackStateResult {
             "main_missing_from_base_chain": self.main_commits_not_in_base > 0,
             "number": self.number,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stack continuations use the same opaque cursor admission as arguments.
+    #[test]
+    fn opaque_child_cursor_is_admitted() {
+        const BASE_REVISION: &str = "1111111111111111111111111111111111111111";
+        const HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
+        let result = StackStateResult::try_new(StackStateFields {
+            number: 17,
+            base_ref: String::from("main"),
+            base_revision: String::from(BASE_REVISION),
+            head_ref: String::from("feature"),
+            head_revision: String::from(HEAD_REVISION),
+            default_ref: String::from("main"),
+            default_revision: String::from(BASE_REVISION),
+            base_commits_not_in_head: 0,
+            main_commits_not_in_base: 0,
+            children: Vec::new(),
+            children_truncated: true,
+            children_next_cursor: Some(String::from("opaque-child-page")),
+        });
+
+        assert!(result.is_some());
     }
 }
