@@ -553,19 +553,90 @@ async fn assert_process_exits(pid: rustix::process::Pid) {
     }
 }
 
-/// Whether `pid` names a still-running process. A signalable pid that `/proc`
-/// reports as a zombie has already exited (its slot only awaits reaping); where
-/// `/proc` is unavailable (macOS), a signalable pid is treated as live, the
-/// best signal available.
+/// Whether `pid` names a still-running process, taking the two operating-system
+/// observations the classification needs and handing them to
+/// [`classify_process_liveness`], so every arm is pinned by a focused test
+/// rather than only by whichever outcome the host running the descendant
+/// integration test happens to produce.
 #[cfg(unix)]
 fn process_is_live(pid: rustix::process::Pid) -> bool {
-    if rustix::process::test_kill_process(pid).is_err() {
+    let signalable = rustix::process::test_kill_process(pid).is_ok();
+    // Read the stat line only for a pid still worth classifying; an
+    // unsignalable one is already gone.
+    let proc_stat = signalable.then(|| proc_stat_line(pid)).flatten();
+    classify_process_liveness(signalable, proc_stat.as_deref())
+}
+
+/// The process's `/proc/<pid>/stat` line, or `None` where `/proc` is
+/// unavailable (macOS) or the entry vanished between the two observations.
+#[cfg(unix)]
+fn proc_stat_line(pid: rustix::process::Pid) -> Option<String> {
+    std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero().get())).ok()
+}
+
+/// Classifies liveness from those observations. An unsignalable pid is gone. A
+/// signalable pid that `/proc` reports as a zombie has already exited — its slot
+/// only awaits reaping, and `test_kill_process` keeps succeeding for it — so
+/// treating it as live would make cleanup time out on a dead descendant. Where
+/// `/proc` is unavailable (macOS), a signalable pid is treated as live, the best
+/// signal available.
+#[cfg(unix)]
+fn classify_process_liveness(signalable: bool, proc_stat: Option<&str>) -> bool {
+    if !signalable {
         return false;
     }
-    match std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero().get())) {
-        Ok(stat) => !proc_stat_is_zombie(&stat),
-        Err(_) => true,
+    match proc_stat {
+        Some(stat) => !proc_stat_is_zombie(stat),
+        None => true,
     }
+}
+
+/// An unsignalable pid names no process, so it is not live.
+#[cfg(unix)]
+#[test]
+fn unsignalable_process_is_not_live() {
+    assert!(!classify_process_liveness(false, None));
+}
+
+/// Signalability decides first: a stale stat line for a pid that can no longer
+/// be signalled cannot revive it.
+#[cfg(unix)]
+#[test]
+fn unsignalable_process_with_a_running_stat_line_is_not_live() {
+    assert!(!classify_process_liveness(
+        false,
+        Some("4321 (codex) R 1 4321 4321 0 -1")
+    ));
+}
+
+/// Where `/proc` is unavailable, a signalable pid is live — the fallback that
+/// keeps the macOS host from reporting every descendant as already exited.
+#[cfg(unix)]
+#[test]
+fn signalable_process_without_proc_is_live() {
+    assert!(classify_process_liveness(true, None));
+}
+
+/// A signalable pid whose stat line reports a zombie has exited; reporting it
+/// live would make the cleanup observation time out on a dead descendant.
+#[cfg(unix)]
+#[test]
+fn signalable_zombie_is_not_live() {
+    assert!(!classify_process_liveness(
+        true,
+        Some("4321 (codex) Z 1 4321 4321 0 -1")
+    ));
+}
+
+/// A signalable pid whose stat line reports a running process is live;
+/// reporting it exited would let cleanup pass with a surviving descendant.
+#[cfg(unix)]
+#[test]
+fn signalable_running_process_is_live() {
+    assert!(classify_process_liveness(
+        true,
+        Some("4321 (codex) R 1 4321 4321 0 -1")
+    ));
 }
 
 /// A `/proc/<pid>/stat` line reports a zombie as state `Z` in the field after
