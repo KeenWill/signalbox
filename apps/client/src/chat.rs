@@ -289,20 +289,6 @@ impl ChatTurns {
         false
     }
 
-    fn synchronize_active_phase(
-        &mut self,
-        snapshot: &mut crate::transcript::TranscriptSnapshot,
-        turn_id: CanonicalUuid,
-    ) -> Result<(), ClientError> {
-        self.approval_request = match snapshot.turn_state(turn_id)? {
-            Some(TurnState::ActiveAwaitingToolApproval { tool_request_id }) => {
-                Some(tool_request_id)
-            }
-            _ => None,
-        };
-        Ok(())
-    }
-
     fn resynchronize(
         &mut self,
         snapshot: &mut crate::transcript::TranscriptSnapshot,
@@ -311,7 +297,12 @@ impl ChatTurns {
             Some(turn_id) => {
                 self.awaited_turn = Some(turn_id);
                 self.active_turn = Some(turn_id);
-                self.synchronize_active_phase(snapshot, turn_id)?;
+                self.approval_request = match snapshot.turn_state(turn_id)? {
+                    Some(TurnState::ActiveAwaitingToolApproval { tool_request_id }) => {
+                        Some(tool_request_id)
+                    }
+                    _ => None,
+                };
             }
             None => {
                 self.active_turn = None;
@@ -442,10 +433,30 @@ where
     let mut turns = ChatTurns::default();
 
     'resubscribe: loop {
-        let mut connection = client
-            .request(ClientRequest::FollowSession { session_id })
-            .await?;
-        let mut snapshot = read_snapshot(&mut connection, session_id).await?;
+        let mut connection = match await_request(
+            output,
+            &mut interrupts,
+            turns.status(),
+            RequestKind::ReadOnly,
+            client.request(ClientRequest::FollowSession { session_id }),
+        )
+        .await?
+        {
+            RequestWait::Complete(result) => result?,
+            RequestWait::Exit => return Ok(()),
+        };
+        let mut snapshot = match await_request(
+            output,
+            &mut interrupts,
+            turns.status(),
+            RequestKind::ReadOnly,
+            read_snapshot(&mut connection, session_id),
+        )
+        .await?
+        {
+            RequestWait::Complete(result) => result?,
+            RequestWait::Exit => return Ok(()),
+        };
         turns.resynchronize(&mut snapshot)?;
         interrupts.reset();
         let mut observed_cursor = snapshot.cursor();
@@ -486,12 +497,7 @@ where
                                     selection,
                                 )?;
                                 turns.resynchronize(&mut refreshed)?;
-                                render_approval_wait(
-                                    &mut turns,
-                                    output,
-                                    &mut refreshed,
-                                    &event,
-                                )?;
+                                render_approval_wait(&turns, output)?;
                             }
                             match turn_effect {
                                 TurnEventEffect::Activated(turn_id) => output.chat_activated(turn_id)?,
@@ -1138,18 +1144,13 @@ fn update_turns_from_event(turns: &mut ChatTurns, event: &SessionEvent) -> TurnE
     }
 }
 
-fn render_approval_wait(
-    turns: &mut ChatTurns,
-    output: &mut Output<'_>,
-    snapshot: &mut crate::transcript::TranscriptSnapshot,
-    event: &SessionEvent,
-) -> Result<(), ClientError> {
-    let SessionEvent::ToolBatchTransition { turn_id, .. } = event else {
-        return Ok(());
-    };
-    turns.synchronize_active_phase(snapshot, *turn_id)?;
-    if let Some(tool_request_id) = turns.approval_request() {
-        output.chat_awaiting_approval(*turn_id, tool_request_id)?;
+fn render_approval_wait(turns: &ChatTurns, output: &mut Output<'_>) -> Result<(), ClientError> {
+    if let Some(ChatTurnStatus::AwaitingApproval {
+        turn_id,
+        tool_request_id,
+    }) = turns.status()
+    {
+        output.chat_awaiting_approval(turn_id, tool_request_id)?;
     }
     Ok(())
 }
@@ -1630,7 +1631,7 @@ mod tests {
         turns.activated(turn_id);
 
         turns
-            .synchronize_active_phase(&mut first_snapshot, turn_id)
+            .resynchronize(&mut first_snapshot)
             .expect("first approval phase");
         assert_eq!(
             turns.status(),
@@ -1641,7 +1642,7 @@ mod tests {
         );
         assert_eq!(turns.controllable_turn(), None);
         turns
-            .synchronize_active_phase(&mut second_snapshot, turn_id)
+            .resynchronize(&mut second_snapshot)
             .expect("second approval phase");
         assert_eq!(
             turns.status(),

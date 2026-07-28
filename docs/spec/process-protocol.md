@@ -1226,10 +1226,11 @@ interrupt instead names the exact `:approve` or `:deny` decision the turn
 requires; active-only `:stop` and `:steer` are unavailable in that phase. A
 second Ctrl-C exits and explicitly reports that the turn remains running. The
 offer is bound to the exact observed turn phase and is reset by
-resynchronization. Every in-loop side request continues polling Ctrl-C. Exiting
-while a mutation request is in flight reports its potentially ambiguous outcome
-and terminates the loop, so the loop cannot retry with a fresh command identity;
-the printed recovery values remain the standalone exact-retry path.
+resynchronization. Every follow resubscription and in-loop side request
+continues polling Ctrl-C. Exiting while a mutation request is in flight reports
+its potentially ambiguous outcome and terminates the loop, so the loop cannot
+retry with a fresh command identity; the printed recovery values remain the
+standalone exact-retry path.
 
 `:quit` and standard-input EOF use the same honest exit report. While a turn is
 queued, Ctrl-C, `:quit`, or standard-input EOF exits immediately and reports
