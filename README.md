@@ -124,6 +124,13 @@ states. The devenv dev-instance launcher creates that directory and sets mode
 `0700` before executing the daemon; the daemon then binds the socket there. The
 devenv shell
 [exports that path as `SIGNALBOX_SOCKET_PATH` and provides a `signalbox <verb>` convenience](docs/decisions.md#2026-07-28--expose-the-dev-instance-client-from-every-shell-directory).
+That convenience execs Cargo's resolved binary directly rather than through
+`cargo run`, so a shell carrying an ambient `-C prefer-dynamic` (in `RUSTFLAGS`
+or inherited Cargo configuration) produces an executable that needs Cargo's
+runtime library search path, which the direct `exec` does not set; the command
+then exits `127` naming the missing shared object. This is a recorded, loud
+failure under an unusual global setting, not a silent one, and is left as a
+known limitation rather than reproducing `cargo run`'s environment here.
 
 The daemon's default Anthropic key path is
 `$HOME/.config/signalbox/anthropic-api-key` and its default code-host token path
