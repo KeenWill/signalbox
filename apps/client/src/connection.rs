@@ -68,6 +68,7 @@ pub(crate) struct Connection {
     request_id: RequestId,
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
+    partial_frame_line: Vec<u8>,
 }
 
 impl Connection {
@@ -92,6 +93,7 @@ impl Connection {
             request_id,
             reader: BufReader::new(reader),
             writer,
+            partial_frame_line: Vec::new(),
         };
         connection
             .writer
@@ -116,7 +118,7 @@ impl Connection {
     }
 
     pub(crate) async fn frame(&mut self) -> Result<ServerFrame, ClientError> {
-        let line = read_frame_line(&mut self.reader).await?;
+        let line = read_frame_line(&mut self.reader, &mut self.partial_frame_line).await?;
         let frame: ServerFrame = decode_server_line(&line)?;
         if !response_version_is_admitted(self.version, &frame) {
             return Err(ClientError::Protocol("response protocol version mismatch"));
@@ -142,8 +144,10 @@ fn response_version_is_admitted(expected: ProtocolVersion, frame: &ServerFrame) 
         )
 }
 
-async fn read_frame_line(reader: &mut BufReader<OwnedReadHalf>) -> Result<Vec<u8>, ClientError> {
-    let mut line = Vec::new();
+async fn read_frame_line(
+    reader: &mut BufReader<OwnedReadHalf>,
+    partial_frame_line: &mut Vec<u8>,
+) -> Result<Vec<u8>, ClientError> {
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
@@ -153,19 +157,19 @@ async fn read_frame_line(reader: &mut BufReader<OwnedReadHalf>) -> Result<Vec<u8
         }
         if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
             let consumed = newline + 1;
-            if line.len().saturating_add(consumed) > MAX_FRAME_BYTES {
+            if partial_frame_line.len().saturating_add(consumed) > MAX_FRAME_BYTES {
                 return Err(ClientError::Protocol("server frame exceeded its bound"));
             }
-            line.extend_from_slice(&available[..consumed]);
+            partial_frame_line.extend_from_slice(&available[..consumed]);
             reader.consume(consumed);
-            return Ok(line);
+            return Ok(std::mem::take(partial_frame_line));
         }
-        if line.len().saturating_add(available.len()) >= MAX_FRAME_BYTES {
+        if partial_frame_line.len().saturating_add(available.len()) >= MAX_FRAME_BYTES {
             return Err(ClientError::Protocol(
                 "unterminated server frame reached its bound",
             ));
         }
-        line.extend_from_slice(available);
+        partial_frame_line.extend_from_slice(available);
         let consumed = available.len();
         reader.consume(consumed);
     }
@@ -173,11 +177,51 @@ async fn read_frame_line(reader: &mut BufReader<OwnedReadHalf>) -> Result<Vec<u8
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error;
+    use std::{error::Error, time::Duration};
 
-    use signalbox_process_protocol::ErrorDetail;
+    use signalbox_process_protocol::{ErrorDetail, encode_server_line};
+    use tokio::{io::AsyncWriteExt as _, time::timeout};
 
     use super::*;
+
+    const FRAME_SPLIT_POSITION: usize = 8;
+    const CANCELLATION_DEADLINE: Duration = Duration::from_millis(10);
+
+    #[tokio::test]
+    async fn frame_read_is_cancellation_safe() -> Result<(), Box<dyn Error>> {
+        let frame = error_frame(ProtocolVersion::Sixteen, ErrorCode::InvalidRequest)?;
+        let expected = frame.message().clone();
+        let encoded = encode_server_line(&frame)?;
+        let (server, client) = UnixStream::pair()?;
+        let (reader, writer) = client.into_split();
+        let (_, mut server_writer) = server.into_split();
+        let mut connection = Connection {
+            version: ProtocolVersion::Sixteen,
+            request_id: frame.request_id(),
+            reader: BufReader::new(reader),
+            writer,
+            partial_frame_line: Vec::new(),
+        };
+
+        server_writer
+            .write_all(&encoded[..FRAME_SPLIT_POSITION])
+            .await?;
+        assert!(
+            timeout(CANCELLATION_DEADLINE, connection.message())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            connection.partial_frame_line,
+            encoded[..FRAME_SPLIT_POSITION]
+        );
+        server_writer
+            .write_all(&encoded[FRAME_SPLIT_POSITION..])
+            .await?;
+
+        assert_eq!(connection.message().await?, expected);
+        Ok(())
+    }
 
     #[test]
     fn inv033_newer_version_client_admits_version_one_pre_admission_errors()

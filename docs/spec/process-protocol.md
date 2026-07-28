@@ -52,15 +52,17 @@ versions sixteen, seventeen, and eighteen all shipped first while it was still
 in flight; numbering it below their already-closed vocabularies would
 retroactively admit `transcript_model_call_usage` frames under those versions,
 so it takes version nineteen instead, verified through this PR
-(`agent/token-usage`). Every earlier admitted version retains its closed
-vocabulary. This implementation speaks versions one through thirteen and sixteen
-through nineteen, with fourteen and fifteen unsupported, and its terminal client
-selects version nineteen. Its `search` verb over version four's metadata list
-was verified through PR #283 (`agent/session-search-cli`; terminal client
-surface only). This page's version-four last-writer member spelling was verified
-through PR #288 (`agent/audit-fix-docs-coherence`). This page is the normative
-boundary between a local client process and `signalboxd`; domain values,
-PostgreSQL records, and wire messages remain distinct representations.
+(`agent/token-usage`). The interactive terminal chat surface adds no protocol
+version and was verified through this PR (`agent/interactive-terminal-chat`).
+Every earlier admitted version retains its closed vocabulary. This
+implementation speaks versions one through thirteen and sixteen through
+nineteen, with fourteen and fifteen unsupported, and its terminal client selects
+version nineteen. Its `search` verb over version four's metadata list was
+verified through PR #283 (`agent/session-search-cli`; terminal client surface
+only). This page's version-four last-writer member spelling was verified through
+PR #288 (`agent/audit-fix-docs-coherence`). This page is the normative boundary
+between a local client process and `signalboxd`; domain values, PostgreSQL
+records, and wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -1304,7 +1306,65 @@ client accepts a global `--socket <path>` override or reads
 - `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `stop <session-uuid> [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
 - `approve <session-uuid> <tool-request-uuid> [--command-id <uuid>]`;
-- `deny <session-uuid> <tool-request-uuid> --reason <text> [--command-id <uuid>]`.
+- `deny <session-uuid> <tool-request-uuid> --reason <text> [--command-id <uuid>]`;
+- `chat <session-uuid>`.
+
+`chat` is the plain line-oriented interactive surface for one live session. It
+opens one long-lived `follow_session` connection before accepting input and
+keeps that connection dedicated to ordered snapshots, provider-text deltas, and
+durable events. Submissions and in-loop control operations use a second
+connection, opened through the existing one-request connection path; the client
+does not multiplex requests onto the follow connection. The initial and every
+resynchronized follow snapshot replace transient display state with the durable
+transcript, and later provider-text deltas remain ephemeral presentation exactly
+as they do for `follow`. Snapshot reconciliation selects the active turn or,
+when there is none, the first acceptance-ordered queued turn; queued work is not
+presented as an idle loop.
+
+A line without the `:` prefix submits exact nonempty line content only while the
+loop awaits neither a queued nor active reply. Line termination removes LF or
+CRLF only, retaining a bare trailing carriage return at standard-input EOF. The
+returned `input_submitted` receipt marks that turn queued; only its durable
+`turn_activated` event enables active-turn controls and changes the displayed
+state to streaming. The closed in-loop command set is `:stop TEXT`,
+`:steer TEXT`, `:approve ID`, `:deny ID REASON`, `:transcript`,
+`:model ALIAS-UUID`, and `:quit`. These map to the existing `stop_turn`,
+configuration-free steering `submit_input`, `decide_tool_request`,
+`read_transcript`, and `replace_session_defaults` requests, or local exit;
+ordinary input maps to start-when-idle `submit_input`. `:stop` requires
+successor text because the interrupt request cannot represent a standalone
+cancellation. `:deny` applies the existing denial contract's POSIX
+edge-whitespace rule without rejecting other Unicode whitespace. `:steer`
+requires an active turn, binds the exact turn currently observed by the loop,
+and prints the existing typed steering receipt without waiting for a successor
+turn. `:model` changes only the alias selection and copies the observed
+dangerous-tool posture and system prompt into the forward-only successor
+defaults epoch. Tool proposals and projected results are reread and presented at
+their durable transition, and an approval wait prints its exact request
+identity. Each successful decision rereads authoritative state and immediately
+announces the next approval identity when the batch has one. All process-derived
+text, including live deltas and tool content, uses the same terminal-safe
+escaping as the other client verbs unless the invocation selected
+`--raw-output`.
+
+While a stoppable turn is active, the first Ctrl-C leaves the daemon turn
+running and prints the `:stop TEXT` choice. During an approval wait, that first
+interrupt instead names the exact `:approve` or `:deny` decision the turn
+requires; active-only `:stop` and `:steer` are unavailable in that phase. A
+second Ctrl-C exits and explicitly reports that the turn remains running. The
+offer is bound to the exact observed turn phase and is reset by
+resynchronization. Every follow resubscription and in-loop side request
+continues polling Ctrl-C. Exiting while a mutation request is in flight reports
+its potentially ambiguous outcome and terminates the loop, so the loop cannot
+retry with a fresh command identity; the printed recovery values remain the
+standalone exact-retry path.
+
+`:quit` and standard-input EOF use the same honest exit report. While a turn is
+queued, Ctrl-C, `:quit`, or standard-input EOF exits immediately and reports
+that the turn remains queued; active-only `:stop` and `:steer` remain
+unavailable until activation. Once the followed turn terminalizes, the client
+presents its exact durable terminal material and accepts another ordinary input
+line.
 
 `list` remains the complete unfiltered version-one summary sequence. `search` is
 the separate verb for version four's `list_session_metadata`, whose filters,

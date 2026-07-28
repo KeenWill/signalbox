@@ -176,6 +176,16 @@ enum TextField {
     DelimitedOnLine,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChatTurnStatus {
+    Queued(CanonicalUuid),
+    Active(CanonicalUuid),
+    AwaitingApproval {
+        turn_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+    },
+}
+
 pub(crate) struct Output<'a> {
     stdout: &'a mut dyn Write,
     stderr: &'a mut dyn Write,
@@ -189,6 +199,130 @@ impl<'a> Output<'a> {
             stderr,
             raw,
         }
+    }
+
+    pub(crate) fn flush(&mut self) -> io::Result<()> {
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_started(
+        &mut self,
+        session_id: CanonicalUuid,
+        status: Option<ChatTurnStatus>,
+        commands: &str,
+    ) -> io::Result<()> {
+        match status {
+            Some(ChatTurnStatus::Active(turn_id)) => writeln!(
+                self.stdout,
+                "chat session={session_id} state=following turn={turn_id} commands={commands}"
+            )?,
+            Some(ChatTurnStatus::AwaitingApproval {
+                turn_id,
+                tool_request_id,
+            }) => writeln!(
+                self.stdout,
+                "chat session={session_id} state=awaiting_approval turn={turn_id} request={tool_request_id} commands={commands}"
+            )?,
+            Some(ChatTurnStatus::Queued(turn_id)) => writeln!(
+                self.stdout,
+                "chat session={session_id} state=queued turn={turn_id} commands={commands}"
+            )?,
+            None => writeln!(
+                self.stdout,
+                "chat session={session_id} state=ready commands={commands}"
+            )?,
+        }
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_ready(&mut self, session_id: CanonicalUuid) -> io::Result<()> {
+        writeln!(self.stdout, "chat session={session_id} state=ready")?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_queued(&mut self, turn_id: CanonicalUuid) -> io::Result<()> {
+        writeln!(self.stdout, "chat state=queued turn={turn_id}")?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_activated(&mut self, turn_id: CanonicalUuid) -> io::Result<()> {
+        writeln!(self.stdout, "chat state=streaming turn={turn_id}")?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_stopped(
+        &mut self,
+        stopped_turn_id: CanonicalUuid,
+        successor_turn_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "chat state=queued stopped_turn={stopped_turn_id} successor_turn={successor_turn_id}"
+        )?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_awaiting_approval(
+        &mut self,
+        turn_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "chat state=awaiting_approval turn={turn_id} request={tool_request_id}"
+        )?;
+        self.stdout.flush()
+    }
+
+    pub(crate) fn chat_usage(&mut self, message: &str, commands: &str) -> io::Result<()> {
+        let message = self.render_field(message, TextField::TrailingOnLine);
+        writeln!(self.stderr, "chat: {message}; commands: {commands}")?;
+        self.stderr.flush()
+    }
+
+    pub(crate) fn chat_interrupt_offered(&mut self, commands: &str) -> io::Result<()> {
+        writeln!(
+            self.stderr,
+            "chat: turn still running; use :stop TEXT to stop and continue, or press Ctrl-C again to exit leaving it running; commands: {commands}"
+        )?;
+        self.stderr.flush()
+    }
+
+    pub(crate) fn chat_approval_interrupt_offered(
+        &mut self,
+        tool_request_id: CanonicalUuid,
+        commands: &str,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stderr,
+            "chat: turn awaits approval request {tool_request_id}; use :approve ID or :deny ID REASON, or press Ctrl-C again to exit leaving it running; commands: {commands}"
+        )?;
+        self.stderr.flush()
+    }
+
+    pub(crate) fn chat_mutation_abandoned(&mut self) -> io::Result<()> {
+        writeln!(
+            self.stderr,
+            "chat: exiting with an in-flight mutation whose outcome may be ambiguous; use the printed recovery values for any exact standalone retry"
+        )?;
+        self.stderr.flush()
+    }
+
+    pub(crate) fn chat_exiting(&mut self, status: Option<ChatTurnStatus>) -> io::Result<()> {
+        match status {
+            Some(
+                ChatTurnStatus::Active(turn_id) | ChatTurnStatus::AwaitingApproval { turn_id, .. },
+            ) => writeln!(
+                self.stderr,
+                "chat: exiting; turn {turn_id} remains running in the daemon"
+            ),
+            Some(ChatTurnStatus::Queued(turn_id)) => writeln!(
+                self.stderr,
+                "chat: exiting; turn {turn_id} remains queued in the daemon"
+            ),
+            None => writeln!(self.stderr, "chat: exiting; no turn is queued or running"),
+        }?;
+        self.stderr.flush()
     }
 
     pub(crate) fn recovery_value(&mut self, name: &str, value: &str) -> io::Result<()> {

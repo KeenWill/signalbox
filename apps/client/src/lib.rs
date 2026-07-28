@@ -36,6 +36,7 @@ use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_s
 use uuid::Uuid;
 
 mod arguments;
+mod chat;
 mod connection;
 mod error;
 mod presentation;
@@ -156,6 +157,63 @@ pub async fn run(
     }
 }
 
+/// Parses and runs one invocation against the process terminal.
+///
+/// The interactive `chat` verb uses asynchronous standard-input lines and
+/// catches terminal interrupts. Every other verb retains the one-shot standard
+/// input and output path exposed by [`run`].
+pub async fn run_terminal(
+    arguments: impl IntoIterator<Item = OsString>,
+    socket_environment: Option<OsString>,
+) -> ExitCode {
+    let arguments = arguments.into_iter().collect::<Vec<_>>();
+    let parsed = match arguments::parse(arguments.clone()) {
+        Ok(ParseOutcome::Help(help)) => {
+            return if write!(std::io::stdout().lock(), "{help}").is_ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+        Ok(ParseOutcome::Run(arguments)) => arguments,
+        Err(error) => {
+            let _ = write!(std::io::stderr().lock(), "{error}");
+            return ExitCode::from(2);
+        }
+    };
+    let Command::Chat { session_id } = parsed.command else {
+        return run(
+            arguments,
+            socket_environment,
+            &mut std::io::stdin().lock(),
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        )
+        .await;
+    };
+    let raw_output = parsed.raw_output;
+    let result = async {
+        let socket = socket_path(parsed.socket, socket_environment)?;
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = std::io::stdout().lock();
+        let mut stderr = std::io::stderr().lock();
+        let mut output = Output::new(&mut stdout, &mut stderr, raw_output);
+        let input = chat::terminal_input()?;
+        chat::run(&mut client, &mut output, session_id, input).await
+    }
+    .await;
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let mut stdout = std::io::stdout().lock();
+            let mut stderr = std::io::stderr().lock();
+            let mut output = Output::new(&mut stdout, &mut stderr, raw_output);
+            let _ = output.error(&error);
+            ExitCode::FAILURE
+        }
+    }
+}
+
 async fn execute(
     arguments: arguments::Arguments,
     socket_environment: Option<OsString>,
@@ -195,6 +253,7 @@ async fn execute(
         | Command::Model { .. }
         | Command::Transcript { .. }
         | Command::Follow { .. }
+        | Command::Chat { .. }
         | Command::Reconcile { .. }
         | Command::Review(_)
         | Command::Stop { .. }
@@ -224,6 +283,7 @@ async fn execute(
         | Command::Model { .. }
         | Command::Transcript { .. }
         | Command::Follow { .. }
+        | Command::Chat { .. }
         | Command::Continue { .. }
         | Command::Imported { .. }
         | Command::Review(_)
@@ -350,6 +410,9 @@ async fn execute(
             Ok(())
         }
         Command::Follow { session_id } => follow(&mut client, &mut output, session_id).await,
+        Command::Chat { .. } => Err(ClientError::Input(
+            "chat requires the process terminal input path",
+        )),
         Command::Import { format, .. } => {
             match prepared_import.ok_or(ClientError::Input("import source was not prepared"))? {
                 PreparedImport::File(source) => {
