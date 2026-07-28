@@ -12,12 +12,13 @@ page states for the composition root, its telemetry, and the production
 families in the operator-failure inventory were verified through PR #288
 (`agent/audit-fix-docs-coherence`). The streamed-delivery bridge and ephemeral
 text-delta projection were verified through PR #300
-(`agent/token-level-streaming`). It covers the provider-neutral operation,
-observation, and evidence vocabulary; SSE framing; structured-output and tool
-decode; `ScriptedModel`; the two provider adapters; and the in-process
-credential-access boundary. Layer-2 authorization and evidence classification
-([model-call-execution](model-call-execution.md)), credential channels,
-delivery, and rotation discipline
+(`agent/token-level-streaming`); the Claude 5-family thinking-signature stream
+shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). It covers
+the provider-neutral operation, observation, and evidence vocabulary; SSE
+framing; structured-output and tool decode; `ScriptedModel`; the two provider
+adapters; and the in-process credential-access boundary. Layer-2 authorization
+and evidence classification ([model-call-execution](model-call-execution.md)),
+credential channels, delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those

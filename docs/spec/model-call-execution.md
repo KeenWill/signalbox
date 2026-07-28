@@ -24,7 +24,8 @@ model-call cause codes were verified through PR #280
 projection and identity-before-terminal-evidence precedence were verified
 through PR #288 (`agent/audit-fix-docs-coherence`); the session system prompt on
 the prepared operation was verified through PR #286
-(`agent/session-system-prompt`). Invariant tags cite
+(`agent/session-system-prompt`); the empty-thinking completion rule was verified
+through PR #305 (`agent/sonnet-streamed-tool-use`). Invariant tags cite
 [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
