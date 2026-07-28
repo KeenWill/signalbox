@@ -42,16 +42,17 @@ version sixteen for the single read-only `list_conversations` request, verified
 through PR #304 (`agent/unified-conversation-listing`). The concurrently
 commissioned context-compaction stack takes version seventeen. The
 session-template stack therefore takes version eighteen for daemon-side
-copy-on-create resolution and template listing; every earlier admitted version
-retains its closed vocabulary. Until the version-seventeen stack lands, this
-implementation speaks versions one through thirteen, sixteen, and eighteen, with
-fourteen, fifteen, and seventeen unsupported, and its terminal client selects
-version eighteen. Its `search` verb over version four's metadata list was
-verified through PR #283 (`agent/session-search-cli`; terminal client surface
-only). This page's version-four last-writer member spelling was verified through
-PR #288 (`agent/audit-fix-docs-coherence`). This page is the normative boundary
-between a local client process and `signalboxd`; domain values, PostgreSQL
-records, and wire messages remain distinct representations.
+copy-on-create resolution and template listing, verified through PR #313
+(`agent/session-templates`); every earlier admitted version retains its closed
+vocabulary. Until the version-seventeen stack lands, this implementation speaks
+versions one through thirteen, sixteen, and eighteen, with fourteen, fifteen,
+and seventeen unsupported, and its terminal client selects version eighteen. Its
+`search` verb over version four's metadata list was verified through PR #283
+(`agent/session-search-cli`; terminal client surface only). This page's
+version-four last-writer member spelling was verified through PR #288
+(`agent/audit-fix-docs-coherence`). This page is the normative boundary between
+a local client process and `signalboxd`; domain values, PostgreSQL records, and
+wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
