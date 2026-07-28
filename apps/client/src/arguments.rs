@@ -23,6 +23,14 @@ pub(crate) struct Arguments {
     pub(crate) command: Command,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SendDeliveryArgument {
+    StartWhenIdle,
+    Queue {
+        expected_active_turn_id: Option<CanonicalUuid>,
+    },
+}
+
 #[derive(Debug)]
 pub(crate) enum Command {
     Create {
@@ -43,8 +51,7 @@ pub(crate) enum Command {
         session_id: CanonicalUuid,
         command_id: Option<CommandId>,
         defaults_version: Option<CanonicalU64>,
-        queue: bool,
-        turn_id: Option<CanonicalUuid>,
+        delivery: SendDeliveryArgument,
     },
     Steer {
         session_id: CanonicalUuid,
@@ -807,12 +814,18 @@ pub(crate) fn parse(
                     "queued send recovery requires --command-id, --defaults-version, and --turn together",
                 )));
             }
+            let delivery = if arguments.queue {
+                SendDeliveryArgument::Queue {
+                    expected_active_turn_id: arguments.turn,
+                }
+            } else {
+                SendDeliveryArgument::StartWhenIdle
+            };
             Command::Send {
                 session_id: arguments.session_id,
                 command_id: arguments.command_id,
                 defaults_version: arguments.defaults_version,
-                queue: arguments.queue,
-                turn_id: arguments.turn,
+                delivery,
             }
         }
         CliCommand::Steer(arguments) => Command::Steer {
@@ -1083,7 +1096,7 @@ mod tests {
 
     use super::{
         Arguments, Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome,
-        SessionMetadataPageRequest, UsageError, parse,
+        SendDeliveryArgument, SessionMetadataPageRequest, UsageError, parse,
     };
 
     #[derive(Clone, Copy)]
@@ -1220,8 +1233,9 @@ mod tests {
             parse(["send", SESSION, "--queue"].map(Into::into)),
             Ok(ParseOutcome::Run(super::Arguments {
                 command: Command::Send {
-                    queue: true,
-                    turn_id: None,
+                    delivery: SendDeliveryArgument::Queue {
+                        expected_active_turn_id: None,
+                    },
                     ..
                 },
                 ..
@@ -1267,8 +1281,9 @@ mod tests {
             ),
             Ok(ParseOutcome::Run(super::Arguments {
                 command: Command::Send {
-                    queue: true,
-                    turn_id: Some(_),
+                    delivery: SendDeliveryArgument::Queue {
+                        expected_active_turn_id: Some(_),
+                    },
                     ..
                 },
                 ..

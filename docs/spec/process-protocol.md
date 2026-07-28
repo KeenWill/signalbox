@@ -1171,7 +1171,10 @@ With `--queue`, a fresh invocation reads the authoritative transcript, names the
 active turn, submits `queue`, and follows the returned origin turn through its
 own terminal outcome; it therefore waits while the predecessor finishes and
 while the queued turn runs. Exact queued-send recovery supplies command
-identity, defaults version, and expected turn together.
+identity, defaults version, and expected turn together. While the returned turn
+is still queued, a model-call or tool recovery wait on that named predecessor
+returns the existing recovery-required diagnostic instead of waiting for
+successor activation.
 
 `steer` reads content the same way. A fresh invocation observes and prints the
 active turn, submits configuration-free `steer`, validates the typed receipt,
