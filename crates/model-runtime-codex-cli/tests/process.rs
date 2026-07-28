@@ -1788,6 +1788,46 @@ async fn completed_stderr_is_preserved_during_stdout_cleanup() {
     );
 }
 
+/// INV / evidence: a leader that wrote a classifiable stderr failure but handed
+/// its stderr to a surviving descendant (so the reader is not yet finished at
+/// the cleanup deadline) still keeps that failure's typed kind. The group kill
+/// closes the descendant's write end, and the bounded drain awaits the reader
+/// rather than aborting it, so the buffered `authentication failed` is not
+/// discarded and degraded to `Unrecognized`.
+#[cfg(unix)]
+#[tokio::test]
+async fn held_stderr_is_drained_during_stdout_cleanup() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = stderr_held_by_descendant_credential_failure_cli(temporary.path());
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(2));
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let error = provider_error(&report.evidence);
+
+    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
+    assert!(
+        error
+            .native
+            .message
+            .as_deref()
+            .expect("the failure carries the drained stderr detail")
+            .contains("authentication failed")
+    );
+    assert_recorded_process_group_exited(temporary.path().join("fake-codex-stderr-held-group"));
+}
+
 /// The retained output-schema argument is absolute, so the child's move to
 /// the configured working root cannot re-root a relative schema path.
 #[tokio::test]
@@ -2603,6 +2643,26 @@ exec 2>&-
 exit 7
 "#;
     script_cli(directory, "stderr-credential-codex", script)
+}
+
+/// Scripts a CLI that writes a classifiable stderr failure, then hands its
+/// stdout and stderr handles to a surviving descendant (so neither pipe reaches
+/// EOF on its own) and exits nonzero. Unlike `stdout_holding_credential_failure_cli`,
+/// the leader never closes stderr, so at the cleanup deadline the reader is not
+/// yet `is_finished()`; recovering the buffered failure requires draining it
+/// after the group kill closes the descendant's write end.
+#[cfg(unix)]
+fn stderr_held_by_descendant_credential_failure_cli(directory: &Path) -> std::path::PathBuf {
+    let script = r#"#!/bin/sh
+printf 'authentication failed
+' >&2
+sleep 60 &
+printf 'process_group=%s
+descendant=%s
+' "$$" "$!" > fake-codex-stderr-held-group
+exit 7
+"#;
+    script_cli(directory, "stderr-held-codex", script)
 }
 
 /// Scripts a CLI that finishes a complete exchange, then keeps stdout open
