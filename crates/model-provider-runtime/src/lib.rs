@@ -1315,6 +1315,21 @@ fn classify_terminal(
                             DomainToolCallProposal::new(name, arguments),
                         ));
                     }
+                    // Claude 5-family models run adaptive thinking by
+                    // default and, with the default omitted display, return
+                    // thinking blocks whose text is empty: the block carries
+                    // only the provider's replay signature. Signalbox has no
+                    // durable thinking representation to replay from, so the
+                    // signature is unusable either way and an empty part
+                    // carries no transcript content — it is dropped exactly
+                    // like an empty text block. The provider documents the
+                    // resulting tool continuation as graceful degradation:
+                    // a tool-use turn replayed without its thinking block
+                    // silently disables thinking for that request instead of
+                    // erroring. Thinking with actual text and redacted
+                    // thinking still fail closed: discarding them would
+                    // silently erase response material.
+                    AssistantPart::Thinking { text, .. } if text.is_empty() => {}
                     AssistantPart::Thinking { .. } | AssistantPart::RedactedThinking { .. } => {
                         return Err(ClassificationFailure::bare(
                             RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
@@ -1466,8 +1481,9 @@ mod tests {
 
     use super::{
         AcceptanceObservations, ProviderTextDelta, ProviderTextDeltaContext, ProviderTextDeltaSink,
-        RuntimeModelCatalog, RuntimeModelCatalogError, RuntimeModelDefinition, classify_terminal,
-        decode_checked_raw_json, provider_reported_token_usage, render_runtime_messages,
+        RuntimeModelCallProviderError, RuntimeModelCatalog, RuntimeModelCatalogError,
+        RuntimeModelDefinition, classify_terminal, decode_checked_raw_json,
+        provider_reported_token_usage, render_runtime_messages,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -2051,6 +2067,70 @@ mod tests {
             signalbox_domain::AssistantResponsePart::ToolCall(proposal)
                 if proposal.name().as_str() == "current_time"
                     && proposal.arguments().as_str() == r#"{"timezone":"UTC"}"#
+        ));
+    }
+
+    /// S02 / INV-014: a Claude 5-family tool completion carrying the
+    /// omitted-display empty thinking part classifies as a tool round — the
+    /// empty part is dropped like an empty text block instead of failing the
+    /// whole legitimate completion closed.
+    #[test]
+    fn s02_inv014_empty_thinking_part_is_dropped_from_a_tool_completion() {
+        let classified = classify_terminal(
+            completion_with_finish(
+                "model-exact",
+                CompletionFinish::ToolUse,
+                vec![
+                    AssistantPart::Thinking {
+                        text: String::new(),
+                        signature: Some(String::from("sig_synthetic_1")),
+                    },
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("provider-call-opaque"),
+                        name: ToolName::new("current_time"),
+                        arguments_json: String::from("{}"),
+                    }),
+                ],
+            ),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("an empty thinking part must not fail a tool completion closed");
+        let ModelCallTerminalObservation::CompletedWithTools { response } = classified.observation
+        else {
+            panic!("the tool completion still yields its same-turn tool round");
+        };
+        assert_eq!(response.parts().len(), 1);
+        assert!(matches!(
+            &response.parts()[0],
+            signalbox_domain::AssistantResponsePart::ToolCall(proposal)
+                if proposal.name().as_str() == "current_time"
+        ));
+    }
+
+    /// S02 / INV-014: thinking with actual text still fails the bridge
+    /// closed — dropping it would silently erase response material for which
+    /// no durable semantic representation exists.
+    #[test]
+    fn s02_inv014_nonempty_thinking_part_still_fails_closed() {
+        let outcome = classify_terminal(
+            completion(
+                "model-exact",
+                vec![AssistantPart::Thinking {
+                    text: String::from("visible reasoning"),
+                    signature: Some(String::from("sig_synthetic_1")),
+                }],
+            ),
+            &[],
+            &configured("model-exact"),
+        );
+        assert!(matches!(
+            outcome,
+            Err(failure)
+                if matches!(
+                    failure.error,
+                    RuntimeModelCallProviderError::UnsupportedCompletionMaterial
+                )
         ));
     }
 

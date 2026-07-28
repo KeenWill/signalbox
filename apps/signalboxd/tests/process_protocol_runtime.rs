@@ -38,8 +38,9 @@ use signalbox_domain::{
 };
 use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::{
-    AssistantPart, CompletionEvidence, CompletionFinish, DeliveryMode, ExchangeFacts,
-    ObservationFact, ProviderReportedModel, Script, ScriptedModel, TerminalEvidence, TokenUsage,
+    AssistantPart, BoundaryLossEvidence, CompletionEvidence, CompletionFinish, DeliveryMode,
+    ExchangeFacts, LossCause, ObservationFact, ProviderReportedModel, Script, ScriptedModel,
+    TerminalEvidence, TokenUsage,
 };
 use signalbox_persistence::{
     conversation_import::ImportedConversationRepository,
@@ -656,23 +657,51 @@ fn streamed_script(delta_count: usize, delta: String) -> (Script, String) {
     (script, assistant)
 }
 
-async fn wait_for_terminal(pool: &PgPool, session: SessionId, turn: TurnId) {
+/// The durable turn shape one scheduler pass is expected to leave behind.
+#[derive(Clone, Copy)]
+enum TurnSettle {
+    /// The turn reached its terminal lifecycle state.
+    Terminal,
+    /// The turn parked on an unstopped ambiguous model call and still holds
+    /// its slot.
+    ParkedOnAmbiguity,
+}
+
+impl TurnSettle {
+    const fn predicate_sql(self) -> &'static str {
+        match self {
+            Self::Terminal => {
+                "SELECT EXISTS (
+                    SELECT 1
+                      FROM turn_lifecycle
+                     WHERE session_id = $1
+                       AND turn_id = $2
+                       AND state_kind = 'terminal'
+                )"
+            }
+            Self::ParkedOnAmbiguity => {
+                "SELECT EXISTS (
+                    SELECT 1
+                      FROM turn_lifecycle
+                     WHERE session_id = $1
+                       AND turn_id = $2
+                       AND state_kind = 'active'
+                       AND active_phase_kind = 'awaiting_model_call_recovery'
+                )"
+            }
+        }
+    }
+}
+
+async fn wait_for_turn_settle(pool: &PgPool, session: SessionId, turn: TurnId, settle: TurnSettle) {
     loop {
-        let terminal: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                SELECT 1
-                  FROM turn_lifecycle
-                 WHERE session_id = $1
-                   AND turn_id = $2
-                   AND state_kind = 'terminal'
-            )",
-        )
-        .bind(session.into_uuid())
-        .bind(turn.into_uuid())
-        .fetch_one(pool)
-        .await
-        .unwrap_or(false);
-        if terminal {
+        let settled: bool = sqlx::query_scalar(settle.predicate_sql())
+            .bind(session.into_uuid())
+            .bind(turn.into_uuid())
+            .fetch_one(pool)
+            .await
+            .unwrap_or(false);
+        if settled {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -684,6 +713,16 @@ async fn execute_streamed_turn(
     scripted: ScriptedModel<ModelCallId>,
     session_id: CanonicalUuid,
     turn_id: CanonicalUuid,
+) -> Result<ScriptedModel<ModelCallId>, Box<dyn Error>> {
+    execute_streamed_turn_until(runtime, scripted, session_id, turn_id, TurnSettle::Terminal).await
+}
+
+async fn execute_streamed_turn_until(
+    runtime: &mut RunningRuntime,
+    scripted: ScriptedModel<ModelCallId>,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+    settle: TurnSettle,
 ) -> Result<ScriptedModel<ModelCallId>, Box<dyn Error>> {
     let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
     let probe = scripted.clone();
@@ -714,7 +753,7 @@ async fn execute_streamed_turn(
     let fatal_shutdown = fatal_execution.clone();
     let shutdown = async move {
         tokio::select! {
-            () = wait_for_terminal(&observation_pool, session, turn) => {}
+            () = wait_for_turn_settle(&observation_pool, session, turn, settle) => {}
             () = fatal_shutdown.wait() => {}
         }
     };
@@ -2216,6 +2255,109 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
 
     drop(connection);
     runtime.stop().await
+}
+
+/// The terminal disposition the session's single model call recorded, when
+/// one exists.
+async fn sole_terminal_call_disposition(
+    pool: &PgPool,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+) -> Result<Option<String>, Box<dyn Error>> {
+    Ok(sqlx::query_scalar(
+        "SELECT terminal_disposition_kind
+           FROM model_call
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(turn_id.into_uuid())
+    .fetch_one(pool)
+    .await?)
+}
+
+/// S04 / INV-029: a live streamed provider exchange that fails its stream
+/// integrity check parks the turn on an unstopped ambiguous model call —
+/// exactly the wedge a mid-stream protocol violation produces — and the
+/// version-seven reconciliation verb releases the session with a queued
+/// successor.
+///
+/// This is the process-level recovery contract for the streamed-delivery
+/// path: the scripted model declares the same boundary-loss evidence the
+/// Anthropic decoder emits for a protocol violation, so the park is produced
+/// by the real bridge, scheduler, and persistence chain rather than by a
+/// startup-scan fixture.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s04_inv029_streamed_protocol_violation_parks_then_reconciles() -> Result<(), Box<dyn Error>>
+{
+    let mut runtime = RunningRuntime::start().await?;
+    let mut commands = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut commands).await?;
+    let (_, parked_turn_id) = submit_first_input(
+        &mut commands,
+        session_id,
+        String::from("provoke a mid-stream integrity failure"),
+    )
+    .await?;
+    let script = Script::delivering(TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+        cause: LossCause::StreamProtocolViolation {
+            detail: String::from("thinking block carries more than one signature"),
+        },
+        exchange: ExchangeFacts::default(),
+        reported_model: Some(ProviderReportedModel::new("fixture-model")),
+        finish_reported: None,
+        usage: TokenUsage::unreported(),
+    }))
+    .observing(ObservationFact::SendCommenced);
+
+    let probe = execute_streamed_turn_until(
+        &mut runtime,
+        ScriptedModel::single(script),
+        session_id,
+        parked_turn_id,
+        TurnSettle::ParkedOnAmbiguity,
+    )
+    .await?;
+
+    let operations = probe.received_operations();
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].delivery, DeliveryMode::Streamed);
+    assert_eq!(
+        sole_terminal_call_disposition(&runtime.pool, session_id, parked_turn_id).await?,
+        Some(String::from("ambiguous")),
+        "a mid-stream protocol violation must close the issued call as ambiguous"
+    );
+
+    connection_reconciles_the_parked_turn(&mut commands, session_id, parked_turn_id).await?;
+
+    drop(commands);
+    runtime.stop().await
+}
+
+/// Issues the version-seven reconciliation decision for one parked turn and
+/// proves a distinct successor turn was queued from its content.
+async fn connection_reconciles_the_parked_turn(
+    connection: &mut Connection,
+    session_id: CanonicalUuid,
+    parked_turn_id: CanonicalUuid,
+) -> Result<(), Box<dyn Error>> {
+    connection
+        .request_version(
+            ProtocolVersion::Seven,
+            3,
+            ClientRequest::ReconcileTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: parked_turn_id,
+                content: InputContent::new(String::from("continue after the wedge")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    let successor_turn_id = accepted_successor_turn(connection, session_id, 2).await?;
+    assert_ne!(successor_turn_id, parked_turn_id);
+    Ok(())
 }
 
 /// S04 / INV-029: the reconciliation request is refused, without recording a
