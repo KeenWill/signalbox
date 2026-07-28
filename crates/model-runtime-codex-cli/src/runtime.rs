@@ -946,21 +946,47 @@ async fn execute_process<C: Clone + Send + Sync>(
 /// `current_dir` moves it to the configured working root, so a relative
 /// operator value would silently re-root the credential store beneath the
 /// working directory. Absolutize both against the parent's own current
-/// directory; every other allowlisted value passes through unchanged, and an
-/// unabsolutizable value (for example an empty one) is passed verbatim for
-/// the CLI itself to reject.
+/// directory; every other allowlisted value passes through unchanged.
 fn spawn_environment_value(name: &str, value: std::ffi::OsString) -> std::ffi::OsString {
     if name != "CODEX_HOME" && name != "HOME" {
         return value;
     }
-    // An explicitly empty value is refused upstream by `allowlisted_environment`
-    // (absolutizing `""` resolves to the parent's current directory and would
-    // select an ambient credential store), so only a non-empty path reaches
-    // here.
-    match std::path::absolute(std::path::Path::new(&value)) {
-        Ok(path) => path.into_os_string(),
-        Err(_) => value,
+    // `allowlisted_environment` refused every value this cannot resolve, so
+    // the absolutization below succeeds; the unreachable fallback keeps the
+    // assembly total rather than panicking on a future caller.
+    absolute_credential_home(&value, absolutize_against_current_directory).unwrap_or(value)
+}
+
+/// The parent's own absolutization, named so the injectable
+/// [`absolute_credential_home`] receives a higher-ranked function item rather
+/// than one lifetime instantiation of the generic `std::path::absolute`.
+fn absolutize_against_current_directory(
+    path: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    std::path::absolute(path)
+}
+
+/// The absolute form of a `HOME`/`CODEX_HOME` value, resolved through
+/// `absolutize` against the parent's own current directory — `None` when it
+/// cannot be made absolute at all.
+///
+/// An empty value absolutizes to that current directory and would point the
+/// child's login store at `<cwd>/.codex`; a relative value whose absolutization
+/// fails — the parent's current directory was deleted, so there is nothing to
+/// resolve against — would otherwise reach the child verbatim and be re-rooted
+/// under the configured working directory. Both select an unintended ambient
+/// credential store, so `environment_rejection` refuses both before spawn.
+fn absolute_credential_home(
+    value: &std::ffi::OsStr,
+    absolutize: impl Fn(&std::path::Path) -> std::io::Result<std::path::PathBuf>,
+) -> Option<std::ffi::OsString> {
+    if value.is_empty() {
+        return None;
     }
+    absolutize(std::path::Path::new(value))
+        .ok()
+        .filter(|path| path.is_absolute())
+        .map(std::path::PathBuf::into_os_string)
 }
 
 /// The allowlisted variables whose values are proxy URLs. `NO_PROXY` is a
@@ -980,10 +1006,10 @@ const PROXY_URL_VARIABLES: &[&str] = &[
 /// that embeds userinfo — such a credential would transit to the child verbatim
 /// and a CLI that reflects its proxy configuration would hand the password to
 /// output the adapter can only shape-redact, and `redact_text` has no
-/// proxy-userinfo rule (INV-035) — and an explicitly empty `HOME`/`CODEX_HOME`,
-/// which `std::path::absolute` would resolve to the parent's current directory
-/// and point the child's credential store at `<cwd>/.codex`, selecting an
-/// unintended ambient login. Both must never reach the child.
+/// proxy-userinfo rule (INV-035) — and a `HOME`/`CODEX_HOME` the parent cannot
+/// resolve to an absolute directory, which would point the child's credential
+/// store somewhere under its working directory and select an unintended ambient
+/// login (see [`absolute_credential_home`]). Both must never reach the child.
 fn allowlisted_environment(
     read: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Result<Vec<(&'static str, std::ffi::OsString)>, EnvironmentRejection> {
@@ -1013,9 +1039,10 @@ enum EnvironmentRejectionReason {
     EmbedsUserinfo,
     /// A proxy value is not UTF-8, so it cannot be verified credential-free.
     Unverifiable,
-    /// `HOME`/`CODEX_HOME` is present but empty; absolutizing it would select
-    /// an ambient credential store under the working directory.
-    EmptyCredentialHome,
+    /// `HOME`/`CODEX_HOME` is present but cannot be resolved to an absolute
+    /// directory, so the child would select an ambient credential store under
+    /// its own working directory.
+    UnresolvableCredentialHome,
 }
 
 impl EnvironmentRejection {
@@ -1032,28 +1059,32 @@ impl EnvironmentRejection {
                 "inherited `{name}` is not valid UTF-8 and cannot be verified free of embedded \
                  credentials, so the exchange is refused — set it to a valid UTF-8 proxy URL"
             ),
-            EnvironmentRejectionReason::EmptyCredentialHome => format!(
-                "inherited `{name}` is empty; absolutizing it would point the Codex login store \
-                 at the working directory and select an unintended ambient login, so the \
-                 exchange is refused — set it to an absolute directory or leave it unset"
+            EnvironmentRejectionReason::UnresolvableCredentialHome => format!(
+                "inherited `{name}` cannot be resolved to an absolute directory — it is empty, \
+                 or the working directory it would resolve against is gone — so the Codex login \
+                 store would land under the child's own working directory and select an \
+                 unintended ambient login, and the exchange is refused — set it to an absolute \
+                 directory or leave it unset"
             ),
         }
     }
 }
 
 /// Why an allowlisted variable's value is refused, or `None` when it is
-/// acceptable. An empty `HOME`/`CODEX_HOME` is refused as
-/// `EmptyCredentialHome`. For proxy variables, the authority is the span after
-/// any `scheme://` up to the first `/`, `?`, or `#`; userinfo is an `@` inside
-/// it, and a value that cannot be read as UTF-8 cannot be verified
+/// acceptable. A `HOME`/`CODEX_HOME` that cannot be made absolute is refused as
+/// `UnresolvableCredentialHome`. For proxy variables, the authority is the span
+/// after any `scheme://` up to the first `/`, `?`, or `#`; userinfo is an `@`
+/// inside it, and a value that cannot be read as UTF-8 cannot be verified
 /// credential-free and fails closed as `Unverifiable` — a distinct reason from
 /// an actual embedded credential.
 fn environment_rejection(
     name: &str,
     value: &std::ffi::OsStr,
 ) -> Option<EnvironmentRejectionReason> {
-    if matches!(name, "HOME" | "CODEX_HOME") && value.is_empty() {
-        return Some(EnvironmentRejectionReason::EmptyCredentialHome);
+    if matches!(name, "HOME" | "CODEX_HOME")
+        && absolute_credential_home(value, absolutize_against_current_directory).is_none()
+    {
+        return Some(EnvironmentRejectionReason::UnresolvableCredentialHome);
     }
     if !PROXY_URL_VARIABLES.contains(&name) {
         return None;
@@ -1146,6 +1177,12 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
     limit: usize,
 ) -> std::io::Result<Option<Vec<u8>>> {
     let mut line = Vec::new();
+    // Payload bytes counted so far. Tracked apart from `line.len()` because a
+    // `\r` ending a batch is only a delimiter byte once the next batch shows
+    // whether a `\n` follows it, so its charge is deferred rather than counted
+    // and then unaccounted for.
+    let mut counted = 0_usize;
+    let mut deferred_carriage_return = false;
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
@@ -1155,24 +1192,39 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
                 Ok(Some(line))
             };
         }
+        // The deferred `\r` is delimiter only when this batch opens with the
+        // `\n` that completes the pair; otherwise it was payload after all.
+        if deferred_carriage_return {
+            if available[0] != b'\n' {
+                counted += 1;
+            }
+            deferred_carriage_return = false;
+        }
         let newline = available.iter().position(|byte| *byte == b'\n');
         let take = newline.map_or(available.len(), |index| index + 1);
         // Only the payload counts toward the event limit — the line delimiter
         // (`\n`, or a `\r\n` pair) is stripped before decoding, so including it
         // would reject an exactly-`limit`-byte event in ordinary
         // newline-terminated JSONL while admitting the same event unterminated
-        // at EOF.
+        // at EOF. The exclusion holds however the reader chunks the stream: a
+        // `\r\n` split across two batches costs the event nothing, exactly as
+        // an unsplit one does.
         let payload = match newline {
             Some(index) if index > 0 && available[index - 1] == b'\r' => index - 1,
             Some(index) => index,
+            None if available.last() == Some(&b'\r') => {
+                deferred_carriage_return = true;
+                available.len() - 1
+            }
             None => available.len(),
         };
-        if line.len().saturating_add(payload) > limit {
+        if counted.saturating_add(payload) > limit {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Codex JSONL event exceeded the {limit}-byte limit"),
             ));
         }
+        counted += payload;
         line.extend_from_slice(&available[..take]);
         reader.consume(take);
         if newline.is_some() {
@@ -1404,8 +1456,8 @@ fn already_fired(signal: &mut CancellationSignal) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        EnvironmentRejection, EnvironmentRejectionReason, allowlisted_environment,
-        read_bounded_line, spawn_environment_value,
+        EnvironmentRejection, EnvironmentRejectionReason, absolute_credential_home,
+        allowlisted_environment, read_bounded_line, spawn_environment_value,
     };
 
     #[test]
@@ -1556,7 +1608,7 @@ mod tests {
 
         assert_eq!(
             rejection.reason,
-            EnvironmentRejectionReason::EmptyCredentialHome
+            EnvironmentRejectionReason::UnresolvableCredentialHome
         );
     }
 
@@ -1566,7 +1618,38 @@ mod tests {
 
         assert_eq!(
             rejection.reason,
-            EnvironmentRejectionReason::EmptyCredentialHome
+            EnvironmentRejectionReason::UnresolvableCredentialHome
+        );
+    }
+
+    /// INV-035: a relative credential home the parent cannot absolutize — its
+    /// own current directory deleted, so there is nothing to resolve against —
+    /// yields no child value, which is what makes `environment_rejection`
+    /// refuse it before spawn instead of forwarding the relative path for the
+    /// child to re-root beneath its configured working directory.
+    #[test]
+    fn relative_credential_home_without_a_current_directory_is_unresolvable() {
+        let resolved = absolute_credential_home(std::ffi::OsStr::new("relative-home"), |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        });
+
+        assert_eq!(resolved, None);
+    }
+
+    /// A relative credential home the parent *can* absolutize yields the
+    /// resolved absolute value, so the ordinary case still reaches the child
+    /// re-rooted at the parent's own directory rather than being refused.
+    #[test]
+    fn relative_credential_home_resolves_against_the_current_directory() {
+        let resolved = absolute_credential_home(std::ffi::OsStr::new("relative-home"), |path| {
+            Ok(std::path::Path::new("/parent-working-root").join(path))
+        });
+
+        assert_eq!(
+            resolved,
+            Some(std::ffi::OsString::from(
+                "/parent-working-root/relative-home"
+            ))
         );
     }
 
@@ -1609,6 +1692,37 @@ mod tests {
             .expect("an exactly-limit payload plus its CRLF delimiter is admitted");
 
         assert_eq!(line.as_deref(), Some(b"1234".as_slice()));
+    }
+
+    /// The delimiter exclusion does not depend on how the reader chunks the
+    /// stream: a `\r\n` whose `\r` ends one batch and whose `\n` opens the next
+    /// — a legal pipe read boundary — still costs the event nothing, so an
+    /// exactly-limit payload is admitted rather than rejected as oversized.
+    #[tokio::test]
+    async fn bounded_line_admits_an_exactly_sized_payload_with_a_split_crlf() {
+        let input = b"1234\r\n".as_slice();
+        let mut reader = tokio::io::BufReader::with_capacity(5, input);
+
+        let line = read_bounded_line(&mut reader, 4)
+            .await
+            .expect("a CRLF split across reader batches is still a delimiter");
+
+        assert_eq!(line.as_deref(), Some(b"1234".as_slice()));
+    }
+
+    /// A lone `\r` ending a batch is payload, not a delimiter, when the next
+    /// batch does not open with `\n`: an oversize event carrying an interior
+    /// carriage return is still rejected.
+    #[tokio::test]
+    async fn bounded_line_counts_an_interior_carriage_return_as_payload() {
+        let input = b"12\r345\n".as_slice();
+        let mut reader = tokio::io::BufReader::with_capacity(3, input);
+
+        let error = read_bounded_line(&mut reader, 5)
+            .await
+            .expect_err("an interior carriage return counts toward the limit");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     /// A payload one byte over the limit is still rejected.
