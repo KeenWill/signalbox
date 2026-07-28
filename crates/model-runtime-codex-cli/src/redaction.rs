@@ -9,6 +9,7 @@ pub(crate) const REDACTED: &str = "[redacted]";
 /// `arguments_json` raw-JSON contract is never broken by a bare sentinel.
 const REDACTED_JSON_OBJECT: &str = r#"{"redacted":"[redacted]"}"#;
 const MAX_PENDING_STREAM_BYTES: usize = 64 * 1024;
+const MAX_PENDING_RESCAN_BYTES: usize = 6 * MAX_PENDING_STREAM_BYTES;
 const LINE_CREDENTIAL_MARKERS: &[&str] =
     &["authorization=", "authorization:", "cookie=", "cookie:"];
 const VALUE_CREDENTIAL_MARKERS: &[&str] = &[
@@ -1355,6 +1356,7 @@ struct PendingStreamText<C> {
     next_rescan_len: usize,
     basis: PendingBasis,
     candidate_start: usize,
+    rescan_bytes: usize,
 }
 
 impl<C> PendingStreamText<C> {
@@ -1420,6 +1422,7 @@ impl<C> PendingStreamText<C> {
             next_rescan_len,
             basis,
             candidate_start,
+            rescan_bytes: 0,
         }
     }
 
@@ -1430,6 +1433,11 @@ impl<C> PendingStreamText<C> {
     fn push(&mut self, fragment: StreamFragment<C>) {
         self.text.push_str(&fragment.text);
         self.fragments.push(fragment);
+    }
+
+    fn candidate_starts_at_stored_origin(&self) -> bool {
+        matches!(self.basis, PendingBasis::OpaqueCandidateAtStoredOrigin)
+            || stream_candidate_starts_at_zero(&self.text[self.candidate_start..])
     }
 }
 
@@ -1521,16 +1529,28 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         chain.push_str(&self.dropped_context);
         let pre_pending_len = chain.len();
         if let Some(pending) = self.pending.take() {
+            let clean_limit = if pending.candidate_starts_at_stored_origin() {
+                pending.candidate_start
+            } else {
+                pending.text.len()
+            };
             chain.push_str(&pending.text);
             let chrono_unsafe = trailing_credential_context(&chain);
-            let chrono_clean = (chain.len() - chrono_unsafe.len()).saturating_sub(pre_pending_len);
+            let chrono_clean = if pre_pending_len == 0 {
+                pending.text.len()
+            } else {
+                (chain.len() - chrono_unsafe.len()).saturating_sub(pre_pending_len)
+            };
             let mut adjacency = self.emitted_context.clone();
             let adjacency_prefix_len = adjacency.len();
             adjacency.push_str(&pending.text);
             let adjacency_unsafe = trailing_credential_context(&adjacency);
-            let adjacency_clean =
-                (adjacency.len() - adjacency_unsafe.len()).saturating_sub(adjacency_prefix_len);
-            let clean_in_pending = chrono_clean.min(adjacency_clean).min(pending.text.len());
+            let adjacency_clean = if adjacency_prefix_len == 0 {
+                pending.text.len()
+            } else {
+                (adjacency.len() - adjacency_unsafe.len()).saturating_sub(adjacency_prefix_len)
+            };
+            let clean_in_pending = chrono_clean.min(adjacency_clean).min(clean_limit);
             let (safe, unsafe_fragments) =
                 split_stream_fragments(pending.fragments, clean_in_pending);
             self.emit_original(safe);
@@ -1577,6 +1597,13 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     #[cfg(test)]
     fn pending_rescan_work(&self) -> &PendingRescanWork {
         &self.pending_rescan_work
+    }
+
+    #[cfg(test)]
+    fn current_pending_rescan_bytes(&self) -> usize {
+        self.pending
+            .as_ref()
+            .map_or(0, |pending| pending.rescan_bytes)
     }
 
     /// Fails closed: suppresses all subsequent emitted output. Used when the
@@ -1771,10 +1798,13 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             // nothing was emitted, so adjacency is unchanged.
             let chained = self.pending_extends_a_chain(&pending.text);
             let continuation = self.flush_continuation(&pending.text);
+            let candidate = pending.candidate_starts_at_stored_origin();
             self.emitted_context.clear();
             self.dropped_context.clear();
-            if chained || stream_candidate_starts_at_zero(&pending.text) {
+            if chained {
                 self.emit_redacted(pending.fragments);
+            } else if candidate {
+                self.emit_candidate_from_stored_origin(pending);
             } else if let Some(unsafe_start) = unsafe_stream_suffix_start(&pending.text) {
                 let (safe, unsafe_fragments) =
                     split_stream_fragments(pending.fragments, unsafe_start);
@@ -1844,6 +1874,8 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     pub(crate) fn finish(&mut self) {
         if let Some(pending) = self.pending.take() {
             let continuation = self.flush_continuation(&pending.text);
+            let chained = self.pending_extends_a_chain(&pending.text);
+            let candidate = pending.candidate_starts_at_stored_origin();
             let dirty = [
                 "",
                 self.emitted_context.as_str(),
@@ -1856,8 +1888,10 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 joined.push_str(&pending.text);
                 redact_text(&joined) != joined
             });
-            if dirty {
+            if chained || (dirty && !candidate) {
                 self.emit_redacted(pending.fragments);
+            } else if dirty && candidate {
+                self.emit_candidate_from_stored_origin(pending);
             } else {
                 self.emit_original(pending.fragments);
             }
@@ -1869,6 +1903,12 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 FlushContinuation::Ambiguous => self.suppress_remaining(),
             }
         }
+    }
+
+    fn emit_candidate_from_stored_origin(&mut self, pending: PendingStreamText<C>) {
+        let (safe, redacted) = split_stream_fragments(pending.fragments, pending.candidate_start);
+        self.emit_original(safe);
+        self.emit_redacted(redacted);
     }
 
     fn emit_original(&mut self, fragments: Vec<StreamFragment<C>>) {
@@ -2021,14 +2061,17 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         true
     }
 
-    fn resolve_scanned_pending(&mut self, pending: PendingStreamText<C>) {
-        self.record_pending_rescan(pending.text.len());
-        let candidate = matches!(pending.basis, PendingBasis::OpaqueCandidateAtStoredOrigin)
-            || stream_candidate_starts_at_zero(&pending.text[pending.candidate_start..]);
+    fn resolve_scanned_pending(&mut self, mut pending: PendingStreamText<C>) {
+        let rescan_len = pending.text.len();
+        if !self.record_pending_rescan(&mut pending, rescan_len) {
+            self.emit_redacted(pending.fragments);
+            self.suppress_remaining();
+            return;
+        }
+        let candidate = pending.candidate_starts_at_stored_origin();
         let unsafe_start = unsafe_stream_suffix_start(&pending.text);
         match (candidate, unsafe_start) {
             (true, Some(unsafe_start)) if unsafe_start <= pending.candidate_start => {
-                let mut pending = pending;
                 pending.mark_scanned();
                 self.hold_or_suppress(pending);
             }
@@ -2066,18 +2109,25 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     }
 
     /// Charges the two top-level whole-buffer predicates used by one post-hold
-    /// reclassification. Initial unsafe-suffix detection is not a rescan and
-    /// is outside this counter. Internal fixed scanner passes are an
-    /// implementation detail; the regression bounds how many held bytes reach
-    /// each classifier during rescans.
-    fn record_pending_rescan(&mut self, bytes: usize) {
+    /// reclassification, including any fixed lookbehind context in their joined
+    /// input. Initial unsafe-suffix detection is not a rescan. Each continuously
+    /// unresolved candidate receives at most six held-buffer caps of aggregate
+    /// classifier input; a fresh candidate receives a fresh allowance.
+    fn record_pending_rescan(&mut self, pending: &mut PendingStreamText<C>, bytes: usize) -> bool {
+        let charged = bytes.saturating_mul(2);
+        let Some(total) = pending.rescan_bytes.checked_add(charged) else {
+            return false;
+        };
+        if total > MAX_PENDING_RESCAN_BYTES {
+            return false;
+        }
+        pending.rescan_bytes = total;
         #[cfg(test)]
         {
             self.pending_rescan_work.reclassifications += 1;
-            self.pending_rescan_work.bytes += bytes.saturating_mul(2);
+            self.pending_rescan_work.bytes += charged;
         }
-        #[cfg(not(test))]
-        let _ = bytes;
+        true
     }
 
     /// Processes one delta while a lookbehind chain (the emitted thread id's
@@ -2097,14 +2147,28 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         text: &str,
     ) -> (bool, String) {
         let context_length = context.len();
-        let rescans_pending = self.pending.is_some();
+        let mut pending = self.pending.take();
         let mut joined = context.clone();
-        if let Some(pending) = &self.pending {
+        if let Some(pending) = &pending {
             joined.push_str(&pending.text);
         }
         joined.push_str(text);
-        if rescans_pending {
-            self.record_pending_rescan(joined.len() - context_length);
+        if let Some(mut rescanned) = pending.take() {
+            let scan_len = joined.len();
+            if !self.record_pending_rescan(&mut rescanned, scan_len) {
+                if !text.is_empty() {
+                    rescanned.push(StreamFragment {
+                        field,
+                        index,
+                        correlation,
+                        text: text.to_string(),
+                    });
+                }
+                self.emit_redacted(rescanned.fragments);
+                self.suppress_remaining();
+                return (true, String::new());
+            }
+            pending = Some(rescanned);
         }
         let unsafe_start = unsafe_stream_suffix_start(&joined);
         let candidate = stream_candidate_starts_at_zero(&joined);
@@ -2112,11 +2176,10 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             // The join resolved clean: no candidate begins inside the chain's
             // suffix anymore, so adjacency to it is no longer a hazard and
             // the context is spent.
+            self.pending = pending;
             return (false, String::new());
         }
-        let mut pending = self
-            .pending
-            .take()
+        let mut pending = pending
             .unwrap_or_else(|| PendingStreamText::context_continuation(Vec::new(), String::new()));
         if !text.is_empty() {
             pending.push(StreamFragment {
@@ -2874,11 +2937,12 @@ mod tests {
     use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink, TokenUsage};
 
     use super::{
-        MAX_PENDING_STREAM_BYTES, PendingRescanWork, REDACTED, REDACTED_JSON_OBJECT, RedactingSink,
-        decode_unicode_escapes, identifier_assignment_candidate,
-        identifier_assignment_unsafe_start, json_claim_scan_bytes, redact_identifier_assignment,
-        redact_json, redact_text, reset_json_claim_scan_bytes, stream_candidate_starts_at_zero,
-        trailing_credential_context, unsafe_stream_suffix_start, unterminated_json_key_start,
+        MAX_PENDING_RESCAN_BYTES, MAX_PENDING_STREAM_BYTES, PendingRescanWork, REDACTED,
+        REDACTED_JSON_OBJECT, RedactingSink, decode_unicode_escapes,
+        identifier_assignment_candidate, identifier_assignment_unsafe_start, json_claim_scan_bytes,
+        redact_identifier_assignment, redact_json, redact_text, reset_json_claim_scan_bytes,
+        stream_candidate_starts_at_zero, trailing_credential_context, unsafe_stream_suffix_start,
+        unterminated_json_key_start,
     };
 
     const CREDENTIAL_SHAPED_VALUE: &str = "sk-sensitive-value";
@@ -4827,6 +4891,135 @@ safe-line"
         assert!(streamed.contains(REDACTED));
     }
 
+    /// INV-035: a forced boundary resolves a candidate from its stored origin,
+    /// preserving the clean provider prefix while destroying the planted value.
+    #[test]
+    fn inv_035_boundary_honors_the_pending_candidate_origin() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-boundary-origin";
+        let clean_prefix = "x".repeat(50);
+        let mut observed = Vec::new();
+        let captured;
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.begin_terminal_text_capture();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: format!("{clean_prefix}api_"),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: format!("key={PLANTED_VALUE}"),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 2,
+                    fragment: String::new(),
+                },
+            });
+            captured = sink.take_terminal_text_capture();
+        }
+
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: clean_prefix,
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: REDACTED.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 1,
+                        text: REDACTED.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::ToolArgumentsDelta {
+                        index: 2,
+                        fragment: String::new(),
+                    },
+                },
+            ]
+        );
+        assert!(!captured.contains(PLANTED_VALUE));
+    }
+
+    /// INV-035: dropped-context resolution cannot release a completed
+    /// candidate merely because its origin follows a clean held prefix.
+    #[test]
+    fn inv_035_dropped_context_honors_the_pending_candidate_origin() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-dropped-origin";
+        let clean_prefix = "x".repeat(50);
+        let mut observed = Vec::new();
+        let captured;
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.begin_terminal_text_capture();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: format!("{clean_prefix}api_"),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: format!("key={PLANTED_VALUE}"),
+                },
+            });
+            sink.extend_dropped_context("provider-safe-text");
+            captured = sink.take_terminal_text_capture();
+        }
+
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: clean_prefix,
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: REDACTED.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 1,
+                        text: REDACTED.to_string(),
+                    },
+                },
+            ]
+        );
+        assert!(!captured.contains(PLANTED_VALUE));
+    }
+
     #[track_caller]
     fn assert_cap_edge_destroys_planted_value(total_held_bytes: usize) {
         const MARKER: &str = "authorization: ";
@@ -4920,6 +5113,85 @@ safe-line"
                 },
             });
         }
+    }
+
+    /// Drives a maximum-length fixed context through geometric pending scans.
+    fn observe_long_context_candidate_deltas(sink: &mut RedactingSink<'_, u8>, delta_count: u32) {
+        const MARKER: &str = "authorization: ";
+        let context = format!(
+            "{MARKER}{}",
+            "a".repeat(MAX_PENDING_STREAM_BYTES - MARKER.len())
+        );
+        sink.seed_emitted_context(&context);
+        for index in 1..=delta_count {
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index,
+                    text: "b".to_string(),
+                },
+            });
+        }
+    }
+
+    /// INV-035: context-chain rescans charge both classifiers for the full
+    /// joined input and fail closed before exceeding the six-cap allowance.
+    #[test]
+    fn inv_035_context_chain_rescans_obey_the_full_input_budget() {
+        const EXPECTED_WORK: PendingRescanWork = PendingRescanWork {
+            reclassifications: 2,
+            bytes: 262_156,
+        };
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        observe_long_context_candidate_deltas(&mut sink, 8);
+
+        assert_eq!(sink.pending_rescan_work(), &EXPECTED_WORK);
+        assert!(sink.pending_rescan_work().bytes <= MAX_PENDING_RESCAN_BYTES);
+        assert!(sink.is_suppressing());
+    }
+
+    /// Each independently unresolved candidate receives a fresh work budget;
+    /// completed sequential candidates do not consume a sink-lifetime quota.
+    #[test]
+    fn sequential_pending_candidates_receive_independent_rescan_budgets() {
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "authorization: ".to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 1,
+                text: "a".repeat(16),
+            },
+        });
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 2,
+                text: "\n".to_string(),
+            },
+        });
+
+        assert_eq!(sink.current_pending_rescan_bytes(), 62);
+        sink.finish();
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 3,
+                text: "authorization: ".to_string(),
+            },
+        });
+
+        assert_eq!(sink.current_pending_rescan_bytes(), 0);
+        assert!(!sink.is_suppressing());
     }
 
     /// INV-035: after its initial unsafe-suffix detection, the 66,000
