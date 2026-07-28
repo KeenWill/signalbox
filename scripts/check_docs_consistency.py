@@ -297,7 +297,7 @@ RUST_TEST_DECLARATION = re.compile(
 # named `Test` is not the built-in attribute.
 RUST_TEST_ATTRIBUTE = re.compile(
     rf"{RUST_ATTRIBUTE_OPEN}[ \t\r\n]*(?:::[ \t\r\n]*)?"
-    r"(?:(?:r#)?[A-Za-z_][A-Za-z0-9_]*[ \t\r\n]*::[ \t\r\n]*)*"
+    rf"(?:{RUST_IDENTIFIER_PATTERN}[ \t\r\n]*::[ \t\r\n]*)*"
     r"(?:r#)?test(?=[ \t\r\n(\]])[^\]]*\]"
 )
 RUST_ATTRIBUTE = re.compile(
@@ -316,7 +316,7 @@ RUST_CFG_PREDICATE = re.compile(
 )
 RUST_TEST_META = re.compile(
     r"^(?:::[ \t\r\n]*)?"
-    r"(?:(?:r#)?[A-Za-z_][A-Za-z0-9_]*[ \t\r\n]*::[ \t\r\n]*)*"
+    rf"(?:{RUST_IDENTIFIER_PATTERN}[ \t\r\n]*::[ \t\r\n]*)*"
     r"(?:r#)?test(?=[ \t\r\n(]|$)"
 )
 RUST_META_NAME = re.compile(
@@ -339,6 +339,8 @@ RUST_CRATE_IMPORT = re.compile(
     rf"\bcrate[ \t\r\n]*::[ \t\r\n]*(?P<name>{RUST_IDENTIFIER_PATTERN})"
     r"(?![ \t\r\n]*(?:::|as\b))"
 )
+RUST_CRATE_GROUP = re.compile(r"\bcrate[ \t\r\n]*::[ \t\r\n]*\{")
+RUST_BARE_IDENTIFIER = re.compile(RUST_IDENTIFIER_PATTERN)
 RUST_RAW_STRING_OPEN = re.compile(r'(?:br|rb|cr|r)(?P<hashes>#{0,255})"')
 RUST_INLINE_MODULE = re.compile(
     rf"(?P<attributes>(?:{RUST_ATTRIBUTE_OPEN}[^\]]*\][ \t\r\n]*)*)"
@@ -671,6 +673,26 @@ def rust_exported_test_aliases(code: str) -> frozenset[str]:
     )
 
 
+def rust_crate_import_names(body: str) -> set[str]:
+    """Return the names one `use` body imports directly from the crate root.
+
+    Both `use crate::name;` and a `use crate::{...}` group count, and in the
+    group only an item that is exactly one identifier — never a qualified
+    path, a rename, or a nested group — names the root's own item.
+    """
+    names = {match.group("name") for match in RUST_CRATE_IMPORT.finditer(body)}
+    delimiters = rust_matching_delimiters(body)
+    for group in RUST_CRATE_GROUP.finditer(body):
+        opening = group.end() - 1
+        closing = delimiters.get(opening)
+        if closing is None:
+            continue
+        for item in split_rust_meta_items(body[opening + 1 : closing]):
+            if RUST_BARE_IDENTIFIER.fullmatch(item.strip()) is not None:
+                names.add(item.strip())
+    return names
+
+
 def rust_test_attribute_aliases(
     code: str, exported: frozenset[str] = frozenset()
 ) -> list[ScopedTestAlias]:
@@ -709,9 +731,9 @@ def rust_test_attribute_aliases(
             for alias in RUST_TEST_ALIAS.finditer(body)
         }
         names.update(
-            match.group("name")
-            for match in RUST_CRATE_IMPORT.finditer(body)
-            if match.group("name") in exported
+            name
+            for name in rust_crate_import_names(body)
+            if name in exported
         )
         for name in sorted(names):
             aliases.append(ScopedTestAlias(opening, closing, name))
@@ -765,6 +787,25 @@ def rust_top_level_meta_items(text: str) -> list[str]:
     items: list[str] = []
     index = 0
     while index < len(text):
+        if text[index] == "#":
+            probe = index + 1
+            while probe < len(text) and text[probe] in " \t\r\n":
+                probe += 1
+            closing = (
+                delimiters.get(probe)
+                if probe < len(text) and text[probe] == "["
+                else None
+            )
+            if closing is None:
+                index += 1
+                continue
+            # An attribute group's contents are metadata in their own right,
+            # so a `#[test]` written into an invocation is read, not skipped.
+            items.extend(
+                rust_top_level_meta_items(text[probe + 1 : closing])
+            )
+            index = closing + 1
+            continue
         if text[index] in "([{":
             closing = delimiters.get(index)
             index = len(text) if closing is None else closing + 1
@@ -796,38 +837,40 @@ def rust_attributes_apply_test(
     return False
 
 
-def rust_meta_module_path(meta: str) -> str | None:
-    """Return the module file one meta names, directly or under `cfg_attr`.
+def rust_meta_module_paths(meta: str) -> list[str]:
+    """Return the module files one meta names, directly or under `cfg_attr`.
 
     The subject of this check is the test build, so a `cfg_attr` whose
     condition is not build-independently false is read as applied — the same
-    reading `cfg_attr(test, test)` already gets.
+    reading `cfg_attr(test, test)` already gets. Conditions this checker
+    cannot settle, such as a target predicate, therefore each contribute a
+    candidate rather than the first one shadowing the rest.
     """
     meta = meta.strip()
     direct = RUST_PATH_META.fullmatch(meta)
     if direct is not None:
         plain = direct.group("plain")
-        return direct.group("raw") if plain is None else plain
+        return [direct.group("raw") if plain is None else plain]
     cfg_attr = RUST_CFG_ATTR_META.fullmatch(meta)
     if cfg_attr is None:
-        return None
+        return []
     items = split_rust_meta_items(cfg_attr.group("body"))
     if not items or rust_cfg_truth(items[0]) is False:
-        return None
+        return []
+    found: list[str] = []
     for item in items[1:]:
-        found = rust_meta_module_path(item)
-        if found is not None:
-            return found
-    return None
+        found.extend(rust_meta_module_paths(item))
+    return found
 
 
-def rust_module_path_attribute(attributes: str) -> str | None:
-    """Return the module file one attached attribute run names, if any."""
+def rust_module_path_attributes(attributes: str) -> list[str]:
+    """Return every module file one attached attribute run may name."""
+    found: list[str] = []
     for attribute in RUST_ATTRIBUTE.finditer(attributes):
-        found = rust_meta_module_path(attribute.group("meta"))
-        if found is not None:
-            return found
-    return None
+        for path in rust_meta_module_paths(attribute.group("meta")):
+            if path not in found:
+                found.append(path)
+    return found
 
 
 def rust_meta_disables_item(meta: str) -> bool:
@@ -2180,31 +2223,8 @@ def rust_test_invariant_tags(
     return sorted(found.items())
 
 
-def rust_module_child(
-    declaring: Path,
-    name: str,
-    attributes: str,
-    inline: tuple[str, ...] = (),
-) -> Path | None:
-    """Resolve one out-of-line `mod name;` declaration to its source file.
-
-    Child modules of a crate root or a `mod.rs` live beside their declaring
-    file; children of any other file live in a directory named for it. Both
-    directories are offered in that order so the resolution needs no crate
-    metadata, and an explicit `#[path]` names its own file. A declaration
-    nested in inline modules resolves under a directory named for each of
-    them, exactly as the compiler descends.
-    """
-    if declaring.name in RUST_CRATE_ROOT_NAMES:
-        directories = [declaring.parent]
-    else:
-        directories = [declaring.parent / declaring.stem, declaring.parent]
-    directories = [directory.joinpath(*inline) for directory in directories]
-    explicit = rust_module_path_attribute(attributes)
-    if explicit is not None:
-        relatives = [explicit]
-    else:
-        relatives = [f"{name}.rs", f"{name}/mod.rs"]
+def rust_module_file(directories: list[Path], relatives: list[str]) -> Path | None:
+    """Return the first candidate file one directory and name pair resolves."""
     for directory in directories:
         for relative in relatives:
             # Normalized lexically so a `..` in `#[path]` still names the same
@@ -2213,6 +2233,44 @@ def rust_module_child(
             if candidate.is_file():
                 return candidate
     return None
+
+
+def rust_module_children(
+    declaring: Path,
+    name: str,
+    attributes: str,
+    inline: tuple[str, ...] = (),
+) -> list[Path]:
+    """Resolve one out-of-line `mod name;` declaration to its source files.
+
+    Child modules of a crate root or a `mod.rs` live beside their declaring
+    file; children of any other file live in a directory named for it. Both
+    directories are offered in that order so the resolution needs no crate
+    metadata, and a declaration nested in inline modules resolves under a
+    directory named for each of them, exactly as the compiler descends.
+
+    A declaration whose `#[path]` attributes name several files — one per
+    target configuration, say — keeps every one that exists, since which the
+    build selects is not this checker's to decide. Without such an attribute
+    the conventional pair is an either/or and the first match wins.
+    """
+    if declaring.name in RUST_CRATE_ROOT_NAMES:
+        directories = [declaring.parent]
+    else:
+        directories = [declaring.parent / declaring.stem, declaring.parent]
+    directories = [directory.joinpath(*inline) for directory in directories]
+    explicit = rust_module_path_attributes(attributes)
+    if not explicit:
+        conventional = rust_module_file(
+            directories, [f"{name}.rs", f"{name}/mod.rs"]
+        )
+        return [] if conventional is None else [conventional]
+    found: list[Path] = []
+    for relative in explicit:
+        candidate = rust_module_file(directories, [relative])
+        if candidate is not None and candidate not in found:
+            found.append(candidate)
+    return found
 
 
 def rust_module_graph(
@@ -2245,15 +2303,15 @@ def rust_module_graph(
             if any(item.disabled for item in enclosing):
                 continue
             inline = tuple(item.name for item in enclosing)
-            child = rust_module_child(
+            for child in rust_module_children(
                 source.path, module.group("name"), attributes, inline
-            )
-            if child is None or child == source.path:
-                continue
-            children.setdefault(source.path, []).append(
-                ((*inline, module.group("name")), child)
-            )
-            declared.add(child)
+            ):
+                if child == source.path:
+                    continue
+                children.setdefault(source.path, []).append(
+                    ((*inline, module.group("name")), child)
+                )
+                declared.add(child)
         for include in RUST_INCLUDE_OPEN.finditer(source.code):
             # Masking blanks the literal, so the destination is read raw
             # from the offset the masked scan located.

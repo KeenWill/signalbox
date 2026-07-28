@@ -1206,6 +1206,132 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("src/uncited_root/generic.rs", failures[0].message)
 
+    def test_every_conditional_path_alternative_is_followed(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            '#[cfg_attr(windows, path = "windows.rs")]\n'
+            '#[cfg_attr(unix, path = "unix.rs")]\n'
+            "mod inv_001;\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/uncited_root").mkdir()
+        (self.root / "src/uncited_root/windows.rs").write_text(
+            "pub fn windows() {}\n", encoding="utf-8"
+        )
+        (self.root / "src/uncited_root/unix.rs").write_text(
+            "#[test]\nfn generic() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited_root/unix.rs", failures[0].message)
+
+    def test_disabled_path_alternative_is_not_followed(self) -> None:
+        (self.root / "src/context_root.rs").write_text(
+            '#[cfg_attr(any(), path = "dead.rs")]\n'
+            '#[cfg_attr(unix, path = "live.rs")]\n'
+            "mod inv_001;\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/context_root").mkdir()
+        (self.root / "src/context_root/dead.rs").write_text(
+            "#[test]\nfn generic() {}\n", encoding="utf-8"
+        )
+        (self.root / "src/context_root/live.rs").write_text(
+            "pub fn live() {}\n", encoding="utf-8"
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_unicode_attribute_path_declares_a_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[módulo::test]\nfn s01_inv_001_unicode_path() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_grouped_crate_import_carries_the_root_alias(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            "pub use tokio::test as async_test;\nmod cases;\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/uncited_root").mkdir()
+        (self.root / "src/uncited_root/cases.rs").write_text(
+            "use crate::{helpers, async_test};\n\n"
+            "#[async_test]\n"
+            "async fn s01_inv_001_grouped_import() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited_root/cases.rs", failures[0].message)
+
+    def test_qualified_name_in_a_group_declares_no_test(self) -> None:
+        (self.root / "src/context_root.rs").write_text(
+            "pub use tokio::test as shared;\nmod cases;\n", encoding="utf-8"
+        )
+        (self.root / "src/context_root").mkdir()
+        (self.root / "src/context_root/cases.rs").write_text(
+            "use crate::{helpers::shared};\n\n"
+            "#[shared]\n"
+            "fn s01_inv_001_not_a_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_forwarded_attribute_group_is_rejected(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! many {\n"
+            "    ($(#[$attr:meta])* $name:ident) => {\n"
+            "        $(#[$attr])*\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "many!(#[test] s01_inv_001_generated);\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "`macro_rules! many` emits or forwards a test attribute",
+            failures[0].message,
+        )
+
+    def test_forwarded_non_test_attribute_group_is_allowed(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! many {\n"
+            "    ($(#[$attr:meta])* $name:ident) => {\n"
+            "        $(#[$attr])*\n"
+            "        struct $name;\n"
+            "    };\n"
+            "}\n"
+            "many!(#[derive(Clone)] Item);\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_capitalized_attribute_declares_no_test(self) -> None:
         (self.root / "src/context.rs").write_text(
             "#[Test]\nfn s01_inv_001_not_a_test() {}\n", encoding="utf-8"
