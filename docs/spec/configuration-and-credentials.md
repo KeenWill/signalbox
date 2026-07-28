@@ -18,10 +18,10 @@ code-host result redaction are verified through PR #270
 (`agent/tool-batch-tier1`). The per-turn pinning behavior at a mid-session
 defaults boundary was verified through PR #272 (`agent/mid-session-model`). The
 credential-file value narrowing and the credential-shaped code-host detail were
-verified through PR #285 (`agent/dev-instance-code-host-credential`). Static
-copy-on-create session templates are implemented by the session-templates stack.
-Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
-tag.
+verified through PR #285 (`agent/dev-instance-code-host-credential`). The static
+copy-on-create session-template catalog was verified through PR #313
+(`agent/session-templates`). Invariant law lives in
+[docs/invariants.md](../invariants.md), cited here by tag.
 
 ## Process configuration
 
@@ -90,7 +90,7 @@ paths, or URLs. The typed configuration error does not survive to the log:
 `run_hub` collapses every catalog-parse and adapter-construction variant (and
 likewise connection and migration errors) into a generic `Infrastructure` class
 carrying only its phase, so an operator cannot distinguish an unreadable catalog
-from an unknown field, bad version, or invalid limit (see Open edges). The four
+from an unknown field, bad version, or invalid limit (see Open edges). The five
 deployment paths are accepted without I/O at environment parsing time; both
 catalogs and every template prompt file are read during startup. Neither
 credential file is read at startup (see credential lifecycle below).
@@ -196,9 +196,12 @@ or `$HOME/` followed by a relative suffix resolved from the process's `HOME` at
 load. Every component after either root must be normal and nonempty: absolute
 paths, `.` or `..`, another `$`, any other variable spelling, and a missing,
 empty, or non-absolute `HOME` for a `$HOME/` reference fail typed validation.
-The file must be readable UTF-8 and its complete contents must construct the
-same nonempty, U+0000-free, 1,048,576-byte-bounded `SessionSystemPrompt` as an
-inline value. There is no newline trimming or interpolation.
+The target must be a regular file containing readable UTF-8, and its complete
+contents must construct the same nonempty, U+0000-free, 1,048,576-byte-bounded
+`SessionSystemPrompt` as an inline value. The loader reads at most 1,048,577
+bytes even if the file changes during loading; a file already larger than the
+bound is rejected before its contents are read. There is no newline trimming or
+interpolation.
 
 One valid table becomes an immutable resolved bundle containing the exact model
 request, system prompt, and dangerous-tool blanket. Its content digest is

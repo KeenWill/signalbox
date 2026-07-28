@@ -10,11 +10,11 @@ failed-attempt operator event together with the credential-shaped code-host
 detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
 decision surface through PR #291 (`agent/turn-control-verbs`), and
 runner-protocol batch reconstitution through PR #260
-(`agent/runner-protocol-domain`). The session-template stack implements
-template-derived blanket creation. It owns logical tool requests, approval
-policy and decisions, physical tool attempts, result admission, intra-turn
-continuation, crash classification, the compiled registry, and the daemon-local
-catalog. Turn and attempt lifecycle law lives in
+(`agent/runner-protocol-domain`). Template-derived blanket creation was verified
+through PR #313 (`agent/session-templates`). It owns logical tool requests,
+approval policy and decisions, physical tool attempts, result admission,
+intra-turn continuation, crash classification, the compiled registry, and the
+daemon-local catalog. Turn and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
 model-call staging and provider translation in

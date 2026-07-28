@@ -184,6 +184,7 @@ async fn execute(
         Command::Create { .. }
         | Command::Continue { .. }
         | Command::List
+        | Command::Templates
         | Command::Search(_)
         | Command::Conversations(_)
         | Command::Send { .. }
@@ -208,6 +209,7 @@ async fn execute(
         } => Some(read_system_prompt_file(path).await?),
         Command::Create { .. }
         | Command::List
+        | Command::Templates
         | Command::Search(_)
         | Command::Conversations(_)
         | Command::Send { .. }
@@ -230,18 +232,27 @@ async fn execute(
     match arguments.command {
         Command::Create {
             selection,
+            template,
             command_id,
             system_prompt_file: _,
-        } => {
-            create(
-                &mut client,
-                &mut output,
-                selection,
-                command_id,
-                system_prompt_text,
-            )
-            .await
-        }
+        } => match (selection, template) {
+            (Some(selection), None) => {
+                create(
+                    &mut client,
+                    &mut output,
+                    selection,
+                    command_id,
+                    system_prompt_text,
+                )
+                .await
+            }
+            (None, Some(template)) => {
+                create_from_template(&mut client, &mut output, template, command_id).await
+            }
+            _ => Err(ClientError::Protocol(
+                "create source was internally invalid",
+            )),
+        },
         Command::Continue {
             imported_conversation_id,
             through_position,
@@ -261,6 +272,7 @@ async fn execute(
             .await
         }
         Command::List => list(&mut client, &mut output).await,
+        Command::Templates => list_templates(&mut client, &mut output).await,
         Command::Search(page) => search(&mut client, &mut output, page).await,
         Command::Conversations(page) => conversations(&mut client, &mut output, page).await,
         Command::Send {
@@ -552,6 +564,41 @@ async fn create(
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("create returned an unexpected response").mutation()),
+    }
+}
+
+async fn create_from_template(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    template_name: String,
+    command_id: Option<CommandId>,
+) -> Result<(), ClientError> {
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let mut connection = client
+        .mutation_request(ClientRequest::CreateSessionFromTemplate {
+            command_id,
+            template_name,
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::SessionCreated { session_id } => {
+            output.session_created(session_id)?;
+            Ok(())
+        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(
+            ClientError::Protocol("template creation returned an unexpected response").mutation(),
+        ),
     }
 }
 
@@ -1062,6 +1109,81 @@ async fn list(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(),
             _ => {
                 return Err(ClientError::Protocol(
                     "session-summary spool contained a non-summary frame",
+                ));
+            }
+        }
+        line.clear();
+    }
+    Ok(())
+}
+
+async fn list_templates(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+) -> Result<(), ClientError> {
+    let mut connection = client.request(ClientRequest::ListTemplates {}).await?;
+    match connection.message().await? {
+        ServerMessage::TemplatesStart {} => {}
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(code, message, detail)),
+        _ => {
+            return Err(ClientError::Protocol(
+                "template list did not begin with its start frame",
+            ));
+        }
+    }
+    let mut spool = tempfile::tempfile()?;
+    let mut prior_name: Option<String> = None;
+    let mut summary_count = 0_u64;
+    loop {
+        let frame = connection.frame().await?;
+        match frame.message() {
+            ServerMessage::TemplateSummary { name, .. } => {
+                if prior_name
+                    .as_ref()
+                    .is_some_and(|prior| prior.as_str() >= name.as_str())
+                {
+                    return Err(ClientError::Protocol(
+                        "template summaries were not strictly ordered",
+                    ));
+                }
+                summary_count = summary_count
+                    .checked_add(1)
+                    .ok_or(ClientError::Protocol("template summary count overflowed"))?;
+                prior_name = Some(name.clone());
+                spool.write_all(&encode_server_line(&frame)?)?;
+            }
+            ServerMessage::TemplatesEnd { template_count }
+                if template_count.value() == summary_count =>
+            {
+                break;
+            }
+            ServerMessage::Error {
+                code,
+                message,
+                detail,
+            } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+            _ => {
+                return Err(ClientError::Protocol(
+                    "template list sequence or count was invalid",
+                ));
+            }
+        }
+    }
+    spool.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(spool);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        match decode_server_line(&line)?.message() {
+            ServerMessage::TemplateSummary { name, version } => {
+                output.template_summary(name, version.value())?;
+            }
+            _ => {
+                return Err(ClientError::Protocol(
+                    "template-summary spool contained a non-summary frame",
                 ));
             }
         }
@@ -3869,7 +3991,7 @@ mod tests {
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert_eq!(request.version(), ProtocolVersion::Sixteen);
+            assert_eq!(request.version(), ProtocolVersion::Eighteen);
             assert_eq!(
                 request.request(),
                 &ClientRequest::SubmitInput {
