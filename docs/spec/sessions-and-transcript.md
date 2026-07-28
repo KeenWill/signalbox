@@ -11,10 +11,11 @@ model-identity boundary were additionally verified through PR #272
 through PR #294 (`agent/continue-imported-conversation`); the session system
 prompt was verified through PR #286 (`agent/session-system-prompt`); and the
 version-thirteen input-delivery surface and its user-reachable steering boundary
-were verified through PR #302 (`agent/mid-turn-steering`). The
-imported-conversation record and converter are owned by
-[conversation-import](conversation-import.md). Where a law is cited as
-`INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
+were verified through PR #302 (`agent/mid-turn-steering`). The append-only
+context-compaction record and projection were verified against
+`agent/context-compaction-core`. The imported-conversation record and converter
+are owned by [conversation-import](conversation-import.md). Where a law is cited
+as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
 mechanics owned by another decision are summarized, the owning sibling page is
 linked inline.
 
@@ -496,6 +497,9 @@ and closed:
 - `ModelIdentityChanged { turn, defaults_version, selected }` — the exact
   successor-turn boundary at which execution first observes a different frozen
   direct model identity;
+- `ContextSummary { producing_call, summarized, value }` — exact model-produced
+  summary text retaining its dedicated physical call and the first and through
+  source-qualified entries of the inclusive range it represents;
 - `TurnFailed { turn }` — an explicit marker that the turn terminalized as
   failed;
 - `AssistantText { producing_call, value }` — exact assistant text with
@@ -555,6 +559,47 @@ entry/turn-state trigger so an origin entry additionally requires its input's
 `origin_of` disposition (constraint
 `semantic_transcript_entry_origin_disposition`); pending steering can never
 appear as a semantic origin.
+
+### Context compaction
+
+Context compaction changes model visibility, never durable history. A completed
+compaction has five correlated immutable facts: its identity and optional
+same-session predecessor, the complete source frontier, a dedicated physical
+model call, the exact inclusive source-qualified range summarized, and a result
+frontier equal to the source frontier plus one new `ContextSummary`. The summary
+entry names the producing call and repeats the exact range. Storage and domain
+reconstitution reject a missing endpoint, reversed range, mismatched summary,
+non-completing call, different source frontier, or result that is not exactly
+that one-entry append (INV-005, INV-015).
+
+The transcript therefore remains complete and addressable after compaction. No
+entry or frontier is deleted, replaced, reordered, or rewritten. The
+compaction-call record separately retains the session's current direct model
+selection, resolved provider target, source frontier, physical lifecycle and
+disposition, non-secret credential reference, and each independently optional
+provider-reported usage field. Summary production is its own model call; it is
+not assistant output attributed to an accepted-input turn.
+
+Compactions in one session form a forward-only chain. A successor's source must
+retain its predecessor's complete result frontier as a semantic prefix. A later
+ordinary turn cannot opt back into an uncompacted projection. The existing
+continue-from-boundary operation remains the escape hatch: choosing a position
+before the summary creates a different session whose ancestry frontier does not
+contain that compaction.
+
+For model input only, a complete frontier containing summaries is projected from
+its latest summary: render that summary first and then every complete-frontier
+entry physically after the summary's through-boundary, excluding the selected
+summary from its later physical position. With no summary, projection is the
+complete frontier order. This rule deliberately separates the frontier a call
+durably records from the ordered subset the selected model sees.
+
+Explicit compaction chooses an optional through position, defaulting to the
+latest safe boundary. The daemon also compacts before an ordinary model send
+when that call's rendered input would exceed the current selection's declared
+context window. Both paths use the required deployment-configured compaction
+prompt and the session's current direct selection. Trigger and configuration
+mechanics are owned by [model-call-execution](model-call-execution.md).
 
 ### When entries come to exist
 

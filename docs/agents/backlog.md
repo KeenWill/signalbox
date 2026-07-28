@@ -523,11 +523,30 @@ Owns: model-call observation path, follow protocol, persistence checkpoints.
 Collides-with: turn machinery. Deltas are collected today but not delivered; the
 deferred draft-streaming policy decides what is durable versus transient.
 
-## Compaction [blocked-on: frontier-policy decision] [size: L]
+## Compaction [in-flight] [size: L]
 
 Owns: frontier machinery, compaction entries, new spec section. Collides-with:
-turn machinery. The frontier-snapshot substrate is ready. Never expose the state
-before the semantics.
+turn machinery. Owner-commissioned implementation started 2026-07-28.
+
+## Smarter compaction timing [blocked-on: compaction] [size: M]
+
+Owner direction, 2026-07-28. Compact at coherent task and turn boundaries before
+the context limit becomes the immediate constraint. Owns: compaction trigger
+policy and timing evidence. Collides-with: turn machinery and goal mode.
+
+## Agent-controlled self-compaction [blocked-on: compaction; tool policy] [size: M]
+
+Owner direction, 2026-07-28. Give an agent an explicit tool for compacting its
+current session when its own task state indicates a useful boundary. Owns: tool
+contract and compaction authorization. Collides-with: tool registry and context
+assembly.
+
+## Cross-session read tools for agents [blocked-on: read-tool policy] [size: M]
+
+Owner direction, 2026-07-28. Add bounded tools through which an agent can
+inspect other durable sessions without flattening their transcripts into the
+current session. Owns: read contracts and actor authorization. Collides-with:
+tool registry, conversation listing, and context assembly.
 
 ## Templates [blocked-on: system-prompt configuration category] [size: M]
 

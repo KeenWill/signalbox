@@ -10,6 +10,7 @@ mod accepted_input;
 mod actor;
 mod applied_interrupt;
 mod configuration;
+mod context_compaction;
 mod context_frontier;
 mod delivery_request;
 mod fatal_mismatch;
@@ -48,6 +49,13 @@ pub use configuration::{
     SessionDefaultsVersionMismatch, SessionSystemPrompt, SessionSystemPromptError,
     SessionSystemPromptFailure, TurnConfigurationProvenance, UnknownModelAlias,
     VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
+};
+pub use context_compaction::{
+    ContextCompaction, ContextCompactionId, ContextCompactionModelCall,
+    ContextCompactionModelCallReconstitutionFailure, ContextCompactionModelCallReconstitutionInput,
+    ContextCompactionModelCallState, ContextCompactionRange,
+    ContextCompactionReconstitutionFailure, ContextCompactionReconstitutionInput,
+    ContextCompactionTokenUsage, ContextFrontierProjection, ContextFrontierProjectionFailure,
 };
 pub use context_frontier::{
     ContextFrontier, ContextFrontierId, ResolvedContextFrontierReconstitutionInput,

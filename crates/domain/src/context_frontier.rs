@@ -78,7 +78,7 @@ pub struct ContextFrontier {
 }
 
 impl ContextFrontier {
-    const fn new(owning_session: SessionId, snapshot: ContextFrontierId) -> Self {
+    pub(crate) const fn new(owning_session: SessionId, snapshot: ContextFrontierId) -> Self {
         Self {
             owning_session,
             snapshot,
