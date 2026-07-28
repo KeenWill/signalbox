@@ -8,8 +8,10 @@ content, and actor attribution. It was verified against the implementing stack
 through PR #265 (`agent/tool-batch-tier0`); the defaults-epoch and
 model-identity boundary were additionally verified through PR #272
 (`agent/mid-session-model`); the imported-frontier process surface was verified
-through PR #294 (`agent/continue-imported-conversation`); and the session system
-prompt was verified through PR #286 (`agent/session-system-prompt`). The
+through PR #294 (`agent/continue-imported-conversation`); the session system
+prompt was verified through PR #286 (`agent/session-system-prompt`); and the
+version-thirteen input-delivery surface and its user-reachable steering boundary
+were verified through PR #302 (`agent/mid-turn-steering`). The
 imported-conversation record and converter are owned by
 [conversation-import](conversation-import.md). Where a law is cited as
 `INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
@@ -578,15 +580,18 @@ predecessor terminal prefix, then appends the model-identity boundary when the
 frozen direct selection changed, and finally appends its ordinary origin
 (INV-039, INV-046).
 
-Pending steering has a separate safe-point boundary (INV-036). Immediately
-before an initial or continuation call is prepared, the transaction appends one
-`SteeringAcceptedInput` per pending input in ascending acceptance position,
-derives one frontier extending the starting frontier for the admitted initial
-call, changes every input to `ConsumedAsSteering { call }`, and inserts that
-exact `Prepared` call against the extended frontier. All four effects commit or
-roll back together. The entry therefore becomes semantic history only with the
-call that first observes it; the immutable accepted-input row remains the
-content authority.
+Pending steering has a separate safe-point boundary (INV-036). A
+version-thirteen `steer` submit accepted while its exact source turn is active
+returns the accepted-input identity, immutable acceptance position, and source
+turn immediately; it creates no origin turn or semantic entry at acceptance.
+Immediately before an initial or continuation call is prepared, the transaction
+appends one `SteeringAcceptedInput` per pending input in ascending acceptance
+position, derives one frontier extending the starting frontier for the admitted
+initial call, changes every input to `ConsumedAsSteering { call }`, and inserts
+that exact `Prepared` call against the extended frontier. All four effects
+commit or roll back together. The entry therefore becomes semantic history only
+with the call that first observes it; the immutable accepted-input row remains
+the content authority.
 
 Tool-use entries become history with the producing call's completed observation;
 tool-result entries become history only at the all-resolved continuation or
@@ -643,6 +648,14 @@ participates in `SubmitInput` replay equality (INV-012).
 Why (exact, unnormalized): replay equality must not depend on a normalization
 policy; search or display projections may normalize without changing accepted
 intent.
+
+The process boundary exposes the existing delivery algebra without changing
+content ownership. An accepted omitted or explicit `start_when_idle` submit and
+a `queue` submit create an accepted origin turn with frozen configuration;
+`queue` binds its acceptance to the exact active turn it follows. A `steer`
+submit instead creates configuration-free pending steering bound to that exact
+source turn. The closed version-thirteen wire spelling and typed receipts are
+owned by [process-protocol](process-protocol.md#client-requests).
 
 The accepted input owns the one immutable authoritative content value; the
 `accepted_input` row admits exactly two guarded updates from pending steering:

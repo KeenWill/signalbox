@@ -54,10 +54,13 @@ pub const REVIEW_WORKFLOW_PROTOCOL_VERSION: u64 = 11;
 /// The ephemeral provider-text streaming protocol version.
 pub const PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION: u64 = 12;
 
+/// The client-selectable input-delivery protocol version.
+pub const INPUT_DELIVERY_PROTOCOL_VERSION: u64 = 13;
+
 /// The unified conversation-listing protocol version.
 ///
-/// Versions thirteen, fourteen, and fifteen were reserved by concurrent
-/// protocol work when this version was selected.
+/// Version thirteen is allocated by input delivery; versions fourteen and
+/// fifteen remain reserved by concurrent protocol work.
 pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
 
 /// The imported-conversation inspection protocol version.
@@ -96,6 +99,8 @@ pub enum ProtocolVersion {
     Eleven,
     /// Ephemeral provider-text presentation events on follow streams.
     Twelve,
+    /// Client-selectable input delivery.
+    Thirteen,
     /// Unified conversation-listing vocabulary.
     Sixteen,
     /// Imported-conversation inspection vocabulary.
@@ -118,6 +123,7 @@ impl ProtocolVersion {
             Self::Ten => IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION,
             Self::Eleven => REVIEW_WORKFLOW_PROTOCOL_VERSION,
             Self::Twelve => PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
+            Self::Thirteen => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::Sixteen => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
             Self::Seventeen => IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
         }
@@ -137,6 +143,7 @@ impl ProtocolVersion {
             IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION => Some(Self::Ten),
             REVIEW_WORKFLOW_PROTOCOL_VERSION => Some(Self::Eleven),
             PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION => Some(Self::Twelve),
+            INPUT_DELIVERY_PROTOCOL_VERSION => Some(Self::Thirteen),
             UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION => Some(Self::Sixteen),
             IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION => Some(Self::Seventeen),
             _ => None,
@@ -1299,6 +1306,37 @@ pub enum ImportedSessionRelationship {
     Fork,
 }
 
+/// One closed client-selected treatment for submitted input.
+///
+/// Omitting this value from `submit_input` preserves the baseline
+/// start-when-idle treatment. Steering and queueing carry the exact active turn
+/// the client observed so the domain can reject a stale target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum InputDelivery {
+    /// Start new work only while the session slot is idle.
+    StartWhenIdle {},
+    /// Bind the input to the active turn's next safe point.
+    Steer {
+        /// Exact active turn observed by the client.
+        expected_active_turn_id: CanonicalUuid,
+    },
+    /// Queue new work behind the active turn.
+    Queue {
+        /// Exact active turn observed by the client.
+        expected_active_turn_id: CanonicalUuid,
+    },
+}
+
+fn deserialize_present_input_delivery<'de, DeserializerT>(
+    deserializer: DeserializerT,
+) -> Result<Option<InputDelivery>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+{
+    InputDelivery::deserialize(deserializer).map(Some)
+}
+
 impl MetadataLastWriter {
     /// Constructs one exact last-writer stamp.
     pub const fn new(updated_at_unix_micros: CanonicalU64, actor: MetadataActor) -> Self {
@@ -1506,7 +1544,7 @@ pub enum ClientRequest {
     },
     /// List current sessions.
     ListSessions {},
-    /// Submit sequential owner input.
+    /// Submit owner input with an admitted delivery treatment.
     SubmitInput {
         /// Durable mutation identity.
         command_id: CommandId,
@@ -1514,8 +1552,18 @@ pub enum ClientRequest {
         session_id: CanonicalUuid,
         /// Exact owner text.
         content: InputContent,
-        /// Caller-observed defaults version.
-        expected_defaults_version: CanonicalU64,
+        /// Caller-observed defaults version, or null for configuration-free
+        /// steering.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        expected_defaults_version: Option<CanonicalU64>,
+        /// Version-thirteen delivery treatment. Absence is the retained
+        /// start-when-idle default.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_input_delivery",
+            skip_serializing_if = "Option::is_none"
+        )]
+        delivery: Option<InputDelivery>,
     },
     /// Read one durable transcript snapshot.
     ReadTranscript {
@@ -1801,15 +1849,34 @@ impl ClientRequest {
             Self::ReadImportedConversation { .. } => {
                 IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
             }
+            Self::SubmitInput {
+                delivery: Some(_), ..
+            } => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::CreateSession { .. }
             | Self::ListSessions {}
-            | Self::SubmitInput { .. }
+            | Self::SubmitInput { delivery: None, .. }
             | Self::ReadTranscript { .. }
             | Self::FollowSession { .. } => PROTOCOL_VERSION,
         }
     }
 
     fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::SubmitInput {
+            expected_defaults_version,
+            delivery,
+            ..
+        } = self
+        {
+            let valid = matches!(
+                (delivery, expected_defaults_version),
+                (None | Some(InputDelivery::StartWhenIdle {}), Some(_))
+                    | (Some(InputDelivery::Steer { .. }), None)
+                    | (Some(InputDelivery::Queue { .. }), Some(_))
+            );
+            if !valid {
+                return Err(FrameValidationError::InputDeliveryShape);
+            }
+        }
         if let Self::CreateSessionFromImportedFrontier {
             through_position, ..
         } = self
@@ -2066,6 +2133,15 @@ pub enum RejectionDetail {
         /// Authoritative active turn.
         active_turn_id: CanonicalUuid,
     },
+    /// A next-safe-point input targeted a turn that is already stopping.
+    SafePointUnavailableWhileStopping {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Authoritative stopping turn.
+        active_turn_id: CanonicalUuid,
+        /// Command whose applied result already carries the stop proof.
+        existing_command_id: CanonicalUuid,
+    },
     /// No logical tool request had the named identity.
     ToolRequestNotFound {
         /// Absent logical tool request.
@@ -2155,6 +2231,7 @@ impl RejectionDetail {
             Self::ActiveTurnMismatch { .. }
             | Self::NoActiveTurn { .. }
             | Self::TurnNotAwaitingReconciliation { .. } => TURN_RECONCILIATION_PROTOCOL_VERSION,
+            Self::SafePointUnavailableWhileStopping { .. } => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::InterruptAlreadyApplied { .. }
             | Self::InterruptUnavailableWhileAwaitingApproval { .. }
             | Self::ToolRequestNotFound { .. }
@@ -3058,6 +3135,17 @@ pub enum ServerMessage {
         /// Created origin turn.
         turn_id: CanonicalUuid,
     },
+    /// Configuration-free steering acceptance receipt.
+    SteeringSubmitted {
+        /// Owning session.
+        session_id: CanonicalUuid,
+        /// Accepted input.
+        accepted_input_id: CanonicalUuid,
+        /// Immutable acceptance position.
+        acceptance_position: CanonicalU64,
+        /// Exact active turn the steering is bound to.
+        source_turn_id: CanonicalUuid,
+    },
     /// Begins a session-summary sequence.
     SessionsStart {},
     /// One current session summary.
@@ -3437,6 +3525,7 @@ impl ServerMessage {
             | Self::ConversationSummary { .. }
             | Self::ConversationPageEnd { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
             Self::SessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
+            Self::SteeringSubmitted { .. } => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::Error { detail, .. } => detail.minimum_protocol_version(),
             Self::SessionCreated { .. }
             | Self::InputSubmitted { .. }
@@ -3702,6 +3791,8 @@ pub enum FrameValidationError {
     /// An out-of-range imported rejection stated a range its own requested
     /// position falls inside, or an empty selectable range.
     ImportedFrontierRangeShape,
+    /// A submit-input delivery carried forbidden or missing correlated fields.
+    InputDeliveryShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -3726,6 +3817,7 @@ impl fmt::Display for FrameValidationError {
             }
             Self::ImportedTextPreviewShape => "imported text preview shape is inconsistent",
             Self::ImportedFrontierRangeShape => "imported frontier rejection range is inconsistent",
+            Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
         })
     }
 }
@@ -3779,7 +3871,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1 through 12, 16, and 17",
+                "process-protocol version is unsupported; supported versions are 1 through 13, 16, and 17",
             ),
         }
     }
@@ -3990,7 +4082,20 @@ fn probe_header(
     }
     if !matches!(
         version_spelling,
-        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" | "12" | "16" | "17"
+        "1" | "2"
+            | "3"
+            | "4"
+            | "5"
+            | "6"
+            | "7"
+            | "8"
+            | "9"
+            | "10"
+            | "11"
+            | "12"
+            | "13"
+            | "16"
+            | "17"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -4106,6 +4211,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "10" => Some(ProtocolVersion::Ten),
         "11" => Some(ProtocolVersion::Eleven),
         "12" => Some(ProtocolVersion::Twelve),
+        "13" => Some(ProtocolVersion::Thirteen),
         "16" => Some(ProtocolVersion::Sixteen),
         "17" => Some(ProtocolVersion::Seventeen),
         _ => None,
@@ -4155,17 +4261,17 @@ mod tests {
         FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
         IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION, ImportedContentKind,
         ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
-        ImportedSpeaker, ImportedTextPreview, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
-        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES,
-        MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
-        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
-        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
-        MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallDisposition,
-        ModelCallState, ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail,
-        RequestId, ReviewTargetSubject, SESSION_METADATA_PROTOCOL_VERSION,
-        SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, ServerFrame, ServerMessage, SessionEvent,
-        SessionMetadata, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TurnState,
+        ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+        MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
+        MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
+        MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
+        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
+        MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION,
+        ProtocolVersion, RejectionDetail, RequestId, ReviewTargetSubject,
+        SESSION_METADATA_PROTOCOL_VERSION, SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, ServerFrame,
+        ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
         UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION, decode_client_line, decode_server_line,
         encode_client_line, encode_server_line,
     };
@@ -4249,7 +4355,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1 through 12, 16, and 17")
+                .contains("supported versions are 1 through 13, 16, and 17")
         );
     }
 
@@ -4259,7 +4365,7 @@ mod tests {
             r#"{"future":"#.repeat(payload_depth),
             "}".repeat(payload_depth)
         );
-        format!("{{\"version\":13,\"request_id\":\"9\",\"request\":{payload}}}")
+        format!("{{\"version\":15,\"request_id\":\"9\",\"request\":{payload}}}")
     }
 
     #[track_caller]
@@ -4311,7 +4417,8 @@ mod tests {
                 command_id: command(1)?,
                 session_id: uuid(2),
                 content: InputContent::new("hello".to_owned()),
-                expected_defaults_version: CanonicalU64::new(u64::MAX),
+                expected_defaults_version: Some(CanonicalU64::new(u64::MAX)),
+                delivery: None,
             },
         )?;
         let encoded = encode_client_line(&frame)?;
@@ -4448,7 +4555,7 @@ mod tests {
     #[test]
     fn inv033_unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
-        assert_unsupported_version("13");
+        assert_unsupported_version("15");
         assert_unsupported_version("18446744073709551616");
         assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
@@ -4969,7 +5076,8 @@ mod tests {
                 command_id: command(5)?,
                 session_id: uuid(6),
                 content: InputContent::new(String::new()),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )?;
         assert_client_request_current_version(
@@ -5720,7 +5828,8 @@ mod tests {
                 command_id: command(4)?,
                 session_id: uuid(6),
                 content: InputContent::new(String::from("ordinary work")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )?;
         let encoded = encode_client_line(&frame)?;
@@ -5801,7 +5910,8 @@ mod tests {
                 command_id: command(4)?,
                 session_id: uuid(6),
                 content: InputContent::new(String::from("ordinary work")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )?;
         let encoded = encode_client_line(&frame)?;
@@ -5879,7 +5989,8 @@ mod tests {
                 command_id: command(2)?,
                 session_id: uuid(3),
                 content: InputContent::new(String::from("content")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )?;
         let encoded_request = encode_client_line(&request_frame)?;
@@ -6330,10 +6441,10 @@ mod tests {
     }
 
     /// INV-033: the admitted version set is closed exactly at one through
-    /// twelve plus sixteen and seventeen; thirteen, fourteen, and fifteen
-    /// remain reserved by concurrent protocol stacks and are not admitted.
+    /// thirteen plus sixteen and seventeen; fourteen and fifteen remain
+    /// reserved by concurrent protocol stacks and are not admitted here.
     #[test]
-    fn inv033_version_sixteen_completes_the_admitted_set() {
+    fn inv033_versions_thirteen_and_sixteen_complete_the_admitted_set() {
         assert_eq!(
             ProtocolVersion::Nine.as_u64(),
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
@@ -6351,7 +6462,10 @@ mod tests {
         assert_eq!(ProtocolVersion::from_u64(10), Some(ProtocolVersion::Ten));
         assert_eq!(ProtocolVersion::from_u64(11), Some(ProtocolVersion::Eleven));
         assert_eq!(ProtocolVersion::from_u64(12), Some(ProtocolVersion::Twelve));
-        assert_eq!(ProtocolVersion::from_u64(13), None);
+        assert_eq!(
+            ProtocolVersion::from_u64(13),
+            Some(ProtocolVersion::Thirteen)
+        );
         assert_eq!(ProtocolVersion::from_u64(14), None);
         assert_eq!(ProtocolVersion::from_u64(15), None);
         assert_eq!(
@@ -6494,7 +6608,8 @@ mod tests {
                 command_id: command(4)?,
                 session_id: uuid(6),
                 content: InputContent::new(String::from("ordinary work")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )?;
         let encoded = encode_client_line(&frame)?;
@@ -7121,6 +7236,264 @@ mod tests {
         Ok(())
     }
 
+    /// INV-033: an explicit null is not a member of the closed delivery
+    /// vocabulary in either a retained or current protocol version.
+    #[test]
+    fn inv033_submit_delivery_rejects_explicit_null_in_retained_and_current_versions() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"1","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","content":"content","expected_defaults_version":"1","delivery":null}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":13,"request_id":"2","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000003","session_id":"00000000-0000-0000-0000-000000000004","content":"content","expected_defaults_version":"1","delivery":null}}"#,
+        );
+    }
+
+    /// INV-033: version thirteen adds steering without widening a retained
+    /// version or carrying independent defaults configuration.
+    #[test]
+    fn inv033_version_thirteen_steering_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let steering_request = ClientRequest::SubmitInput {
+            command_id: command(1)?,
+            session_id: uuid(2),
+            content: InputContent::new(String::from("steering")),
+            expected_defaults_version: None,
+            delivery: Some(InputDelivery::Steer {
+                expected_active_turn_id: uuid(3),
+            }),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Eleven,
+                request(1)?,
+                steering_request.clone(),
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+        let steering_frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(1)?,
+            steering_request,
+        )?;
+        let encoded = encode_client_line(&steering_frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            concat!(
+                "{\"version\":13,\"request_id\":\"1\",\"request\":{",
+                "\"type\":\"submit_input\",",
+                "\"command_id\":\"00000000-0000-0000-0000-000000000001\",",
+                "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
+                "\"content\":\"steering\",\"expected_defaults_version\":null,",
+                "\"delivery\":{\"type\":\"steer\",",
+                "\"expected_active_turn_id\":",
+                "\"00000000-0000-0000-0000-000000000003\"}}}\n"
+            )
+        );
+        assert_eq!(decode_client_line(&encoded)?, steering_frame);
+        Ok(())
+    }
+
+    /// INV-033: version thirteen queueing carries both the exact active target
+    /// and the queued turn's defaults guard.
+    #[test]
+    fn inv033_version_thirteen_queueing_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let queue_frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(2)?,
+            ClientRequest::SubmitInput {
+                command_id: command(4)?,
+                session_id: uuid(2),
+                content: InputContent::new(String::from("queued")),
+                expected_defaults_version: Some(CanonicalU64::new(7)),
+                delivery: Some(InputDelivery::Queue {
+                    expected_active_turn_id: uuid(3),
+                }),
+            },
+        )?;
+        let encoded = encode_client_line(&queue_frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            concat!(
+                "{\"version\":13,\"request_id\":\"2\",\"request\":{",
+                "\"type\":\"submit_input\",",
+                "\"command_id\":\"00000000-0000-0000-0000-000000000004\",",
+                "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
+                "\"content\":\"queued\",\"expected_defaults_version\":\"7\",",
+                "\"delivery\":{\"type\":\"queue\",",
+                "\"expected_active_turn_id\":",
+                "\"00000000-0000-0000-0000-000000000003\"}}}\n"
+            )
+        );
+        assert_eq!(decode_client_line(&encoded)?, queue_frame);
+        Ok(())
+    }
+
+    /// INV-033: version thirteen can spell the retained start-when-idle intent
+    /// explicitly while the absent member remains the legacy default.
+    #[test]
+    fn inv033_version_thirteen_explicit_start_when_idle_has_a_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(3)?,
+            ClientRequest::SubmitInput {
+                command_id: command(5)?,
+                session_id: uuid(2),
+                content: InputContent::new(String::from("start")),
+                expected_defaults_version: Some(CanonicalU64::new(7)),
+                delivery: Some(InputDelivery::StartWhenIdle {}),
+            },
+        )?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            concat!(
+                "{\"version\":13,\"request_id\":\"3\",\"request\":{",
+                "\"type\":\"submit_input\",",
+                "\"command_id\":\"00000000-0000-0000-0000-000000000005\",",
+                "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
+                "\"content\":\"start\",\"expected_defaults_version\":\"7\",",
+                "\"delivery\":{\"type\":\"start_when_idle\"}}}\n"
+            )
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: configured start and queue treatments reject a missing
+    /// defaults guard before encoding.
+    #[test]
+    fn inv033_configured_delivery_rejects_missing_defaults()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let start = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(4)?,
+            ClientRequest::SubmitInput {
+                command_id: command(6)?,
+                session_id: uuid(2),
+                content: InputContent::new(String::from("start without defaults")),
+                expected_defaults_version: None,
+                delivery: Some(InputDelivery::StartWhenIdle {}),
+            },
+        );
+        assert_eq!(start, Err(FrameValidationError::InputDeliveryShape));
+
+        let queue = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(5)?,
+            ClientRequest::SubmitInput {
+                command_id: command(7)?,
+                session_id: uuid(2),
+                content: InputContent::new(String::from("queue without defaults")),
+                expected_defaults_version: None,
+                delivery: Some(InputDelivery::Queue {
+                    expected_active_turn_id: uuid(3),
+                }),
+            },
+        );
+        assert_eq!(queue, Err(FrameValidationError::InputDeliveryShape));
+        Ok(())
+    }
+
+    /// INV-033: configuration-free steering rejects an independently supplied
+    /// defaults version before encoding.
+    #[test]
+    fn inv033_steering_rejects_independent_defaults_configuration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let invalid = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(3)?,
+            ClientRequest::SubmitInput {
+                command_id: command(5)?,
+                session_id: uuid(2),
+                content: InputContent::new(String::from("misconfigured steering")),
+                expected_defaults_version: Some(CanonicalU64::new(7)),
+                delivery: Some(InputDelivery::Steer {
+                    expected_active_turn_id: uuid(3),
+                }),
+            },
+        );
+        assert_eq!(invalid, Err(FrameValidationError::InputDeliveryShape));
+
+        let zero = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(4)?,
+            ClientRequest::SubmitInput {
+                command_id: command(6)?,
+                session_id: uuid(2),
+                content: InputContent::new(String::from("zero-version steering")),
+                expected_defaults_version: Some(CanonicalU64::new(0)),
+                delivery: Some(InputDelivery::Steer {
+                    expected_active_turn_id: uuid(3),
+                }),
+            },
+        );
+        assert_eq!(zero, Err(FrameValidationError::InputDeliveryShape));
+        Ok(())
+    }
+
+    /// INV-033: steering against an already-stopping turn carries the exact
+    /// stop proof through one closed version-thirteen rejection shape.
+    #[test]
+    fn inv033_version_thirteen_stopping_steering_rejection_has_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the active turn is already stopping"),
+                detail: ErrorDetail::rejected(RejectionDetail::SafePointUnavailableWhileStopping {
+                    session_id: uuid(2),
+                    active_turn_id: uuid(3),
+                    existing_command_id: uuid(5),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"the active turn is already stopping","detail":{"type":"safe_point_unavailable_while_stopping","session_id":"00000000-0000-0000-0000-000000000002","active_turn_id":"00000000-0000-0000-0000-000000000003","existing_command_id":"00000000-0000-0000-0000-000000000005"}}"#,
+        )
+    }
+
+    /// INV-033: pending steering has one version-thirteen typed receipt naming
+    /// its accepted input, position, and exact source turn.
+    #[test]
+    fn inv033_version_thirteen_steering_receipt_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let steering_response = ServerMessage::SteeringSubmitted {
+            session_id: uuid(2),
+            accepted_input_id: uuid(6),
+            acceptance_position: CanonicalU64::new(8),
+            source_turn_id: uuid(3),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::Eleven,
+                request(4)?,
+                steering_response.clone(),
+            ),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+        let response_frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(4)?,
+            steering_response,
+        )?;
+        let encoded = encode_server_line(&response_frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            concat!(
+                "{\"version\":13,\"request_id\":\"4\",\"message\":{",
+                "\"type\":\"steering_submitted\",",
+                "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
+                "\"accepted_input_id\":",
+                "\"00000000-0000-0000-0000-000000000006\",",
+                "\"acceptance_position\":\"8\",\"source_turn_id\":",
+                "\"00000000-0000-0000-0000-000000000003\"}}\n"
+            )
+        );
+        assert_eq!(decode_server_line(&encoded)?, response_frame);
+        Ok(())
+    }
+
     #[test]
     fn submit_content_is_admitted_by_the_application_not_wire_decoding()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7131,7 +7504,8 @@ mod tests {
                 command_id: command(5)?,
                 session_id: uuid(6),
                 content: InputContent::new(content),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )?;
         let encoded = encode_client_line(&frame)?;

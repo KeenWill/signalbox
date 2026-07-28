@@ -100,6 +100,38 @@ the read request, its three messages, the two rejection details, and the
 [conversation import](spec/conversation-import.md) (the inspection read),
 `crates/process-protocol`, `apps/signalboxd`, and `apps/client`.
 
+## 2026-07-27 — Expose explicit steering and queued input delivery
+
+**Context.** The domain already records `StartWhenNoActiveTurn`,
+`NextSafePoint`, and `AfterCurrentTurn`, but the process submit path always
+chose the first and treated accepted pending steering as an internal error.
+Versions nine and twelve are reserved by concurrent work; eleven was the latest
+admitted version at this branch point.
+
+**Decision.** Protocol version thirteen adds one optional closed `delivery`
+object to `submit_input`: `start_when_idle`, `steer` naming the exact active
+turn, or `queue` naming that turn. Absence preserves the exact legacy
+start-when-idle frame. Start and queue carry the defaults guard;
+configuration-free steer requires the existing defaults member as null. Accepted
+steering returns its input identity, acceptance position, and source turn. The
+terminal uses `steer SESSION` for the receipt-only operation and
+`send SESSION --queue` for a separate reply-bearing turn; queued send waits
+through that turn's own terminal result. Exact recovery adds the observed turn
+to each active-work request. Queued origins already survive restart unchanged,
+so startup scans only recover the active predecessor before ordinary eligibility
+resumes their durable acceptance order.
+
+**Rejected alternatives.** Inferring delivery from whether a turn is active
+would silently change intent. Separate wire request types would duplicate the
+canonical submit command and acceptance boundary. Returning immediately from
+queued `send` would contradict its reply-waiting contract; waiting on `steer`
+would invent a turn it does not create. A new process-local queue would
+duplicate and weaken the durable queue.
+
+**Affects.** Process protocol version thirteen, daemon submit mapping and
+receipt projection, terminal send/steer UX and recovery values, and the owning
+process, session/transcript, and scheduling specifications.
+
 ## 2026-07-27 — Serve the unified conversation listing from authoritative tables
 
 **Context.** The owner needs one read surface listing native sessions and
