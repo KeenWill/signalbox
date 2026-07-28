@@ -150,7 +150,7 @@ fn reject_duplicate_json_members(line: &str) -> Result<(), DecodeFailure> {
     match result {
         Ok(()) => Ok(()),
         Err(_) if duplicate_found.get() => Err(DecodeFailure::stream_protocol(
-            "event has duplicate JSON members",
+            "JSON input has duplicate object members",
         )),
         // The ordinary decoder below owns every other JSON-shape failure and
         // preserves its established provider-error classification.
@@ -548,6 +548,18 @@ impl<C: Clone> EventDecoder<C> {
                 self.usage,
                 LossCause::ResponseUnintelligible {
                     detail: format!("last agent message exceeds JSON nesting bounds: {error}"),
+                },
+            );
+        }
+        if let Err(error) = reject_duplicate_json_members(&agent_message) {
+            return boundary_loss(
+                self.exchange,
+                self.usage,
+                LossCause::StreamProtocolViolation {
+                    detail: format!(
+                        "undecodable Codex response envelope: {}",
+                        error.into_detail()
+                    ),
                 },
             );
         }

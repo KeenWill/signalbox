@@ -465,10 +465,12 @@ async fn execute_process<C: Clone + Send + Sync>(
     }
     command
         // Feature flags are not the complete control surface. These config
-        // values close the independent web, configured MCP, and agent gates so
-        // no prompt sentence is asked to carry capability authority.
+        // values close the independent web, configured MCP, ambient-skill, and
+        // agent gates so no prompt sentence is asked to carry capability authority.
         .arg("--config")
         .arg("agents.enabled=false")
+        .arg("--config")
+        .arg("skills.include_instructions=false")
         .arg("--config")
         .arg("mcp_servers={}")
         .arg("--config")

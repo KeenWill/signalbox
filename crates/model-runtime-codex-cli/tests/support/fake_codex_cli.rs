@@ -632,6 +632,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "duplicate_response_envelope_member" => {
+            envelope(r#"{"outcome":"completed","text":"first","text":"second","tool_calls":[]}"#);
+            completed();
+        }
         "textless_refusal" => {
             envelope(r#"{"outcome":"refused","text":"","tool_calls":[]}"#);
             completed();

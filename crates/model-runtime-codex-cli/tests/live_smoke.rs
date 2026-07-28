@@ -232,6 +232,19 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
 /// still exercises the whole event protocol.
 const PROMPT: &str = "Reply with the single word: ready";
 
+const SKILL_INSTRUCTIONS_CONFIG: &str = "skills.include_instructions=false";
+const SYNTHETIC_SKILL_DESCRIPTION: &str = "ambient-skill-injection-description-probe-317";
+const SYNTHETIC_SKILL_BODY: &str = "ambient-skill-injection-body-probe-317";
+const SYNTHETIC_SKILL_FILE: &str = r#"---
+name: ambient_probe
+description: ambient-skill-injection-description-probe-317
+---
+
+# Ambient probe
+
+ambient-skill-injection-body-probe-317
+"#;
+
 /// Arbitrary non-default facts that prove the shared response projection
 /// preserves terminal evidence rather than manufacturing defaults.
 const FIXTURE_THREAD_ID: &str = "fixture-thread";
@@ -246,6 +259,7 @@ async fn the_pinned_codex_cli_completes_one_exchange() {
 
     assert_pinned_version(&executable).await;
     assert_pinned_feature_inventory(&executable).await;
+    assert_ambient_skill_instructions_disabled(&executable).await;
 
     let working_directory = tempfile::tempdir().expect("smoke working directory is created");
     let credential_reference = CredentialReference::new("codex-smoke");
@@ -615,6 +629,105 @@ async fn assert_pinned_feature_inventory(executable: &std::path::Path) {
         "the pinned CLI feature inventory changed; classify every added or \
          changed entry before moving the supported-version contract"
     );
+}
+
+#[derive(Clone, Copy)]
+enum SkillInstructionDisposition {
+    InjectedBaseline,
+    HardDisabled,
+}
+
+/// Fails before spend unless the pinned CLI both discovers the isolated synthetic
+/// ambient skill under its ordinary home and removes all model-visible skill
+/// instructions under the exact config value the production invocation passes.
+async fn assert_ambient_skill_instructions_disabled(executable: &std::path::Path) {
+    let isolated_home = tempfile::tempdir().expect("skill probe home is created");
+    let skill_directory = isolated_home.path().join("skills").join("ambient_probe");
+    std::fs::create_dir_all(&skill_directory).expect("synthetic skill directory is created");
+    std::fs::write(skill_directory.join("SKILL.md"), SYNTHETIC_SKILL_FILE)
+        .expect("synthetic skill is written");
+
+    let baseline = skill_prompt_input(
+        executable,
+        isolated_home.path(),
+        SkillInstructionDisposition::InjectedBaseline,
+    )
+    .await;
+    let disabled = skill_prompt_input(
+        executable,
+        isolated_home.path(),
+        SkillInstructionDisposition::HardDisabled,
+    )
+    .await;
+
+    assert!(
+        baseline.contains("<skills_instructions>")
+            && baseline.contains(SYNTHETIC_SKILL_DESCRIPTION)
+            && baseline.contains(SYNTHETIC_SKILL_BODY),
+        "the pinned CLI did not discover and inject the isolated synthetic control skill"
+    );
+    assert!(
+        !disabled.contains("<skills_instructions>")
+            && !disabled.contains(SYNTHETIC_SKILL_DESCRIPTION)
+            && !disabled.contains(SYNTHETIC_SKILL_BODY),
+        "`{SKILL_INSTRUCTIONS_CONFIG}` did not remove ambient skills from model-visible input"
+    );
+}
+
+/// Captures only the bounded JSON prompt description from an isolated synthetic
+/// home; stderr is discarded and no ambient login or configuration is reachable.
+async fn skill_prompt_input(
+    executable: &std::path::Path,
+    isolated_home: &std::path::Path,
+    disposition: SkillInstructionDisposition,
+) -> String {
+    const PROMPT_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+    const MAX_PROMPT_INPUT_STDOUT_BYTES: usize = 1024 * 1024;
+
+    let mut command = tokio::process::Command::new(executable);
+    command.args(["debug", "prompt-input"]);
+    match disposition {
+        SkillInstructionDisposition::InjectedBaseline => {}
+        SkillInstructionDisposition::HardDisabled => {
+            command.args(["--config", SKILL_INSTRUCTIONS_CONFIG]);
+        }
+    }
+    command.arg("synthetic prompt input probe").env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    command
+        .env("HOME", isolated_home)
+        .env("CODEX_HOME", isolated_home)
+        .env("XDG_CONFIG_HOME", isolated_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let child = spawn_probe(&mut command, executable).await;
+    let output = command_output_bounded(
+        child,
+        executable,
+        "debug prompt-input",
+        PROMPT_PROBE_TIMEOUT,
+        MAX_PROMPT_INPUT_STDOUT_BYTES,
+        "prompt input",
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "`{} debug prompt-input` exited with {}",
+        executable.display(),
+        output.status
+    );
+    String::from_utf8(output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "`{} debug prompt-input` printed non-UTF-8 output",
+            executable.display()
+        )
+    })
 }
 
 /// Proves that every pinned entry has exactly one disposition and that every

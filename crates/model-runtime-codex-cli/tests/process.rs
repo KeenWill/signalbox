@@ -91,6 +91,11 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
     assert!(result.argv.contains("--ignore-rules"));
     assert!(result.argv.contains(&disabled_capability_argv()));
     assert!(result.argv.contains("--config\nagents.enabled=false"));
+    assert!(
+        result
+            .argv
+            .contains("--config\nskills.include_instructions=false")
+    );
     assert!(result.argv.contains("--config\nmcp_servers={}"));
     assert!(result.argv.contains("--config\nweb_search=\"disabled\""));
     assert!(result.argv.contains("--config\nproject_doc_max_bytes=0"));
@@ -469,6 +474,23 @@ async fn nested_duplicate_event_members_are_stream_protocol_violations() {
 
     let detail = stream_protocol_violation(&boundary_loss(&result.evidence).cause);
     assert!(detail.contains("duplicate"));
+}
+
+/// The response envelope is provider input even though the CLI transports it as
+/// escaped agent-message text; repeated envelope members remain ambiguous and
+/// must fail before serde can select the last occurrence.
+#[tokio::test]
+async fn duplicate_response_envelope_members_are_stream_protocol_violations() {
+    let result = execute_scenario(
+        "duplicate_response_envelope_member",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let detail = stream_protocol_violation(&boundary_loss(&result.evidence).cause);
+    assert!(detail.contains("response envelope"));
 }
 
 /// INV-035: a marker-bearing object field that sorts before a benign sibling

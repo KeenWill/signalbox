@@ -21,19 +21,21 @@ use other built-ins; the pinned CLI exposes a larger, evolving feature registry.
 Ambiguous provider input and undeclared capabilities both need mechanical
 boundaries, while a process can deliberately leave its inherited group.
 
-**Decision.** Repeated JSON object members are stream-protocol violations;
-additive tolerance covers unknown members, never repeated ones. A duplicate is
-ambiguous by construction, and ambiguous provider input is refused rather than
-resolved by choosing a winner, matching the native client's repeated-member
-rule. Adapter supervision contains exactly the process group it creates; host
-isolation, owned by the runner sandbox in build-out, contains a descendant that
-deliberately leaves that group. Every feature in the pinned CLI inventory is
-classified. Features that can add a model-visible tool, external interaction,
-instruction source, or delegated execution outside the declared tools are
-explicitly disabled, with independent agent, MCP-server, and web-search
-controls. The pre-spend version smoke compares the complete name, stage, and
-default inventory so a version bump cannot add an unclassified feature. Prompt
-prose is not a capability boundary.
+**Decision.** Repeated JSON object members in either the JSONL event or its
+escaped response envelope are stream-protocol violations; additive tolerance
+covers unknown members, never repeated ones. A duplicate is ambiguous by
+construction, and ambiguous provider input is refused rather than resolved by
+choosing a winner, matching the native client's repeated-member rule. Adapter
+supervision contains exactly the process group it creates; host isolation, owned
+by the runner sandbox in build-out, contains a descendant that deliberately
+leaves that group. Every feature in the pinned CLI inventory is classified.
+Features that can add a model-visible tool, external interaction, instruction
+source, or delegated execution outside the declared tools are explicitly
+disabled, with independent agent, ambient skill-instruction, MCP-server, and
+web-search controls. The pre-spend version smoke compares the complete name,
+stage, and default inventory so a version bump cannot add an unclassified
+feature, and verifies the skill control against an isolated synthetic skill that
+the pinned CLI otherwise injects. Prompt prose is not a capability boundary.
 
 **Rejected alternatives.** Keeping serde's last or first occurrence would
 silently choose among contradictory evidence. Claiming process-tree containment
