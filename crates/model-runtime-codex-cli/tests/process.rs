@@ -770,10 +770,36 @@ async fn inv_035_split_authorization_value_before_tool_name_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: the same rule where no joined-form scan could ever see the pair
+/// rejoin — a marker prefix (`api_`) held in the dropped chain and its
+/// continuation (`key=<value>`) quoted inside serde's own prose. The detail is
+/// content-silent while any context is held, so the continuation cannot cross
+/// in the provider error.
+#[tokio::test]
+async fn inv_035_decode_failure_detail_is_silent_while_a_dropped_marker_is_held() {
+    let result = execute_scenario(
+        "dropped_marker_then_malformed_usage",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let error = provider_error(&result.evidence);
+
+    assert!(!format!("{:?}", result.evidence).contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(
+        error.native.message.as_deref(),
+        Some("undecodable Codex event: [redacted]")
+    );
+}
+
 /// INV-035: a decode-failure detail that quotes provider-controlled bytes
-/// consults the held lookbehind state, so a credential split between
-/// streamed reasoning and a malformed event's quoted value is suppressed
-/// whole instead of surviving in the provider-error message.
+/// consults the held lookbehind state *before* the adapter prefixes its own
+/// prose, so a credential split between streamed reasoning and a malformed
+/// event's quoted value is suppressed whole. Prefixing first would insert the
+/// prose between the held marker and its continuation, leaving the pair unable
+/// to rejoin and the continuation intact inside the message; the adapter's own
+/// prose survives because it is not provider-derived.
 #[tokio::test]
 async fn inv_035_decode_failure_detail_consults_held_redaction_state() {
     let result = execute_scenario(
@@ -786,7 +812,10 @@ async fn inv_035_decode_failure_detail_consults_held_redaction_state() {
     let error = provider_error(&result.evidence);
 
     assert!(!format!("{:?}", result.evidence).contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert_eq!(error.native.message.as_deref(), Some("[redacted]"));
+    assert_eq!(
+        error.native.message.as_deref(),
+        Some("undecodable Codex event: [redacted]")
+    );
 }
 
 /// INV-035: a credential header split between streamed reasoning and a
