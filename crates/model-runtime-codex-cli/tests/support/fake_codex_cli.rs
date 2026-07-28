@@ -182,6 +182,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             completed();
         }
+        "credential_reassembled_across_held_reasoning_and_error_item" => {
+            // The held reasoning bytes (`Auth`, an unrelated unsafe suffix)
+            // are chronologically before the dropped error marker (`api_`)
+            // and the final-text value (`key=<secret>`); only the dropped
+            // marker plus the value form the credential, so the held bytes
+            // must not be scanned between them.
+            reasoning("reason-unrelated", "Auth");
+            error_item("error-marker", "api_");
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
         "credential_split_across_error_item_after_held_reasoning" => {
             // A streamed reasoning delta ends in a bare marker word (held as
             // an unsafe suffix), an intervening error item supplies only the

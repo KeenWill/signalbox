@@ -368,6 +368,26 @@ async fn inv_035_error_item_marker_suppresses_streamed_continuation() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: held reasoning bytes unrelated to the credential (`Auth`), a
+/// dropped error marker (`api_`), then a final-text value (`key=<secret>`)
+/// reassemble chronologically as `api_key=<secret>` — the held bytes are
+/// resolved out of the way rather than scanned between the dropped marker and
+/// the value, so the credential is suppressed.
+#[tokio::test]
+async fn inv_035_credential_reassembles_across_held_reasoning_and_error_item() {
+    let result = execute_scenario(
+        "credential_reassembled_across_held_reasoning_and_error_item",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
 /// INV-035: a marker held in the stream lookbehind (`Authorization` from a
 /// reasoning delta), its separator supplied by an intervening dropped error
 /// item (`:`), and the value in the final text must rejoin chronologically —
