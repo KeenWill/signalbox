@@ -3191,6 +3191,13 @@ fn imported_position_out_of_range(
     if version.as_u64() < IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION {
         return ProtocolError::imported_position_absent();
     }
+    // Imported positions are the contiguous sequence `1..=last_position`, so a
+    // position this handler could not resolve is always beyond a positive
+    // bound. A loaded aggregate that contradicts that is corrupt, and the
+    // closed wire shape has no way to state the contradiction.
+    if last_position == 0 || requested_position.value() <= last_position {
+        return ProtocolError::without_detail(ErrorCode::Internal);
+    }
     ProtocolError::rejected(RejectionDetail::ImportedFrontierPositionOutOfRange {
         imported_conversation_id,
         requested_position,

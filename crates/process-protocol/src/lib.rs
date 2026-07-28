@@ -3236,6 +3236,7 @@ impl ServerMessage {
             }
             Self::ImportedConversationEntry {
                 position,
+                content_kind,
                 text_preview,
                 ..
             } => {
@@ -3243,6 +3244,12 @@ impl ServerMessage {
                     return Err(FrameValidationError::ImportedConversationEntryShape);
                 }
                 if let Some(preview) = text_preview {
+                    // Only `Text` content has an exact attested text to
+                    // preview, so a preview on any other kind contradicts the
+                    // kind it accompanies.
+                    if *content_kind != ImportedContentKind::Text {
+                        return Err(FrameValidationError::ImportedConversationEntryShape);
+                    }
                     preview.validate()?;
                 }
             }
@@ -3335,6 +3342,22 @@ impl ServerFrame {
                 {
                     return Err(FrameValidationError::UncorrelatedApplicationError);
                 }
+                if let Some(RejectionDetail::ImportedFrontierPositionOutOfRange {
+                    requested_position,
+                    last_position,
+                    ..
+                }) = detail.value()
+                {
+                    // An imported conversation's positions are the contiguous
+                    // sequence `1..=last_position`, so a nonpositive bound or a
+                    // requested ordinal inside that range contradicts the
+                    // rejection the detail states.
+                    if last_position.value() == 0
+                        || requested_position.value() <= last_position.value()
+                    {
+                        return Err(FrameValidationError::ImportedFrontierRangeShape);
+                    }
+                }
                 if (*code == ErrorCode::Rejected) != detail.value().is_some() {
                     return Err(FrameValidationError::ErrorDetailShape);
                 }
@@ -3402,6 +3425,9 @@ pub enum FrameValidationError {
     /// An imported text preview exceeded its bound or contradicted its own
     /// truncation marker.
     ImportedTextPreviewShape,
+    /// An out-of-range imported rejection stated a range its own requested
+    /// position falls inside, or an empty selectable range.
+    ImportedFrontierRangeShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -3422,6 +3448,7 @@ impl fmt::Display for FrameValidationError {
                 "imported conversation entry position is not positive"
             }
             Self::ImportedTextPreviewShape => "imported text preview shape is inconsistent",
+            Self::ImportedFrontierRangeShape => "imported frontier rejection range is inconsistent",
         })
     }
 }
@@ -5006,6 +5033,81 @@ mod tests {
         );
 
         assert_eq!(frame, Err(FrameValidationError::ImportedTextPreviewShape));
+        Ok(())
+    }
+
+    /// A preview states an entry's exact attested text, so attaching one to a
+    /// kind that has no such text is a contradictory frame rather than extra
+    /// information the client may present.
+    #[test]
+    fn inv033_imported_conversation_entry_rejects_a_preview_on_nontext_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Fifteen,
+            request(1)?,
+            ServerMessage::ImportedConversationEntry {
+                position: CanonicalU64::new(1),
+                imported_entry_id: uuid(6),
+                source_speaker: ImportedSourceSpeaker::NotAttested {},
+                content_kind: ImportedContentKind::ToolCall,
+                text_preview: Some(ImportedTextPreview::of_exact_text("lookup")),
+            },
+        );
+
+        assert_eq!(
+            frame,
+            Err(FrameValidationError::ImportedConversationEntryShape)
+        );
+        Ok(())
+    }
+
+    /// A requested ordinal inside the stated range contradicts the rejection
+    /// carrying it, so the frame is refused rather than rendered.
+    #[test]
+    fn inv033_imported_range_rejection_refuses_a_selectable_requested_position()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Fifteen,
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the command was rejected by current durable state"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::ImportedFrontierPositionOutOfRange {
+                        imported_conversation_id: uuid(5),
+                        requested_position: CanonicalU64::new(2),
+                        last_position: CanonicalU64::new(2),
+                    },
+                ),
+            },
+        );
+
+        assert_eq!(frame, Err(FrameValidationError::ImportedFrontierRangeShape));
+        Ok(())
+    }
+
+    /// An imported conversation is nonempty, so a zero selectable bound cannot
+    /// describe one.
+    #[test]
+    fn inv033_imported_range_rejection_refuses_an_empty_selectable_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Fifteen,
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the command was rejected by current durable state"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::ImportedFrontierPositionOutOfRange {
+                        imported_conversation_id: uuid(5),
+                        requested_position: CanonicalU64::new(1),
+                        last_position: CanonicalU64::new(0),
+                    },
+                ),
+            },
+        );
+
+        assert_eq!(frame, Err(FrameValidationError::ImportedFrontierRangeShape));
         Ok(())
     }
 

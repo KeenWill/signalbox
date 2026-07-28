@@ -676,17 +676,19 @@ split and uses `text` for every `Text` content.
 
 `text_preview` is JSON `null` for every entry carrying no exact attested text —
 every non-`Text` content, and `Text` whose value is unattested or explicitly
-absent. Otherwise it is `{ preview, truncated }`, where `preview` is the entry's
-exact leading Unicode scalar sequence cut at a scalar boundary within 256 UTF-8
-bytes and `truncated` states whether exact text remains beyond it. Attested
-empty text therefore previews as exact empty text, which the null member cannot
-be confused with. A `truncated = true` preview is nonempty, because the cut
-always keeps at least one scalar of nonempty text. The projection exposes no
-imported content a transcript snapshot does not already carry: it bounds exactly
-the attested text that snapshot carries in full and adds nothing for any other
-content. The immutable imported aggregate remains the authority for complete
-normalized content and verbatim raw source. This read creates nothing, seeds no
-session, and performs no durable write.
+absent. A present preview on any `content_kind` other than `text` is a
+contradictory frame and is rejected rather than presented. Otherwise it is
+`{ preview, truncated }`, where `preview` is the entry's exact leading Unicode
+scalar sequence cut at a scalar boundary within 256 UTF-8 bytes and `truncated`
+states whether exact text remains beyond it. Attested empty text therefore
+previews as exact empty text, which the null member cannot be confused with. A
+`truncated = true` preview is nonempty, because the cut always keeps at least
+one scalar of nonempty text. The projection exposes no imported content a
+transcript snapshot does not already carry: it bounds exactly the attested text
+that snapshot carries in full and adds nothing for any other content. The
+immutable imported aggregate remains the authority for complete normalized
+content and verbatim raw source. This read creates nothing, seeds no session,
+and performs no durable write.
 
 An application rejection is an `error` with `code = "rejected"` and a required
 `detail` object whose variants are closed. The version-one input treatment
@@ -723,17 +725,19 @@ version-fifteen `create_session_from_imported_frontier` rejection admits
 `imported_frontier_position_out_of_range { imported_conversation_id, requested_position, last_position }`.
 The first names an imported conversation, never a session, as the absent target;
 the second states that the identity was valid and only the ordinal was outside
-`1..=last_position`. The admitted versions ten through twelve have no typed
-detail for either case and keep the undetailed `not_found` their closed message
-vocabulary already admits, distinguished only by its non-normative message.
-Thirteen and fourteen are reserved rather than admitted, so no frame ever
-reaches this mapping under them. The `turn_not_awaiting_reconciliation` and
-`tool_request_not_in_session` details report refusals made before command
-recording, so unlike every other `rejected` detail they name no durable command
-result and have no replay projection; a caller that repeats the request observes
-the current state, not a recorded outcome. Other error codes have no `detail`.
-An equal replay returns the same success or rejection projection as the first
-handling.
+`1..=last_position`. Because imported positions are that contiguous sequence, a
+`last_position` of zero or a `requested_position` inside the stated range is a
+contradictory frame and is rejected rather than presented. The admitted versions
+ten through twelve have no typed detail for either case and keep the undetailed
+`not_found` their closed message vocabulary already admits, distinguished only
+by its non-normative message. Thirteen and fourteen are reserved rather than
+admitted, so no frame ever reaches this mapping under them. The
+`turn_not_awaiting_reconciliation` and `tool_request_not_in_session` details
+report refusals made before command recording, so unlike every other `rejected`
+detail they name no durable command result and have no replay projection; a
+caller that repeats the request observes the current state, not a recorded
+outcome. Other error codes have no `detail`. An equal replay returns the same
+success or rejection projection as the first handling.
 
 The error-code set in all admitted versions is:
 
