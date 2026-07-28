@@ -6,7 +6,7 @@ use std::{
 
 use signalbox_process_protocol::{
     CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ImportedContentKind,
-    ImportedSourceSpeaker, ImportedSpeaker, MetadataActor, MetadataLastWriter,
+    ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, MetadataActor, MetadataLastWriter,
     ModelCallDisposition, ModelCallState, ReviewDiffSide, ReviewFindingSnapshot,
     ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle, ReviewRunLifecycle,
     ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject, ReviewWorkflow,
@@ -56,6 +56,15 @@ pub(crate) enum SnapshotSelection {
 #[derive(Default)]
 struct SnapshotSelectionContext {
     requests: HashSet<CanonicalUuid>,
+}
+
+/// One imported entry as the imported verb presents it.
+pub(crate) struct ImportedEntryRow<'a> {
+    pub(crate) position: u64,
+    pub(crate) imported_entry_id: CanonicalUuid,
+    pub(crate) source_speaker: ImportedSourceSpeaker,
+    pub(crate) content_kind: ImportedContentKind,
+    pub(crate) text_preview: Option<&'a ImportedTextPreview>,
 }
 
 /// One complete metadata summary as the search verb presents it.
@@ -222,6 +231,49 @@ impl<'a> Output<'a> {
             "scan_summary imported={} already_imported={} skipped={}",
             summary.imported, summary.already_imported, summary.skipped
         )
+    }
+
+    /// Prints one selectable imported position with its attestation, kind, and
+    /// bounded text preview.
+    ///
+    /// The preview is the last field on its line and the truncation marker
+    /// precedes it, so preview text cannot forge either. An entry carrying no
+    /// exact attested text omits both fields rather than printing a placeholder
+    /// that empty attested text could not be told apart from.
+    pub(crate) fn imported_conversation_entry(
+        &mut self,
+        row: &ImportedEntryRow<'_>,
+    ) -> io::Result<()> {
+        let prefix = format!(
+            "position={} imported_entry={} speaker={} kind={}",
+            row.position,
+            row.imported_entry_id,
+            imported_speaker_attestation_label(row.source_speaker),
+            imported_content_kind(row.content_kind),
+        );
+        match row.text_preview {
+            Some(preview) => {
+                let text = self.render_field(preview.preview(), TextField::TrailingOnLine);
+                writeln!(
+                    self.stdout,
+                    "{prefix} truncated={} text={text}",
+                    preview.truncated()
+                )
+            }
+            None => writeln!(self.stdout, "{prefix}"),
+        }
+    }
+
+    /// Prints the imported conversation's total entry count, which is also its
+    /// greatest selectable position.
+    pub(crate) fn imported_conversation_entry_count(&mut self, entry_count: u64) -> io::Result<()> {
+        writeln!(self.stdout, "entry_count={entry_count}")
+    }
+
+    /// Prints the concrete position a `latest` selection resolved to, before
+    /// the durable command that consumes it can become ambiguous.
+    pub(crate) fn resolved_through_position(&mut self, position: u64) -> io::Result<()> {
+        self.recovery_value("through_position", &position.to_string())
     }
 
     pub(crate) fn session_summary(
@@ -1265,6 +1317,21 @@ const fn imported_speaker_label(source: ImportedSourceSpeaker) -> &'static str {
     }
 }
 
+/// Names the speaker attestation as a standalone field value, where the
+/// transcript's `imported_<suffix>` composition does not supply the noun.
+const fn imported_speaker_attestation_label(source: ImportedSourceSpeaker) -> &'static str {
+    match source {
+        ImportedSourceSpeaker::NotAttested {} => "unattested",
+        ImportedSourceSpeaker::AttestedAbsent {} => "absent",
+        ImportedSourceSpeaker::Attested {
+            speaker: ImportedSpeaker::User,
+        } => "user",
+        ImportedSourceSpeaker::Attested {
+            speaker: ImportedSpeaker::Assistant,
+        } => "assistant",
+    }
+}
+
 const fn imported_content_kind(kind: ImportedContentKind) -> &'static str {
     match kind {
         ImportedContentKind::SourceEvent => "source_event",
@@ -1441,16 +1508,17 @@ mod tests {
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ContentFragment, CurrentModelCall, CurrentModelCallState,
         ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
-        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent, MetadataActor,
-        MetadataLastWriter, ModelCallState, ReviewDiffSide, ReviewFindingInput,
-        ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity, ReviewTargetSnapshot,
-        ReviewTargetSubject, ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry,
-        TurnState,
+        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
+        InputContent, MetadataActor, MetadataLastWriter, ModelCallState, ReviewDiffSide,
+        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
+        ReviewTargetSnapshot, ReviewTargetSubject, ServerMessage, SessionEvent, TranscriptEntry,
+        TranscriptTextEntry, TurnState,
     };
     use uuid::Uuid;
 
     use super::{
-        ConversationRow, Output, SessionMetadataRow, SnapshotSelection, TextField, control_safe,
+        ConversationRow, ImportedEntryRow, Output, SessionMetadataRow, SnapshotSelection,
+        TextField, control_safe,
     };
     use crate::{
         error::ClientError,
@@ -1615,6 +1683,109 @@ mod tests {
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn imported_renders_a_previewed_attested_text_entry() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .imported_conversation_entry(&ImportedEntryRow {
+                position: 2,
+                imported_entry_id: wire_uuid(7),
+                source_speaker: ImportedSourceSpeaker::Attested {
+                    speaker: ImportedSpeaker::Assistant,
+                },
+                content_kind: ImportedContentKind::Text,
+                text_preview: Some(&ImportedTextPreview::of_exact_text("synthetic answer")),
+            })
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            position=2 imported_entry=00000000-0000-0000-0000-000000000007 speaker=assistant kind=text truncated=false text=synthetic answer
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn imported_renders_a_nontext_entry_without_preview_fields() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .imported_conversation_entry(&ImportedEntryRow {
+                position: 1,
+                imported_entry_id: wire_uuid(7),
+                source_speaker: ImportedSourceSpeaker::NotAttested {},
+                content_kind: ImportedContentKind::SourceEvent,
+                text_preview: None,
+            })
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            position=1 imported_entry=00000000-0000-0000-0000-000000000007 speaker=unattested kind=source_event
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn imported_preview_text_cannot_forge_another_entry_row() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .imported_conversation_entry(&ImportedEntryRow {
+                position: 3,
+                imported_entry_id: wire_uuid(7),
+                source_speaker: ImportedSourceSpeaker::Attested {
+                    speaker: ImportedSpeaker::User,
+                },
+                content_kind: ImportedContentKind::Text,
+                text_preview: Some(&ImportedTextPreview::of_exact_text(
+                    "forged\nposition=9 imported_entry=00000000-0000-0000-0000-000000000008",
+                )),
+            })
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            position=3 imported_entry=00000000-0000-0000-0000-000000000007 speaker=user kind=text truncated=false text=forged\u{a}position=9 imported_entry=00000000-0000-0000-0000-000000000008
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn imported_names_its_entry_count_as_the_greatest_selectable_position() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .imported_conversation_entry_count(2)
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            entry_count=2
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn continue_prints_the_resolved_latest_position_before_its_command() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .resolved_through_position(2)
+            .expect("in-memory output cannot fail");
+
+        assert!(stdout.is_empty());
+        expect![[r#"
+            through_position=2
+        "#]]
+        .assert_eq(&String::from_utf8(stderr).expect("rendered output is UTF-8"));
     }
 
     #[test]

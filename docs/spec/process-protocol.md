@@ -36,12 +36,20 @@ surface adds protocol version eleven, verified through PR #295
 protocol version twelve, verified through PR #300
 (`agent/token-level-streaming`). The client-selectable input-delivery surface
 adds protocol version thirteen, verified through PR #302
-(`agent/mid-turn-steering`). Versions fourteen and fifteen remain allocated to
-concurrent protocol stacks. The unified conversation-listing surface adds
-version sixteen for the single read-only `list_conversations` request, verified
-through PR #304 (`agent/unified-conversation-listing`). The implementation here
-speaks versions one through thirteen and sixteen, and its terminal client
-selects version sixteen. Its `search` verb over version four's metadata list was
+(`agent/mid-turn-steering`). Version fourteen remains allocated to a concurrent
+protocol stack. The unified conversation-listing surface adds version sixteen
+for the single read-only `list_conversations` request, verified through PR #304
+(`agent/unified-conversation-listing`). The imported-conversation inspection
+surface reserved fifteen while sixteen was still unclaimed, but sixteen shipped
+first: numbering its request below an already-closed vocabulary would
+retroactively admit that request in version-sixteen frames, so the inspection
+surface takes version seventeen for the single `read_imported_conversation`
+request and the two typed imported-continuation rejections, verified through PR
+#303 (`agent/imported-conversation-inspection`). Versions one through thirteen
+and sixteen retain their closed request and message vocabularies unchanged. The
+implementation here speaks versions one through thirteen, sixteen, and seventeen
+while fourteen and fifteen remain unsupported, and its terminal client selects
+version seventeen. Its `search` verb over version four's metadata list was
 verified through PR #283 (`agent/session-search-cli`; terminal client surface
 only). This page's version-four last-writer member spelling was verified through
 PR #288 (`agent/audit-fix-docs-coherence`). This page is the normative boundary
@@ -158,7 +166,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1` through `13`, or `16`;
+- `version`: JSON integer `1` through `13`, `16`, or `17`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -170,18 +178,20 @@ and members with the wrong JSON type fail explicitly (INV-033). A frame may
 contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
-spellings decode to the same name. A version other than one through thirteen or
-sixteen produces an `unsupported_version` error naming the supported versions,
-then the server closes the connection. Every response uses the request's
-admitted version; when no version can be admitted, the server error uses version
-one as the pre-admission fallback. A client speaking a version above one admits
-that version-one fallback only for `malformed_frame` or `unsupported_version`,
-then applies the ordinary request-identity check; every other response-version
-mismatch fails locally. A server error uses `request_id = "0"` only when the
-incoming frame prevents recovery of a valid nonzero identity; zero is never a
-valid client identity or success-response identity. Leading zeroes, a plus sign,
-whitespace, and any spelling other than the shortest ASCII decimal form are
-invalid.
+spellings decode to the same name. A version other than one through thirteen,
+sixteen, or seventeen produces an `unsupported_version` error naming the
+supported versions, then the server closes the connection. Versions fourteen and
+fifteen are reserved by other stacks and are unsupported here, so the admitted
+set has one gap; that gap is a reservation, not a retired version. Every
+response uses the request's admitted version; when no version can be admitted,
+the server error uses version one as the pre-admission fallback. A client
+speaking a version above one admits that version-one fallback only for
+`malformed_frame` or `unsupported_version`, then applies the ordinary
+request-identity check; every other response-version mismatch fails locally. A
+server error uses `request_id = "0"` only when the incoming frame prevents
+recovery of a valid nonzero identity; zero is never a valid client identity or
+success-response identity. Leading zeroes, a plus sign, whitespace, and any
+spelling other than the shortest ASCII decimal form are invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -212,6 +222,7 @@ that variant.
 | `decide_tool_request`                   | 8               | `command_id`, `session_id`, and `tool_request_id` (canonical UUID strings), `decision` (a decision object below)                                                                                                                                                     | Supply the owner decision for one pending tool request through the canonical decision command.                                                                                                                                                    |
 | `read_session_defaults`                 | 9               | `session_id` (canonical UUID string), `defaults_version` (canonical decimal string or null)                                                                                                                                                                          | Read one complete immutable defaults epoch: the current one for null, otherwise exactly the named one.                                                                                                                                            |
 | `list_conversations`                    | 16              | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                  | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                    |
+| `read_imported_conversation`            | 17              | `imported_conversation_id` (canonical UUID string)                                                                                                                                                                                                                   | Read one immutable imported conversation's complete entry inventory, including the positions `create_session_from_imported_frontier` consumes.                                                                                                    |
 
 Version thirteen adds one optional closed `delivery` object to `submit_input`.
 Its exact variants are `start_when_idle {}`,
@@ -494,21 +505,24 @@ twelve retains every earlier admitted request and adds no request variant.
 Version thirteen retains every earlier admitted request and adds only the
 optional delivery member on `submit_input` plus its steering receipt. Version
 sixteen retains every earlier admitted request and adds only the read-only
-`list_conversations`; versions fourteen and fifteen remain reserved by
-concurrent stacks and unsupported here. A metadata request carried under version
-one, two, or three, an import request carried under version one through four, a
-defaults-replacement request carried under version one through five, a
-reconciliation request carried under version one through six, a turn-control
-request carried under version one through seven, a defaults read carried under
-version one through eight, an imported-frontier creation request carried under
-any version one through nine, a review request carried under any version one
-through ten, a delivery-bearing submit carried under any version before
-thirteen, or a unified-listing request carried under any version one through
-twelve, is classified as `malformed_frame` because its supported version does
-not admit that request variant; it never reaches application construction. A
-version-one `submit_input`, `read_transcript`, or `follow_session` request that
-selects imported ancestry returns a version-one `unsupported_version` error
-naming version two before mutation or snapshot construction.
+`list_conversations`. Version seventeen retains every earlier admitted request
+and adds only the read-only `read_imported_conversation`; versions fourteen and
+fifteen remain reserved by concurrent stacks and unsupported here. A metadata
+request carried under version one, two, or three, an import request carried
+under version one through four, a defaults-replacement request carried under
+version one through five, a reconciliation request carried under version one
+through six, a turn-control request carried under version one through seven, a
+defaults read carried under version one through eight, an imported-frontier
+creation request carried under any version one through nine, a review request
+carried under any version one through ten, a delivery-bearing submit carried
+under any version before thirteen, a unified-listing request carried under any
+version one through twelve, or an imported-conversation read carried under any
+version one through sixteen, is classified as `malformed_frame` because its
+supported version does not admit that request variant; it never reaches
+application construction. A version-one `submit_input`, `read_transcript`, or
+`follow_session` request that selects imported ancestry returns a version-one
+`unsupported_version` error naming version two before mutation or snapshot
+construction.
 
 Versions four and above also inherit every transcript, turn-state, entry, and
 event shape admitted by version three, including the imported representations
@@ -628,7 +642,8 @@ fragment bound, signalboxd emits consecutive messages with the same identities
 and part index whose contents concatenate to the exact already-redacted delta.
 The message has no outbox `cursor`: it is a process-local presentation event,
 not a `session_event`, transcript entry, or terminal-evidence fact. Versions one
-through eleven never receive this message.
+through eleven never receive this message; every admitted version at or above
+twelve inherits it, exactly as they inherit every earlier follow shape.
 
 A replayed metadata receipt remains the exact snapshot installed by its original
 handling even if a later command has replaced the current metadata. A caller
@@ -718,6 +733,48 @@ current pointer; a named version reads exactly that immutable epoch, so the
 response is stable under later replacements. The `not_found` error covers both
 an absent session and a named epoch that was never installed.
 
+Version seventeen's successful `read_imported_conversation` response is a
+bounded sequence:
+
+1. `imported_conversation_start { imported_conversation_id }`;
+2. one `imported_conversation_entry` per normalized entry, in imported position
+   order; and
+3. `imported_conversation_end { imported_conversation_id, entry_count }`.
+
+Each entry carries its one-based `position`, `imported_entry_id`, the exact
+`source_speaker` attestation version two introduced, a `content_kind`
+discriminator over the closed normalized content vocabulary, and a required
+`text_preview` member. Positions are the contiguous sequence `1..=entry_count`,
+so `entry_count` is also the greatest position
+`create_session_from_imported_frontier` admits. The client validates that
+contiguity and the terminal count before presenting any row. The daemon reads
+the complete checked aggregate through the same repository load the continuation
+command performs, spools the whole sequence, and streams it, so a slow client
+retains temporary disk rather than the aggregate.
+
+`content_kind` names the entry's normalized content variant: `source_event`,
+`source_message_block`, `text`, `tool_call`, `tool_result`, `thinking`,
+`redacted_thinking`, `document`, or `message_content_absent`. A transcript
+snapshot reaches its `text` arm only for absent or unattested text, because
+attested text takes `transcript_text_entry` there; an inspection row has no such
+split and uses `text` for every `Text` content.
+
+`text_preview` is JSON `null` for every entry carrying no exact attested text —
+every non-`Text` content, and `Text` whose value is unattested or explicitly
+absent. A present preview on any `content_kind` other than `text` is a
+contradictory frame and is rejected rather than presented. Otherwise it is
+`{ preview, truncated }`, where `preview` is the entry's exact leading Unicode
+scalar sequence cut at a scalar boundary within 256 UTF-8 bytes and `truncated`
+states whether exact text remains beyond it. Attested empty text therefore
+previews as exact empty text, which the null member cannot be confused with. A
+`truncated = true` preview is nonempty, because the cut always keeps at least
+one scalar of nonempty text. The projection exposes no imported content a
+transcript snapshot does not already carry: it bounds exactly the attested text
+that snapshot carries in full and adds nothing for any other content. The
+immutable imported aggregate remains the authority for complete normalized
+content and verbatim raw source. This read creates nothing, seeds no session,
+and performs no durable write.
+
 An application rejection is an `error` with `code = "rejected"` and a required
 `detail` object whose variants are closed. The version-one input treatment
 admits `session_not_found { session_id }`,
@@ -755,13 +812,32 @@ A version-eight `decide_tool_request` rejection admits
 `tool_request_not_found { tool_request_id }`,
 `tool_request_already_resolved { tool_request_id }`,
 `tool_request_not_earliest_undecided { tool_request_id, earliest_tool_request_id }`,
-and `tool_request_not_in_session { session_id, tool_request_id }`. The
-`turn_not_awaiting_reconciliation` and `tool_request_not_in_session` details
-report refusals made before command recording, so unlike every other `rejected`
-detail they name no durable command result and have no replay projection; a
-caller that repeats the request observes the current state, not a recorded
-outcome. Other error codes have no `detail`. An equal replay returns the same
-success or rejection projection as the first handling.
+and `tool_request_not_in_session { session_id, tool_request_id }`. A
+version-seventeen `create_session_from_imported_frontier` rejection admits
+`imported_conversation_not_found { imported_conversation_id }` and
+`imported_frontier_position_out_of_range { imported_conversation_id, requested_position, last_position }`.
+The first names an imported conversation, never a session, as the absent target;
+the second states that the identity was valid and only the ordinal was outside
+`1..=last_position`. Because imported positions are that contiguous sequence, a
+`last_position` of zero or a `requested_position` inside the stated range is a
+contradictory frame and is rejected rather than presented. The admitted versions
+ten through thirteen and sixteen have no typed detail for either case and keep
+the undetailed `not_found` their closed message vocabulary already admits,
+distinguished only by its non-normative message. Fourteen and fifteen are
+reserved rather than admitted, so no frame ever reaches this mapping under them.
+The `turn_not_awaiting_reconciliation`, `tool_request_not_in_session`,
+`imported_conversation_not_found`, and `imported_frontier_position_out_of_range`
+details report refusals made before command recording, so unlike every other
+`rejected` detail they name no durable command result and have no replay
+projection; a caller that repeats the request observes the current state, not a
+recorded outcome. The two imported details leave the command identity unclaimed
+— the daemon refuses them before the creation service runs, and the service's
+own misses likewise claim nothing, as
+[sessions-and-transcript](sessions-and-transcript.md#create-from-an-imported-frontier)
+states — so the same command identity remains available for a corrected
+conversation or position rather than becoming a conflicting reuse. Other error
+codes have no `detail`. An equal replay returns the same success or rejection
+projection as the first handling.
 
 The error-code set in all admitted versions is:
 
@@ -1153,7 +1229,7 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack uses version sixteen; version four's
+The `signalbox` binary in this stack uses version seventeen; version four's
 single-session metadata read and metadata replacement remain core protocol and
 daemon capabilities without terminal-client UX, while its paginated metadata
 list is the `search` verb below. Older clients remain supported for
@@ -1162,7 +1238,8 @@ client accepts a global `--socket <path>` override or reads
 `SIGNALBOX_SOCKET_PATH`, and provides:
 
 - `create (--model <selection-uuid> | --alias <alias-uuid>) [--system-prompt-file <path>] [--command-id <uuid>]`;
-- `continue <imported-conversation-uuid> --through-position <positive-decimal> --relationship <resume|fork> (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;
+- `continue <imported-conversation-uuid> --through-position <positive-decimal|latest> --relationship <resume|fork> (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;
+- `imported <imported-conversation-uuid>`;
 - `list`;
 - `search [--title <substring>] [--tag <tag>]... [--include-archived] [--limit <decimal>] [--after <session-uuid>]`;
 - `conversations [--title <substring>] [--origin <native|imported|all>] [--include-archived] [--limit <decimal>] [--after <native|imported>:<uuid>]`;
@@ -1278,11 +1355,30 @@ defaults recovery values as an ordinary `send`, then follows the accepted
 successor turn to its own terminal, so one invocation both records the
 reconciliation decision and continues the conversation.
 
+`imported` prints one imported conversation's selectable positions. Each result
+is one line carrying the position, imported entry identity, speaker attestation,
+content kind, and — for an entry with exact attested text — its truncation
+marker and bounded preview. An entry carrying no exact attested text omits both
+preview fields rather than printing a placeholder that empty attested text could
+not be told apart from. The preview is the line's last field and its truncation
+marker precedes it, so preview text cannot forge either. A final
+`entry_count=<decimal>` line names the total, which is also the greatest
+position `continue` admits. The client validates the complete sequence, its
+position contiguity, and its terminal count into a spool before presenting any
+line.
+
 `continue` requires the imported position and relationship explicitly; it never
-selects the last frontier or treats resume as an implicit default. Success
-prints the created session identity, which is immediately usable by `send`,
-`transcript`, and `follow`. The command identity, imported conversation,
-position, relationship, and model selection are the complete replay inputs.
+treats resume as an implicit default and has no implicit position. Its position
+is either a positive decimal or the exact sentinel `latest`. `latest` is
+resolved client-side against `read_imported_conversation`'s entry count before
+the durable command is constructed, and the resolved ordinal is printed as the
+recovery value `through_position=<decimal>` on standard error; the wire request
+therefore always carries a concrete position. An imported conversation is
+immutable, so that resolution is stable and an exact replay names the same
+boundary. Success prints the created session identity, which is immediately
+usable by `send`, `transcript`, and `follow`. The command identity, imported
+conversation, resolved position, relationship, and model selection are the
+complete replay inputs.
 
 `stop` reads its successor content the same way. When `--turn` is absent it
 reads the authoritative transcript, selects the single turn holding the active
@@ -1330,7 +1426,7 @@ silently substitutes a new command identity for an ambiguous attempt. It uses a
 fresh nonzero request identity per connection, validates that a defaults receipt
 is the exact successor carrying the requested selection, copied posture, and
 exact replacement prompt, validates that a decision receipt echoes the exact
-request and decision it sent, renders only known version-sixteen messages, and
+request and decision it sent, renders only known version-seventeen messages, and
 exits nonzero on protocol or application errors other than the follow-specific
 `resync_required` control case, which reconnects for a fresh snapshot.
 
