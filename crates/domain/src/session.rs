@@ -13,8 +13,17 @@
 use crate::{
     ContextFrontierId, DurableCommandId, ImportedConversationId, ImportedTranscriptFrontier,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    VersionedSessionConfigurationDefaults,
+    SessionTemplateProvenance, VersionedSessionConfigurationDefaults,
 };
+
+#[derive(Clone, Debug)]
+enum SessionCreationDefaults {
+    Explicit(SessionConfigurationDefaults),
+    Template {
+        provenance: SessionTemplateProvenance,
+        resolved: SessionConfigurationDefaults,
+    },
+}
 
 /// Why one session exists.
 ///
@@ -230,7 +239,7 @@ impl SessionCreationProvenance {
 pub struct CreateSession {
     command_id: DurableCommandId,
     provenance: SessionCreationProvenance,
-    initial_configuration_defaults: SessionConfigurationDefaults,
+    creation_defaults: SessionCreationDefaults,
 }
 
 impl CreateSession {
@@ -244,7 +253,25 @@ impl CreateSession {
         Self {
             command_id,
             provenance,
-            initial_configuration_defaults,
+            creation_defaults: SessionCreationDefaults::Explicit(initial_configuration_defaults),
+        }
+    }
+
+    /// Creates a template-sourced payload from the resolved copy and its
+    /// immutable name/digest provenance.
+    pub const fn new_from_template(
+        command_id: DurableCommandId,
+        provenance: SessionCreationProvenance,
+        template_provenance: SessionTemplateProvenance,
+        resolved_configuration_defaults: SessionConfigurationDefaults,
+    ) -> Self {
+        Self {
+            command_id,
+            provenance,
+            creation_defaults: SessionCreationDefaults::Template {
+                provenance: template_provenance,
+                resolved: resolved_configuration_defaults,
+            },
         }
     }
 
@@ -261,7 +288,20 @@ impl CreateSession {
 
     /// Borrows the complete unversioned initial defaults payload.
     pub const fn initial_configuration_defaults(&self) -> &SessionConfigurationDefaults {
-        &self.initial_configuration_defaults
+        match &self.creation_defaults {
+            SessionCreationDefaults::Explicit(defaults)
+            | SessionCreationDefaults::Template {
+                resolved: defaults, ..
+            } => defaults,
+        }
+    }
+
+    /// Borrows immutable template provenance when creation copied a template.
+    pub const fn template_provenance(&self) -> Option<&SessionTemplateProvenance> {
+        match &self.creation_defaults {
+            SessionCreationDefaults::Explicit(_) => None,
+            SessionCreationDefaults::Template { provenance, .. } => Some(provenance),
+        }
     }
 
     /// Establishes the first immutable defaults version this creation
@@ -293,7 +333,7 @@ impl CreateSession {
     /// work.
     pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults {
         VersionedSessionConfigurationDefaults::establish(
-            self.initial_configuration_defaults.clone(),
+            self.initial_configuration_defaults().clone(),
         )
     }
 }
@@ -305,7 +345,21 @@ impl CreateSession {
 impl PartialEq for CreateSession {
     fn eq(&self, other: &Self) -> bool {
         self.provenance == other.provenance
-            && self.initial_configuration_defaults == other.initial_configuration_defaults
+            && match (&self.creation_defaults, &other.creation_defaults) {
+                (
+                    SessionCreationDefaults::Explicit(left),
+                    SessionCreationDefaults::Explicit(right),
+                ) => left == right,
+                (
+                    SessionCreationDefaults::Template {
+                        provenance: left, ..
+                    },
+                    SessionCreationDefaults::Template {
+                        provenance: right, ..
+                    },
+                ) => left.name() == right.name(),
+                _ => false,
+            }
     }
 }
 
@@ -314,7 +368,16 @@ impl Eq for CreateSession {}
 impl std::hash::Hash for CreateSession {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.provenance.hash(state);
-        self.initial_configuration_defaults.hash(state);
+        match &self.creation_defaults {
+            SessionCreationDefaults::Explicit(defaults) => {
+                0_u8.hash(state);
+                defaults.hash(state);
+            }
+            SessionCreationDefaults::Template { provenance, .. } => {
+                1_u8.hash(state);
+                provenance.name().hash(state);
+            }
+        }
     }
 }
 
@@ -445,6 +508,7 @@ impl ImportedSessionSeed {
 pub struct InitialSession {
     id: SessionId,
     provenance: SessionCreationProvenance,
+    template_provenance: Option<SessionTemplateProvenance>,
     configuration_defaults: VersionedSessionConfigurationDefaults,
 }
 
@@ -457,6 +521,7 @@ impl InitialSession {
         Self {
             id,
             provenance,
+            template_provenance: None,
             configuration_defaults,
         }
     }
@@ -469,6 +534,11 @@ impl InitialSession {
     /// Returns the immutable creation provenance.
     pub const fn provenance(&self) -> SessionCreationProvenance {
         self.provenance
+    }
+
+    /// Borrows immutable template provenance when creation copied a template.
+    pub const fn template_provenance(&self) -> Option<&SessionTemplateProvenance> {
+        self.template_provenance.as_ref()
     }
 
     /// Returns defaults version one established by creation.
@@ -525,6 +595,7 @@ impl InitialSession {
 pub struct Session {
     id: SessionId,
     creation_provenance: SessionCreationProvenance,
+    template_provenance: Option<SessionTemplateProvenance>,
     current_configuration_defaults: VersionedSessionConfigurationDefaults,
 }
 
@@ -537,6 +608,7 @@ impl Session {
         Self {
             id,
             creation_provenance,
+            template_provenance: None,
             current_configuration_defaults,
         }
     }
@@ -549,6 +621,11 @@ impl Session {
     /// Returns the complete immutable creation provenance.
     pub const fn creation_provenance(&self) -> SessionCreationProvenance {
         self.creation_provenance
+    }
+
+    /// Borrows immutable template provenance when creation copied a template.
+    pub const fn template_provenance(&self) -> Option<&SessionTemplateProvenance> {
+        self.template_provenance.as_ref()
     }
 
     /// Borrows the complete defaults version selected as current when this
@@ -569,6 +646,7 @@ pub struct SessionReconstitutionInput {
     requested_session: SessionId,
     stored_session: SessionId,
     provenance: SessionCreationProvenance,
+    template_provenance: Option<SessionTemplateProvenance>,
     current_defaults_session: SessionId,
     current_defaults_version: SessionConfigurationDefaultsVersion,
     defaults_session: SessionId,
@@ -590,10 +668,37 @@ impl SessionReconstitutionInput {
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
     ) -> Self {
+        Self::new_with_template_provenance(
+            requested_session,
+            stored_session,
+            provenance,
+            None,
+            current_defaults_session,
+            current_defaults_version,
+            defaults_session,
+            defaults_version,
+            defaults,
+        )
+    }
+
+    /// Supplies complete typed facts including optional template provenance.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new_with_template_provenance(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        template_provenance: Option<SessionTemplateProvenance>,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self {
         Self {
             requested_session,
             stored_session,
             provenance,
+            template_provenance,
             current_defaults_session,
             current_defaults_version,
             defaults_session,
@@ -615,6 +720,11 @@ impl SessionReconstitutionInput {
     /// Returns the complete stored immutable creation provenance.
     pub const fn provenance(&self) -> SessionCreationProvenance {
         self.provenance
+    }
+
+    /// Borrows the stored optional template provenance.
+    pub const fn template_provenance(&self) -> Option<&SessionTemplateProvenance> {
+        self.template_provenance.as_ref()
     }
 
     /// Returns the session identity owning the current-defaults pointer.
@@ -671,6 +781,7 @@ impl SessionReconstitutionInput {
         Ok(Session {
             id: self.stored_session,
             creation_provenance: self.provenance,
+            template_provenance: self.template_provenance,
             current_configuration_defaults: VersionedSessionConfigurationDefaults::reconstitute(
                 self.defaults_version,
                 self.defaults,
@@ -851,6 +962,7 @@ impl CreateSession {
         let initial_session = InitialSession {
             id: session,
             provenance: self.provenance,
+            template_provenance: self.template_provenance().cloned(),
             configuration_defaults: self.establish_initial_defaults(),
         };
         Ok(PreparedCreateSession {
@@ -873,6 +985,7 @@ pub struct CreateSessionReconstitutionInput {
     result_session: SessionId,
     session: SessionId,
     provenance: SessionCreationProvenance,
+    template_provenance: Option<SessionTemplateProvenance>,
     defaults_session: SessionId,
     defaults_version: crate::SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
@@ -890,11 +1003,36 @@ impl CreateSessionReconstitutionInput {
         defaults_version: crate::SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
     ) -> Self {
+        Self::new_with_template_provenance(
+            command,
+            result_session,
+            session,
+            provenance,
+            None,
+            defaults_session,
+            defaults_version,
+            defaults,
+        )
+    }
+
+    /// Supplies complete stored facts including optional template provenance.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new_with_template_provenance(
+        command: CreateSession,
+        result_session: SessionId,
+        session: SessionId,
+        provenance: SessionCreationProvenance,
+        template_provenance: Option<SessionTemplateProvenance>,
+        defaults_session: SessionId,
+        defaults_version: crate::SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self {
         Self {
             command,
             result_session,
             session,
             provenance,
+            template_provenance,
             defaults_session,
             defaults_version,
             defaults,
@@ -919,6 +1057,11 @@ impl CreateSessionReconstitutionInput {
     /// Returns the immutable provenance recorded by the session aggregate.
     pub const fn provenance(&self) -> SessionCreationProvenance {
         self.provenance
+    }
+
+    /// Borrows the template provenance recorded by the session aggregate.
+    pub const fn template_provenance(&self) -> Option<&SessionTemplateProvenance> {
+        self.template_provenance.as_ref()
     }
 
     /// Returns the session that owns the stored initial defaults row.
@@ -962,6 +1105,12 @@ impl CreateSessionReconstitutionInput {
                 CreateSessionReconstitutionFailure::ProvenanceMismatch,
             ));
         }
+        if self.command.template_provenance() != self.template_provenance.as_ref() {
+            return Err(fail(
+                self,
+                CreateSessionReconstitutionFailure::TemplateProvenanceMismatch,
+            ));
+        }
         if self.defaults_session != self.session {
             return Err(fail(
                 self,
@@ -999,6 +1148,7 @@ impl CreateSessionReconstitutionInput {
             session: InitialSession {
                 id: self.session,
                 provenance: self.provenance,
+                template_provenance: self.template_provenance,
                 configuration_defaults: VersionedSessionConfigurationDefaults::establish(
                     self.defaults,
                 ),
@@ -1017,6 +1167,8 @@ pub enum CreateSessionReconstitutionFailure {
     SessionResultMismatch,
     /// The stored creation provenance differs from the canonical command.
     ProvenanceMismatch,
+    /// The session's template name/digest differs from the canonical command.
+    TemplateProvenanceMismatch,
     /// The stored initial defaults row belongs to a different session.
     DefaultsSessionMismatch,
     /// Trusted source-frontier production is unavailable for this slice.
@@ -1110,7 +1262,8 @@ mod tests {
     };
     use crate::{
         ImportedTranscriptPosition, ModelSelectionRequest, SessionConfigurationDefaults,
-        SessionConfigurationDefaultsVersion, VersionedSessionConfigurationDefaults,
+        SessionConfigurationDefaultsVersion, SessionTemplateContentDigest, SessionTemplateName,
+        SessionTemplateProvenance, VersionedSessionConfigurationDefaults,
     };
 
     fn defaults(value: u128) -> SessionConfigurationDefaults {
@@ -1121,6 +1274,13 @@ mod tests {
         SessionCreationProvenance::new(
             SessionCreationCause::OwnerInitiated,
             TranscriptAncestry::None,
+        )
+    }
+
+    fn template_provenance(name: &str, digest_byte: u8) -> SessionTemplateProvenance {
+        SessionTemplateProvenance::new(
+            SessionTemplateName::try_new(name.to_owned()).expect("fixture template name is valid"),
+            SessionTemplateContentDigest::from_bytes([digest_byte; 32]),
         )
     }
 
@@ -1608,6 +1768,90 @@ mod tests {
         assert_ne!(
             create,
             CreateSession::new(command_id(3), owner_initiated_empty(), defaults(6))
+        );
+    }
+
+    /// INV-047: replay of template creation is keyed by requested name, so a
+    /// catalog edit under that name remains equal while another name or the
+    /// explicit creation mode is conflicting reuse.
+    #[test]
+    fn inv047_template_creation_comparison_uses_name_and_creation_mode() {
+        let original = CreateSession::new_from_template(
+            command_id(1),
+            owner_initiated_empty(),
+            template_provenance("reviewer", 2),
+            defaults(3),
+        );
+        let edited_same_name = CreateSession::new_from_template(
+            command_id(1),
+            owner_initiated_empty(),
+            template_provenance("reviewer", 4),
+            defaults(5),
+        );
+        let different_name = CreateSession::new_from_template(
+            command_id(1),
+            owner_initiated_empty(),
+            template_provenance("planner", 2),
+            defaults(3),
+        );
+        let explicit = CreateSession::new(command_id(1), owner_initiated_empty(), defaults(3));
+
+        assert_eq!(original, edited_same_name);
+        assert_ne!(original, different_name);
+        assert_ne!(original, explicit);
+    }
+
+    /// INV-047: preparation copies the resolved bundle and immutable
+    /// name/digest provenance into initial session state.
+    #[test]
+    fn inv047_template_preparation_copies_defaults_and_provenance() {
+        let provenance = template_provenance("reviewer", 2);
+        let create = CreateSession::new_from_template(
+            command_id(1),
+            owner_initiated_empty(),
+            provenance.clone(),
+            defaults(3),
+        );
+
+        let prepared = create
+            .prepare(session_id(4))
+            .expect("owner creation without ancestry prepares");
+
+        assert_eq!(prepared.command().template_provenance(), Some(&provenance));
+        assert_eq!(prepared.session().template_provenance(), Some(&provenance));
+        assert_eq!(
+            prepared.session().configuration_defaults().defaults(),
+            &defaults(3)
+        );
+    }
+
+    /// INV-047: replay reconstitution requires command and session storage to
+    /// repeat the same name and digest exactly.
+    #[test]
+    fn inv047_template_reconstitution_rejects_missing_provenance() {
+        let provenance = template_provenance("reviewer", 2);
+        let create = CreateSession::new_from_template(
+            command_id(1),
+            owner_initiated_empty(),
+            provenance,
+            defaults(3),
+        );
+        let error = CreateSessionReconstitutionInput::new_with_template_provenance(
+            create,
+            session_id(4),
+            session_id(4),
+            owner_initiated_empty(),
+            None,
+            session_id(4),
+            SessionConfigurationDefaultsVersion::first(),
+            defaults(3),
+        )
+        .reconstitute()
+        .expect_err("stored template provenance cannot be absent");
+
+        assert_eq!(
+            error.failure(),
+            CreateSessionReconstitutionFailure::TemplateProvenanceMismatch
         );
     }
 

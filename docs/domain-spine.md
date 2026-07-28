@@ -483,6 +483,57 @@ pub enum ImportedConversationDisplayTitleError {
 }
 ```
 
+## domain: session_template
+
+```rust
+pub struct SessionTemplateName(/* private String */);
+impl SessionTemplateName {
+    pub const MAX_UTF8_BYTES: usize;
+    pub fn try_new(value: String) -> Result<Self, SessionTemplateNameError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+
+pub enum SessionTemplateNameFailure {
+    Empty,
+    TooLong { bytes: usize },
+    InvalidFirstByte,
+    InvalidByte,
+}
+
+pub struct SessionTemplateNameError { /* private */ }
+impl SessionTemplateNameError {
+    pub fn value(&self) -> &str;
+    pub const fn failure(&self) -> SessionTemplateNameFailure;
+    pub fn into_parts(self) -> (String, SessionTemplateNameFailure);
+}
+
+pub struct SessionTemplateVersion(/* private u64 */);
+impl SessionTemplateVersion {
+    pub const fn try_from_u64(value: u64) -> Option<Self>;
+    pub const fn as_u64(self) -> u64;
+}
+
+pub struct SessionTemplateContentDigest(/* private [u8; 32] */);
+impl SessionTemplateContentDigest {
+    pub fn derive(
+        version: SessionTemplateVersion,
+        defaults: &SessionConfigurationDefaults,
+    ) -> Option<Self>;
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+}
+
+pub struct SessionTemplateProvenance { /* private */ }
+impl SessionTemplateProvenance {
+    pub const fn new(
+        name: SessionTemplateName,
+        content_digest: SessionTemplateContentDigest,
+    ) -> Self;
+    // accessors: name(), content_digest()
+}
+```
+
 ## domain: session
 
 ```rust
@@ -524,13 +575,20 @@ impl CreateSession {
         provenance: SessionCreationProvenance,
         initial_configuration_defaults: SessionConfigurationDefaults,
     ) -> Self;
+    pub const fn new_from_template(
+        command_id: DurableCommandId,
+        provenance: SessionCreationProvenance,
+        template_provenance: SessionTemplateProvenance,
+        resolved_configuration_defaults: SessionConfigurationDefaults,
+    ) -> Self;
     pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
     pub fn prepare(self, session: SessionId)
         -> Result<PreparedCreateSession, CreateSessionPreparationError>;
-    // accessors: command_id(), provenance(), initial_configuration_defaults()
+    // accessors: command_id(), provenance(), initial_configuration_defaults(),
+    //   template_provenance()
 }
-// Eq/Hash exclude command_id (comparison-payload rule,
-// spec/identity-and-commands.md)
+// Eq/Hash exclude command_id; explicit mode compares defaults, template mode
+// compares the requested template name, and the two modes differ.
 
 pub struct CreateSessionFromImportedFrontier { /* private */ }
 impl CreateSessionFromImportedFrontier {
@@ -570,7 +628,8 @@ pub struct InitialSession { /* private */ }
 // ReconstitutedSessionCreation, PreparedCreateSessionFromImportedFrontier,
 // and ReconstitutedSessionCreationFromImportedFrontier
 impl InitialSession {
-    // accessors: id(), provenance(), configuration_defaults()
+    // accessors: id(), provenance(), template_provenance(),
+    //   configuration_defaults()
 }
 
 pub struct Session { /* private */ }
@@ -580,7 +639,8 @@ pub struct Session { /* private */ }
 // non-Copy: owned snapshot, cloned deliberately (session aggregate,
 // spec/sessions-and-transcript.md)
 impl Session {
-    // accessors: id(), creation_provenance(), current_configuration_defaults()
+    // accessors: id(), creation_provenance(), template_provenance(),
+    //   current_configuration_defaults()
 }
 
 pub struct SessionReconstitutionInput { /* private */ }
@@ -595,9 +655,20 @@ impl SessionReconstitutionInput {
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
     ) -> Self;
+    pub const fn new_with_template_provenance(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        template_provenance: Option<SessionTemplateProvenance>,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self;
     pub fn reconstitute(self) -> Result<Session, SessionReconstitutionError>;
     // accessors: requested_session(), stored_session(), provenance(),
-    //   current_defaults_session(), current_defaults_version(),
+    //   template_provenance(), current_defaults_session(), current_defaults_version(),
     //   defaults_session(), defaults_version(), defaults()
 }
 
@@ -652,15 +723,26 @@ impl CreateSessionReconstitutionInput {
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
     ) -> Self;
+    pub const fn new_with_template_provenance(
+        command: CreateSession,
+        result_session: SessionId,
+        session: SessionId,
+        provenance: SessionCreationProvenance,
+        template_provenance: Option<SessionTemplateProvenance>,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self;
     pub fn reconstitute(self)
         -> Result<ReconstitutedSessionCreation, CreateSessionReconstitutionError>;
     // accessors: command(), result_session(), session(), provenance(),
-    //   defaults_session(), defaults_version(), defaults()
+    //   template_provenance(), defaults_session(), defaults_version(), defaults()
 }
 
 pub enum CreateSessionReconstitutionFailure {
     SessionResultMismatch,
     ProvenanceMismatch,
+    TemplateProvenanceMismatch,
     DefaultsSessionMismatch,
     TranscriptAncestryUnavailable,
     DefaultsVersionIsNotFirst,
@@ -3951,7 +4033,12 @@ impl CreateSessionRequest {
         command_id: DurableCommandId,
         initial_configuration_defaults: SessionConfigurationDefaults,
     ) -> Result<Self, InvalidDurableCommandId>;
-    // accessors: command_id(), initial_configuration_defaults()
+    pub fn try_new_from_template(
+        command_id: DurableCommandId,
+        template_provenance: SessionTemplateProvenance,
+        resolved_configuration_defaults: SessionConfigurationDefaults,
+    ) -> Result<Self, InvalidDurableCommandId>;
+    // accessors: command_id(), initial_configuration_defaults(), template_provenance()
 }
 
 pub trait SessionIdGenerator {
@@ -6744,6 +6831,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: lib.rs identities                          | 20                   |
 | domain: actor                                      | 1                    |
 | domain: imported_conversation                      | 31                   |
+| domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 22                   |
@@ -6769,7 +6857,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 53                   |
-| **signalbox-domain total**                         | **517 (+1 free fn)** |
+| **signalbox-domain total**                         | **523 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

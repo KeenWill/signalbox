@@ -7,7 +7,9 @@ use signalbox_application::SessionReader;
 use signalbox_domain::{
     DirectModelSelection, ModelAlias, ModelSelectionRequest, Session, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
+    SessionId, SessionReconstitutionFailure, SessionReconstitutionInput,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
+    TranscriptAncestry,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -132,10 +134,11 @@ impl SessionRepository {
     /// The query is driven by `session` and left-joins the authoritative
     /// current-defaults pointer and exactly the immutable defaults row selected
     /// by that pointer. Imported ancestry additionally joins its one-to-one
-    /// seed record and seed-frontier header as a constant-size proof. It
-    /// intentionally loads no imported aggregate, frontier membership,
-    /// semantic entry, creation receipt, turn, command history, or unselected
-    /// defaults version.
+    /// seed record and seed-frontier header as a constant-size proof. Native
+    /// template provenance additionally correlates the creation command's
+    /// storage version. It intentionally loads no imported aggregate, frontier
+    /// membership, semantic entry, creation receipt, turn, command history, or
+    /// unselected defaults version.
     pub async fn load_session(
         &self,
         requested_session: SessionId,
@@ -165,6 +168,9 @@ pub(crate) async fn load_session_from_connection(
             s.session_id AS stored_session_id,
             s.creation_cause AS stored_cause,
             s.ancestry_kind AS stored_ancestry,
+            s.template_name AS stored_template_name,
+            s.template_content_digest AS stored_template_digest,
+            creation.storage_version AS create_storage_version,
             s.imported_conversation_id AS stored_conversation_id,
             s.imported_frontier_entry_id AS stored_frontier_entry_id,
             s.imported_frontier_position AS stored_frontier_position,
@@ -189,6 +195,8 @@ pub(crate) async fn load_session_from_connection(
          LEFT JOIN session_defaults_version AS v
            ON v.session_id = p.session_id
           AND v.version = p.current_version
+         LEFT JOIN create_session_command AS creation
+           ON creation.created_session_id = s.session_id
          LEFT JOIN imported_session_seed AS seed
            ON seed.session_id = s.session_id
          LEFT JOIN context_frontier AS seed_frontier
@@ -220,6 +228,18 @@ fn decode_complete(
 ) -> Result<Session, SessionRepositoryError> {
     let ancestry: String = required(&row, "stored_ancestry")?;
     if ancestry == "imported_conversation" {
+        if row
+            .try_get::<Option<String>, _>("stored_template_name")?
+            .is_some()
+            || row
+                .try_get::<Option<Vec<u8>>, _>("stored_template_digest")?
+                .is_some()
+        {
+            return Err(SessionCorruption::Inconsistent(
+                "imported session has template provenance",
+            )
+            .into());
+        }
         return create_session_from_imported_frontier::reconstitute_bounded_current(
             requested_session,
             row,
@@ -233,6 +253,18 @@ fn decode_complete(
     }
     let stored_session = session_id_from_uuid(required(&row, "stored_session_id")?);
     let provenance = decode_provenance(required(&row, "stored_cause")?, ancestry)?;
+    let template_provenance = decode_template_provenance(
+        row.try_get("stored_template_name")?,
+        row.try_get("stored_template_digest")?,
+    )?;
+    if template_provenance.is_some()
+        && !matches!(
+            row.try_get::<Option<i16>, _>("create_storage_version")?,
+            Some(version) if version >= 4
+        )
+    {
+        return Err(SessionCorruption::Inconsistent("pre-version-four template provenance").into());
+    }
     let current_defaults_session =
         session_id_from_uuid(required(&row, "current_defaults_session_id")?);
     let current_defaults_version = decode_ordinal(&row, "current_version")?;
@@ -246,10 +278,11 @@ fn decode_complete(
         row.try_get("system_prompt")?,
     )?;
 
-    SessionReconstitutionInput::new(
+    SessionReconstitutionInput::new_with_template_provenance(
         requested_session,
         stored_session,
         provenance,
+        template_provenance,
         current_defaults_session,
         current_defaults_version,
         defaults_session,
@@ -258,6 +291,30 @@ fn decode_complete(
     )
     .reconstitute()
     .map_err(|error| SessionCorruption::Domain(error.failure()).into())
+}
+
+fn decode_template_provenance(
+    name: Option<String>,
+    digest: Option<Vec<u8>>,
+) -> Result<Option<SessionTemplateProvenance>, SessionRepositoryError> {
+    const RELATIONSHIP: &str = "session template provenance";
+    match (name, digest) {
+        (None, None) => Ok(None),
+        (Some(name), Some(digest)) => {
+            let name = SessionTemplateName::try_new(name)
+                .map_err(|_| SessionCorruption::Inconsistent(RELATIONSHIP))?;
+            let digest: [u8; 32] = digest
+                .try_into()
+                .map_err(|_| SessionCorruption::Inconsistent(RELATIONSHIP))?;
+            Ok(Some(SessionTemplateProvenance::new(
+                name,
+                SessionTemplateContentDigest::from_bytes(digest),
+            )))
+        }
+        (None, Some(_)) | (Some(_), None) => {
+            Err(SessionCorruption::Inconsistent(RELATIONSHIP).into())
+        }
+    }
 }
 
 fn map_imported_error(error: ImportedSessionRepositoryError) -> SessionRepositoryError {

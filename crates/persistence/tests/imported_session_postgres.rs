@@ -789,6 +789,57 @@ async fn s28_inv002_command_load_rejects_stored_sentinel_command_identity()
     Ok(())
 }
 
+/// S28 / INV-002 / INV-039: imported ancestry carrying template provenance
+/// fails closed at the ordinary current-session load boundary.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv002_inv039_current_load_rejects_imported_template_provenance()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = imported(0x11f, 0x21f, "{\"type\":\"summary\",\"value\":null}");
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+    )
+    .await?;
+    let repository = ImportedSessionRepository::new(pool.clone());
+    let created = repository
+        .handle(
+            imported_command(0x31f, &conversation, ImportedSessionRelationship::Resume),
+            SessionId::from_uuid(Uuid::from_u128(0x41f)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x71f)),
+            || SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x61f)),
+        )
+        .await?;
+    let CreateSessionFromImportedFrontierOutcome::Applied(applied) = created else {
+        panic!("fixture creation must apply")
+    };
+
+    sqlx::raw_sql(
+        "ALTER TABLE session
+         DROP CONSTRAINT session_template_provenance_shape,
+         DROP CONSTRAINT session_template_provenance_creation_fk;
+         ALTER TABLE session DISABLE TRIGGER session_is_append_only;
+         UPDATE session
+            SET template_name = 'reviewer',
+                template_content_digest = decode(repeat('21', 32), 'hex');",
+    )
+    .execute(&pool)
+    .await?;
+
+    let error = SessionRepository::new(pool)
+        .load_session(applied.session())
+        .await
+        .expect_err("imported template provenance must fail closed");
+    assert!(matches!(
+        error,
+        SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(
+            "imported session has template provenance"
+        ))
+    ));
+    Ok(())
+}
+
 /// S28 / INV-039: an imported session whose one-to-one seed is absent fails
 /// closed at the ordinary current-session load boundary.
 #[tokio::test(flavor = "multi_thread")]

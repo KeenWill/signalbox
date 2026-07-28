@@ -880,8 +880,8 @@ async fn s28_inv039_imported_creation_registry_claim_requires_typed_record()
     Ok(())
 }
 
-/// S28 / INV-039: replacing the native-only reverse creation FK does not make the
-/// preexisting native command table truncatable.
+/// S28 / INV-039: the reciprocal template-provenance creation FK does not make
+/// the preexisting native command table truncatable.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s28_inv039_native_creation_command_truncate_remains_rejected() -> Result<(), Box<dyn Error>>
@@ -893,7 +893,7 @@ async fn s28_inv039_native_creation_command_truncate_remains_rejected() -> Resul
         .expect_err("native creation commands must remain protected from truncate");
     assert_eq!(
         error.as_database_error().and_then(|error| error.code()),
-        Some(std::borrow::Cow::Borrowed("23514"))
+        Some(std::borrow::Cow::Borrowed("0A000"))
     );
 
     pool.close().await;

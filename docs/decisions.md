@@ -36,6 +36,107 @@ a live credential exposes a partial or empty file when its producer fails.
 operational guidance only; daemon, domain, persistence, and protocol behavior do
 not change.
 
+## 2026-07-28 — Fail closed at the Codex CLI's declared input and capability boundaries
+
+**Context.** The Codex adapter projected JSONL through serde's last-value-wins
+object representation, so repeated provider members could overwrite evidence
+before classification. Its specification also claimed descendant-lifetime
+supervision beyond the process group the adapter can control. Finally, the
+invocation disabled three CLI features while prompt prose asked the model not to
+use other built-ins; the pinned CLI exposes a larger, evolving feature registry.
+Ambiguous provider input and undeclared capabilities both need mechanical
+boundaries, while a process can deliberately leave its inherited group.
+
+**Decision.** Repeated JSON object members in either the JSONL event or its
+escaped response envelope are stream-protocol violations; additive tolerance
+covers unknown members, never repeated ones. A duplicate is ambiguous by
+construction, and ambiguous provider input is refused rather than resolved by
+choosing a winner, matching the native client's repeated-member rule. Adapter
+supervision contains exactly the process group it creates; host isolation, owned
+by the runner sandbox in build-out, contains a descendant that deliberately
+leaves that group. Every feature in the pinned CLI inventory is classified.
+Features that can add a model-visible tool, external interaction, instruction
+source, or delegated execution outside the declared tools are explicitly
+disabled, with independent agent, ambient skill-instruction, MCP-server, and
+web-search controls. The pre-spend version smoke compares the complete name,
+stage, and default inventory so a version bump cannot add an unclassified
+feature, and verifies the skill control against an isolated synthetic skill that
+the pinned CLI otherwise injects. Prompt prose is not a capability boundary.
+
+**Rejected alternatives.** Keeping serde's last or first occurrence would
+silently choose among contradictory evidence. Claiming process-tree containment
+would promise control the adapter does not possess; adding host isolation inside
+this adapter would cross the runner boundary. Prompt-only restrictions, or
+testing only today's enabled features, would let a CLI default or version bump
+widen the tool surface without review.
+
+**Affects.** `crates/model-runtime-codex-cli/src/event.rs`,
+`crates/model-runtime-codex-cli/src/runtime.rs`, its process and compatibility
+tests, and [runtime-substrate](spec/runtime-substrate.md) (Codex CLI provider
+adapter and version smoke). The runner sandbox remains the owner of stronger
+host containment.
+
+## 2026-07-28 — Bound the Codex compatibility-smoke login
+
+**Context.** The gated compatibility smoke bounded its build, version probe,
+model exchange, and whole job, but its non-interactive CLI login could consume
+the entire twenty-minute job slot if the launcher or a descendant hung.
+
+**Decision.** Give login thirty seconds, then send `TERM` to the command's
+process group and allow five seconds before `KILL`. A managed shell remains live
+through that grace even when the direct CLI launcher exits on `TERM`, so the
+`KILL` phase still reaches surviving group members. The key remains stdin-only,
+absent from the timeout and CLI child environments and never placed in argv.
+
+**Rejected alternatives.** Relying only on the job timeout would hold the sole
+smoke concurrency slot too long. Reusing the four-minute model-exchange bound
+would conflate a local authentication setup command with a billable provider
+turn. Killing only the direct launcher could strand its native descendant.
+
+**Affects.** `.github/workflows/codex-smoke.yml` and the operational duration of
+the non-merge-gating, manually dispatched compatibility smoke.
+
+## 2026-07-28 — Load versioned session templates and copy them at creation
+
+**Context.** Session creation can already set a model selection and one bounded
+system prompt, while the dangerous-tool blanket is part of the same immutable
+defaults epoch. Repeating that bundle at each call site makes long prompts
+awkward and gives clients configuration-file responsibilities. The owner
+commissioned a deliberately narrow first template slice and fixed copy-on-create
+as its provenance law.
+
+**Decision.** `SIGNALBOX_TEMPLATE_CONFIG_FILE` names a separate version-one TOML
+document loaded once beside the model catalog at daemon startup. Each uniquely
+named template carries a positive version, exactly one configured direct model
+or alias, exactly one inline prompt or prompt-file reference, and the complete
+dangerous-tool blanket. Prompt files are resolved and validated at load; paths
+are either relative to the template file or begin `$HOME/`, and every other
+absolute, parent-traversing, or variable-bearing spelling is rejected. The
+content digest is domain-separated SHA-256 over the template version and exact
+resolved bundle, not its source spelling.
+
+Protocol version eighteen adds daemon-side creation by template name and a
+read-only name/version listing. Creation copies the resolved bundle into
+defaults version one and records template name plus content digest on the
+session. Equal replay is keyed by the original command and template name and
+returns the copied result even after configuration changes; a new command sees
+the new bundle. The terminal's `create --template NAME` is mutually exclusive
+with `--model`, `--alias`, and `--system-prompt-file`; explicit overrides are
+excluded so one invocation has one complete source of defaults.
+
+**Rejected alternatives.** Client-side parsing would duplicate daemon validation
+and expose deployment files. Explicit flags overriding a template would create a
+composition algebra and ambiguous digest meaning. Storing a template reference
+for later lookup would let edits rewrite existing sessions. Durable template
+objects and CRUD are deferred rather than hidden behind the static file.
+
+**Affects.** Session configuration and creation provenance, process protocol
+version eighteen, terminal creation and template listing, migration
+`202607300101_session_template_provenance.sql`,
+[configuration and credentials](spec/configuration-and-credentials.md),
+[sessions and transcript](spec/sessions-and-transcript.md), and
+[process protocol](spec/process-protocol.md).
+
 ## 2026-07-27 — Drop empty thinking parts instead of failing completions closed
 
 **Context.** Claude 5-family models run adaptive thinking by default, and with
@@ -75,6 +176,56 @@ law beyond what the provider's shape requires.
 [model-call-execution](spec/model-call-execution.md) (observation
 classification), and the wedge-then-reconcile process regression in
 `apps/signalboxd/tests/process_protocol_runtime.rs`.
+
+## 2026-07-27 — Read imported conversations through their own verb
+
+**Context.** `signalbox import` prints an imported conversation identity and
+nothing else, while `signalbox continue --through-position N` requires a valid
+one-based imported position. No client verb could show an imported
+conversation's entries or even its entry count: `transcript` takes session
+identities, and an imported conversation is durable record that creates no
+session. The owner's first hands-on continuation had to guess `N`, and an
+out-of-range guess answered `not_found: the requested session was not found` —
+wrong on both counts, since the identity was valid and named no session.
+
+**Decision.** Add a separate read verb,
+`signalbox imported <imported-conversation-uuid>`, over a new version-seventeen
+`read_imported_conversation` request whose response is a spooled start/entry/end
+sequence. Each entry names its position, imported entry identity, speaker
+attestation, content kind, and a `text_preview` that is null or the entry's
+exact leading scalars bounded to 256 UTF-8 bytes with a truncation marker.
+Version seventeen also adds two typed rejections for
+`create_session_from_imported_frontier`: `imported_conversation_not_found` and
+`imported_frontier_position_out_of_range`, the latter naming the selectable
+range. `continue --through-position` stays required and gains only the exact
+sentinel `latest`, which the client resolves through this read and prints before
+sending the concrete ordinal.
+
+**Rejected alternatives.** Extending `transcript` to accept an imported
+conversation identity would make the two kinds interchangeable on the verb that
+reads live sessions, when the protocol keeps them distinct everywhere else.
+Reusing the undetailed `not_found` for an out-of-range position keeps the
+misdiagnosis the owner hit. Making `--through-position` optional with an
+implicit latest default would silently pick a boundary the recorded decision to
+require it explicitly rejects. Resolving `latest` server-side would put a
+non-concrete position in the durable command and make replay equality depend on
+resolution rather than on the payload. Previewing tool, thinking, or media
+content would widen what the wire exposes about imported content beyond the
+conservative transcript projection, which is a separate foundation-weight
+change. A 256-byte preview is one or two terminal lines: enough to recognize an
+entry, small enough that a several-thousand-entry listing stays scannable. This
+surface first reserved fifteen. Version sixteen then merged while the branch was
+open, and numbering the request below an already-closed vocabulary would
+retroactively admit it in version-sixteen frames — widening a shipped version
+rather than adding a new one — so the surface moved above sixteen to seventeen.
+Fourteen and fifteen stay reserved and unadmitted, and the admitted set carries
+that gap.
+
+**Affects.** [process protocol](spec/process-protocol.md) (version seventeen,
+the read request, its three messages, the two rejection details, and the
+`imported` and `continue` client surfaces),
+[conversation import](spec/conversation-import.md) (the inspection read),
+`crates/process-protocol`, `apps/signalboxd`, and `apps/client`.
 
 ## 2026-07-27 — Expose explicit steering and queued input delivery
 
@@ -970,6 +1121,55 @@ in [model-call-execution](spec/model-call-execution.md), the adapter contract in
 model-identifier-normalization half of the model fallback and provenance
 question.
 
+## 2026-07-26 — Pin the wrapped Codex CLI in npm and gate bumps on a smoke
+
+**Context.** The recorded drift-defense direction is that a wrapped CLI is
+pinned to an exact version, bumped frequently by Renovate, and each bump
+verified by a compatibility smoke on the cheapest model using real credentials
+that fork pull requests can never reach. The adapter landed with a
+supported-version constant and an offline fixture corpus but nothing binding
+either to the executable anyone actually installs. Executing the direction
+required choosing a manifest form Renovate tracks, a bump policy, and an
+authentication path the CLI genuinely supports unattended.
+
+**Decision.** Pin the CLI as an exact npm dependency in
+`tooling/codex-cli/package.json` with a committed lockfile, tracked by
+Renovate's built-in npm manager with no release-age gate and no automerge. Bind
+the pin to the adapter with an offline test asserting that the manifest version
+equals the supported-version constant, so a bump fails the ordinary Rust check
+until the constant and fixtures move with it. Verify bumps against the live CLI
+with a gated smoke — one cheapest-model exchange through the adapter, preceded
+by a fail-closed assertion that the invoked executable reports the pinned
+version — triggered only by manual dispatch and by pushes to `main` that touch
+the pin, never by a pull-request event, with credentials held in a protected
+deployment environment. Authenticate that smoke through the CLI's
+non-interactive API-key login, piped from the secret into the CLI's own
+credential store, and state plainly that it therefore covers protocol
+compatibility and not subscription login. Treat the addressable model set as an
+account-scoped input: keep the cheapest advertised model as a local fallback,
+and let the environment or local caller select another model without changing
+the test when its credential cannot address that fallback.
+
+**Rejected alternatives.** Pinning the Homebrew cask that serves local installs
+has no Renovate manager; a GitHub-release regex manager would hand-roll a
+datasource the npm manager already provides for the same artifact. Probing the
+version inside the adapter would spend a process on every model dispatch and was
+already rejected. Letting the smoke skip on a version mismatch or a missing
+credential would record compatibility evidence for a version that never ran.
+Applying the cargo policy's minimum-release-age gate would delay bumps on
+calendar time while proving nothing. Storing a subscription access token as a
+secret would go stale between the CLI's own token rotations, so automation built
+on it would fail for reasons unrelated to compatibility; weakening the
+fork-exposure rules to reach a subscription session was not considered.
+Hard-coding the model that one subscription account currently addresses would
+make another subscription or API-key credential's model set look like protocol
+drift.
+
+**Affects.** `tooling/codex-cli`, `renovate.json5`,
+`.github/workflows/codex-smoke.yml`, the tests of
+`crates/model-runtime-codex-cli`, and the Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md).
+
 ## 2026-07-26 — Carry credential lineage in runner placement
 
 **Context.** Runner replacement can intentionally move from a credential-bearing
@@ -1076,6 +1276,28 @@ reservation and merged filename differ.
 and interpretation of the earlier review-workflow decision entries' affected
 slice.
 
+## 2026-07-26 — Bound Codex streamed redaction lookbehind
+
+**Context.** Credential-shape redaction must retain an incomplete marker or
+value across streamed observations, but an unterminated value can otherwise grow
+that retained suffix for the lifetime of the process. Per-event bounds do not
+bound accumulation across many valid events.
+
+**Decision.** Retain at most 64 KiB of incomplete Codex credential-shaped stream
+text. When that bound is exceeded, emit redaction markers with the original
+observation metadata and suppress later streamed text through the terminal
+flush. This may redact benign continuation text but never releases the possible
+credential.
+
+**Rejected alternatives.** Retaining through the process deadline leaves memory
+unbounded. Truncating and resuming ordinary output could release the remainder
+of the same credential. Raising the per-event limit does not address cumulative
+growth.
+
+**Affects.** INV-035, the Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md), and the streaming redactor in
+`crates/model-runtime-codex-cli`.
+
 ## 2026-07-26 — Select execution locus before authorization
 
 **Context.** A combined-locus tool can use a runner-resident credential profile
@@ -1131,6 +1353,53 @@ forward narrowing.
 **Affects.** `RunnerToolAttemptAuthorization`, `AuthorizedToolAttempt`,
 `RunnerLease`, placement reconstitution, INV-043 and INV-044, S12, S30, S31, and
 the [runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-26 — Require Unix process-group supervision for Codex
+
+**Context.** Cancellation and timeout evidence is sound only when the adapter
+can terminate the spawned CLI and its descendants. The implemented supervisor
+uses Unix process groups; its non-Unix fallback could kill only the direct
+process and leave a descendant continuing provider work after terminal evidence
+was returned.
+
+**Decision.** Construct the Codex CLI runtime only on Unix hosts. Keep one
+process group per dispatch and signal that group through interrupt and forced
+termination. A later non-Unix implementation must provide equivalent
+process-tree lifetime control before broadening support.
+
+**Rejected alternatives.** Killing only the direct child violates the
+one-dispatch evidence boundary when a descendant survives. Adding a Windows Job
+Object dependency and implementation is outside this adapter slice. Claiming
+portable supervision from a no-op fallback would overstate implemented behavior.
+
+**Affects.** The Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md) and
+`crates/model-runtime-codex-cli`.
+
+## 2026-07-26 — Codex CLI generation settings are advisory
+
+**Context.** `ModelSettings` normally names provider-enforced request controls,
+including a required output-token ceiling. The pinned Codex CLI subscription
+surface exposes no argv, configuration, or request fields for that ceiling,
+temperature, top-p, or stop sequences. Prompt text can communicate intent but
+cannot enforce sampling or budget semantics. Rejecting the required ceiling
+would make every operation unsupported and leave the commissioned wrapper
+unusable.
+
+**Decision.** Record one capability-limited exception for the Codex CLI adapter:
+validate all four settings, render them into the complete model-visible
+operation prompt, and describe them as advisory rather than provider-enforced.
+Callers that require hard generation controls must not select this adapter. No
+other adapter inherits the exception.
+
+**Rejected alternatives.** Claiming prompt instructions as hard controls is
+false. Rejecting every operation preserves the generic rule but defeats the
+wrapped subscription runtime. Reimplementing the provider transport would
+reverse the recorded wrap direction.
+
+**Affects.** `ModelSettings` contract comments, the Codex CLI section of
+[runtime-substrate](spec/runtime-substrate.md), and
+`crates/model-runtime-codex-cli`.
 
 ## 2026-07-26 — Bound native followed-event buffering in memory
 
@@ -1280,6 +1549,88 @@ runtime contract beyond this boundary.
 **Affects.** Semantic transcript entries, turn-start frontier construction,
 provider-neutral conversation rendering, protocol version six, and
 [sessions and transcript](spec/sessions-and-transcript.md).
+
+## 2026-07-25 — Allowlist the Codex subprocess environment
+
+**Context.** A subprocess inherits its parent's complete environment by default.
+The Codex wrapper needs the operator-selected subscription-login location,
+ordinary process paths, locale, certificate, and proxy configuration, but
+passing unrelated service variables would expose ambient capabilities to the
+provider process. Clearing every variable would also make the CLI's own login
+and network configuration unreliable.
+
+**Decision.** Clear the environment for each Codex spawn, then copy only the
+named home and Codex-home paths, executable and temporary paths, XDG paths,
+locale and terminal settings, certificate paths, and proxy settings listed by
+the adapter. Never enumerate, retain, diagnose, or pass any other parent
+variable. Keep filesystem authority separate: this subprocess boundary supplies
+the CLI's documented read-only sandbox and working root, while stronger host
+isolation belongs to later composition.
+
+**Rejected alternatives.** Inheriting the complete service environment exposes
+unrelated secrets and capabilities. An empty environment can disconnect the CLI
+from the subscription login it exclusively owns and from required network
+configuration. Claiming a filesystem allowlist that the wrapped CLI does not
+enforce would overstate the adapter's authority.
+
+**Affects.** The Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md) and
+`crates/model-runtime-codex-cli`.
+
+## 2026-07-25 — Anchor subprocess dispatch at one process spawn
+
+**Context.** INV-025/026 prohibited hidden repeat sends around one authorized
+provider interaction, but named only the direct adapters' physical-request
+shape. A wrapped CLI exposes process control and a JSON event stream, not its
+internal provider requests, so treating each unobservable internal attempt as a
+hub dispatch would make the invariant unenforceable.
+
+**Decision.** Define the adapter-owned unit of irrevocable dispatch by
+transport: one physical request for a direct adapter and one process spawn for a
+subprocess adapter. One prepared call spawns at most once, never respawns after
+ambiguity, and treats provider-client activity inside the process as
+provider-internal. Process death or terminal-marker loss after spawn remains
+typed evidence for the original dispatch.
+
+**Rejected alternatives.** Reimplementing or observing the CLI's internal
+transport would reverse the accepted wrap direction and couple Signalbox to a
+provider implementation boundary. Treating one spawn as proven retry-free would
+claim evidence the adapter cannot observe. Respawning after an ambiguous exit
+would hide accepted duplicate risk.
+
+**Affects.** INV-025, INV-026, the two-stage runtime contract in
+[runtime-substrate](spec/runtime-substrate.md), and every subprocess
+`ModelRuntime` adapter.
+
+## 2026-07-25 — Make Codex CLI calls ephemeral structured subprocesses
+
+**Context.** The Codex wrapper needs exact frontier input, typed completion,
+refusal and tool evidence, bounded supervision, version-drift defense, and
+subscription login without reading the CLI credential store. The CLI's JSONL
+events supply process and turn boundaries, while its final agent message needs a
+stable model-shaped envelope. The adapter cannot spend a model dispatch on a
+separate version-probe process, and composition is outside this pass.
+
+**Decision.** Anchor the event-protocol fixture corpus and exported deployment
+pin at Codex CLI version `0.145.0`; composition must select that executable
+before wiring the adapter. Invoke one fresh `codex exec --json --ephemeral`
+process with user configuration and rule files ignored, read-only sandboxing,
+the resolved model, the complete rendered operation on stdin, and an
+adapter-owned JSON output schema in a private temporary file. Use Tokio process
+I/O, `tempfile` for schema lifetime, and Rustix only for safe Unix process-group
+interrupt before force-kill. Parse the last agent message as the
+completion/refusal/tool envelope and require `turn.completed`; use only offline
+scripted-process tests in CI.
+
+**Rejected alternatives.** Resume-by-default would move required semantic state
+behind an in-memory session pointer. Positional prompt arguments expose large
+frontiers through process listings. Reading Codex auth to seed exact-value
+redaction violates the credential boundary. Treating Codex's own command or MCP
+items as caller tool proposals confuses agent activity with the declared
+`ModelOperation` contract.
+
+**Affects.** `crates/model-runtime-codex-cli`, workspace dependencies, and the
+Codex CLI provider section of [runtime-substrate](spec/runtime-substrate.md).
 
 ## 2026-07-25 — Scoped verification references on specification pages
 

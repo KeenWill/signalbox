@@ -311,6 +311,25 @@ impl fmt::Display for RejectionDisplay {
                 "defaults_version_exhausted session={session_id} current={}",
                 current.value()
             ),
+            RejectionDetail::ImportedConversationNotFound {
+                imported_conversation_id,
+            } => write!(
+                formatter,
+                "imported_conversation_not_found \
+                 imported_conversation={imported_conversation_id}"
+            ),
+            RejectionDetail::ImportedFrontierPositionOutOfRange {
+                imported_conversation_id,
+                requested_position,
+                last_position,
+            } => write!(
+                formatter,
+                "imported_frontier_position_out_of_range \
+                 imported_conversation={imported_conversation_id} requested={} \
+                 first_position=1 last_position={}",
+                requested_position.value(),
+                last_position.value()
+            ),
         }
     }
 }
