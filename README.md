@@ -101,14 +101,15 @@ operational usage.
 State lives under the gitignored `.devenv/state/`: the cluster in `postgres/`,
 and everything the daemon needs in `dev-instance/` — a locally generated
 certificate authority and server certificate under `tls/`, a process-scoped home
-under `home/`, and `signalboxd.toml`, seeded on first run from
-[`config/signalboxd.example.toml`](config/signalboxd.example.toml) and left
-alone afterwards so local edits survive. Wipe the whole instance with
-`rm -rf .devenv/state`, or reseed just the catalog by deleting
-`.devenv/state/dev-instance/signalboxd.toml`.
+under `home/`, `signalboxd.toml` and `session-templates.toml`, seeded on first
+run from [`config/signalboxd.example.toml`](config/signalboxd.example.toml) and
+[`config/session-templates.example.toml`](config/session-templates.example.toml).
+Both are left alone afterwards so local edits survive. Wipe the whole instance
+with `rm -rf .devenv/state`, or reseed one catalog by deleting its file under
+`.devenv/state/dev-instance/`.
 
-Two things are worth knowing before editing the seeded catalog or reaching for
-the socket. The seed is a copy of the checked-in example, so it carries that
+Two things are worth knowing before editing the seeded model catalog or reaching
+for the socket. Its seed is a copy of the checked-in example, so it carries that
 file's undated family names such as `claude-haiku-4-5`; the spelling a
 `provider_model` must take is stated in
 [configuration and credentials](docs/spec/configuration-and-credentials.md#the-static-model-and-alias-catalog),
@@ -119,19 +120,32 @@ And the process socket lives at `$DEVENV_RUNTIME/signalbox/signalboxd.sock`
 rather than directly in the runtime directory, because the daemon accepts only a
 socket parent meeting the ownership and permission rules the
 [process protocol](docs/spec/process-protocol.md#transport-and-trust-boundary)
-states and creates neither that directory nor those permissions itself; the
-daemon process makes it before binding. Point the terminal client there with
-`--socket`.
+states. The devenv dev-instance launcher creates that directory and sets mode
+`0700` before executing the daemon; the daemon then binds the socket there. The
+devenv shell
+[exports that path as `SIGNALBOX_SOCKET_PATH` and provides a `signalbox <verb>` convenience](docs/decisions.md#2026-07-28--expose-the-dev-instance-client-from-every-shell-directory).
+That convenience execs Cargo's resolved binary directly rather than through
+`cargo run`, so a shell carrying an ambient `-C prefer-dynamic` (in `RUSTFLAGS`
+or inherited Cargo configuration) produces an executable that needs Cargo's
+runtime library search path, which the direct `exec` does not set; the command
+then exits `127` naming the missing shared object. This is a recorded, loud
+failure under an unusual global setting, not a silent one, and is left as a
+known limitation rather than reproducing `cargo run`'s environment here.
 
-The daemon reads its Anthropic key from `~/.config/signalbox/anthropic-api-key`
-and its code-host token from `~/.config/signalbox/github-token`, overridable
-with `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE` and
-`SIGNALBOX_DEV_GITHUB_TOKEN_FILE` respectively. No credential material is
-committed or generated. Both paths are passed to the daemon unconditionally
-because it requires both variables at startup; neither file has to exist, since
-neither is read at startup. When each file is read, what its bytes mean, and
-what its absence does are stated in the
-[credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle).
+The daemon's default Anthropic key path is
+`$HOME/.config/signalbox/anthropic-api-key` and its default code-host token path
+is `$HOME/.config/signalbox/github-token`, overridable with
+`SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE` and `SIGNALBOX_DEV_GITHUB_TOKEN_FILE`
+respectively. No credential material is committed or generated. The
+[credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle)
+owns when those files are read, what their bytes mean, and how absence is
+handled. Provision the default code-host path from the GitHub CLI, and create
+the Anthropic path for editing, with these one-line commands:
+
+```console
+install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.config/signalbox/github-token"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; gh auth token >"$temporary" && mv "$temporary" "$destination" && trap - EXIT)
+install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.config/signalbox/anthropic-api-key"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; if [ -e "$destination" ]; then cp "$destination" "$temporary" || exit; fi; editor="${EDITOR:-vi}"; EDITOR="$editor" sh -c 'set -f; $EDITOR "$1"' sh "$temporary" && mv "$temporary" "$destination" && trap - EXIT)
+```
 
 Most of `devenv.nix` exists to satisfy the ambient-configuration refusals that
 [configuration and credentials](docs/spec/configuration-and-credentials.md#process-configuration)

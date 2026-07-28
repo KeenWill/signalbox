@@ -6,8 +6,9 @@ use std::{
 #[cfg(test)]
 use signalbox_process_protocol::ProtocolVersion;
 use signalbox_process_protocol::{
-    CanonicalUuid, ContentFragment, ServerFrame, ServerMessage, TranscriptEntry,
-    TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
+    CanonicalUuid, ContentFragment, MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION, ModelCallTokenUsage,
+    ServerFrame, ServerMessage, TranscriptEntry, TranscriptTextEntry, TurnState,
+    decode_server_line, encode_server_line,
 };
 
 use crate::{connection::Connection, error::ClientError};
@@ -91,7 +92,7 @@ impl TranscriptSnapshot {
         let mut spool = tempfile::tempfile()?;
         for message in messages {
             let frame =
-                ServerFrame::try_new_for_version(ProtocolVersion::Three, request_id, message)
+                ServerFrame::try_new_for_version(ProtocolVersion::Nineteen, request_id, message)
                     .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
             append_frame(&mut spool, &frame)?;
         }
@@ -129,9 +130,17 @@ pub(crate) struct SnapshotContent {
     pub(crate) content: ContentFragment,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SnapshotModelCallUsage {
+    pub(crate) turn_id: CanonicalUuid,
+    pub(crate) model_call_id: CanonicalUuid,
+    pub(crate) usage: ModelCallTokenUsage,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SnapshotRecord {
     Turn(TranscriptTurn),
+    ModelCallUsage(SnapshotModelCallUsage),
     Entry(SnapshotEntry),
     Content(SnapshotContent),
 }
@@ -197,10 +206,17 @@ pub(crate) async fn read_snapshot(
 
     let mut spool = tempfile::tempfile()?;
     let mut turn_ids = FixedDiskSet::<16>::new()?;
+    let mut model_call_order = DiskModelCallUsageOrder::new()?;
+    let mut model_call_ids = FixedDiskSet::<16>::new()?;
     let mut entry_ids = FixedDiskSet::<32>::new()?;
     let mut prior_acceptance_position = None;
     let mut turn_count = 0_u64;
+    let mut model_call_count = 0_u64;
     let mut entry_count = 0_u64;
+    let requires_model_call_usage =
+        connection.version().as_u64() >= MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION;
+    let mut model_calls_started = false;
+    let mut model_calls_ended = !requires_model_call_usage;
     let mut entries_started = false;
     loop {
         let frame = connection.frame().await?;
@@ -209,7 +225,7 @@ pub(crate) async fn read_snapshot(
                 turn_id,
                 acceptance_position,
                 ..
-            } if !entries_started => {
+            } if !model_calls_started && !entries_started => {
                 let position = acceptance_position.value();
                 if position == 0
                     || prior_acceptance_position.is_some_and(|prior| prior >= position)
@@ -220,17 +236,49 @@ pub(crate) async fn read_snapshot(
                     ));
                 }
                 prior_acceptance_position = Some(position);
+                model_call_order.push_turn(turn_id)?;
                 append_frame(&mut spool, &frame)?;
                 turn_count = turn_count
                     .checked_add(1)
                     .ok_or(ClientError::Protocol("snapshot turn count overflowed"))?;
+            }
+            ServerMessage::TranscriptModelCallUsage {
+                model_call_index,
+                turn_id,
+                model_call_id,
+                ..
+            } if !model_calls_ended && !entries_started => {
+                model_calls_started = true;
+                if model_call_index.value() != model_call_count
+                    || !model_call_order.accept(turn_id, model_call_id)?
+                    || !model_call_ids.insert(uuid_key(model_call_id))?
+                {
+                    return Err(ClientError::Protocol(
+                        "snapshot model-call usage identities, indices, or order were invalid",
+                    ));
+                }
+                append_frame(&mut spool, &frame)?;
+                model_call_count = model_call_count
+                    .checked_add(1)
+                    .ok_or(ClientError::Protocol(
+                        "snapshot model-call usage count overflowed",
+                    ))?;
+            }
+            ServerMessage::TranscriptModelCallsEnd {
+                model_call_count: ending_model_call_count,
+            } if !model_calls_ended
+                && !entries_started
+                && ending_model_call_count.value() == model_call_count =>
+            {
+                model_calls_started = true;
+                model_calls_ended = true;
             }
             ServerMessage::TranscriptEntry {
                 entry_index,
                 source_session_id,
                 entry_id,
                 ..
-            } => {
+            } if model_calls_ended => {
                 entries_started = true;
                 require_entry_index(entry_index.value(), entry_count)?;
                 if !entry_ids.insert(entry_key(source_session_id, entry_id))? {
@@ -248,7 +296,7 @@ pub(crate) async fn read_snapshot(
                 source_session_id,
                 entry_id,
                 ..
-            } => {
+            } if model_calls_ended => {
                 entries_started = true;
                 require_entry_index(entry_index.value(), entry_count)?;
                 if !entry_ids.insert(entry_key(source_session_id, entry_id))? {
@@ -269,6 +317,7 @@ pub(crate) async fn read_snapshot(
                 entry_count: ending_entry_count,
             } if ending_session == session_id
                 && ending_cursor.value() == cursor
+                && model_calls_ended
                 && ending_turn_count.value() == turn_count
                 && ending_entry_count.value() == entry_count =>
             {
@@ -344,6 +393,16 @@ fn snapshot_record(message: ServerMessage) -> Result<SnapshotRecord, ClientError
             acceptance_position: acceptance_position.value(),
             state,
         })),
+        ServerMessage::TranscriptModelCallUsage {
+            turn_id,
+            model_call_id,
+            usage,
+            ..
+        } => Ok(SnapshotRecord::ModelCallUsage(SnapshotModelCallUsage {
+            turn_id,
+            model_call_id,
+            usage,
+        })),
         ServerMessage::TranscriptEntry {
             entry_index,
             source_session_id,
@@ -402,6 +461,67 @@ fn entry_key(source_session_id: CanonicalUuid, entry_id: CanonicalUuid) -> [u8; 
     key[..16].copy_from_slice(source_session_id.into_uuid().as_bytes());
     key[16..].copy_from_slice(entry_id.into_uuid().as_bytes());
     key
+}
+
+#[derive(Clone, Copy)]
+struct ModelCallUsagePosition {
+    turn: [u8; 16],
+    call: [u8; 16],
+}
+
+struct DiskModelCallUsageOrder {
+    file: File,
+    reading: bool,
+    previous: Option<ModelCallUsagePosition>,
+}
+
+impl DiskModelCallUsageOrder {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            file: tempfile::tempfile()?,
+            reading: false,
+            previous: None,
+        })
+    }
+
+    fn push_turn(&mut self, turn: CanonicalUuid) -> io::Result<()> {
+        if self.reading {
+            return Err(io::Error::other(
+                "model-call usage order accepted a late turn",
+            ));
+        }
+        self.file.write_all(&uuid_key(turn))
+    }
+
+    fn accept(&mut self, turn: CanonicalUuid, call: CanonicalUuid) -> io::Result<bool> {
+        let turn = uuid_key(turn);
+        let call = uuid_key(call);
+        let accepted = match self.previous {
+            None => self.advance_to(turn)?,
+            Some(previous) if previous.turn == turn => previous.call < call,
+            Some(_) => self.advance_to(turn)?,
+        };
+        if accepted {
+            self.previous = Some(ModelCallUsagePosition { turn, call });
+        }
+        Ok(accepted)
+    }
+
+    fn advance_to(&mut self, selected: [u8; 16]) -> io::Result<bool> {
+        if !self.reading {
+            self.file.seek(SeekFrom::Start(0))?;
+            self.reading = true;
+        }
+        let mut candidate = [0_u8; 16];
+        loop {
+            match self.file.read_exact(&mut candidate) {
+                Ok(()) if candidate == selected => return Ok(true),
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+    }
 }
 
 struct FixedDiskSet<const WIDTH: usize> {
@@ -526,7 +646,55 @@ fn stable_hash(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::FixedDiskSet;
+    use signalbox_process_protocol::CanonicalUuid;
+    use uuid::Uuid;
+
+    use super::{DiskModelCallUsageOrder, FixedDiskSet};
+
+    #[test]
+    fn disk_usage_order_rejects_a_return_to_an_earlier_turn() {
+        let first_turn = wire_uuid(1);
+        let second_turn = wire_uuid(2);
+        let mut order = DiskModelCallUsageOrder::new().expect("anonymous order file must open");
+        order.push_turn(first_turn).expect("first turn must spool");
+        order
+            .push_turn(second_turn)
+            .expect("second turn must spool");
+
+        assert!(
+            order
+                .accept(first_turn, wire_uuid(11))
+                .expect("first usage lookup must succeed")
+        );
+        assert!(
+            order
+                .accept(second_turn, wire_uuid(12))
+                .expect("second usage lookup must succeed")
+        );
+        assert!(
+            !order
+                .accept(first_turn, wire_uuid(13))
+                .expect("backward usage lookup must succeed")
+        );
+    }
+
+    #[test]
+    fn disk_usage_order_rejects_descending_calls_within_one_turn() {
+        let turn = wire_uuid(1);
+        let mut order = DiskModelCallUsageOrder::new().expect("anonymous order file must open");
+        order.push_turn(turn).expect("turn must spool");
+
+        assert!(
+            order
+                .accept(turn, wire_uuid(12))
+                .expect("first usage lookup must succeed")
+        );
+        assert!(
+            !order
+                .accept(turn, wire_uuid(11))
+                .expect("descending usage lookup must succeed")
+        );
+    }
 
     #[test]
     fn disk_identity_set_grows_at_its_load_boundary() {
@@ -557,6 +725,10 @@ mod tests {
 
         assert!(!set.insert([0, 2]).expect("duplicate lookup must succeed"));
         assert_eq!(set.len, 1);
+    }
+
+    fn wire_uuid(value: u128) -> CanonicalUuid {
+        CanonicalUuid::from_uuid(Uuid::from_u128(value))
     }
 
     #[track_caller]

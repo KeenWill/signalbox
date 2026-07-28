@@ -215,9 +215,12 @@ undecodable claim as unseen would let one identifier acquire a second meaning
 (INV-012). Corruption is a distinct error family from infrastructure failure and
 from recorded domain rejection.
 
-New `CreateSession`, `CreateSessionFromImportedFrontier`, and
-`ReplaceSessionDefaults` records use version 2 for the complete defaults value;
-version 1 reconstitutes with dangerous blanket approval disabled.
+New `CreateSession` records use storage version 4. New
+`CreateSessionFromImportedFrontier` and `ReplaceSessionDefaults` records use
+version 3. All three families reconstitute version 1 with dangerous blanket
+approval disabled and versions 1 and 2 with no system prompt. Create-session
+versions 1 through 3 carry no template provenance; version 4 requires provenance
+for template mode and requires its absence for explicit mode.
 `ReplaceSessionMetadata`, `SubmitInput`, and `DecideToolRequest` use version 1.
 `CreateSession` records applied results only (its one preparation failure is an
 error, not a recorded rejection); `CreateSessionFromImportedFrontier` also
@@ -231,8 +234,15 @@ rejections claim the identifier exactly as applied results do.
 ## Replay and equality
 
 The canonical command payload is the typed domain value constructed at the
-boundary before registry lookup — not a serialization. Structural equality
-(hand-written `PartialEq` on `CreateSession`,
+boundary — not a serialization. Ordinarily that construction precedes registry
+lookup. Template creation is the one narrower caller-intent preflight: the
+boundary validates command identity and template name, then looks up the durable
+command before consulting the live template catalog or constructing the complete
+domain payload. An existing create command compares explicit-versus-template
+mode and, for template mode, the caller-supplied name; equality returns the
+recorded result without catalog resolution. Only an unseen identity resolves the
+startup catalog and constructs the complete defaults-and-provenance payload.
+Structural equality (hand-written `PartialEq` on `CreateSession`,
 `CreateSessionFromImportedFrontier`, `ReplaceSessionDefaults`, `SubmitInput`,
 `ReplaceSessionMetadata`, and `DecideToolRequest` in `crates/domain`) covers
 every caller-supplied semantic field and excludes `DurableCommandId`. Why: the
@@ -258,8 +268,10 @@ durable operation, before any current-state validation (INV-012):
    applied result is returned before commit, and a failed transaction claims no
    identifier.
 
-After registry inspection and before claiming an unseen identifier, a command
-may perform an owner-specified pre-claim admission read.
+Before complete payload construction, template creation may perform only the
+caller-intent registry preflight above. After the repository inspects the
+registry for a constructed command and before claiming an unseen identifier, a
+command may perform an owner-specified pre-claim admission read.
 `CreateSessionFromImportedFrontier` uses that phase to load the conversation
 named by `frontier.conversation()` and resolve the frontier's inclusive
 boundary; a missing target returns the corresponding admission error without
