@@ -368,6 +368,47 @@ async fn inv_035_error_item_marker_suppresses_streamed_continuation() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: an unsupported (unmodeled) item whose text ends in a credential
+/// marker prefix (`api_`) seeds the dropped lookbehind, so a final text
+/// beginning with the continuation (`key=<secret>`) is suppressed rather than
+/// releasing the credential the adapter never surfaced the item for.
+#[tokio::test]
+async fn inv_035_unsupported_item_marker_suppresses_the_continuation() {
+    for delivery in [DeliveryMode::Streamed, DeliveryMode::Buffered] {
+        let result = execute_scenario(
+            "credential_split_across_unsupported_item",
+            delivery,
+            OperationShape::Text,
+            CancellationSignal::never(),
+        )
+        .await;
+        let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+        assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+        assert_eq!(result.spawns, 1);
+    }
+}
+
+/// INV-035: a held credential-prefix (`api_` from a reasoning delta) followed
+/// by an unrelated dropped error item stays adjacent to a later emitted
+/// `key=<secret>` in the output, so the value is suppressed — the redacted
+/// prefix still marks the future value even though the dropped bytes broke
+/// the internal candidate.
+#[tokio::test]
+async fn inv_035_held_prefix_suppresses_value_across_unrelated_error_item() {
+    let result = execute_scenario(
+        "held_credential_prefix_then_unrelated_error_item",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
 /// INV-035: held reasoning bytes unrelated to the credential (`Auth`), a
 /// dropped error marker (`api_`), then a final-text value (`key=<secret>`)
 /// reassemble chronologically as `api_key=<secret>` — the held bytes are

@@ -182,6 +182,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             completed();
         }
+        "credential_split_across_unsupported_item" => {
+            unsupported_item("diag-marker", "api_");
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "held_credential_prefix_then_unrelated_error_item" => {
+            // The reasoning delta is itself an incomplete credential prefix
+            // (`api_`), held in the lookbehind; an unrelated error item
+            // follows, and the value arrives in the final text. The dropped
+            // error bytes never reach output, so `api_` stays adjacent to
+            // `key=<secret>` there and the value must be suppressed.
+            reasoning("reason-prefix", "api_");
+            error_item("error-unrelated", "diagnostic notice");
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
         "credential_reassembled_across_held_reasoning_and_error_item" => {
             // The held reasoning bytes (`Auth`, an unrelated unsafe suffix)
             // are chronologically before the dropped error marker (`api_`)
@@ -614,6 +636,15 @@ fn error_item(id: &str, message: &str) {
     emit(&format!(
         r#"{{"type":"item.completed","item":{{"id":"{id}","type":"error","message":"{}"}}}}"#,
         json_escape(message)
+    ));
+}
+
+fn unsupported_item(id: &str, text: &str) {
+    // An item type the adapter does not model; its `text` is dropped from the
+    // output but must still seed the redaction lookbehind.
+    emit(&format!(
+        r#"{{"type":"item.completed","item":{{"id":"{id}","type":"diagnostic","text":"{}"}}}}"#,
+        json_escape(text)
     ));
 }
 
