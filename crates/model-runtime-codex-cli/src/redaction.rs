@@ -126,6 +126,7 @@ const CREDENTIAL_INDICATORS: &[&str] = &[
     "eyJ",
     "://",
     "-u ",
+    "-u\t",
     "--user",
     // Space-separated labels a diagnostic prints (`API key: …`): the JSON key
     // policy normalizes across punctuation, so the plaintext spellings must be
@@ -152,6 +153,42 @@ fn text_might_contain_credential(text: &str) -> bool {
     CREDENTIAL_INDICATORS
         .iter()
         .any(|indicator| find_ascii_case_insensitive(text, indicator).is_some())
+        || has_normalized_pwd_assignment_name(text)
+}
+
+/// Whether a bare ASCII assignment name normalizes to a name ending in `pwd`.
+/// Checking backward from assignment separators keeps the no-match gate
+/// allocation-free and admits `_`/`-`-separated spellings such as `mysql-p-w-d`
+/// within the identifier grammar the assignment scanner covers.
+fn has_normalized_pwd_assignment_name(text: &str) -> bool {
+    text.bytes().enumerate().any(|(separator, byte)| {
+        matches!(byte, b'=' | b':') && bare_name_ends_with_normalized_pwd(&text[..separator])
+    })
+}
+
+fn bare_name_ends_with_normalized_pwd(before_separator: &str) -> bool {
+    let bytes = before_separator.as_bytes();
+    let mut index = bytes.len();
+    while index > 0 && matches!(bytes[index - 1], b' ' | b'\t') {
+        index -= 1;
+    }
+    let expected = b"dwp";
+    let mut matched = 0;
+    while index > 0 {
+        let byte = bytes[index - 1];
+        index -= 1;
+        if matches!(byte, b'_' | b'-') {
+            continue;
+        }
+        if !byte.is_ascii_alphanumeric() || byte.to_ascii_lowercase() != expected[matched] {
+            return false;
+        }
+        matched += 1;
+        if matched == expected.len() {
+            return true;
+        }
+    }
+    false
 }
 
 fn redact_text_literal(text: &str) -> String {
@@ -896,7 +933,7 @@ fn credential_key(key: &str) -> bool {
             "licensekey",
         ]
         .iter()
-        .any(|shape| normalized.contains(shape))
+        .any(|shape| normalized == *shape)
 }
 
 fn credential_identifier_could_extend_to_credential(identifier: &str) -> bool {
@@ -926,9 +963,11 @@ fn credential_identifier_could_extend_to_credential(identifier: &str) -> bool {
     if tail.is_empty() {
         return false;
     }
-    ["token", "passwd", "pwd", "passphrase"]
+    ["token", "password", "passwd", "pwd", "passphrase"]
         .iter()
-        .any(|shape| tail.len() < shape.len() && shape.starts_with(tail))
+        .any(|shape| {
+            (1..shape.len()).any(|prefix_length| normalized.ends_with(&shape[..prefix_length]))
+        })
         || (qualified && tail.len() < "key".len() && "key".starts_with(tail))
 }
 
@@ -2911,6 +2950,36 @@ mod tests {
     }
 
     #[track_caller]
+    fn assert_two_delta_split_is_byte_exact(first: &str, second: &str) {
+        let expected = format!("{first}{second}");
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: first.to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: second.to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert_eq!(emitted, expected);
+    }
+
+    #[track_caller]
     fn assert_three_delta_split_redacts(first: &str, second: &str, third: &str) {
         let mut observed = Vec::new();
         {
@@ -3595,6 +3664,19 @@ mod tests {
         );
     }
 
+    /// INV-035: curl's short and long userinfo options accept a tab between
+    /// the option and argument, matching the scanner's whitespace contract.
+    #[test]
+    fn inv_035_redacts_tab_separated_curl_userinfo_passwords() {
+        let short = format!("curl -u\tadmin:{QUOTED_CREDENTIAL_VALUE}");
+        let long = format!("curl --user\tadmin:{QUOTED_CREDENTIAL_VALUE}");
+        let short_output = redact_text(&short);
+        let long_output = redact_text(&long);
+
+        assert!(!short_output.contains(QUOTED_CREDENTIAL_VALUE));
+        assert!(!long_output.contains(QUOTED_CREDENTIAL_VALUE));
+    }
+
     /// INV-035: curl's userinfo option redacts the password while retaining
     /// the option, user name, and destination URL.
     #[test]
@@ -3616,6 +3698,30 @@ mod tests {
 
         assert_eq!(redact_text(url), url);
         assert_eq!(redact_text(curl), curl);
+    }
+
+    /// INV-035: bare ASCII assignment names ending in normalized `pwd` are
+    /// covered across `_`/`-` separators and preceding name prefixes.
+    #[test]
+    fn inv_035_redacts_every_normalized_pwd_suffix_assignment() {
+        let bare = redact_text(&format!("pwd={QUOTED_CREDENTIAL_VALUE}"));
+        let hyphenated = redact_text(&format!("mysql-pwd={QUOTED_CREDENTIAL_VALUE}"));
+        let camel = redact_text(&format!("fooPwd={QUOTED_CREDENTIAL_VALUE}"));
+        let punctuated = redact_text(&format!("mysql-p-w-d={QUOTED_CREDENTIAL_VALUE}"));
+
+        assert!(!bare.contains(QUOTED_CREDENTIAL_VALUE));
+        assert!(!hyphenated.contains(QUOTED_CREDENTIAL_VALUE));
+        assert!(!camel.contains(QUOTED_CREDENTIAL_VALUE));
+        assert!(!punctuated.contains(QUOTED_CREDENTIAL_VALUE));
+    }
+
+    /// Names merely containing an enumerated cryptographic-key name are not
+    /// credentials; those families match only the exact normalized spelling.
+    #[test]
+    fn credential_clean_security_key_substrings_remain_byte_exact() {
+        let fixture = "nonsigningkeynote=ordinary hmackeybackup=ordinary";
+
+        assert_eq!(redact_text(fixture), fixture);
     }
 
     /// INV-035: adjacent high-confidence password and cryptographic-key names
@@ -3685,14 +3791,28 @@ mod tests {
         );
     }
 
-    /// INV-035: splitting a suffix-token name cannot separate the recognized
-    /// name from the value it marks as a credential.
+    /// INV-035: an undelimited credential suffix split inside its final family
+    /// name remains held until the assignment can be judged whole.
     #[test]
-    fn inv_035_stream_redacts_a_suffix_token_assignment_split_inside_its_name() {
+    fn inv_035_stream_redacts_undelimited_suffix_families_split_inside_their_names() {
+        assert_two_delta_split_redacts("githubTo", &format!("ken={PLANTED_SYNTHETIC_SECRET} tail"));
         assert_two_delta_split_redacts(
-            "GITHUB_TO",
-            &format!("KEN={PLANTED_SYNTHETIC_SECRET} tail"),
+            "accountPass",
+            &format!("wd={PLANTED_SYNTHETIC_SECRET} tail"),
         );
+        assert_two_delta_split_redacts("databaseP", &format!("wd={PLANTED_SYNTHETIC_SECRET} tail"));
+        assert_two_delta_split_redacts(
+            "gpgPass",
+            &format!("phrase={PLANTED_SYNTHETIC_SECRET} tail"),
+        );
+    }
+
+    /// One-character `p`/`t` suffix holds that could begin a credential family
+    /// release byte-exact once the next delta proves the name harmless.
+    #[test]
+    fn broken_undelimited_suffix_prefixes_remain_byte_exact() {
+        assert_two_delta_split_is_byte_exact("ordinaryP", "lain");
+        assert_two_delta_split_is_byte_exact("auditT", "rail");
     }
 
     /// INV-035: malformed quoted-key ownership remains consistent across a
