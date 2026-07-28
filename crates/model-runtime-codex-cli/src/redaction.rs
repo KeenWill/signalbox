@@ -1441,6 +1441,12 @@ impl<C> PendingStreamText<C> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ContextRescanState {
+    continues_candidate: bool,
+    bytes: usize,
+}
+
 #[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 struct PendingRescanWork {
@@ -1477,6 +1483,17 @@ pub(crate) struct RedactingSink<'a, C> {
     /// Distinguishes a carried pending candidate from fresh out-of-band
     /// lookbehind, whose first joined classification is not a reclassification.
     context_continues_candidate: bool,
+    /// Rescan work spent by the chronological dropped-provider chain. It is
+    /// independent of the emitted-adjacency chain because dropped bytes are
+    /// absent from that chain and can resolve one candidate but not the other.
+    dropped_context_rescan_bytes: usize,
+    /// Whether the dropped chain still represents the same candidate as its
+    /// previous geometric checkpoint, rather than a fresh unsafe suffix.
+    dropped_context_continues_candidate: bool,
+    /// Next chronological lookbehind length at which dropped provider bytes
+    /// require a full reclassification. Between geometric checkpoints the
+    /// complete suffix remains match-only state and cannot reach an output.
+    dropped_context_next_rescan_len: usize,
     #[cfg(test)]
     pending_rescan_work: PendingRescanWork,
 }
@@ -1492,6 +1509,9 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             dropped_context: String::new(),
             context_rescan_bytes: 0,
             context_continues_candidate: false,
+            dropped_context_rescan_bytes: 0,
+            dropped_context_continues_candidate: false,
+            dropped_context_next_rescan_len: 0,
             #[cfg(test)]
             pending_rescan_work: PendingRescanWork {
                 reclassifications: 0,
@@ -1509,6 +1529,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         self.emitted_context = trailing_credential_context(emitted).to_string();
         self.context_rescan_bytes = 0;
         self.context_continues_candidate = false;
+        self.refresh_dropped_context_rescan_threshold();
     }
 
     /// Extends the match-only lookbehind with provider text the adapter is
@@ -1522,25 +1543,74 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         if self.suppressing {
             return;
         }
-        // Two live match-only chains precede the held text, and the held text
-        // must be judged against BOTH (a fragment safe against one can still be
-        // unsafe against the other):
-        //   * the emitted-adjacency chain `emitted_context` (the thread id,
-        //     and suppressed held markers) — future *emitted* output sits
-        //     beside it directly, dropped bytes being invisible; and
-        //   * the full chronological chain `emitted_context ++ dropped_context
-        //     ++ pending`, which also threads the dropped bytes.
-        // The held text's clean prefix is the shorter of what each chain
-        // allows; the rest is suppressed (a released prefix would reconstruct a
-        // credential beside later output) and carried into both chains so a
-        // marker completed by future emitted output, the dropped bytes, or a
-        // later delta is caught.
-        let mut chain = self.emitted_context.clone();
-        chain.push_str(&self.dropped_context);
+        // Once a chronological lookbehind is known live, dropped bytes cannot
+        // reach any output and may be accumulated without rescanning until its
+        // length doubles. The full suffix remains available to every terminal
+        // field between checkpoints; only the expensive classification waits.
+        if self.pending.is_none() && self.dropped_context_next_rescan_len > 0 {
+            let mut joined = if self.dropped_context.is_empty() {
+                self.emitted_context.clone()
+            } else {
+                self.dropped_context.clone()
+            };
+            let prior_context_len = joined.len();
+            joined.push_str(dropped);
+            if joined.len() < self.dropped_context_next_rescan_len
+                && joined.len() <= MAX_PENDING_STREAM_BYTES
+            {
+                self.dropped_context = joined;
+                return;
+            }
+            if !self.record_context_rescan(joined.len()) {
+                self.suppress_remaining();
+                return;
+            }
+            let unsafe_start = unsafe_stream_suffix_start(&joined);
+            let context = unsafe_start.map_or("", |start| &joined[start..]);
+            if context.len() > MAX_PENDING_STREAM_BYTES {
+                self.suppress_remaining();
+                return;
+            }
+            let continued = unsafe_start.is_some_and(|start| start < prior_context_len);
+            if !continued {
+                self.dropped_context_rescan_bytes = 0;
+            }
+            self.dropped_context = context.to_string();
+            self.dropped_context_continues_candidate = continued;
+            self.refresh_dropped_context_rescan_threshold();
+            self.reset_context_budget_if_spent();
+            return;
+        }
+        // `dropped_context`, when present, is already the unsafe suffix of the
+        // full chronological emitted-plus-dropped chain. Keeping that complete
+        // suffix both avoids prefix duplication on every extension and lets
+        // terminal fields match a marker split across the two sources.
+        let mut chain = if self.dropped_context.is_empty() {
+            self.emitted_context.clone()
+        } else {
+            self.dropped_context.clone()
+        };
         let pre_pending_len = chain.len();
+        let mut inherited_candidate = if self.dropped_context.is_empty() {
+            self.context_continues_candidate
+        } else {
+            self.dropped_context_continues_candidate
+        };
+        if self.dropped_context.is_empty() {
+            self.dropped_context_rescan_bytes = self
+                .dropped_context_rescan_bytes
+                .max(self.context_rescan_bytes);
+        }
         if let Some(pending) = self.pending.take() {
-            self.context_rescan_bytes = self.context_rescan_bytes.max(pending.rescan_bytes);
+            let inherited_rescan_bytes = self
+                .context_rescan_bytes
+                .max(self.dropped_context_rescan_bytes)
+                .max(pending.rescan_bytes);
+            self.context_rescan_bytes = inherited_rescan_bytes;
+            self.dropped_context_rescan_bytes = inherited_rescan_bytes;
             self.context_continues_candidate = true;
+            self.dropped_context_continues_candidate = true;
+            inherited_candidate = true;
             let clean_limit = if pending.candidate_starts_at_stored_origin() {
                 pending.candidate_start
             } else {
@@ -1572,31 +1642,45 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 let mut merged = self.emitted_context.clone();
                 merged.push_str(held_unsafe);
                 let carried_emitted = trailing_credential_context(&merged);
-                // Same 64-KiB lookbehind bound as the dropped chain: an
-                // emitted marker that opens a line credential (`Authorization:`)
-                // can grow this context by a full held delta each dropped
-                // newline, so an unterminated candidate past the cap fails
-                // closed instead of pinning unbounded provider-controlled bytes.
                 if carried_emitted.len() > MAX_PENDING_STREAM_BYTES {
                     self.suppress_remaining();
                     return;
                 }
                 self.emitted_context = carried_emitted.to_string();
             }
-            // The dropped chain carries the unsafe tail of the full
-            // chronological chain (which already folds in any emitted/dropped
-            // prefix that reached into the held text).
             let chrono_unsafe_start = chain.len() - chrono_unsafe.len();
             chain = chain[chrono_unsafe_start..].to_string();
         }
+        let prior_context_len = chain.len();
         chain.push_str(dropped);
-        let context = trailing_credential_context(&chain);
+        let unsafe_start = unsafe_stream_suffix_start(&chain);
+        let context = unsafe_start.map_or("", |start| &chain[start..]);
         if context.len() > MAX_PENDING_STREAM_BYTES {
-            self.suppressing = true;
-            self.dropped_context = String::new();
+            self.suppress_remaining();
             return;
         }
+        let continued =
+            inherited_candidate && unsafe_start.is_some_and(|start| start < prior_context_len);
+        if !continued {
+            self.dropped_context_rescan_bytes = 0;
+        }
         self.dropped_context = context.to_string();
+        self.dropped_context_continues_candidate = continued;
+        self.refresh_dropped_context_rescan_threshold();
+        self.reset_context_budget_if_spent();
+    }
+
+    fn refresh_dropped_context_rescan_threshold(&mut self) {
+        let live_len = if self.dropped_context.is_empty() {
+            self.emitted_context.len()
+        } else {
+            self.dropped_context.len()
+        };
+        self.dropped_context_next_rescan_len = if live_len == 0 {
+            0
+        } else {
+            live_len.saturating_mul(2).max(live_len + 1)
+        };
     }
 
     /// Whether the sink has entered fail-closed suppression (every subsequent
@@ -1627,6 +1711,9 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         self.emitted_context = String::new();
         self.context_rescan_bytes = 0;
         self.context_continues_candidate = false;
+        self.dropped_context_rescan_bytes = 0;
+        self.dropped_context_continues_candidate = false;
+        self.dropped_context_next_rescan_len = 0;
         self.suppressing = true;
     }
 
@@ -1712,6 +1799,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.emitted_context = self.resolve_context_through(emitted, text);
             let dropped = std::mem::take(&mut self.dropped_context);
             self.dropped_context = self.resolve_context_through(dropped, text);
+            self.refresh_dropped_context_rescan_threshold();
             self.reset_context_budget_if_spent();
         }
         redacted
@@ -1811,7 +1899,10 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             // continuation instead of being released after its marker was
             // destroyed. Chains with no held text survive the boundary —
             // nothing was emitted, so adjacency is unchanged.
-            let inherited_rescan_bytes = self.context_rescan_bytes.max(pending.rescan_bytes);
+            let inherited_rescan_bytes = self
+                .context_rescan_bytes
+                .max(self.dropped_context_rescan_bytes)
+                .max(pending.rescan_bytes);
             let chained = self.pending_extends_a_chain(&pending.text);
             let continuation = self.flush_continuation(&pending.text);
             let candidate = pending.candidate_starts_at_stored_origin();
@@ -1819,6 +1910,9 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.dropped_context.clear();
             self.context_rescan_bytes = 0;
             self.context_continues_candidate = false;
+            self.dropped_context_rescan_bytes = 0;
+            self.dropped_context_continues_candidate = false;
+            self.dropped_context_next_rescan_len = 0;
             if chained {
                 self.emit_redacted(pending.fragments);
             } else if candidate {
@@ -1851,6 +1945,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                     self.emitted_context = context;
                     self.context_rescan_bytes = inherited_rescan_bytes;
                     self.context_continues_candidate = true;
+                    self.refresh_dropped_context_rescan_threshold();
                 }
             }
             FlushContinuation::Ambiguous => self.suppress_remaining(),
@@ -1909,7 +2004,10 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     /// provider bytes will arrive.
     pub(crate) fn finish(&mut self) {
         if let Some(pending) = self.pending.take() {
-            let inherited_rescan_bytes = self.context_rescan_bytes.max(pending.rescan_bytes);
+            let inherited_rescan_bytes = self
+                .context_rescan_bytes
+                .max(self.dropped_context_rescan_bytes)
+                .max(pending.rescan_bytes);
             let continuation = self.flush_continuation(&pending.text);
             let chained = self.pending_extends_a_chain(&pending.text);
             let candidate = pending.candidate_starts_at_stored_origin();
@@ -1938,6 +2036,9 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.dropped_context.clear();
             self.context_rescan_bytes = 0;
             self.context_continues_candidate = false;
+            self.dropped_context_rescan_bytes = 0;
+            self.dropped_context_continues_candidate = false;
+            self.dropped_context_next_rescan_len = 0;
             self.install_flush_continuation(continuation, inherited_rescan_bytes);
         }
     }
@@ -1980,9 +2081,16 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     }
 
     fn reset_context_budget_if_spent(&mut self) {
-        if self.emitted_context.is_empty() && self.dropped_context.is_empty() {
+        if self.emitted_context.is_empty() {
             self.context_rescan_bytes = 0;
             self.context_continues_candidate = false;
+        }
+        if self.dropped_context.is_empty() {
+            self.dropped_context_rescan_bytes = 0;
+            self.dropped_context_continues_candidate = false;
+        }
+        if self.emitted_context.is_empty() && self.dropped_context.is_empty() {
+            self.dropped_context_next_rescan_len = 0;
         }
     }
 
@@ -2016,9 +2124,19 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         // checkpoint and at flush points.
         let emitted = std::mem::take(&mut self.emitted_context);
         if !emitted.is_empty() {
-            let (consumed, live) =
-                self.delta_against_context(emitted, field, index, correlation.clone(), &text);
+            let (consumed, live) = self.delta_against_context(
+                emitted,
+                ContextRescanState {
+                    continues_candidate: self.context_continues_candidate,
+                    bytes: self.context_rescan_bytes,
+                },
+                field,
+                index,
+                correlation.clone(),
+                &text,
+            );
             self.emitted_context = live;
+            self.refresh_dropped_context_rescan_threshold();
             self.reset_context_budget_if_spent();
             if consumed {
                 return;
@@ -2026,9 +2144,19 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         }
         let dropped = std::mem::take(&mut self.dropped_context);
         if !dropped.is_empty() {
-            let (consumed, live) =
-                self.delta_against_context(dropped, field, index, correlation.clone(), &text);
+            let (consumed, live) = self.delta_against_context(
+                dropped,
+                ContextRescanState {
+                    continues_candidate: self.dropped_context_continues_candidate,
+                    bytes: self.dropped_context_rescan_bytes,
+                },
+                field,
+                index,
+                correlation.clone(),
+                &text,
+            );
             self.dropped_context = live;
+            self.refresh_dropped_context_rescan_threshold();
             self.reset_context_budget_if_spent();
             if consumed {
                 return;
@@ -2167,6 +2295,26 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         true
     }
 
+    /// Charges a dropped suffix reclassification at the same conservative
+    /// two-predicate rate as a streamed post-hold round. The allowance follows
+    /// the candidate across all barriers.
+    fn record_context_rescan(&mut self, bytes: usize) -> bool {
+        let charged = bytes.saturating_mul(2);
+        let Some(total) = self.dropped_context_rescan_bytes.checked_add(charged) else {
+            return false;
+        };
+        if total > MAX_PENDING_RESCAN_BYTES {
+            return false;
+        }
+        self.dropped_context_rescan_bytes = total;
+        #[cfg(test)]
+        {
+            self.pending_rescan_work.reclassifications += 1;
+            self.pending_rescan_work.bytes += charged;
+        }
+        true
+    }
+
     /// Processes one delta while a lookbehind chain (the emitted thread id's
     /// suffix or dropped provider text's suffix) is live. Decisions are made
     /// on the joined form `context + pending + delta` and emissions are
@@ -2178,6 +2326,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     fn delta_against_context(
         &mut self,
         context: String,
+        context_state: ContextRescanState,
         field: StreamField,
         index: u32,
         correlation: C,
@@ -2186,7 +2335,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         let context_length = context.len();
         let mut pending = self.pending.take();
         let had_pending = pending.is_some();
-        let continued_across_barrier = !had_pending && self.context_continues_candidate;
+        let continued_across_barrier = !had_pending && context_state.continues_candidate;
         let mut joined = context.clone();
         if let Some(pending) = &pending {
             joined.push_str(&pending.text);
@@ -2196,7 +2345,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             let mut rescanned = pending.take().unwrap_or_else(|| {
                 PendingStreamText::context_continuation(Vec::new(), String::new())
             });
-            rescanned.rescan_bytes = rescanned.rescan_bytes.max(self.context_rescan_bytes);
+            rescanned.rescan_bytes = rescanned.rescan_bytes.max(context_state.bytes);
             let scan_len = joined.len();
             if !self.record_pending_rescan(&mut rescanned, scan_len) {
                 if !text.is_empty() {
@@ -2235,6 +2384,13 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 correlation,
                 text: text.to_string(),
             });
+        }
+        if dirty && candidate && unsafe_start.is_some_and(|start| start >= context_length) {
+            // The zero-origin context candidate owns a nested unsafe suffix in
+            // its credential value. Splitting there would detach the value and
+            // let a later barrier release it as an independent candidate.
+            self.emit_redacted(pending.fragments);
+            return (true, String::new());
         }
         if dirty && !candidate && unsafe_start.is_none() {
             // A saved escaped context can complete a credential before a clean
@@ -5004,6 +5160,41 @@ safe-line"
         assert!(streamed.contains(REDACTED));
     }
 
+    /// INV-035: a candidate carried across a finish barrier owns an unsafe
+    /// suffix that begins inside its value; a later finish cannot release that
+    /// value as though it were an independent clean candidate.
+    #[test]
+    fn inv_035_context_candidate_owns_a_nested_unsafe_value_suffix() {
+        const PLANTED_VALUE: &str = "synthetic_secret";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "a".to_string(),
+                },
+            });
+            sink.finish();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: format!("pi_key={PLANTED_VALUE} "),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
     /// INV-035: an unsafe suffix inside an already recognized quoted value
     /// remains owned by the original credential span.
     #[test]
@@ -5345,6 +5536,45 @@ safe-line"
         }
     }
 
+    /// Extends a credential candidate only through provider text that the
+    /// adapter drops, exercising the match-only context's rescan schedule.
+    fn extend_one_byte_dropped_context(sink: &mut RedactingSink<'_, u8>, byte_count: u32) {
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "authorization: ".to_string(),
+            },
+        });
+        for _ in 0..byte_count {
+            sink.extend_dropped_context("x");
+        }
+    }
+
+    /// Repeats a benign dropped unit that ends in a fresh partial marker.
+    fn extend_repeated_dropped_unit(sink: &mut RedactingSink<'_, u8>, unit: &str, count: u32) {
+        for _ in 0..count {
+            sink.extend_dropped_context(unit);
+        }
+    }
+
+    /// Independent benign suffix candidates receive independent work budgets;
+    /// a keepalive flood cannot accumulate into fail-closed suppression.
+    #[test]
+    fn repeated_benign_dropped_prefixes_do_not_suppress_terminal_text() {
+        const EXPECTED_DETAIL: &str = "authentication failed";
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        extend_repeated_dropped_unit(&mut sink, "keepalive", 20_000);
+
+        assert_eq!(
+            sink.redact_terminal_failure_text(EXPECTED_DETAIL),
+            EXPECTED_DETAIL
+        );
+        assert!(!sink.is_suppressing());
+    }
+
     /// INV-035: context-chain rescans charge both classifiers for the full
     /// joined input and fail closed before exceeding the six-cap allowance.
     #[test]
@@ -5373,6 +5603,45 @@ safe-line"
 
         observe_finish_interleaved_candidate_deltas(&mut sink, DELTA_COUNT);
 
+        assert!(sink.pending_rescan_work().bytes <= MAX_PENDING_RESCAN_BYTES);
+        assert!(sink.is_suppressing());
+    }
+
+    /// INV-035: dropped-context growth is reclassified only at geometric
+    /// length thresholds and receives the full two-classifier work charge.
+    #[test]
+    fn inv_035_dropped_context_growth_has_geometric_rescan_work() {
+        const BYTE_COUNT: u32 = 1_024;
+        const EXPECTED_WORK: PendingRescanWork = PendingRescanWork {
+            reclassifications: 6,
+            bytes: 4_032,
+        };
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        extend_one_byte_dropped_context(&mut sink, BYTE_COUNT);
+
+        assert_eq!(sink.pending_rescan_work(), &EXPECTED_WORK);
+        assert!(sink.pending_rescan_work().bytes <= MAX_PENDING_RESCAN_BYTES);
+        assert!(!sink.is_suppressing());
+    }
+
+    /// INV-035: dropped-context growth crossing the 64-KiB cap receives one
+    /// final charged classification and then fails closed within the shared
+    /// six-cap work allowance.
+    #[test]
+    fn inv_035_dropped_context_cap_crossing_fails_closed_within_budget() {
+        const BYTE_COUNT: u32 = 66_000;
+        const EXPECTED_WORK: PendingRescanWork = PendingRescanWork {
+            reclassifications: 13,
+            bytes: 393_154,
+        };
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        extend_one_byte_dropped_context(&mut sink, BYTE_COUNT);
+
+        assert_eq!(sink.pending_rescan_work(), &EXPECTED_WORK);
         assert!(sink.pending_rescan_work().bytes <= MAX_PENDING_RESCAN_BYTES);
         assert!(sink.is_suppressing());
     }

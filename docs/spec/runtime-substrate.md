@@ -694,11 +694,13 @@ absorbing for the sink's lifetime: usage reports, other fact boundaries, and
 terminal flushes never re-enable provider-controlled bytes. Streamed
 lookbehind's 64-KiB memory bound is independent of its work bound. One initial
 unsafe-suffix classification decides whether a prefix is held; it is not charged
-as reclassification. After a hold at length L, reclassification occurs only when
-the held length reaches at least twice L, while crossing the cap forces one
-final round. Each post-hold round invokes the two top-level whole-buffer
-classifiers. Before invocation, the sink charges both classifiers for the full
-joined input, including emitted or dropped lookbehind context. A
+as reclassification. After a streamed hold or a live dropped-provider match-only
+suffix at length L, reclassification occurs only when its length reaches at
+least twice L, while crossing the cap forces one final round. Each streamed
+post-hold round invokes the two top-level whole-buffer classifiers; a dropped
+suffix round invokes its suffix classifier but receives the same conservative
+two-classifier charge. Before invocation, the sink charges the full joined
+input, including emitted or dropped lookbehind context, at that rate. A
 per-continuously-unresolved-candidate budget fails closed before a round would
 make cumulative reclassification input exceed 393,216 bytes (six times 64 KiB),
 independent of delta count. Without external context, the geometric held lengths
