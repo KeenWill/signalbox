@@ -836,6 +836,33 @@ domain transition would move storage authority into the domain boundary.
 reconstitution, INV-044 and INV-045, S32, and the
 [runner-protocol specification](spec/runner-protocol.md).
 
+## 2026-07-26 — Normalize runner authority as append-only PostgreSQL evidence
+
+**Context.** The runner-protocol domain fixes forward-only enrollment,
+registration, placement, credential-grant, and lease aggregates, but left their
+durable schema and transaction boundaries open. Dispatch admission must compare
+canonical current authority while restart and reconciliation retain exact
+historical evidence. Credential values must remain structurally absent.
+
+**Decision.** Store runner authority in normalized PostgreSQL relations with
+append-only history, explicit current-head tables, and deferred completeness
+triggers for multirow snapshots. Serialize transitions by locking each
+aggregate's current authority row, and reconstitute through canonical joins into
+domain inputs that independently validate correlated identities and revisions.
+Represent credential control data only as profile names, pair approvals, grants,
+and audit events; provide no value or generic payload column.
+
+**Rejected alternatives.** One JSON aggregate per runner or session would hide
+cross-aggregate references and credential shape from relational enforcement.
+Mutable current-only rows would discard retry, revocation, and reconciliation
+evidence. Application-only validation would permit malformed direct SQL or
+migrations to install states that the domain cannot load.
+
+**Affects.** `crates/persistence` runner-protocol migration, adapter, lock
+inventory, and PostgreSQL tests; the
+[runner-protocol specification](spec/runner-protocol.md), the persistence lock
+protocol, and the runner transport/reconnect open question.
+
 ## 2026-07-26 — Add sccache as the devenv shared compiler cache
 
 **Context.** Every checkout and worktree cold-builds the full dependency graph,
