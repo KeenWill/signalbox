@@ -12,6 +12,8 @@ use crate::code_host::{
 pub enum ReviewGateBlockerCode {
     /// One bounded evidence source requires continuation.
     EvidenceTruncated,
+    /// The composed sources describe different head revisions.
+    EvidenceHeadMismatch,
     /// At least one current-head check is not green.
     CiNotGreen,
     /// A review thread has no recognized disposition.
@@ -22,12 +24,16 @@ pub enum ReviewGateBlockerCode {
     BuriedEscalations,
     /// The code host reports a merge conflict.
     MergeConflicting,
+    /// The code host has not yet computed a decisive mergeability state.
+    MergeabilityUnknown,
     /// No actual reviewer verdict exists.
     ReviewerVerdictMissing,
     /// The latest actual verdict does not cover the current head.
     ReviewerVerdictStale,
     /// Usage-limit starvation followed the latest actual verdict.
     ReviewerStarved,
+    /// An explicit review request has no later reviewer response.
+    ReviewInFlight,
     /// The immediate base has commits absent from this head.
     ParentNeedsMergeForward,
     /// The default branch has commits absent from the immediate base chain.
@@ -40,14 +46,17 @@ impl ReviewGateBlockerCode {
     const fn as_str(self) -> &'static str {
         match self {
             Self::EvidenceTruncated => "evidence_truncated",
+            Self::EvidenceHeadMismatch => "evidence_head_mismatch",
             Self::CiNotGreen => "ci_not_green",
             Self::UndispositionedThreads => "undispositioned_threads",
             Self::UnresolvedThreads => "unresolved_threads",
             Self::BuriedEscalations => "buried_escalations",
             Self::MergeConflicting => "merge_conflicting",
+            Self::MergeabilityUnknown => "mergeability_unknown",
             Self::ReviewerVerdictMissing => "reviewer_verdict_missing",
             Self::ReviewerVerdictStale => "reviewer_verdict_stale",
             Self::ReviewerStarved => "reviewer_starved",
+            Self::ReviewInFlight => "review_in_flight",
             Self::ParentNeedsMergeForward => "parent_needs_merge_forward",
             Self::BaseChainMissingMain => "base_chain_missing_main",
             Self::ChildNeedsMergeForward => "child_needs_merge_forward",
@@ -88,6 +97,24 @@ impl ReviewGateCheckResult {
         inventory: &ThreadInventoryResult,
     ) -> Self {
         let mut blockers = Vec::new();
+        if convergence.head_revision() != stack.head_revision()
+            || convergence.head_revision() != inventory.head_revision()
+        {
+            blockers.push(ReviewGateBlocker::new(
+                ReviewGateBlockerCode::EvidenceHeadMismatch,
+                vec![
+                    format!("convergence:{}", convergence.head_revision()),
+                    format!("stack:{}", stack.head_revision()),
+                    format!("inventory:{}", inventory.head_revision()),
+                ],
+            ));
+        }
+        if convergence.reviewer().request_in_flight() {
+            blockers.push(ReviewGateBlocker::new(
+                ReviewGateBlockerCode::ReviewInFlight,
+                Vec::new(),
+            ));
+        }
         if convergence.evidence_truncated() || stack.evidence_truncated() || inventory.truncated() {
             blockers.push(ReviewGateBlocker::new(
                 ReviewGateBlockerCode::EvidenceTruncated,
@@ -143,6 +170,12 @@ impl ReviewGateCheckResult {
             if convergence.merge_conflicting() {
                 blockers.push(ReviewGateBlocker::new(
                     ReviewGateBlockerCode::MergeConflicting,
+                    Vec::new(),
+                ));
+            }
+            if convergence.mergeable_unknown() {
+                blockers.push(ReviewGateBlocker::new(
+                    ReviewGateBlockerCode::MergeabilityUnknown,
                     Vec::new(),
                 ));
             }
@@ -211,6 +244,8 @@ mod tests {
             reviewed_at: Some(String::from(REVIEWED_AT)),
             starvation_after_verdict: false,
             latest_starvation_at: None,
+            latest_review_request_at: None,
+            review_request_in_flight: false,
             source_truncated: false,
             comments_previous_cursor: None,
             reviews_previous_cursor: None,
@@ -225,6 +260,8 @@ mod tests {
             reviewed_at: Some(String::from(REVIEWED_AT)),
             starvation_after_verdict: true,
             latest_starvation_at: Some(String::from(STARVED_AT)),
+            latest_review_request_at: None,
+            review_request_in_flight: false,
             source_truncated: false,
             comments_previous_cursor: None,
             reviews_previous_cursor: None,
@@ -232,10 +269,29 @@ mod tests {
         .expect("fixture reviewer evidence is admitted")
     }
 
-    fn convergence(reviewer: ReviewerVerdictEvidence) -> ConvergenceStateResult {
+    fn in_flight_reviewer() -> ReviewerVerdictEvidence {
+        ReviewerVerdictEvidence::try_new(ReviewerVerdictFields {
+            status: ReviewerVerdictStatus::CurrentHead,
+            reviewed_revision: Some(String::from(HEAD_REVISION)),
+            reviewed_at: Some(String::from(REVIEWED_AT)),
+            starvation_after_verdict: false,
+            latest_starvation_at: None,
+            latest_review_request_at: Some(String::from(STARVED_AT)),
+            review_request_in_flight: true,
+            source_truncated: false,
+            comments_previous_cursor: None,
+            reviews_previous_cursor: None,
+        })
+        .expect("fixture reviewer evidence is admitted")
+    }
+
+    fn convergence_with_merge(
+        reviewer: ReviewerVerdictEvidence,
+        mergeable_state: &str,
+    ) -> ConvergenceStateResult {
         ConvergenceStateResult::try_new(ConvergenceStateFields {
             head_revision: String::from(HEAD_REVISION),
-            mergeable_state: String::from("mergeable"),
+            mergeable_state: String::from(mergeable_state),
             ci_rollup_state: Some(String::from("success")),
             checks: Vec::new(),
             checks_truncated: false,
@@ -243,11 +299,16 @@ mod tests {
             unresolved_threads: Vec::new(),
             open_escalations: Vec::new(),
             buried_escalations: Vec::new(),
+            undispositioned_threads: Vec::new(),
             threads_truncated: false,
             threads_next_cursor: None,
             reviewer,
         })
         .expect("fixture convergence evidence is admitted")
+    }
+
+    fn convergence(reviewer: ReviewerVerdictEvidence) -> ConvergenceStateResult {
+        convergence_with_merge(reviewer, "mergeable")
     }
 
     fn stack() -> StackStateResult {
@@ -269,7 +330,7 @@ mod tests {
     }
 
     fn inventory() -> ThreadInventoryResult {
-        ThreadInventoryResult::try_new(Vec::new(), false, None)
+        ThreadInventoryResult::try_new(String::from(HEAD_REVISION), Vec::new(), false, None)
             .expect("fixture inventory is admitted")
     }
 
@@ -315,5 +376,65 @@ mod tests {
                 "ready": false,
             })
         );
+    }
+
+    /// Composition refuses evidence gathered from different head revisions.
+    #[test]
+    fn gate_blocks_mixed_head_evidence() {
+        let convergence = convergence(current_reviewer());
+        let stack = stack();
+        let inventory = ThreadInventoryResult::try_new(
+            String::from("2222222222222222222222222222222222222222"),
+            Vec::new(),
+            false,
+            None,
+        )
+        .expect("fixture inventory is admitted");
+        let gate = ReviewGateCheckResult::compose(
+            ReviewGatePurpose::RequestReviewWave,
+            &convergence,
+            &stack,
+            &inventory,
+        );
+
+        assert_eq!(
+            gate.into_value()["blockers"][0]["code"],
+            "evidence_head_mismatch"
+        );
+    }
+
+    /// An additive mergeability state blocks a convergence declaration.
+    #[test]
+    fn gate_blocks_unknown_mergeability() {
+        let convergence = convergence_with_merge(current_reviewer(), "UNKNOWN");
+        let stack = stack();
+        let inventory = inventory();
+        let gate = ReviewGateCheckResult::compose(
+            ReviewGatePurpose::DeclareConvergence,
+            &convergence,
+            &stack,
+            &inventory,
+        );
+
+        assert_eq!(
+            gate.into_value()["blockers"][0]["code"],
+            "mergeability_unknown"
+        );
+    }
+
+    /// A requested review wave blocks both another request and convergence.
+    #[test]
+    fn gate_blocks_in_flight_review_request() {
+        let convergence = convergence(in_flight_reviewer());
+        let stack = stack();
+        let inventory = inventory();
+        let gate = ReviewGateCheckResult::compose(
+            ReviewGatePurpose::RequestReviewWave,
+            &convergence,
+            &stack,
+            &inventory,
+        );
+
+        assert_eq!(gate.into_value()["blockers"][0]["code"], "review_in_flight");
     }
 }

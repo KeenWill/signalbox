@@ -595,12 +595,18 @@ The declarations and compact result objects are:
 - `change_request_convergence_state` accepts `repository` and `number`. It
   returns the exact head and mergeable state; the current-head CI rollup and
   bounded check contexts; unresolved-thread identities; open and buried
-  escalation-marker identities; and reviewer-verdict evidence. Reviewer evidence
-  merges review bodies and issue comments in code-host timestamp order,
-  recognizes an actual `Reviewed commit:` verdict in either source, and reports
-  whether a later usage-limit response starved that verdict. Its derived verdict
-  is `converged`, `converged_with_escalations`, `not_converged`, or
-  `indeterminate`; any truncated evidence required for the verdict makes it
+  escalation-marker identities; all resolved or unresolved undispositioned
+  threads; and reviewer-verdict evidence. Reviewer evidence merges review bodies
+  and issue comments in code-host timestamp order. Only the exact
+  `chatgpt-codex-connector` bot can supply a verdict or usage-limit response;
+  the last complete, line-anchored `Reviewed commit:` record is the verdict. The
+  evidence also reports usage-limit starvation and whether the latest explicit
+  `@codex review` request has no later verdict or starvation response. Its
+  derived verdict is `converged`, `converged_with_escalations`, `not_converged`,
+  or `indeterminate`. A missing or non-successful CI rollup, conflicting
+  mergeability, any undispositioned thread, reviewer starvation, or a
+  still-pending request prevents convergence; an additive unknown mergeability
+  state or any truncated evidence required for the verdict makes it
   indeterminate.
 - `change_request_stack_state` accepts `repository`, `number`, and an optional
   positive decimal child-page `cursor`. It returns the immediate base, head, and
@@ -610,32 +616,36 @@ The declarations and compact result objects are:
   the same merge-forward and default-chain comparison for its level. The child
   page carries `children_truncated` and `children_next_cursor`.
 - `change_request_thread_inventory` accepts `repository`, `number`, and an
-  optional opaque GraphQL `cursor`. It returns at most 100 review threads with
-  exact resolution and outdated posture, path and optional line, first-comment
-  author and `bot` / `human` / `unknown` class, the bounded first-comment
-  finding title, and last-comment `fix_named` / `declined` / `escalation_marker`
-  / `undispositioned` class. The page carries `truncated` and `next_cursor`.
+  optional opaque GraphQL `cursor`. It returns the observed head revision and at
+  most 100 review threads with exact resolution and outdated posture, path and
+  optional line, first-comment author and `bot` / `human` / `unknown` class, the
+  bounded first-comment finding title, and the actual reply's `fix_named` /
+  `declined` / `escalation_marker` / `undispositioned` class. A thread without a
+  reply is undispositioned. The page carries `truncated` and `next_cursor`.
 - `review_gate_check` accepts `repository`, `number`, and purpose
   `request_review_wave` or `declare_convergence`. It reads the same fresh typed
-  evidence as the three slog tools, then purely derives `ready`, the exact head,
-  and stable blocker codes with affected identities. Both purposes block on
-  incomplete evidence, non-green CI, undispositioned or unresolved threads,
-  buried escalations, and unhealthy parent, default-chain, or immediate-child
-  ancestry. Declaring convergence additionally requires a nonconflicting
-  mergeable state and an actual current-head reviewer verdict that was not
-  followed by usage-limit starvation.
+  evidence as the three slog tools, re-reading convergence last, then purely
+  derives `ready`, the exact head, and stable blocker codes with affected
+  identities. Both purposes block when the three evidence sources name different
+  heads, a review request is still in flight, evidence is incomplete, CI is not
+  green, threads are undispositioned or unresolved, escalations are buried, or
+  parent, default-chain, or immediate-child ancestry is unhealthy. Declaring
+  convergence additionally requires the exact mergeable posture and an actual
+  current-head reviewer verdict not followed by usage-limit starvation.
 
 Shared typed admission rejects extra object members; repositories are at most
 256 bytes, paths 4 KiB, comment bodies and returned text fields 64 KiB, and
 opaque node ids and GraphQL cursors 512 bytes. REST child-page cursors are
-positive decimal strings of at most nine digits. A returned node id, cursor, or
-head revision is admitted by the same predicate its argument counterpart uses,
-so an identity or continuation a result carries can be passed back as an
-argument, and every returned URL is one absolute credential-free HTTPS location.
-No result has more than 100 collection members or more than 512 KiB of encoded
-JSON. Every bounded slog list reports whether it is truncated and the matching
-continuation cursor; a verdict never silently treats a partial evidence page as
-complete.
+positive decimal strings of at most nine digits. A returned node id, head
+revision, or stack or inventory continuation is admitted by the same predicate
+its argument counterpart uses, so those identities and continuations can be
+passed back as arguments. Convergence-state cursors identify a diagnostic
+truncation boundary; that tool and the gate remain indeterminate rather than
+performing an unbounded continuation scan. Every returned URL is one absolute
+credential-free HTTPS location. No result has more than 100 collection members
+or more than 512 KiB of encoded JSON. Every bounded slog list reports whether it
+is truncated and the matching continuation cursor; a verdict never silently
+treats a partial evidence page as complete.
 
 The production adapter uses fixed GitHub REST and GraphQL endpoints. It disables
 ambient proxies, automatic redirects, protocol retries, and idle reuse; uses

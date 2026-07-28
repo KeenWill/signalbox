@@ -77,16 +77,17 @@ query Convergence($owner: String!, $name: String!, $number: Int!) {
       headRefOid
       mergeable
       comments(last: 100) {
-        nodes { author { login } body createdAt }
+        nodes { author { login __typename } body createdAt }
         pageInfo { hasPreviousPage startCursor }
       }
       reviews(last: 100) {
-        nodes { author { login } body createdAt }
+        nodes { author { login __typename } body createdAt }
         pageInfo { hasPreviousPage startCursor }
       }
       reviewThreads(first: 100) {
         nodes {
           id isResolved isOutdated path line
+          commentCount: comments(first: 1) { totalCount }
           firstComment: comments(first: 1) {
             nodes { author { login __typename } body }
           }
@@ -121,9 +122,11 @@ const THREAD_INVENTORY_QUERY: &str = r#"
 query ThreadInventory($owner: String!, $name: String!, $number: Int!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
+      headRefOid
       reviewThreads(first: 100, after: $cursor) {
         nodes {
           id isResolved isOutdated path line
+          commentCount: comments(first: 1) { totalCount }
           firstComment: comments(first: 1) {
             nodes { author { login __typename } body }
           }
@@ -448,7 +451,11 @@ impl GitHubCodeHostTransport {
         let mut unresolved_threads = Vec::new();
         let mut open_escalations = Vec::new();
         let mut buried_escalations = Vec::new();
+        let mut undispositioned_threads = Vec::new();
         for thread in parsed_threads {
+            if thread.inventory.disposition() == ReviewDispositionClass::Undispositioned {
+                undispositioned_threads.push(thread.identity.clone());
+            }
             if !thread.resolved {
                 unresolved_threads.push(thread.identity.clone());
             }
@@ -489,6 +496,7 @@ impl GitHubCodeHostTransport {
             open_escalations,
             buried_escalations,
             threads_truncated,
+            undispositioned_threads,
             threads_next_cursor,
             reviewer,
         })
@@ -529,11 +537,9 @@ impl GitHubCodeHostTransport {
                 credential,
             )
             .await?;
-        let connection = nested(
-            &value,
-            &["data", "repository", "pullRequest", "reviewThreads"],
-        )?;
-        let connection = required_object(connection)?;
+        let request = required_object(nested(&value, &["data", "repository", "pullRequest"])?)?;
+        let head_revision = required_string(request, "headRefOid")?;
+        let connection = required_object(required(request, "reviewThreads")?)?;
         let nodes = required(connection, "nodes")?
             .as_array()
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
@@ -543,7 +549,7 @@ impl GitHubCodeHostTransport {
             .map(|parsed| parsed.map(|thread| thread.inventory))
             .collect::<Result<Vec<_>, _>>()?;
         let (truncated, next_cursor) = next_page(connection)?;
-        ThreadInventoryResult::try_new(threads, truncated, next_cursor)
+        ThreadInventoryResult::try_new(head_revision, threads, truncated, next_cursor)
             .ok_or(CodeHostTransportFailure::InvalidResponse)
     }
 
@@ -687,14 +693,14 @@ impl GitHubCodeHostTransport {
         arguments: ReviewGateCheckArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
-        let convergence = self
-            .convergence_state_for(arguments.repository(), arguments.number(), credential)
-            .await?;
         let stack = self
             .stack_state_for(arguments.repository(), arguments.number(), 1, credential)
             .await?;
         let inventory = self
             .thread_inventory_for(arguments.repository(), arguments.number(), None, credential)
+            .await?;
+        let convergence = self
+            .convergence_state_for(arguments.repository(), arguments.number(), credential)
             .await?;
         Ok(CodeHostResult::ReviewGateCheck(
             ReviewGateCheckResult::compose(arguments.purpose(), &convergence, &stack, &inventory),
@@ -1250,7 +1256,11 @@ fn parse_slog_thread(
     let id = required_string(object, "id")?;
     let path = required_string(object, "path")?;
     let resolved = required_bool(object, "isResolved")?;
-    let disposition = disposition_class(&last_body);
+    let comment_count = required_u64(
+        required_object(required(object, "commentCount")?)?,
+        "totalCount",
+    )?;
+    let disposition = disposition_class(&last_body, comment_count > 1);
     let identity = ReviewThreadIdentity::try_new(id.clone(), path.clone(), title.clone())
         .ok_or(CodeHostTransportFailure::InvalidResponse)?;
     let inventory = ReviewThreadInventoryItem::try_new(ReviewThreadInventoryFields {
@@ -1291,9 +1301,17 @@ fn parse_reviewer_activities(
         .iter()
         .map(|value| {
             let object = required_object(value)?;
-            let author = optional_object_string(object, "author", "login")?;
+            let (author, actor_type) = match required(object, "author")? {
+                serde_json::Value::Null => (None, None),
+                serde_json::Value::Object(author) => (
+                    Some(required_string(author, "login")?),
+                    Some(required_string(author, "__typename")?),
+                ),
+                _ => return Err(CodeHostTransportFailure::InvalidResponse),
+            };
             Ok(ReviewerActivity {
                 author,
+                actor_type,
                 body: required_string(object, "body")?,
                 created_at: required_string(object, "createdAt")?,
             })
@@ -1321,10 +1339,12 @@ fn page(
     let page_info = required_object(required(connection, "pageInfo")?)?;
     let truncated = required_bool(page_info, truncated_member)?;
     let cursor = optional_string(page_info, cursor_member)?;
-    if truncated != cursor.is_some() {
-        return Err(CodeHostTransportFailure::InvalidResponse);
+    if truncated {
+        return cursor
+            .map(|cursor| (true, Some(cursor)))
+            .ok_or(CodeHostTransportFailure::InvalidResponse);
     }
-    Ok((truncated, cursor))
+    Ok((false, None))
 }
 
 type CheckRollup = (Option<String>, Vec<ReviewCheck>, bool, Option<String>);
@@ -1759,6 +1779,30 @@ mod tests {
         );
     }
 
+    /// A nonempty terminal GraphQL page may retain its last node cursor.
+    #[test]
+    fn terminal_page_discards_noncontinuation_cursor() {
+        let value = serde_json::json!({
+            "pageInfo": {"endCursor": "last-node", "hasNextPage": false}
+        });
+        let connection = required_object(&value).expect("fixture connection is an object");
+
+        assert_eq!(next_page(connection), Ok((false, None)));
+    }
+
+    /// A genuinely truncated page must identify the continuation boundary.
+    #[test]
+    fn truncated_page_requires_cursor() {
+        let value = serde_json::json!({
+            "pageInfo": {"endCursor": null, "hasNextPage": true}
+        });
+        let connection = required_object(&value).expect("fixture connection is an object");
+
+        assert_eq!(
+            next_page(connection),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
     /// Lossy decoding cannot expand a retained job-log prefix beyond its
     /// declared byte bound.
     #[test]

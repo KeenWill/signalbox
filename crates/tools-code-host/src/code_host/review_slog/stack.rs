@@ -142,6 +142,9 @@ impl StackStateResult {
     pub(super) fn evidence_truncated(&self) -> bool {
         self.children_truncated
     }
+    pub(super) fn head_revision(&self) -> &str {
+        &self.head_revision
+    }
 
     pub(super) fn needs_merge_forward(&self) -> bool {
         self.base_commits_not_in_head > 0

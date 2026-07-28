@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 use crate::code_host::{
-    arguments::{valid_cursor, valid_opaque_id},
+    arguments::{valid_cursor, valid_opaque_id, valid_revision},
     result::{MAX_RESULT_ITEMS, valid_path, valid_required_text, valid_text},
     review_slog::ESCALATION_MARKER,
 };
@@ -138,6 +138,7 @@ impl ReviewThreadInventoryItem {
 /// Typed result of `change_request_thread_inventory`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThreadInventoryResult {
+    head_revision: String,
     threads: Vec<ReviewThreadInventoryItem>,
     truncated: bool,
     next_cursor: Option<String>,
@@ -146,15 +147,18 @@ pub struct ThreadInventoryResult {
 impl ThreadInventoryResult {
     /// Validates one bounded inventory page and its honest continuation.
     pub fn try_new(
+        head_revision: String,
         threads: Vec<ReviewThreadInventoryItem>,
         truncated: bool,
         next_cursor: Option<String>,
     ) -> Option<Self> {
-        (threads.len() <= MAX_RESULT_ITEMS
+        (valid_revision(&head_revision)
+            && threads.len() <= MAX_RESULT_ITEMS
             && next_cursor.as_deref().is_none_or(valid_cursor)
             && truncated == next_cursor.is_some())
         .then_some(Self {
             threads,
+            head_revision,
             truncated,
             next_cursor,
         })
@@ -162,6 +166,10 @@ impl ThreadInventoryResult {
 
     pub(super) const fn truncated(&self) -> bool {
         self.truncated
+    }
+
+    pub(super) fn head_revision(&self) -> &str {
+        &self.head_revision
     }
 
     pub(super) fn undispositioned_ids(&self) -> Vec<String> {
@@ -183,6 +191,7 @@ impl ThreadInventoryResult {
     pub(super) fn into_value(self) -> Value {
         json!({
             "next_cursor": self.next_cursor,
+            "head_revision": self.head_revision,
             "threads": self.threads.into_iter().map(ReviewThreadInventoryItem::into_value).collect::<Vec<_>>(),
             "truncated": self.truncated,
         })
@@ -213,8 +222,12 @@ pub(crate) fn author_class(actor_type: Option<&str>) -> ReviewAuthorClass {
     }
 }
 
-/// Classifies the exact last-comment text under the recorded conventions.
-pub(crate) fn disposition_class(body: &str) -> ReviewDispositionClass {
+/// Classifies an actual reply's exact last-comment text under the recorded
+/// conventions.
+pub(crate) fn disposition_class(body: &str, reply_exists: bool) -> ReviewDispositionClass {
+    if !reply_exists {
+        return ReviewDispositionClass::Undispositioned;
+    }
     if body.contains(ESCALATION_MARKER) {
         return ReviewDispositionClass::EscalationMarker;
     }
@@ -242,7 +255,7 @@ mod tests {
     #[test]
     fn fixing_commit_is_classified_as_fix_named() {
         assert_eq!(
-            disposition_class("Fixed in commit `0123456789abcdef`"),
+            disposition_class("Fixed in commit `0123456789abcdef`", true),
             ReviewDispositionClass::FixNamed
         );
     }
@@ -251,7 +264,7 @@ mod tests {
     #[test]
     fn declined_reply_is_classified_as_declined() {
         assert_eq!(
-            disposition_class("Declined: the cited contract requires this shape."),
+            disposition_class("Declined: the cited contract requires this shape.", true),
             ReviewDispositionClass::Declined
         );
     }
@@ -260,7 +273,7 @@ mod tests {
     #[test]
     fn escalation_marker_is_classified_exactly() {
         assert_eq!(
-            disposition_class("Escalated without disposition"),
+            disposition_class("Escalated without disposition", true),
             ReviewDispositionClass::EscalationMarker
         );
     }
@@ -270,7 +283,16 @@ mod tests {
     #[test]
     fn narrative_reply_remains_undispositioned() {
         assert_eq!(
-            disposition_class("Thanks, I will inspect this."),
+            disposition_class("Thanks, I will inspect this.", true),
+            ReviewDispositionClass::Undispositioned
+        );
+    }
+
+    /// A finding cannot classify itself as fixed when no reply exists.
+    #[test]
+    fn finding_body_without_reply_remains_undispositioned() {
+        assert_eq!(
+            disposition_class("Fixed in commit `0123456789abcdef`", false),
             ReviewDispositionClass::Undispositioned
         );
     }

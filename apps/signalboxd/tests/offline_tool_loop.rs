@@ -1245,6 +1245,8 @@ fn reviewer_verdict_result() -> ReviewerVerdictEvidence {
         reviewed_at: Some(String::from("2026-07-27T10:00:00Z")),
         starvation_after_verdict: false,
         latest_starvation_at: None,
+        latest_review_request_at: None,
+        review_request_in_flight: false,
         source_truncated: false,
         comments_previous_cursor: None,
         reviews_previous_cursor: None,
@@ -1263,6 +1265,7 @@ fn convergence_state_evidence() -> ConvergenceStateResult {
         unresolved_threads: Vec::new(),
         open_escalations: Vec::new(),
         buried_escalations: Vec::new(),
+        undispositioned_threads: Vec::new(),
         threads_truncated: false,
         threads_next_cursor: None,
         reviewer: reviewer_verdict_result(),
@@ -1309,8 +1312,13 @@ fn thread_inventory_evidence() -> ThreadInventoryResult {
         disposition: ReviewDispositionClass::FixNamed,
     })
     .expect("fixture inventory item is bounded");
-    ThreadInventoryResult::try_new(vec![thread], false, None)
-        .expect("fixture thread inventory is bounded")
+    ThreadInventoryResult::try_new(
+        String::from("0123456789abcdef0123456789abcdef01234567"),
+        vec![thread],
+        false,
+        None,
+    )
+    .expect("fixture thread inventory is bounded")
 }
 
 fn thread_inventory_result() -> CodeHostResult {
@@ -2081,6 +2089,8 @@ async fn tier_one_change_request_convergence_state_completes_offline_tool_loop()
             "reviewer_verdict": {
                 "comments_previous_cursor": null,
                 "latest_starvation_at": null,
+                "latest_review_request_at": null,
+                "review_request_in_flight": false,
                 "reviewed_at": "2026-07-27T10:00:00Z",
                 "reviewed_revision": "0123456789abcdef0123456789abcdef01234567",
                 "reviews_previous_cursor": null,
@@ -2091,6 +2101,8 @@ async fn tier_one_change_request_convergence_state_completes_offline_tool_loop()
             "threads_next_cursor": null,
             "threads_truncated": false,
             "unresolved_thread_count": 0,
+            "undispositioned_thread_count": 0,
+            "undispositioned_threads": [],
             "unresolved_threads": [],
             "verdict": "converged",
         }),
@@ -2160,6 +2172,7 @@ async fn tier_one_change_request_thread_inventory_completes_offline_tool_loop()
         thread_inventory_result(),
         serde_json::json!({
             "next_cursor": null,
+            "head_revision": "0123456789abcdef0123456789abcdef01234567",
             "threads": [{
                 "author": "review-bot",
                 "author_class": "bot",

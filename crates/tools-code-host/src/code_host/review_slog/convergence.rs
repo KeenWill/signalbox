@@ -10,6 +10,9 @@ use crate::code_host::{
 const STARVATION_MARKER: &str = "reached your Codex usage limits";
 const REVIEWED_COMMIT_LABEL: &str = "Reviewed commit:";
 
+const REVIEW_REQUEST: &str = "@codex review";
+const REVIEWER_LOGIN: &str = "chatgpt-codex-connector";
+
 /// Deterministic convergence verdict.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConvergenceVerdict {
@@ -126,6 +129,8 @@ pub struct ReviewerVerdictEvidence {
     reviewed_at: Option<String>,
     starvation_after_verdict: bool,
     latest_starvation_at: Option<String>,
+    latest_review_request_at: Option<String>,
+    review_request_in_flight: bool,
     source_truncated: bool,
     comments_previous_cursor: Option<String>,
     reviews_previous_cursor: Option<String>,
@@ -144,6 +149,10 @@ pub struct ReviewerVerdictFields {
     pub starvation_after_verdict: bool,
     /// Exact timestamp of the latest observed usage-limit message.
     pub latest_starvation_at: Option<String>,
+    /// Exact timestamp of the latest explicit review request.
+    pub latest_review_request_at: Option<String>,
+    /// Whether the latest request has no later reviewer response.
+    pub review_request_in_flight: bool,
     /// Whether either bounded activity source omitted older items.
     pub source_truncated: bool,
     /// Cursor for the preceding issue-comment page when truncated.
@@ -166,6 +175,10 @@ impl ReviewerVerdictEvidence {
             && fields
                 .latest_starvation_at
                 .as_deref()
+                .is_none_or(valid_required_text)
+            && fields
+                .latest_review_request_at
+                .as_deref()
                 .is_none_or(valid_required_text);
         let cursors_valid = fields
             .comments_previous_cursor
@@ -176,8 +189,10 @@ impl ReviewerVerdictEvidence {
                 .as_deref()
                 .is_none_or(valid_cursor);
         let cursor_shape = fields.source_truncated
-            || (fields.comments_previous_cursor.is_none()
-                && fields.reviews_previous_cursor.is_none());
+            == (fields.comments_previous_cursor.is_some()
+                || fields.reviews_previous_cursor.is_some());
+        let request_shape =
+            !fields.review_request_in_flight || fields.latest_review_request_at.is_some();
         let verdict_shape = match fields.status {
             ReviewerVerdictStatus::Missing => {
                 fields.reviewed_revision.is_none() && fields.reviewed_at.is_none()
@@ -186,13 +201,20 @@ impl ReviewerVerdictEvidence {
                 fields.reviewed_revision.is_some() && fields.reviewed_at.is_some()
             }
         };
-        (revision_valid && timestamps_valid && cursors_valid && cursor_shape && verdict_shape)
+        (revision_valid
+            && timestamps_valid
+            && cursors_valid
+            && cursor_shape
+            && request_shape
+            && verdict_shape)
             .then_some(Self {
                 status: fields.status,
                 reviewed_revision: fields.reviewed_revision,
                 reviewed_at: fields.reviewed_at,
                 starvation_after_verdict: fields.starvation_after_verdict,
                 latest_starvation_at: fields.latest_starvation_at,
+                latest_review_request_at: fields.latest_review_request_at,
+                review_request_in_flight: fields.review_request_in_flight,
                 source_truncated: fields.source_truncated,
                 comments_previous_cursor: fields.comments_previous_cursor,
                 reviews_previous_cursor: fields.reviews_previous_cursor,
@@ -207,11 +229,17 @@ impl ReviewerVerdictEvidence {
         self.starvation_after_verdict
     }
 
+    pub(super) const fn request_in_flight(&self) -> bool {
+        self.review_request_in_flight
+    }
+
     fn into_value(self) -> Value {
         json!({
             "comments_previous_cursor": self.comments_previous_cursor,
             "latest_starvation_at": self.latest_starvation_at,
+            "latest_review_request_at": self.latest_review_request_at,
             "reviewed_at": self.reviewed_at,
+            "review_request_in_flight": self.review_request_in_flight,
             "reviewed_revision": self.reviewed_revision,
             "reviews_previous_cursor": self.reviews_previous_cursor,
             "source_truncated": self.source_truncated,
@@ -233,6 +261,7 @@ pub struct ConvergenceStateResult {
     unresolved_threads: Vec<ReviewThreadIdentity>,
     open_escalations: Vec<ReviewThreadIdentity>,
     buried_escalations: Vec<ReviewThreadIdentity>,
+    undispositioned_threads: Vec<ReviewThreadIdentity>,
     threads_truncated: bool,
     threads_next_cursor: Option<String>,
     reviewer: ReviewerVerdictEvidence,
@@ -260,6 +289,8 @@ pub struct ConvergenceStateFields {
     pub open_escalations: Vec<ReviewThreadIdentity>,
     /// Resolved threads whose last comment carries the escalation marker.
     pub buried_escalations: Vec<ReviewThreadIdentity>,
+    /// Threads, resolved or unresolved, without a recognized reply disposition.
+    pub undispositioned_threads: Vec<ReviewThreadIdentity>,
     /// Whether more review threads exist.
     pub threads_truncated: bool,
     /// Opaque next review-thread cursor.
@@ -274,7 +305,8 @@ impl ConvergenceStateResult {
         let lists_valid = fields.checks.len() <= MAX_RESULT_ITEMS
             && fields.unresolved_threads.len() <= MAX_RESULT_ITEMS
             && fields.open_escalations.len() <= MAX_RESULT_ITEMS
-            && fields.buried_escalations.len() <= MAX_RESULT_ITEMS;
+            && fields.buried_escalations.len() <= MAX_RESULT_ITEMS
+            && fields.undispositioned_threads.len() <= MAX_RESULT_ITEMS;
         let text_valid = valid_revision(&fields.head_revision)
             && valid_required_text(&fields.mergeable_state)
             && fields
@@ -299,18 +331,18 @@ impl ConvergenceStateResult {
         let ci_green = fields
             .ci_rollup_state
             .as_deref()
-            .is_none_or(|state| state.eq_ignore_ascii_case("success"));
-        let undispositioned = fields
-            .unresolved_threads
-            .len()
-            .saturating_sub(fields.open_escalations.len());
-        let verdict = if incomplete {
+            .is_some_and(|state| state.eq_ignore_ascii_case("success"));
+        let mergeable = fields.mergeable_state.eq_ignore_ascii_case("mergeable");
+        let merge_conflicting = fields.mergeable_state.eq_ignore_ascii_case("conflicting");
+        let verdict = if incomplete || (!mergeable && !merge_conflicting) {
             ConvergenceVerdict::Indeterminate
         } else if !ci_green
             || !fields.buried_escalations.is_empty()
-            || undispositioned > 0
-            || fields.mergeable_state.eq_ignore_ascii_case("conflicting")
+            || !fields.undispositioned_threads.is_empty()
+            || merge_conflicting
             || fields.reviewer.status != ReviewerVerdictStatus::CurrentHead
+            || fields.reviewer.starvation_after_verdict
+            || fields.reviewer.review_request_in_flight
         {
             ConvergenceVerdict::NotConverged
         } else if fields.open_escalations.is_empty() {
@@ -328,6 +360,7 @@ impl ConvergenceStateResult {
             unresolved_threads: fields.unresolved_threads,
             open_escalations: fields.open_escalations,
             buried_escalations: fields.buried_escalations,
+            undispositioned_threads: fields.undispositioned_threads,
             threads_truncated: fields.threads_truncated,
             threads_next_cursor: fields.threads_next_cursor,
             reviewer: fields.reviewer,
@@ -352,7 +385,7 @@ impl ConvergenceStateResult {
     pub(super) fn ci_green(&self) -> bool {
         self.ci_rollup_state
             .as_deref()
-            .is_none_or(|state| state.eq_ignore_ascii_case("success"))
+            .is_some_and(|state| state.eq_ignore_ascii_case("success"))
     }
 
     pub(super) fn failing_checks(&self) -> Vec<String> {
@@ -365,6 +398,10 @@ impl ConvergenceStateResult {
 
     pub(super) fn merge_conflicting(&self) -> bool {
         self.mergeable_state.eq_ignore_ascii_case("conflicting")
+    }
+
+    pub(super) fn mergeable_unknown(&self) -> bool {
+        !self.mergeable_state.eq_ignore_ascii_case("mergeable") && !self.merge_conflicting()
     }
 
     pub(super) fn buried_ids(&self) -> Vec<String> {
@@ -394,6 +431,8 @@ impl ConvergenceStateResult {
             "threads_next_cursor": self.threads_next_cursor,
             "threads_truncated": self.threads_truncated,
             "unresolved_thread_count": self.unresolved_threads.len(),
+            "undispositioned_thread_count": self.undispositioned_threads.len(),
+            "undispositioned_threads": self.undispositioned_threads.into_iter().map(ReviewThreadIdentity::into_value).collect::<Vec<_>>(),
             "unresolved_threads": self.unresolved_threads.into_iter().map(ReviewThreadIdentity::into_value).collect::<Vec<_>>(),
             "verdict": self.verdict.as_str(),
         })
@@ -406,6 +445,7 @@ pub(crate) struct ReviewerActivity {
     pub(crate) author: Option<String>,
     pub(crate) body: String,
     pub(crate) created_at: String,
+    pub(crate) actor_type: Option<String>,
 }
 
 /// Merges review bodies and issue comments in exact code-host timestamp order.
@@ -420,11 +460,20 @@ pub(crate) fn reviewer_verdict_evidence(
     let mut reviewed_revision = None;
     let mut reviewed_at = None;
     let mut latest_starvation_at = None;
+    let mut latest_review_request_at = None;
     for activity in activities {
-        let reviewer = activity
-            .author
-            .as_deref()
-            .is_some_and(|author| author.to_ascii_lowercase().contains("codex"));
+        if activity
+            .body
+            .lines()
+            .any(|line| line.trim() == REVIEW_REQUEST)
+        {
+            latest_review_request_at = Some(activity.created_at.clone());
+        }
+        let reviewer = activity.actor_type.as_deref() == Some("Bot")
+            && activity
+                .author
+                .as_deref()
+                .is_some_and(|author| author == REVIEWER_LOGIN);
         if !reviewer {
             continue;
         }
@@ -438,12 +487,7 @@ pub(crate) fn reviewer_verdict_evidence(
     }
     let status = match reviewed_revision.as_deref() {
         None => ReviewerVerdictStatus::Missing,
-        Some(revision)
-            if head_revision.starts_with(revision)
-                || revision.starts_with(head_revision.get(..12).unwrap_or(head_revision)) =>
-        {
-            ReviewerVerdictStatus::CurrentHead
-        }
+        Some(revision) if head_revision.starts_with(revision) => ReviewerVerdictStatus::CurrentHead,
         Some(_) => ReviewerVerdictStatus::StaleHead,
     };
     let starvation_after_verdict = match (&latest_starvation_at, &reviewed_at) {
@@ -451,12 +495,18 @@ pub(crate) fn reviewer_verdict_evidence(
         (Some(_), None) => true,
         (None, _) => false,
     };
+    let latest_response_at = reviewed_at.iter().chain(latest_starvation_at.iter()).max();
+    let review_request_in_flight = latest_review_request_at
+        .as_ref()
+        .is_some_and(|requested| latest_response_at.is_none_or(|responded| requested > responded));
     ReviewerVerdictEvidence::try_new(ReviewerVerdictFields {
         status,
         reviewed_revision,
         reviewed_at,
         starvation_after_verdict,
         latest_starvation_at,
+        latest_review_request_at,
+        review_request_in_flight,
         source_truncated,
         comments_previous_cursor,
         reviews_previous_cursor,
@@ -464,16 +514,29 @@ pub(crate) fn reviewer_verdict_evidence(
 }
 
 fn reviewed_commit_from_body(body: &str) -> Option<String> {
-    let suffix = body.split_once(REVIEWED_COMMIT_LABEL)?.1;
-    let suffix = suffix.trim_start();
-    let suffix = suffix.trim_start_matches('*').trim_start();
+    body.lines()
+        .filter_map(reviewed_commit_from_line)
+        .next_back()
+}
+
+fn reviewed_commit_from_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    let line = line.strip_prefix("**").unwrap_or(line);
+    let suffix = line.strip_prefix(REVIEWED_COMMIT_LABEL)?;
+    let suffix = suffix.trim_start().trim_start_matches('*').trim_start();
     let suffix = suffix.strip_prefix('`').unwrap_or(suffix);
     let revision: String = suffix
         .chars()
         .take_while(|character| character.is_ascii_hexdigit())
         .take(40)
         .collect();
-    ((7..=40).contains(&revision.len())).then_some(revision)
+    if !(7..=40).contains(&revision.len()) {
+        return None;
+    }
+    let trailing = suffix.get(revision.len()..)?.trim();
+    let trailing = trailing.strip_prefix('`').unwrap_or(trailing).trim();
+    let trailing = trailing.trim_matches('*').trim();
+    trailing.is_empty().then_some(revision)
 }
 
 #[cfg(test)]
@@ -484,6 +547,41 @@ mod tests {
     const EARLIER: &str = "2026-07-27T10:00:00Z";
     const LATER: &str = "2026-07-27T11:00:00Z";
 
+    fn complete_fields() -> ConvergenceStateFields {
+        let reviewer = reviewer_verdict_evidence(
+            HEAD_REVISION,
+            vec![ReviewerActivity {
+                author: Some(String::from("chatgpt-codex-connector")),
+                actor_type: Some(String::from("Bot")),
+                body: format!("Reviewed commit: `{HEAD_REVISION}`"),
+                created_at: String::from(EARLIER),
+            }],
+            false,
+            None,
+            None,
+        )
+        .expect("fixture reviewer evidence is admitted");
+        ConvergenceStateFields {
+            head_revision: String::from(HEAD_REVISION),
+            mergeable_state: String::from("MERGEABLE"),
+            ci_rollup_state: Some(String::from("SUCCESS")),
+            checks: Vec::new(),
+            checks_truncated: false,
+            checks_next_cursor: None,
+            unresolved_threads: Vec::new(),
+            open_escalations: Vec::new(),
+            buried_escalations: Vec::new(),
+            undispositioned_threads: Vec::new(),
+            threads_truncated: false,
+            threads_next_cursor: None,
+            reviewer,
+        }
+    }
+    fn evidence(activities: Vec<ReviewerActivity>) -> ReviewerVerdictEvidence {
+        reviewer_verdict_evidence(HEAD_REVISION, activities, false, None, None)
+            .expect("fixture reviewer evidence is admitted")
+    }
+
     /// Reviewer verdict extraction scans review bodies, not only issue
     /// comments, and recognizes the exact current head.
     #[test]
@@ -492,6 +590,7 @@ mod tests {
             HEAD_REVISION,
             vec![ReviewerActivity {
                 author: Some(String::from("chatgpt-codex-connector")),
+                actor_type: Some(String::from("Bot")),
                 body: format!("Reviewed commit: `{HEAD_REVISION}`"),
                 created_at: String::from(EARLIER),
             }],
@@ -514,11 +613,13 @@ mod tests {
             vec![
                 ReviewerActivity {
                     author: Some(String::from("chatgpt-codex-connector")),
+                    actor_type: Some(String::from("Bot")),
                     body: String::from("You have reached your Codex usage limits"),
                     created_at: String::from(LATER),
                 },
                 ReviewerActivity {
                     author: Some(String::from("chatgpt-codex-connector")),
+                    actor_type: Some(String::from("Bot")),
                     body: format!("Reviewed commit: **`{HEAD_REVISION}`"),
                     created_at: String::from(EARLIER),
                 },
@@ -541,6 +642,7 @@ mod tests {
             HEAD_REVISION,
             vec![ReviewerActivity {
                 author: Some(String::from("chatgpt-codex-connector")),
+                actor_type: Some(String::from("Bot")),
                 body: format!("Reviewed commit: `{HEAD_REVISION}`"),
                 created_at: String::from(EARLIER),
             }],
@@ -559,6 +661,7 @@ mod tests {
             unresolved_threads: Vec::new(),
             open_escalations: Vec::new(),
             buried_escalations: Vec::new(),
+            undispositioned_threads: Vec::new(),
             threads_truncated: false,
             threads_next_cursor: None,
             reviewer,
@@ -566,5 +669,119 @@ mod tests {
         .expect("fixture convergence result is admitted");
 
         assert_eq!(result.verdict(), ConvergenceVerdict::Indeterminate);
+    }
+
+    /// Absence of a check rollup is not green CI evidence.
+    #[test]
+    fn missing_ci_rollup_prevents_convergence() {
+        let mut fields = complete_fields();
+        fields.ci_rollup_state = None;
+        let result = ConvergenceStateResult::try_new(fields)
+            .expect("fixture convergence result is admitted");
+
+        assert_eq!(result.verdict(), ConvergenceVerdict::NotConverged);
+    }
+
+    /// Additive mergeability states cannot be treated as mergeable.
+    #[test]
+    fn unknown_mergeability_is_indeterminate() {
+        let mut fields = complete_fields();
+        fields.mergeable_state = String::from("UNKNOWN");
+        let result = ConvergenceStateResult::try_new(fields)
+            .expect("fixture convergence result is admitted");
+
+        assert_eq!(result.verdict(), ConvergenceVerdict::Indeterminate);
+    }
+
+    /// A usage-limit response after the verdict prevents direct convergence.
+    #[test]
+    fn reviewer_starvation_prevents_direct_convergence() {
+        let mut fields = complete_fields();
+        fields.reviewer.starvation_after_verdict = true;
+        let result = ConvergenceStateResult::try_new(fields)
+            .expect("fixture convergence result is admitted");
+
+        assert_eq!(result.verdict(), ConvergenceVerdict::NotConverged);
+    }
+
+    /// A resolved thread without a recognized reply disposition remains a
+    /// convergence failure.
+    #[test]
+    fn resolved_undispositioned_thread_prevents_convergence() {
+        let mut fields = complete_fields();
+        let thread = ReviewThreadIdentity::try_new(
+            String::from("PRRT_resolved"),
+            String::from("src/lib.rs"),
+            String::from("Finding"),
+        )
+        .expect("fixture thread identity is admitted");
+        fields.undispositioned_threads = vec![thread];
+        let result = ConvergenceStateResult::try_new(fields)
+            .expect("fixture convergence result is admitted");
+
+        assert_eq!(result.verdict(), ConvergenceVerdict::NotConverged);
+    }
+
+    /// A similarly named account cannot provide the reviewer verdict.
+    #[test]
+    fn substring_login_is_not_reviewer_evidence() {
+        let evidence = evidence(vec![ReviewerActivity {
+            author: Some(String::from("not-codex-reviewer")),
+            actor_type: Some(String::from("Bot")),
+            body: format!("Reviewed commit: `{HEAD_REVISION}`"),
+            created_at: String::from(EARLIER),
+        }]);
+
+        assert_eq!(evidence.status(), ReviewerVerdictStatus::Missing);
+    }
+
+    /// Prose mentions are ignored and the last complete record line wins.
+    #[test]
+    fn last_anchored_review_record_wins() {
+        let body = format!(
+            "Prose says Reviewed commit: `ffffffffffffffff`\nReviewed commit: `1111111111111111`\n**Reviewed commit:** `{HEAD_REVISION}`"
+        );
+        let evidence = evidence(vec![ReviewerActivity {
+            author: Some(String::from("chatgpt-codex-connector")),
+            actor_type: Some(String::from("Bot")),
+            body,
+            created_at: String::from(EARLIER),
+        }]);
+
+        assert_eq!(evidence.status(), ReviewerVerdictStatus::CurrentHead);
+    }
+
+    /// A longer revision sharing only the head's first twelve digits is stale.
+    #[test]
+    fn reverse_prefix_match_does_not_cover_head() {
+        let evidence = evidence(vec![ReviewerActivity {
+            author: Some(String::from("chatgpt-codex-connector")),
+            actor_type: Some(String::from("Bot")),
+            body: String::from("Reviewed commit: `0123456789abffffffffffffffffffffffffffff`"),
+            created_at: String::from(EARLIER),
+        }]);
+
+        assert_eq!(evidence.status(), ReviewerVerdictStatus::StaleHead);
+    }
+
+    /// A later explicit request remains in flight until the reviewer responds.
+    #[test]
+    fn later_review_request_is_in_flight() {
+        let evidence = evidence(vec![
+            ReviewerActivity {
+                author: Some(String::from("chatgpt-codex-connector")),
+                actor_type: Some(String::from("Bot")),
+                body: format!("Reviewed commit: `{HEAD_REVISION}`"),
+                created_at: String::from(EARLIER),
+            },
+            ReviewerActivity {
+                author: Some(String::from("owner")),
+                actor_type: Some(String::from("User")),
+                body: String::from("@codex review\nReviewed head: current"),
+                created_at: String::from(LATER),
+            },
+        ]);
+
+        assert!(evidence.request_in_flight());
     }
 }
