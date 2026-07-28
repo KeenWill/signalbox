@@ -69,6 +69,11 @@ path = "tests/postgres_integration.rs"
 required-features = ["postgres-integration"]
 
 [[test]]
+name = "runner_protocol_postgres"
+path = "tests/runner_protocol_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
 name = "review_workflow_postgres"
 path = "tests/review_workflow_postgres.rs"
 required-features = ["postgres-integration"]

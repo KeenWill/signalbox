@@ -16,8 +16,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      # Full history also fetches `refs/remotes/origin/*`, which the docs
+      # checker reads verification provenance from: the first-parent history of
+      # `origin/main`, never a merge the branch under review contributes.
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Check domain spine sync
         run: python3 scripts/check_domain_spine.py
       - name: Check documentation consistency
@@ -41,7 +47,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            5453e5b3f495476fb2d4e8fde837a844e03d2c1228ce51741c9427a4f327cee2
+            312df9e01e597aa1e45be69652eede008d838c55adaae8d61f9095b784015532
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};

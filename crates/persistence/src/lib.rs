@@ -19,6 +19,7 @@ pub mod process_read;
 pub mod replace_session_defaults;
 pub mod review_workflow;
 mod review_workflow_command;
+pub mod runner_protocol;
 pub mod scheduler;
 pub mod session;
 pub mod session_metadata;
