@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 
+import check_docs_consistency
 from check_docs_consistency import PR_TOKEN, Violation, github_slug, run_checks
 
 
@@ -28,8 +32,79 @@ def pr_tokens(text: str) -> list[str]:
     return [match.group(0) for match in PR_TOKEN.finditer(text)]
 
 
+def run_git(root: Path, *arguments: str) -> None:
+    """Run one deterministic local-only Git fixture command."""
+    disabled_hooks = root / ".disabled-git-hooks"
+    disabled_hooks.mkdir(exist_ok=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            f"core.hooksPath={disabled_hooks}",
+            *arguments,
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def git_output(root: Path, *arguments: str) -> str:
+    """Return output from one deterministic local-only Git fixture command."""
+    disabled_hooks = root / ".disabled-git-hooks"
+    disabled_hooks.mkdir(exist_ok=True)
+    result = subprocess.run(
+        [
+            "git",
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            f"core.hooksPath={disabled_hooks}",
+            *arguments,
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def initialize_git_history(root: Path) -> str:
+    """Create one reachable GitHub-style PR merge for the baseline fixture."""
+    merged_branch = "agent/example"
+    empty_template = root / ".empty-git-template"
+    empty_template.mkdir()
+    run_git(root, "init", "-q", "-b", "main", f"--template={empty_template}")
+    run_git(root, "config", "user.name", "Docs checker tests")
+    run_git(root, "config", "user.email", "docs-checker@example.invalid")
+    run_git(root, "add", ".")
+    run_git(root, "commit", "-q", "-m", "initial fixture")
+    run_git(root, "checkout", "-q", "-b", merged_branch)
+    (root / "history-marker").write_text("PR 12 fixture\n", encoding="utf-8")
+    run_git(root, "add", "history-marker")
+    run_git(root, "commit", "-q", "-m", "fixture change")
+    run_git(root, "checkout", "-q", "main")
+    run_git(
+        root,
+        "merge",
+        "-q",
+        "--no-ff",
+        "-m",
+        f"Merge pull request #12 from owner/{merged_branch}",
+        merged_branch,
+    )
+    return merged_branch
+
+
 class DocsConsistencyTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.environment = patch.dict(os.environ)
+        self.environment.start()
+        os.environ.pop("GITHUB_EVENT_PATH", None)
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         (self.root / "docs/spec").mkdir(parents=True)
@@ -83,9 +158,11 @@ class DocsConsistencyTests(unittest.TestCase):
         (self.root / "docs/spec/README.md").write_text(
             "# Specification\n", encoding="utf-8"
         )
+        self.merged_pr_branch = initialize_git_history(self.root)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+        self.environment.stop()
 
     def test_failure_projection_helpers(self) -> None:
         failures = [
@@ -105,6 +182,1412 @@ class DocsConsistencyTests(unittest.TestCase):
     def test_valid_fixture_passes(self) -> None:
         self.assertEqual(run_checks(self.root), [])
 
+    def test_git_fixture_commands_disable_signing_and_hooks(self) -> None:
+        hooks = self.root / ".fixture-hooks"
+        hooks.mkdir()
+        pre_commit = hooks / "pre-commit"
+        pre_commit.write_text("#!/bin/sh\ntouch hook-ran\nexit 1\n", encoding="utf-8")
+        pre_commit.chmod(0o755)
+        run_git(self.root, "config", "commit.gpgSign", "true")
+        run_git(self.root, "config", "core.hooksPath", str(hooks))
+
+        run_git(self.root, "commit", "-q", "--allow-empty", "-m", "isolated fixture")
+
+        self.assertFalse((self.root / "hook-ran").exists())
+
+    def test_tagged_enforcement_file_must_contain_its_invariant_tag(self) -> None:
+        (self.root / "src/tests.rs").write_text(
+            "#[test]\nfn untagged_test() {}\n", encoding="utf-8"
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | INV-001-tagged tests in "
+            "[`src/tests.rs`](../src/tests.rs). |\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["invariant-tag"])
+        self.assertIn("contains no INV-001 tag", failures[0].message)
+
+    def test_reverse_discovers_invariant_tag_in_test_name(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test]\nfn s01_inv_001_uncited_enforcement() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("INV-001-tagged tests", failures[0].message)
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_invariant_tag_in_test_doc_comment(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "/// INV-001: tagged only by the enforcement comment.\n"
+            "#[tokio::test]\n"
+            "async fn generically_named_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_invariant_tag_in_block_doc_comment(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "/** INV-001: tagged by an attached block doc comment. */\n"
+            "#[test]\n"
+            "fn generically_named_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_tag_in_nested_block_doc_comment(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "/** Outer proof: /* nested explanation */ INV-001. */\n"
+            "#[test]\n"
+            "fn generically_named_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_triple_star_block_comment_cannot_supply_doc_tag(self) -> None:
+        (self.root / "src/tests.rs").write_text(
+            "/*** INV-001 is an ordinary block comment. */\n"
+            "#[test]\n"
+            "fn named_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_unrelated_test_attribute_does_not_register_invariant(self) -> None:
+        (self.root / "src/ignored.rs").write_text(
+            '#[ignore = "INV-001 is temporarily flaky"]\n'
+            "#[test]\n"
+            "fn generically_named_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_tagged_enforcement_requires_tagged_test_declaration(self) -> None:
+        (self.root / "src/tests.rs").write_text(
+            'const NOTE: &str = "INV-001";\n'
+            "// INV-001 is not attached to the test.\n"
+            "#[test]\n"
+            "fn untagged_test() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | INV-001-tagged tests in "
+            "[`src/tests.rs`](../src/tests.rs). |\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["invariant-tag"])
+        self.assertIn("test name or attached doc comment", failures[0].message)
+
+    def test_tagged_link_label_requires_tagged_test_declaration(self) -> None:
+        (self.root / "src/tests.rs").write_text(
+            "#[test]\n"
+            "fn untagged_test() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "[INV-001-tagged tests](../src/tests.rs). |\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["invariant-tag"])
+        self.assertIn("test name or attached doc comment", failures[0].message)
+
+    def test_rust_tag_scan_is_cached_per_source_file(self) -> None:
+        (self.root / "src/tests.rs").write_text(
+            "#[test]\n"
+            "fn s01_inv_001_inv_002_shared_file() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | First law. | Domain | Accepted | INV-001-tagged "
+            "tests in [`src/tests.rs`](../src/tests.rs). |\n"
+            "| INV-002 | Second law. | Domain | Accepted | INV-002-tagged "
+            "tests in [`src/tests.rs`](../src/tests.rs). |\n",
+            encoding="utf-8",
+        )
+
+        with patch.object(
+            check_docs_consistency,
+            "rust_test_invariant_tags",
+            wraps=check_docs_consistency.rust_test_invariant_tags,
+        ) as tag_scan:
+            failures = run_checks(self.root)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(tag_scan.call_count, 1)
+
+    def test_reverse_discovers_doc_tag_across_comment_gap(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "/// INV-001: attached despite the gap.\n"
+            "// The ordinary comment and blank line remain trivia.\n"
+            "\n"
+            "#[test]\n"
+            "fn generically_named_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_ordinary_comment_cannot_supply_test_attribute(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "/// INV-001 is production context, not a test binding.\n"
+            "// #[test]\n"
+            "fn production_context() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_ordinary_block_comment_cannot_supply_doc_tag(self) -> None:
+        (self.root / "src/tests.rs").write_text(
+            "/*\n"
+            "/// INV-001 is ordinary block-comment text.\n"
+            "*/\n"
+            "#[test]\n"
+            "fn named_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_reverse_discovers_invariant_tag_on_const_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test]\n"
+            "const fn s01_inv_001_const_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_invariant_tag_on_extern_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test]\n"
+            'extern "C" fn s01_inv_001_extern_test() {}\n',
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_invariant_tag_on_raw_identifier_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test]\n"
+            "fn r#s01_inv_001_raw_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_unicode_invariant_test_identifier(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test]\n"
+            "fn café_inv_001_executes() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_root_qualified_test_attribute(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[::tokio::test]\n"
+            "async fn s01_inv_001_root_qualified_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_invariant_tag_requires_identifier_boundary(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[test]\n"
+            "fn inv_001alpha_is_not_a_tag() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_reverse_discovers_invariant_tag_in_module_path(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "mod inv_001 {\n"
+            "    #[test]\n"
+            "    fn rejects() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_out_of_line_module_path(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            '#[path = "generic.rs"]\nmod inv_001;\n', encoding="utf-8"
+        )
+        (self.root / "src/generic.rs").write_text(
+            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/generic.rs", failures[0].message)
+
+    def test_reverse_discovers_nested_out_of_line_module_path(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            "mod inv_001;\n", encoding="utf-8"
+        )
+        (self.root / "src/inv_001").mkdir()
+        (self.root / "src/inv_001/mod.rs").write_text(
+            "mod deeper;\n", encoding="utf-8"
+        )
+        (self.root / "src/inv_001/deeper.rs").write_text(
+            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/inv_001/deeper.rs", failures[0].message)
+
+    def test_reverse_discovers_aliased_test_attribute(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "use tokio::test as async_test;\n\n"
+            "#[async_test]\n"
+            "async fn s01_inv_001_aliased_attribute() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_renaming_a_non_test_import_declares_no_test(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "use crate::support::latest as newest;\n\n"
+            "#[newest]\n"
+            "fn s01_inv_001_not_a_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_reverse_discovers_cfg_attr_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[cfg_attr(test, test)]\n"
+            "fn s01_inv_001_cfg_attr_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_nested_cfg_attr_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[cfg_attr(test, cfg_attr(all(), test))]\n"
+            "fn s01_inv_001_nested_cfg_attr_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_cfg_disabled_functions_do_not_register_invariants(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[cfg(any())]\n"
+            "#[test]\n"
+            "fn s01_inv_001_disabled_test() {}\n"
+            "#[cfg_attr(any(), test)]\n"
+            "fn s01_inv_001_disabled_cfg_attr_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_active_cfg_attr_can_disable_test_declaration(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[cfg_attr(all(), cfg(any()), test)]\n"
+            "fn s01_inv_001_never_exists() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_test_generating_macro_is_rejected(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! invariant_test {\n"
+            "    ($name:ident) => {\n"
+            "        #[test]\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "invariant_test!(s01_inv_001_generated);\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "`macro_rules! invariant_test` emits or forwards a test attribute",
+            failures[0].message,
+        )
+
+    def test_attribute_forwarding_macro_is_rejected(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! invariant_test {\n"
+            "    ($attr:meta, $name:ident) => {\n"
+            "        #[$attr]\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "invariant_test!(test, s01_inv_001_generated);\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "`macro_rules! invariant_test` emits or forwards a test attribute",
+            failures[0].message,
+        )
+
+    def test_non_test_attribute_forwarding_macro_is_allowed(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! documented {\n"
+            "    ($attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        struct Item;\n"
+            "    };\n"
+            "}\n"
+            "documented!(derive(Clone));\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_test_named_argument_outside_the_forwarded_position_is_allowed(
+        self,
+    ) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! named {\n"
+            "    ($name:ident, $attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "named!(test, allow(dead_code));\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_test_metadata_in_the_forwarded_position_is_rejected(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! named {\n"
+            "    ($name:ident, $attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "named!(s01_inv_001_generated, test);\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "`macro_rules! named` emits or forwards a test attribute",
+            failures[0].message,
+        )
+
+    def test_non_comma_forwarding_matcher_is_rejected(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! forwarded {\n"
+            "    ($name:ident => $attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "forwarded!(s01_inv_001_generated => test);\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "`macro_rules! forwarded` emits or forwards a test attribute",
+            failures[0].message,
+        )
+
+    def test_unknown_binding_keeps_nested_metadata_nested(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! documented {\n"
+            "    ($name:ident => $attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        struct $name;\n"
+            "    };\n"
+            "}\n"
+            "documented!(Item => cfg_attr(test, derive(Clone)));\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_repeated_forwarding_matcher_inspects_every_argument(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! many {\n"
+            "    ($name:ident, $($attr:meta),*) => {\n"
+            "        $(#[$attr])*\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "many!(s01_inv_001_generated, test);\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "`macro_rules! many` emits or forwards a test attribute",
+            failures[0].message,
+        )
+
+    def test_cfg_predicate_test_token_does_not_mark_function_as_test(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[cfg_attr(any(unix, test), allow(dead_code))]\n"
+            "fn s01_inv_001_production_context() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_test_declaration_inside_comment_is_ignored(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "/*\n"
+            "#[test]\n"
+            "fn s01_inv_001_commented_example() {}\n"
+            "*/\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_test_declarations_inside_string_literals_are_ignored(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "const RAW_EXAMPLE: &str = r###\"\n"
+            "#[test]\n"
+            "fn s01_inv_001_raw_string_example() {}\n"
+            "\"###;\n"
+            "const STRING_EXAMPLE: &str = \"#[test]\\nfn "
+            "s01_inv_001_string_example() {}\";\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_test_declaration_inside_raw_c_string_is_ignored(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "const RAW_C_EXAMPLE: &CStr = cr###\"prefix \\\"\n"
+            "#[test]\n"
+            "fn s01_inv_001_raw_c_string_example() {}\n"
+            "\"###;\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_lifetime_does_not_mask_the_rest_of_its_line(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "mod inv_001 {\n"
+            "    fn helper<'a>() -> char { let c = 'x'; c }\n"
+            "    #[test]\n"
+            "    fn rejects() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_loop_label_does_not_mask_the_rest_of_its_line(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "mod inv_001 {\n"
+            "    fn helper() { 'outer: loop { let c = 'x'; break 'outer; } }\n"
+            "    #[test]\n"
+            "    fn rejects() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_spaced_attribute_declares_a_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "# [ test ]\nfn s01_inv_001_spaced_attribute() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_decomposed_unicode_identifier(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test]\nfn café_inv_001_executes() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_cfg_disabled_out_of_line_module_declares_no_prefix(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            '#[cfg(any())]\n#[path = "generic.rs"]\nmod inv_001;\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/generic.rs").write_text(
+            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_every_active_out_of_line_module_prefix_is_read(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            '#[path = "generic.rs"]\nmod ordinary;\n'
+            '#[path = "generic.rs"]\nmod inv_001;\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/generic.rs").write_text(
+            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/generic.rs", failures[0].message)
+
+    def test_matcher_only_test_attribute_generates_no_test(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! strip_test {\n"
+            "    (#[test] $item:item) => { $item };\n"
+            "}\n"
+            "strip_test!(#[test] fn ignored() {});\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_missing_git_reports_a_verification_violation(self) -> None:
+        empty_path = self.root / ".empty-path"
+        empty_path.mkdir()
+
+        with patch.dict(os.environ, {"PATH": str(empty_path)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn("`git` is not available", failures[0].message)
+
+    def test_disabled_inline_module_declares_no_test(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[cfg(any())]\n"
+            "mod dead {\n"
+            "    #[test]\n"
+            "    fn s01_inv_001_never_built() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_enabled_inline_module_still_declares_its_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[cfg(all())]\n"
+            "mod live {\n"
+            "    #[test]\n"
+            "    fn s01_inv_001_built() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_test_alias_does_not_escape_its_module(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "mod first {\n"
+            "    use tokio::test as scoped;\n"
+            "    #[scoped]\n"
+            "    async fn ordinary_alias_test() {}\n"
+            "}\n"
+            "mod second {\n"
+            "    use crate::support::marker as scoped;\n"
+            "    #[scoped]\n"
+            "    fn s01_inv_001_not_a_test() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_same_line_attribute_declares_a_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test] fn s01_inv_001_same_line() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_raw_identifier_test_attribute_declares_a_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[r#test]\nfn s01_inv_001_raw_attribute() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_cyclic_module_declarations_terminate(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            "mod first;\n", encoding="utf-8"
+        )
+        (self.root / "src/first.rs").write_text(
+            '#[path = "second.rs"]\nmod inv_001;\n', encoding="utf-8"
+        )
+        (self.root / "src/second.rs").write_text(
+            '#[path = "first.rs"]\nmod back;\n#[test]\nfn rejects() {}\n',
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/second.rs", failures[0].message)
+
+    def test_parent_relative_module_path_resolves(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            "mod nested;\n", encoding="utf-8"
+        )
+        (self.root / "src/nested.rs").write_text(
+            '#[path = "../outer.rs"]\nmod inv_001;\n', encoding="utf-8"
+        )
+        (self.root / "outer.rs").write_text(
+            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("outer.rs", failures[0].message)
+
+    def test_macro_invoked_from_another_file_is_rejected(self) -> None:
+        (self.root / "src/macros.rs").write_text(
+            "macro_rules! generate {\n"
+            "    ($attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        fn s01_inv_001_generated() {}\n"
+            "    };\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/caller.rs").write_text(
+            "#[macro_use]\nmod macros;\ngenerate!(test);\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "`macro_rules! generate` emits or forwards a test attribute",
+            failures[0].message,
+        )
+
+    def test_non_test_macro_invoked_from_another_file_is_allowed(self) -> None:
+        (self.root / "src/macros.rs").write_text(
+            "macro_rules! documented {\n"
+            "    ($attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        struct Item;\n"
+            "    };\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/caller.rs").write_text(
+            "#[macro_use]\nmod macros;\ndocumented!(derive(Clone));\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_out_of_line_module_under_an_inline_module_resolves(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            "mod inv_001 {\n    mod cases;\n}\n", encoding="utf-8"
+        )
+        (self.root / "src/uncited_root/inv_001").mkdir(parents=True)
+        (self.root / "src/uncited_root/inv_001/cases.rs").write_text(
+            "#[test]\nfn generic() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn(
+            "src/uncited_root/inv_001/cases.rs", failures[0].message
+        )
+
+    def test_reexported_test_alias_reaches_the_importing_file(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            "pub use tokio::test as async_test;\nmod cases;\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/uncited_root").mkdir()
+        (self.root / "src/uncited_root/cases.rs").write_text(
+            "use crate::async_test;\n\n"
+            "#[async_test]\n"
+            "async fn s01_inv_001_reexported_attribute() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited_root/cases.rs", failures[0].message)
+
+    def test_renaming_to_an_alias_name_declares_no_test(self) -> None:
+        (self.root / "src/exporter.rs").write_text(
+            "pub use tokio::test as async_test;\nmod cases;\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/exporter").mkdir()
+        (self.root / "src/exporter/cases.rs").write_text(
+            "use crate::support::marker as async_test;\n\n"
+            "#[async_test]\n"
+            "fn s01_inv_001_not_a_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_alias_spelling_alone_does_not_import_a_test(self) -> None:
+        (self.root / "src/exporter.rs").write_text(
+            "pub use tokio::test as shared;\nmod cases;\n", encoding="utf-8"
+        )
+        (self.root / "src/exporter").mkdir()
+        (self.root / "src/exporter/cases.rs").write_text(
+            "use crate::helpers::shared;\n\n"
+            "#[shared]\n"
+            "fn s01_inv_001_not_a_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_duplicate_macro_names_keep_their_own_call_sites(self) -> None:
+        (self.root / "src/forwarding.rs").write_text(
+            "macro_rules! wrapper {\n"
+            "    ($attr:meta) => {\n"
+            "        #[$attr]\n"
+            "        struct Item;\n"
+            "    };\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/naming.rs").write_text(
+            "macro_rules! wrapper {\n"
+            "    ($name:ident) => {\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "wrapper!(test);\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_conditional_path_attribute_selects_the_test_module(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            '#[cfg_attr(test, path = "generic.rs")]\nmod inv_001;\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/uncited_root").mkdir()
+        (self.root / "src/uncited_root/inv_001.rs").write_text(
+            "pub fn ordinary() {}\n", encoding="utf-8"
+        )
+        (self.root / "src/uncited_root/generic.rs").write_text(
+            "#[test]\nfn generic() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited_root/generic.rs", failures[0].message)
+
+    def test_every_conditional_path_alternative_is_followed(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            '#[cfg_attr(windows, path = "windows.rs")]\n'
+            '#[cfg_attr(unix, path = "unix.rs")]\n'
+            "mod inv_001;\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/uncited_root").mkdir()
+        (self.root / "src/uncited_root/windows.rs").write_text(
+            "pub fn windows() {}\n", encoding="utf-8"
+        )
+        (self.root / "src/uncited_root/unix.rs").write_text(
+            "#[test]\nfn generic() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited_root/unix.rs", failures[0].message)
+
+    def test_disabled_path_alternative_is_not_followed(self) -> None:
+        (self.root / "src/context_root.rs").write_text(
+            '#[cfg_attr(any(), path = "dead.rs")]\n'
+            '#[cfg_attr(unix, path = "live.rs")]\n'
+            "mod inv_001;\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/context_root").mkdir()
+        (self.root / "src/context_root/dead.rs").write_text(
+            "#[test]\nfn generic() {}\n", encoding="utf-8"
+        )
+        (self.root / "src/context_root/live.rs").write_text(
+            "pub fn live() {}\n", encoding="utf-8"
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_unicode_attribute_path_declares_a_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[módulo::test]\nfn s01_inv_001_unicode_path() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_grouped_crate_import_carries_the_root_alias(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            "pub use tokio::test as async_test;\nmod cases;\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/uncited_root").mkdir()
+        (self.root / "src/uncited_root/cases.rs").write_text(
+            "use crate::{helpers, async_test};\n\n"
+            "#[async_test]\n"
+            "async fn s01_inv_001_grouped_import() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited_root/cases.rs", failures[0].message)
+
+    def test_qualified_name_in_a_group_declares_no_test(self) -> None:
+        (self.root / "src/context_root.rs").write_text(
+            "pub use tokio::test as shared;\nmod cases;\n", encoding="utf-8"
+        )
+        (self.root / "src/context_root").mkdir()
+        (self.root / "src/context_root/cases.rs").write_text(
+            "use crate::{helpers::shared};\n\n"
+            "#[shared]\n"
+            "fn s01_inv_001_not_a_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_forwarded_attribute_group_is_rejected(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! many {\n"
+            "    ($(#[$attr:meta])* $name:ident) => {\n"
+            "        $(#[$attr])*\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "many!(#[test] s01_inv_001_generated);\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "`macro_rules! many` emits or forwards a test attribute",
+            failures[0].message,
+        )
+
+    def test_forwarded_non_test_attribute_group_is_allowed(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! many {\n"
+            "    ($(#[$attr:meta])* $name:ident) => {\n"
+            "        $(#[$attr])*\n"
+            "        struct $name;\n"
+            "    };\n"
+            "}\n"
+            "many!(#[derive(Clone)] Item);\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_capitalized_attribute_declares_no_test(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[Test]\nfn s01_inv_001_not_a_test() {}\n", encoding="utf-8"
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_raw_string_module_path_resolves(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            '#[path = r"generic.rs"]\nmod inv_001;\n', encoding="utf-8"
+        )
+        (self.root / "src/uncited_root").mkdir()
+        (self.root / "src/uncited_root/generic.rs").write_text(
+            "#[test]\nfn generic() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited_root/generic.rs", failures[0].message)
+
+    def test_included_file_carries_its_including_module_path(self) -> None:
+        (self.root / "src/uncited_root.rs").write_text(
+            'mod inv_001 {\n    include!("generic.rs");\n}\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/generic.rs").write_text(
+            "#[test]\nfn generic() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/generic.rs", failures[0].message)
+
+    def test_cfg_not_test_declaration_leaves_the_harness(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[cfg(not(test))]\n"
+            "#[test]\n"
+            "fn s01_inv_001_never_in_harness() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_spaced_attribute_path_declares_a_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[:: tokio :: test]\n"
+            "async fn s01_inv_001_spaced_path() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_qualifier_split_across_lines_declares_a_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test] const\nfn s01_inv_001_split_qualifier() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_disabled_use_item_declares_no_test_alias(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[cfg(any())]\n"
+            "use tokio::test as shared;\n\n"
+            "#[shared]\n"
+            "fn s01_inv_001_not_a_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_procedural_test_generator_is_rejected(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "#[proc_macro]\n"
+            "pub fn generate(_: TokenStream) -> TokenStream {\n"
+            '    "#[test] fn s01_inv_001_generated() {}".parse().unwrap()\n'
+            "}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "this procedural macro spells a test attribute",
+            failures[0].message,
+        )
+
+    def test_ordinary_procedural_macro_is_allowed(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "#[proc_macro_derive(Thing)]\n"
+            "pub fn derive_thing(_: TokenStream) -> TokenStream {\n"
+            "    quote! { impl Thing for #name {} }.into()\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_disabled_include_declares_no_module_path(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "mod inv_001 {\n"
+            "    #[cfg(any())]\n"
+            '    include!("generic.rs");\n'
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/generic.rs").write_text(
+            "#[test]\nfn generic() {}\n", encoding="utf-8"
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_commented_test_attribute_generates_no_test(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "#[proc_macro]\n"
+            "pub fn generate(_: TokenStream) -> TokenStream {\n"
+            "    // Accept input carrying #[test], but emit nothing.\n"
+            "    TokenStream::new()\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_source_outside_every_cargo_target_is_not_read(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\n', encoding="utf-8"
+        )
+        (self.root / "src/lib.rs").write_text(
+            "pub fn thing() {}\n", encoding="utf-8"
+        )
+        (self.root / "fixtures").mkdir()
+        (self.root / "fixtures/example.rs").write_text(
+            "#[test]\nfn s01_inv_001_unattached() {}\n", encoding="utf-8"
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_source_named_by_an_explicit_target_path_is_read(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\n\n'
+            '[[test]]\nname = "custom"\npath = "checks/custom.rs"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text(
+            "pub fn thing() {}\n", encoding="utf-8"
+        )
+        (self.root / "checks").mkdir()
+        (self.root / "checks/custom.rs").write_text(
+            "#[test]\nfn s01_inv_001_custom_target() {}\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("checks/custom.rs", failures[0].message)
+
+    def test_tagged_label_claims_only_its_own_link(self) -> None:
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "[INV-001-tagged test](../src/tests.rs) and its "
+            "[helper](../src/helper.rs). |\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/tests.rs").write_text(
+            "#[test]\nfn s01_inv_001_named_test() {}\n", encoding="utf-8"
+        )
+        (self.root / "src/helper.rs").write_text(
+            "pub fn helper() {}\n", encoding="utf-8"
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_reference_style_citation_keeps_occurrence_order(self) -> None:
+        (self.root / "src/tagged.rs").write_text(
+            "#[test]\nfn s01_inv_001_tagged_test() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/named.rs").write_text(
+            "#[test]\nfn named_test() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | INV-001-tagged tests in "
+            "[`src/tagged.rs`][tagged]. Named tests in "
+            "[`src/named.rs`][named]. |\n\n"
+            "[named]: ../src/named.rs\n"
+            "[tagged]: ../src/tagged.rs\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_tagged_claim_applies_only_to_following_link_group(self) -> None:
+        (self.root / "src/named.rs").write_text(
+            "#[test]\nfn named_test() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/tagged.rs").write_text(
+            "#[test]\nfn s01_inv_001_tagged_test() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | test `named_test` in "
+            "[`src/named.rs`](../src/named.rs); INV-001-tagged tests in "
+            "[`src/tagged.rs`](../src/tagged.rs). |\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_non_test_invariant_mentions_do_not_require_registration(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "/// INV-001 is production context, not a test binding.\n"
+            "fn production_context() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_missing_invariant_file_is_not_double_reported_as_link(self) -> None:
         (self.root / "docs/invariants.md").write_text(
             "# Invariants\n\n"
@@ -112,6 +1595,25 @@ class DocsConsistencyTests(unittest.TestCase):
             "| -- | -- | -- | -- | -- |\n"
             "| INV-001 | Law. | Domain | Accepted | "
             "[`src/missing.rs`](../src/missing.rs). |\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-citation"],
+        )
+        self.assertIn("cited file does not exist", failures[0].message)
+
+    def test_missing_reference_invariant_file_is_not_double_reported(self) -> None:
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "[`src/missing.rs`][missing]. |\n\n"
+            "[missing]: ../src/missing.rs\n",
             encoding="utf-8",
         )
 
@@ -1134,6 +2636,439 @@ class DocsConsistencyTests(unittest.TestCase):
         messages = "\n".join(failure_messages(failures))
         self.assertIn("positive decimal", messages)
         self.assertIn("missing", messages)
+
+    def test_verification_ref_requires_integrated_pull_request(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/missing`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
+
+    def test_verification_ref_requires_exact_merged_branch(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/not-example`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            f"names `{self.merged_pr_branch}`", failures[0].message
+        )
+
+    def test_verification_ref_rejects_one_parent_merge_subject_spoof(self) -> None:
+        run_git(
+            self.root,
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "Merge pull request #99 from owner/agent/spoof",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/spoof`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
+
+    def test_local_branch_does_not_override_known_pr_history(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/wrong")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/wrong`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            f"names `{self.merged_pr_branch}`", failures[0].message
+        )
+
+    def test_verification_ref_rejects_merge_outside_integration(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "isolated-base")
+        run_git(self.root, "checkout", "-q", "-b", "agent/unreachable")
+        (self.root / "unreachable-marker").write_text(
+            "PR 99 fixture\n", encoding="utf-8"
+        )
+        run_git(self.root, "add", "unreachable-marker")
+        run_git(self.root, "commit", "-q", "-m", "unreachable fixture")
+        run_git(self.root, "checkout", "-q", "isolated-base")
+        run_git(
+            self.root,
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge pull request #99 from owner/agent/unreachable",
+            "agent/unreachable",
+        )
+        run_git(self.root, "checkout", "-q", "main")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/unreachable`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
+
+    def test_head_branch_merge_is_not_integration_provenance(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/head")
+        run_git(self.root, "checkout", "-q", "-b", "agent/spoof")
+        (self.root / "spoof-marker").write_text(
+            "PR 99 fixture\n", encoding="utf-8"
+        )
+        run_git(self.root, "add", "spoof-marker")
+        run_git(self.root, "commit", "-q", "-m", "spoof fixture")
+        run_git(self.root, "checkout", "-q", "agent/head")
+        run_git(
+            self.root,
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge pull request #99 from owner/agent/spoof",
+            "agent/spoof",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/spoof`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
+
+    def test_remote_integration_ref_outranks_the_local_branch(self) -> None:
+        run_git(
+            self.root,
+            "update-ref",
+            "refs/remotes/origin/main",
+            git_output(self.root, "rev-parse", "HEAD"),
+        )
+        run_git(self.root, "checkout", "-q", "-b", "agent/late")
+        (self.root / "late-marker").write_text(
+            "PR 99 fixture\n", encoding="utf-8"
+        )
+        run_git(self.root, "add", "late-marker")
+        run_git(self.root, "commit", "-q", "-m", "late fixture")
+        run_git(self.root, "checkout", "-q", "main")
+        run_git(
+            self.root,
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge pull request #99 from owner/agent/late",
+            "agent/late",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/late`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
+
+    def test_one_local_in_flight_ref_may_match_checkout_branch(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/in-flight")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/in-flight`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_github_event_may_identify_one_in_flight_ref(self) -> None:
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 99, "pull_request": {"head": {"ref": "agent/in-flight"}}}',
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/in-flight`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(failures, [])
+
+    def test_malformed_github_event_base_is_reported_without_crashing(self) -> None:
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 99, "pull_request": {'
+            '"head": {"ref": "agent/in-flight"}, "base": null}}',
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/in-flight`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "cannot inspect GitHub pull-request event", failures[0].message
+        )
+
+    def test_github_event_accepts_verification_inherited_from_exact_base(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-base")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/stack-base`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+        run_git(self.root, "add", "docs/spec/example.md")
+        run_git(self.root, "commit", "-q", "-m", "stack base fixture")
+        base_sha = git_output(self.root, "rev-parse", "HEAD")
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-child")
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 100, "pull_request": {'
+            '"head": {"ref": "agent/stack-child"}, '
+            f'"base": {{"sha": "{base_sha}"}}}}}}',
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(failures, [])
+
+    def test_inherited_verification_follows_a_renamed_page(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-base")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/stack-base`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+        run_git(self.root, "add", "docs/spec/example.md")
+        run_git(self.root, "commit", "-q", "-m", "stack base fixture")
+        base_sha = git_output(self.root, "rev-parse", "HEAD")
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-child")
+        run_git(
+            self.root,
+            "mv",
+            "docs/spec/example.md",
+            "docs/spec/renamed.md",
+        )
+        run_git(self.root, "commit", "-q", "-m", "rename the page")
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n[Docs directory](docs/)\n", encoding="utf-8"
+        )
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 100, "pull_request": {'
+            '"head": {"ref": "agent/stack-child"}, '
+            f'"base": {{"sha": "{base_sha}"}}}}}}',
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(failures, [])
+
+    def test_github_event_requires_exact_in_flight_number_and_branch(self) -> None:
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 98, "pull_request": {"head": {"ref": "agent/in-flight"}}}',
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/in-flight`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
+
+    def test_non_pull_request_github_event_disables_local_exception(self) -> None:
+        event = self.root / "event.json"
+        event.write_text(
+            '{"ref": "refs/heads/main"}',
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`main`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn("cannot inspect GitHub pull-request event", failures[0].message)
+
+    def test_one_unmerged_pr_may_verify_multiple_pages(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/in-flight")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/in-flight`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/other.md").write_text(
+            "# Other\n\n"
+            "Verified through PR #99 (`agent/in-flight`).\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failures, [])
+
+    def test_only_one_unmerged_verification_pr_identity_is_permitted(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/in-flight")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/in-flight`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/other.md").write_text(
+            "# Other\n\n"
+            "Verified through PR #98 (`agent/in-flight`).\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "only one unmerged verification PR identity is permitted",
+            failures[0].message,
+        )
 
     def test_verification_ref_requires_closed_branch_token(self) -> None:
         (self.root / "docs/spec/example.md").write_text(

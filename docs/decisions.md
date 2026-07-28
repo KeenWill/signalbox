@@ -128,6 +128,52 @@ grandfathering mechanism the model-identity boundary used.
 construction (unchanged), the provider bridge, and
 [sessions and transcript](spec/sessions-and-transcript.md).
 
+## 2026-07-26 — Mechanize invariant registration and verification provenance
+
+**Context.** PR #246 deliberately excluded reverse discovery of INV-tagged tests
+and semantic verification references. The catalog now contains false citations
+and uncited tagged files, while local Git records exact merge provenance.
+
+**Decision.** A cited `INV-NNN`-tagged enforcement file must contain that tag,
+and every Rust test file tagged in its harness test name — the declaration name
+qualified by every inline, out-of-line, and `include!` module path reaching it —
+or in an attached doc comment must be cited by that row; a `test` attribute a
+`use` item renames counts as a test attribute where that rename is visible, and
+in a module that imports it by name, directly or in a group, from a crate root
+re-exporting it. A module declaration whose conditional `#[path]` attributes
+name several files keeps every one of them, since which the build selects is not
+the checker's to decide. Every historical subsystem-page verification token must
+match its exact PR and source branch in a two-parent merge on the first-parent
+history of the protected integration branch — `refs/remotes/origin/main`, or the
+local `main` when no remote-tracking ref resolves — which only an owner merge
+extends. Tokens for one unmerged PR may instead match the local checkout branch
+or, in GitHub Actions, the pull-request event's exact number and branch.
+Verification identities already present on the event's exact base commit remain
+valid in a stacked child until that base PR merges. This reverses PR #246's
+mechanical exclusions without adding a dependency or network access to the
+checker; the CI validate job therefore supplies full history at checkout.
+Discovery reads the harness build of the sources Cargo compiles, so `cfg(test)`
+is true, a file no Cargo target reaches is not read as a crate of its own, and a
+page a stacked child renames is read at its base name. Rust tests remain
+explicit source declarations: macros that emit or forward test attributes are
+rejected, and a procedural macro that spells one in its expansion with it, so
+reverse registration never depends on expanding arbitrary macros; a forwarded
+attribute is read from the invocation argument its matcher binds whenever that
+binding is determinable, from every top-level metadata item of the invocation
+when it is not, and from invocations anywhere in the repository when the macro
+name has exactly one definition, from the defining file alone when it does not.
+
+**Rejected alternatives.** Reviewer-only checks repeat deterministic work.
+GitHub calls or per-token fetches add mutable network state and do not inspect
+one complete graph. Accepting any merge reachable from `HEAD` lets a branch
+under review author its own provenance. Scanning every invariant mention would
+misread production documentation, so reverse discovery is limited to test
+declarations.
+
+**Affects.** `scripts/check_docs_consistency.py`, its tests, the validate
+checkout, and [the invariant catalog](invariants.md). Integration history does
+not judge whether a verification PR is the newest relevant implementation.
+
 ## 2026-07-26 — Renumber review-command migration after its parent advanced
 
 **Context.** The version-eleven review-command migration was introduced as
