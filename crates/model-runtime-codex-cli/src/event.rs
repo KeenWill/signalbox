@@ -142,7 +142,13 @@ impl<C: Clone> EventDecoder<C> {
                 // emitting as the marker's reconstructable continuation.
                 sink.seed_emitted_context(&sanitized);
             }
-            "turn.started" => {}
+            "turn.started" => {
+                // A drifted but accepted event can carry additive
+                // provider-controlled string fields; fold their uninterpreted
+                // content so a credential marker they hold governs the
+                // following text, as for lifecycle and unknown events.
+                fold_dropped_value(sink, &value, true);
+            }
             "item.started" | "item.updated" => {
                 let identity: ItemLifecycleEvent = decode(value.clone())?;
                 validate_item_identity(&identity.item)?;
@@ -150,11 +156,9 @@ impl<C: Clone> EventDecoder<C> {
                 // event, but an additively-tolerated one may carry
                 // provider-controlled string fields whose credential marker
                 // would otherwise seed nothing; fold them into the lookbehind.
-                let mut leaves = Vec::new();
                 if let Some(item) = value.get("item") {
-                    collect_credential_content(item, true, &mut leaves);
+                    fold_dropped_value(sink, item, true);
                 }
-                fold_dropped_content(sink, &leaves);
             }
             "item.completed" => {
                 let identity: ItemLifecycleEvent = decode(value.clone())?;
@@ -169,13 +173,7 @@ impl<C: Clone> EventDecoder<C> {
                         // beginning the final one would otherwise reconstruct
                         // across them. Fold any displaced text (and id) into the
                         // lookbehind before replacing.
-                        if let Some(superseded) = self.agent_message.take() {
-                            let mut leaves = vec![superseded.as_str()];
-                            if let Some(previous_id) = &self.message_id {
-                                leaves.push(previous_id.as_str());
-                            }
-                            fold_dropped_content(sink, &leaves);
-                        }
+                        self.fold_retained_agent_message(sink);
                         // The id is retained raw and sanitized against the
                         // held stream state in `completed`, so a value that
                         // extends a credential marker from earlier reasoning
@@ -215,15 +213,11 @@ impl<C: Clone> EventDecoder<C> {
                         // any credential-bearing text it carries still marks
                         // following output as a secret. Its shape is unmodeled —
                         // provider text can live in any field or nested within
-                        // one, and ordered leaves can jointly form a marker no
-                        // single leaf shows — so fail closed on any
-                        // credential-relevant content rather than guessing how
-                        // the leaves concatenate.
-                        let mut leaves = Vec::new();
+                        // one — so fold its independent credential units into
+                        // the lookbehind.
                         if let Some(item) = value.get("item") {
-                            collect_credential_content(item, true, &mut leaves);
+                            fold_dropped_value(sink, item, true);
                         }
-                        fold_dropped_content(sink, &leaves);
                     }
                 }
             }
@@ -243,21 +237,24 @@ impl<C: Clone> EventDecoder<C> {
             }
             "turn.failed" => {
                 let event: TurnFailed = decode(value)?;
+                // The retained agent message is no longer completion material;
+                // fold it so a marker it ends in still governs the failure
+                // message that supersedes it, as agent-message supersession does.
+                self.fold_retained_agent_message(sink);
                 self.terminal = Some(CliTerminal::Failed(event.error.message));
             }
             "error" => {
                 let event: ThreadError = decode(value)?;
+                self.fold_retained_agent_message(sink);
                 self.terminal = Some(CliTerminal::Unrecoverable(event.message));
             }
             _ => {
                 // An additively-tolerated unknown top-level event is dropped,
                 // but a credential marker in its provider-controlled strings
                 // still marks the following final text as a secret; fold its
-                // string leaves into the lookbehind, failing closed on any
-                // credential-relevant content just as an unsupported item does.
-                let mut leaves = Vec::new();
-                collect_credential_content(&value, false, &mut leaves);
-                fold_dropped_content(sink, &leaves);
+                // uninterpreted content into the lookbehind, as for an
+                // unsupported item.
+                fold_dropped_value(sink, &value, true);
             }
         }
         Ok(())
@@ -327,6 +324,19 @@ impl<C: Clone> EventDecoder<C> {
 
     pub(crate) fn terminal_observed(&self) -> bool {
         self.terminal.is_some()
+    }
+
+    /// Folds a retained agent message (and its id) into the dropped lookbehind
+    /// when it is displaced — by a later agent message or a failure terminal —
+    /// so a credential marker ending it still governs the text that follows.
+    fn fold_retained_agent_message(&mut self, sink: &mut RedactingSink<'_, C>) {
+        if let Some(superseded) = self.agent_message.take() {
+            let mut units = vec![superseded.as_str()];
+            if let Some(previous_id) = &self.message_id {
+                units.push(previous_id.as_str());
+            }
+            seed_strongest_dropped(sink, units);
+        }
     }
 
     fn completed(mut self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
@@ -648,47 +658,82 @@ fn validate_item_identity(item: &ItemIdentity) -> Result<(), DecodeFailure> {
     Ok(())
 }
 
-/// Collects every string leaf carried by a JSON value in document order. When
-/// `is_item_root` is set, the `id`/`type` metadata keys of the item object are
-/// skipped: they name the item, not its content, and their bytes could
-/// otherwise break a marker the content carries.
-fn collect_credential_content<'a>(value: &'a Value, is_item_root: bool, out: &mut Vec<&'a str>) {
+/// Collects the independent credential *units* of provider-controlled content
+/// the adapter drops without interpreting. An object's field values are
+/// separate units (they are not one continuous text, and serde's `BTreeMap`
+/// iteration is key-sorted rather than wire order, so a benign sibling must not
+/// erase another's marker); an array's elements are wire-adjacent, so their
+/// string leaves are joined into a single unit (an array `["api", "_key="]`
+/// forms `api_key=`). At `is_root`, the `id`/`type` metadata keys are skipped.
+fn collect_units(value: &Value, is_root: bool, out: &mut Vec<String>) {
     match value {
-        Value::String(text) => out.push(text),
-        Value::Array(items) => {
-            for item in items {
-                collect_credential_content(item, false, out);
+        Value::String(text) => out.push(text.clone()),
+        Value::Array(_) => {
+            let mut leaves = Vec::new();
+            collect_string_leaves(value, &mut leaves);
+            if !leaves.is_empty() {
+                out.push(leaves.concat());
             }
         }
         Value::Object(fields) => {
             for (key, field) in fields {
-                if is_item_root && matches!(key.as_str(), "id" | "type") {
+                if is_root && matches!(key.as_str(), "id" | "type") {
                     continue;
                 }
-                collect_credential_content(field, false, out);
+                collect_units(field, false, out);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
-/// Folds provider-controlled content the adapter drops without interpreting —
-/// an unsupported completed item, an ignored `item.started`/`item.updated`
-/// lifecycle event, an unknown top-level event, or an agent message superseded
-/// by a later one — into the redaction lookbehind. The string leaves are joined
-/// in document order (so adjacency within an ordered container is preserved: an
-/// array `["api", "_key="]` jointly forms the marker `api_key=` its leaves do
-/// not show individually) and seeded as dropped context, exactly as a dropped
-/// reasoning or error item is. A following value that completes a marker ending
-/// the joined content is then suppressed, while credential-clean content — a
-/// benign prefix the streaming lookbehind holds but no later value completes —
-/// flows unchanged. The pinned CLI emits none of these shapes, so this only
-/// guards a drifted or hostile stream.
-fn fold_dropped_content<C: Clone>(sink: &mut RedactingSink<'_, C>, leaves: &[&str]) {
-    if leaves.is_empty() {
-        return;
+/// Every string leaf of `value` in order, for joining wire-adjacent array
+/// content into one unit.
+fn collect_string_leaves<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+    match value {
+        Value::String(text) => out.push(text),
+        Value::Array(items) => {
+            for item in items {
+                collect_string_leaves(item, out);
+            }
+        }
+        Value::Object(fields) => {
+            for field in fields.values() {
+                collect_string_leaves(field, out);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
-    sink.extend_dropped_context(&leaves.concat());
+}
+
+/// Folds dropped provider content (an unsupported completed item, an ignored
+/// lifecycle or unknown event, an additive field on a known event) into the
+/// redaction lookbehind by seeding its strongest credential unit.
+fn fold_dropped_value<C: Clone>(sink: &mut RedactingSink<'_, C>, value: &Value, is_root: bool) {
+    let mut units = Vec::new();
+    collect_units(value, is_root, &mut units);
+    seed_strongest_dropped(sink, units.iter().map(String::as_str));
+}
+
+/// Seeds the credential unit whose trailing credential context is strongest
+/// (longest) as dropped context. The units are independent — a following value
+/// is suppressed by *any* active marker among them — so seeding the strongest
+/// suffices, while choosing the longest keeps a real marker (`api_`) from being
+/// shadowed by a trivial prefix (a benign word ending in a marker's first
+/// letter). Precise seeding, not fail-closed, so a benign prefix no value
+/// completes flows unchanged (the keepalive flood among unknown events, for
+/// example, is not suppressed).
+fn seed_strongest_dropped<'a, C: Clone>(
+    sink: &mut RedactingSink<'_, C>,
+    units: impl IntoIterator<Item = &'a str>,
+) {
+    if let Some(strongest) = units
+        .into_iter()
+        .max_by_key(|unit| trailing_credential_context(unit).len())
+        && !trailing_credential_context(strongest).is_empty()
+    {
+        sink.extend_dropped_context(strongest);
+    }
 }
 
 /// Requires a string-carried tool-argument payload to hold one JSON object

@@ -185,11 +185,18 @@ fn trailing_identifier(before_separator: &str) -> Option<(&str, Option<char>)> {
             return Some((&without_close[start + 1..], Some(quote)));
         }
     }
+    // Advance past the delimiter by its full UTF-8 width: `rfind` returns the
+    // byte offset where the (possibly multibyte) delimiter char begins, so
+    // `index + 1` could land inside its encoding (`éAWS_SECRET_ACCESS_KEY=`)
+    // and panic the slice — aborting the executing task on provider-controlled
+    // text.
     let start = trimmed
         .rfind(|character: char| {
             !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
         })
-        .map_or(0, |index| index + 1);
+        .map_or(0, |index| {
+            index + trimmed[index..].chars().next().map_or(1, char::len_utf8)
+        });
     (start < trimmed.len()).then_some((&trimmed[start..], None))
 }
 
@@ -2027,6 +2034,17 @@ mod tests {
 
         assert!(!output.contains(COMPOSITE_SECRET_VALUE));
         assert!(output.contains("[redacted]"));
+    }
+
+    /// A non-ASCII delimiter immediately before a composite credential
+    /// identifier must be advanced by its full UTF-8 width; a one-byte advance
+    /// would slice mid-character and panic the executing task.
+    #[test]
+    fn inv_035_multibyte_delimiter_before_credential_does_not_panic() {
+        let output = redact_text("éAWS_SECRET_ACCESS_KEY=opaque-multibyte-value done");
+
+        assert!(!output.contains("opaque-multibyte-value"));
+        assert!(output.contains(REDACTED));
     }
 
     #[test]

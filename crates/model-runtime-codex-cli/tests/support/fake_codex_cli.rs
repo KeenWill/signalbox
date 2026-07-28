@@ -182,6 +182,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             completed();
         }
+        "credential_split_across_sibling_object_fields" => {
+            // A marker-bearing field sorts BEFORE a benign sibling, so a
+            // document-order (serde key-sorted) concatenation would lose the
+            // `api_` marker; the strongest-unit seeding must keep it.
+            emit(
+                r#"{"type":"item.completed","item":{"id":"sib","type":"future_item","a_marker":"api_","z_benign":"notice"}}"#,
+            );
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "credential_split_across_turn_started_field" => {
+            // A drifted turn.started carries an additive credential marker.
+            emit(r#"{"type":"turn.started","diagnostic":"Authorization:"}"#);
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "credential_split_across_agent_message_then_failure" => {
+            // A retained agent message ends in a marker, then turn.failed's
+            // message supplies the value.
+            agent_message("msg-before-failure", "leaked Authorization:");
+            failed(&format!(" {}", fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+        }
         "credential_split_across_superseded_agent_message" => {
             // An earlier agent message is superseded by a later one; its
             // trailing marker plus the final message's value must not
