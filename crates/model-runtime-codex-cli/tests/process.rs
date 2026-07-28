@@ -251,6 +251,25 @@ async fn inv_035_final_text_marker_before_tool_arguments_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a credential marker ending the final envelope text also governs
+/// the agent-message item id — the same same-envelope context the tool-call id
+/// path consults — so an id carrying the marker's continuation never surfaces
+/// as `ProviderMessageId` beside the independently redacted text.
+#[tokio::test]
+async fn inv_035_final_text_marker_before_message_id_is_redacted() {
+    let result = execute_scenario(
+        "final_text_marker_before_message_id",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(result.spawns, 1);
+}
+
 /// INV-035: a credential marker held from streamed reasoning also governs the
 /// agent-message item id, so an id extending the marker never surfaces as
 /// `ProviderMessageId` in terminal evidence.

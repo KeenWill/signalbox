@@ -304,13 +304,17 @@ impl<C: Clone> EventDecoder<C> {
                 );
             }
         };
-        // Sanitized against the held lookbehind before the usage barrier below
-        // flushes it, so a message id extending a credential marker held from
-        // reasoning is suppressed instead of surfacing as `ProviderMessageId`.
+        // Sanitized against the held lookbehind plus the same-envelope final
+        // text — exactly as the tool-call id path is — before the usage
+        // barrier below flushes the lookbehind, so a message id extending a
+        // credential marker held from reasoning, or one ending the final text
+        // itself, is suppressed instead of surfacing as `ProviderMessageId`
+        // beside the independently redacted text.
+        let message_id_context = trailing_credential_context(&envelope.text);
         let message_id = self
             .message_id
             .take()
-            .map(|id| sink.redact_terminal_failure_text(&id));
+            .map(|id| sink.redact_provider_id(message_id_context, &id));
         let reported_finish = match envelope.outcome {
             EnvelopeOutcome::Refused => FinishReason::Refusal,
             EnvelopeOutcome::Completed if envelope.tool_calls.is_empty() => FinishReason::EndTurn,
