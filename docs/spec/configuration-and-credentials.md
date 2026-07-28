@@ -196,9 +196,12 @@ or `$HOME/` followed by a relative suffix resolved from the process's `HOME` at
 load. Every component after either root must be normal and nonempty: absolute
 paths, `.` or `..`, another `$`, any other variable spelling, and a missing,
 empty, or non-absolute `HOME` for a `$HOME/` reference fail typed validation.
-The file must be readable UTF-8 and its complete contents must construct the
-same nonempty, U+0000-free, 1,048,576-byte-bounded `SessionSystemPrompt` as an
-inline value. There is no newline trimming or interpolation.
+The target must be a regular file containing readable UTF-8, and its complete
+contents must construct the same nonempty, U+0000-free, 1,048,576-byte-bounded
+`SessionSystemPrompt` as an inline value. The loader reads at most 1,048,577
+bytes even if the file changes during loading; a file already larger than the
+bound is rejected before its contents are read. There is no newline trimming or
+interpolation.
 
 One valid table becomes an immutable resolved bundle containing the exact model
 request, system prompt, and dangerous-tool blanket. Its content digest is

@@ -101,14 +101,15 @@ operational usage.
 State lives under the gitignored `.devenv/state/`: the cluster in `postgres/`,
 and everything the daemon needs in `dev-instance/` — a locally generated
 certificate authority and server certificate under `tls/`, a process-scoped home
-under `home/`, and `signalboxd.toml`, seeded on first run from
-[`config/signalboxd.example.toml`](config/signalboxd.example.toml) and left
-alone afterwards so local edits survive. Wipe the whole instance with
-`rm -rf .devenv/state`, or reseed just the catalog by deleting
-`.devenv/state/dev-instance/signalboxd.toml`.
+under `home/`, `signalboxd.toml` and `session-templates.toml`, seeded on first
+run from [`config/signalboxd.example.toml`](config/signalboxd.example.toml) and
+[`config/session-templates.example.toml`](config/session-templates.example.toml).
+Both are left alone afterwards so local edits survive. Wipe the whole instance
+with `rm -rf .devenv/state`, or reseed one catalog by deleting its file under
+`.devenv/state/dev-instance/`.
 
-Two things are worth knowing before editing the seeded catalog or reaching for
-the socket. The seed is a copy of the checked-in example, so it carries that
+Two things are worth knowing before editing the seeded model catalog or reaching
+for the socket. Its seed is a copy of the checked-in example, so it carries that
 file's undated family names such as `claude-haiku-4-5`; the spelling a
 `provider_model` must take is stated in
 [configuration and credentials](docs/spec/configuration-and-credentials.md#the-static-model-and-alias-catalog),

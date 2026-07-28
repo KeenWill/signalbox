@@ -426,7 +426,7 @@ dangerous_tool_auto_approval = true
     assert!(original_list.status.success());
     assert_eq!(
         String::from_utf8(original_list.stdout)?,
-        format!("{TEMPLATE_NAME} version={ORIGINAL_TEMPLATE_VERSION}\n")
+        format!("name={TEMPLATE_NAME} version={ORIGINAL_TEMPLATE_VERSION}\n")
     );
     let original_create = run_client(
         original_runtime.socket(),
@@ -479,7 +479,7 @@ dangerous_tool_auto_approval = false
     assert!(edited_list.status.success());
     assert_eq!(
         String::from_utf8(edited_list.stdout)?,
-        format!("{TEMPLATE_NAME} version={EDITED_TEMPLATE_VERSION}\n")
+        format!("name={TEMPLATE_NAME} version={EDITED_TEMPLATE_VERSION}\n")
     );
     let edited_create = run_client(
         edited_runtime.socket(),

@@ -267,6 +267,16 @@ struct ModelCallPinFacts {
     credential_reference: String,
 }
 
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct TemplateCreationFacts {
+    session_template_name: String,
+    session_template_content_digest: Vec<u8>,
+    command_template_name: String,
+    command_template_content_digest: Vec<u8>,
+    registry_storage_version: i16,
+    command_storage_version: i16,
+}
+
 #[track_caller]
 fn assert_ambiguous_tool_recovery(outcome: StartupScanSessionOutcome) {
     match outcome {
@@ -8855,13 +8865,13 @@ async fn inv047_template_creation_persists_copy_and_name_keyed_replay() -> Resul
     assert_eq!(replay_receipt.session(), winner);
     assert_ne!(replay_receipt.session(), replay_candidate);
 
-    let stored: (String, Vec<u8>, String, Vec<u8>, i16, i16) = sqlx::query_as(
-        "SELECT s.template_name,
-                s.template_content_digest,
-                c.template_name,
-                c.template_content_digest,
-                d.storage_version,
-                c.storage_version
+    let stored: TemplateCreationFacts = sqlx::query_as(
+        "SELECT s.template_name AS session_template_name,
+                s.template_content_digest AS session_template_content_digest,
+                c.template_name AS command_template_name,
+                c.template_content_digest AS command_template_content_digest,
+                d.storage_version AS registry_storage_version,
+                c.storage_version AS command_storage_version
          FROM session AS s
          JOIN create_session_command AS c
            ON c.created_session_id = s.session_id
@@ -8871,12 +8881,18 @@ async fn inv047_template_creation_persists_copy_and_name_keyed_replay() -> Resul
     .bind(winner.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(stored.0, name.as_str());
-    assert_eq!(stored.1, original_provenance.content_digest().as_bytes());
-    assert_eq!(stored.2, name.as_str());
-    assert_eq!(stored.3, original_provenance.content_digest().as_bytes());
-    assert_eq!(stored.4, 4);
-    assert_eq!(stored.5, 4);
+    assert_eq!(stored.session_template_name, name.as_str());
+    assert_eq!(
+        stored.session_template_content_digest,
+        original_provenance.content_digest().as_bytes()
+    );
+    assert_eq!(stored.command_template_name, name.as_str());
+    assert_eq!(
+        stored.command_template_content_digest,
+        original_provenance.content_digest().as_bytes()
+    );
+    assert_eq!(stored.registry_storage_version, 4);
+    assert_eq!(stored.command_storage_version, 4);
 
     let loaded = LoadSessionService::new(SessionRepository::new(pool.clone()))
         .execute(winner)

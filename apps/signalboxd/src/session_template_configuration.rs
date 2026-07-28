@@ -4,6 +4,7 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fmt, fs,
+    io::Read,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -180,8 +181,7 @@ fn parse_template(
         (Some(value), None) => value.to_owned(),
         (None, Some(reference)) => {
             let prompt_path = resolve_prompt_path(reference, catalog_path, home)?;
-            fs::read_to_string(prompt_path)
-                .map_err(|_| SessionTemplateConfigurationError::ReadPrompt)?
+            read_prompt_file(&prompt_path)?
         }
     };
     let prompt = SessionSystemPrompt::try_new(prompt)
@@ -204,6 +204,32 @@ fn parse_template(
         provenance: SessionTemplateProvenance::new(name, digest),
         defaults,
     })
+}
+
+fn read_prompt_file(path: &Path) -> Result<String, SessionTemplateConfigurationError> {
+    let file = fs::File::open(path).map_err(|_| SessionTemplateConfigurationError::ReadPrompt)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| SessionTemplateConfigurationError::ReadPrompt)?;
+    if !metadata.is_file() {
+        return Err(SessionTemplateConfigurationError::ReadPrompt);
+    }
+    let maximum_bytes = u64::try_from(SessionSystemPrompt::MAX_UTF8_BYTES)
+        .map_err(|_| SessionTemplateConfigurationError::InvalidPrompt)?;
+    if metadata.len() > maximum_bytes {
+        return Err(SessionTemplateConfigurationError::InvalidPrompt);
+    }
+    let read_limit = maximum_bytes
+        .checked_add(1)
+        .ok_or(SessionTemplateConfigurationError::InvalidPrompt)?;
+    let mut bytes = Vec::new();
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|_| SessionTemplateConfigurationError::ReadPrompt)?;
+    if bytes.len() > SessionSystemPrompt::MAX_UTF8_BYTES {
+        return Err(SessionTemplateConfigurationError::InvalidPrompt);
+    }
+    String::from_utf8(bytes).map_err(|_| SessionTemplateConfigurationError::ReadPrompt)
 }
 
 fn resolve_prompt_path(
@@ -343,7 +369,9 @@ impl Error for SessionTemplateConfigurationError {}
 mod tests {
     use std::{fs, path::Path};
 
-    use signalbox_domain::{DangerousToolAutoApproval, ModelSelectionRequest, SessionTemplateName};
+    use signalbox_domain::{
+        DangerousToolAutoApproval, ModelSelectionRequest, SessionSystemPrompt, SessionTemplateName,
+    };
 
     use super::{SessionTemplateConfiguration, SessionTemplateConfigurationError};
     use crate::HubModelConfiguration;
@@ -515,6 +543,54 @@ dangerous_tool_auto_approval = false
                 .expect("template prompt is required")
                 .as_str(),
             INLINE_PROMPT
+        );
+    }
+
+    #[test]
+    fn oversized_prompt_file_returns_precise_typed_failure() {
+        let temporary = tempfile::tempdir().expect("temporary deployment root");
+        let prompt_path = temporary.path().join("oversized.txt");
+        fs::write(
+            &prompt_path,
+            "x".repeat(SessionSystemPrompt::MAX_UTF8_BYTES + 1),
+        )
+        .expect("oversized synthetic prompt is written");
+        let catalog = inline_catalog("").replace(
+            &format!("system_prompt = \"{INLINE_PROMPT}\""),
+            "system_prompt_file = \"oversized.txt\"",
+        );
+        let result = SessionTemplateConfiguration::parse_at(
+            &catalog,
+            &temporary.path().join("session-templates.toml"),
+            None,
+            &models(),
+        );
+
+        assert_eq!(
+            result.expect_err("oversized prompt file is rejected"),
+            SessionTemplateConfigurationError::InvalidPrompt
+        );
+    }
+
+    #[test]
+    fn non_regular_prompt_source_returns_precise_typed_failure() {
+        let temporary = tempfile::tempdir().expect("temporary deployment root");
+        fs::create_dir(temporary.path().join("prompt-directory"))
+            .expect("synthetic prompt directory is created");
+        let catalog = inline_catalog("").replace(
+            &format!("system_prompt = \"{INLINE_PROMPT}\""),
+            "system_prompt_file = \"prompt-directory\"",
+        );
+        let result = SessionTemplateConfiguration::parse_at(
+            &catalog,
+            &temporary.path().join("session-templates.toml"),
+            None,
+            &models(),
+        );
+
+        assert_eq!(
+            result.expect_err("non-regular prompt source is rejected"),
+            SessionTemplateConfigurationError::ReadPrompt
         );
     }
 

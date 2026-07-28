@@ -49,6 +49,7 @@ let
   daemonHome = "${stateRoot}/home";
 
   daemonConfigFile = "${stateRoot}/signalboxd.toml";
+  daemonTemplateConfigFile = "${stateRoot}/session-templates.toml";
 
   # The daemon validates the socket's parent directory before binding: it must
   # be owned by the effective user and be mode exactly 0700, and no ancestor
@@ -325,6 +326,14 @@ in
            ${shellArg daemonConfigFile}
         chmod 644 ${shellArg daemonConfigFile}
       fi
+
+      if [ ! -f ${shellArg daemonTemplateConfigFile} ]; then
+        echo "dev instance: seeding" ${shellArg daemonTemplateConfigFile} \
+             "from config/session-templates.example.toml"
+        cp "$DEVENV_ROOT/config/session-templates.example.toml" \
+           ${shellArg daemonTemplateConfigFile}
+        chmod 644 ${shellArg daemonTemplateConfigFile}
+      fi
     '';
   };
 
@@ -408,6 +417,7 @@ in
         HOME=${shellArg daemonHome} \
         DATABASE_URL=${shellArg databaseUrl} \
         SIGNALBOX_CONFIG_FILE=${shellArg daemonConfigFile} \
+        SIGNALBOX_TEMPLATE_CONFIG_FILE=${shellArg daemonTemplateConfigFile} \
         ANTHROPIC_API_KEY_FILE="$key_file" \
         GITHUB_TOKEN_FILE="$token_file" \
         SIGNALBOX_SOCKET_PATH=${shellArg daemonSocketPath} \

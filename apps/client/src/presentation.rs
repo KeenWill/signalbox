@@ -136,7 +136,7 @@ impl<'a> Output<'a> {
     }
 
     pub(crate) fn template_summary(&mut self, name: &str, version: u64) -> io::Result<()> {
-        writeln!(self.stdout, "{name} version={version}")
+        writeln!(self.stdout, "name={name} version={version}")
     }
 
     pub(crate) fn steering_submitted(
