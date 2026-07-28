@@ -1561,6 +1561,10 @@ async fn await_turn_terminal(
                         return Ok(terminal);
                     }
                 }
+                ServerMessage::ProviderTextDelta {
+                    session_id: delta_session,
+                    ..
+                } if delta_session == session_id => {}
                 ServerMessage::Error {
                     code: ErrorCode::ResyncRequired,
                     ..
@@ -1710,6 +1714,21 @@ async fn follow(
                             selection,
                         )?;
                     }
+                }
+                ServerMessage::ProviderTextDelta {
+                    session_id: delta_session,
+                    turn_id,
+                    model_call_id,
+                    part_index,
+                    content,
+                } if delta_session == session_id => {
+                    output.provider_text_delta(
+                        session_id,
+                        turn_id,
+                        model_call_id,
+                        part_index.value(),
+                        content.as_str(),
+                    )?;
                 }
                 ServerMessage::Error {
                     code: ErrorCode::ResyncRequired,
@@ -2275,12 +2294,12 @@ mod tests {
     };
 
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, FrameEncodeError,
-        InputContent, InputDelivery, ModelCallDisposition, ModelCallState, ModelSelection,
-        ProtocolVersion, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
-        ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot, ReviewRunLifecycle,
-        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
-        SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
+        CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
+        FrameEncodeError, InputContent, InputDelivery, ModelCallDisposition, ModelCallState,
+        ModelSelection, ProtocolVersion, ReviewFindingInput, ReviewFindingSnapshot,
+        ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot,
+        ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame,
+        ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
         encode_server_line,
     };
     use tokio::{
@@ -2293,11 +2312,11 @@ mod tests {
     use super::{
         MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
         MAX_REVIEW_FINDINGS_PER_RUN, ProcessClient, ReviewCommand, SessionMetadataPageRequest,
-        SnapshotSelection, SubmitInputReceipt, TurnTerminal, collect_import_paths, create, decide,
-        model_call_recovery_transition, open_scanned_import_source, read_input,
-        read_system_prompt_file, reconcile_turn, review, run, search, socket_path, stop_turn,
-        submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
-        tool_recovery_transition,
+        SnapshotSelection, SubmitInputReceipt, TurnTerminal, await_turn_terminal,
+        collect_import_paths, create, decide, model_call_recovery_transition,
+        open_scanned_import_source, read_input, read_system_prompt_file, reconcile_turn, review,
+        run, search, socket_path, stop_turn, submit_input, terminal_event_state,
+        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -2395,6 +2414,167 @@ mod tests {
                 .expect("reconciliation state is terminal protocol truth"),
             Some(TurnTerminal::ReconciliationRequired)
         );
+    }
+
+    #[tokio::test]
+    async fn send_wait_ignores_streamed_text_until_the_durable_terminal_event()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let model_call_id = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let server = tokio::spawn(async move {
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::FollowSession { session_id }
+            );
+            let frame = |message| {
+                ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
+                    .map_err(io::Error::other)
+            };
+            let mut response =
+                encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    session_id,
+                    cursor: CanonicalU64::new(0),
+                })?)
+                .map_err(io::Error::other)?;
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::TranscriptTurn {
+                    turn_id,
+                    acceptance_position: CanonicalU64::new(1),
+                    state: TurnState::Queued {
+                        accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                        content: InputContent::new(String::from("stream the reply")),
+                    },
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                    session_id,
+                    cursor: CanonicalU64::new(0),
+                    turn_count: CanonicalU64::new(1),
+                    entry_count: CanonicalU64::new(0),
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ProviderTextDelta {
+                    session_id,
+                    turn_id,
+                    model_call_id,
+                    part_index: CanonicalU64::new(0),
+                    content: ContentFragment::try_new(String::from("already [redacted]"))
+                        .map_err(io::Error::other)?,
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::SessionEvent {
+                    cursor: CanonicalU64::new(1),
+                    session_id,
+                    event: SessionEvent::TurnCompleted {
+                        turn_id,
+                        model_call_id,
+                        completion_entry_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+                        terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(6)),
+                    },
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            writer.write_all(&response).await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let terminal = await_turn_terminal(&mut client, session_id, turn_id).await?;
+
+        assert_eq!(terminal, TurnTerminal::Completed);
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_wait_rejects_streamed_text_for_another_session() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let other_session_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let server = tokio::spawn(async move {
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::FollowSession { session_id }
+            );
+            let frame = |message| {
+                ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
+                    .map_err(io::Error::other)
+            };
+            let mut response =
+                encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    session_id,
+                    cursor: CanonicalU64::new(0),
+                })?)
+                .map_err(io::Error::other)?;
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::TranscriptTurn {
+                    turn_id,
+                    acceptance_position: CanonicalU64::new(1),
+                    state: TurnState::Queued {
+                        accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+                        content: InputContent::new(String::from("stream the reply")),
+                    },
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                    session_id,
+                    cursor: CanonicalU64::new(0),
+                    turn_count: CanonicalU64::new(1),
+                    entry_count: CanonicalU64::new(0),
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ProviderTextDelta {
+                    session_id: other_session_id,
+                    turn_id,
+                    model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+                    part_index: CanonicalU64::new(0),
+                    content: ContentFragment::try_new(String::from("cross-wired text"))
+                        .map_err(io::Error::other)?,
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            writer.write_all(&response).await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let result = await_turn_terminal(&mut client, session_id, turn_id).await;
+
+        assert!(matches!(
+            result,
+            Err(ClientError::Protocol(
+                "follow returned an unexpected response"
+            ))
+        ));
+        server.await??;
+        Ok(())
     }
 
     #[test]
