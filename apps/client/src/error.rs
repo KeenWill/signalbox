@@ -317,7 +317,7 @@ impl fmt::Display for RejectionDisplay {
                 formatter,
                 "imported_frontier_position_out_of_range \
                  imported_conversation={imported_conversation_id} requested={} \
-                 valid=1 through {}",
+                 first_position=1 last_position={}",
                 requested_position.value(),
                 last_position.value()
             ),

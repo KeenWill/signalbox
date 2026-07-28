@@ -257,7 +257,7 @@ async fn create_fixture_session(socket: PathBuf) -> Result<String, Box<dyn Error
         vec![
             String::from("create"),
             String::from("--model"),
-            String::from(IMPORTED_CONTINUATION_SELECTION),
+            String::from(SEARCH_FIXTURE_SELECTION),
         ],
         None,
     )

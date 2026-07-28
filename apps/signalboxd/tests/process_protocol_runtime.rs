@@ -2898,6 +2898,49 @@ async fn s24_inv032_inv033_streaming_volume_does_not_perturb_version_eleven_foll
     runtime.stop().await
 }
 
+/// S24 / INV-033: a version-fifteen follower inherits version twelve's
+/// ephemeral delta stream. The inspection version adds a read, not a follow
+/// downgrade, so the shipped client keeps live token delivery.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s24_inv033_version_fifteen_followers_inherit_the_streamed_deltas()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut commands = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut commands).await?;
+    let follow =
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Fifteen, 40, session_id).await?;
+    let expected_delta_count = 3;
+    let (script, assistant) =
+        streamed_script(expected_delta_count, String::from("already [redacted] "));
+    let (_, turn_id) = submit_first_input(
+        &mut commands,
+        session_id,
+        String::from("stream to the inspection version"),
+    )
+    .await?;
+
+    let probe = execute_streamed_turn(
+        &mut runtime,
+        ScriptedModel::single(script),
+        session_id,
+        turn_id,
+    )
+    .await?;
+    let followed = follow_streamed_turn_to_completion(follow, session_id, turn_id).await?;
+    let durable = read_completed_assistant(runtime.socket(), 41, session_id, turn_id).await?;
+    let operations = probe.received_operations();
+
+    assert_eq!(followed.delta_count, expected_delta_count);
+    assert_eq!(followed.text, assistant);
+    assert_eq!(durable, assistant);
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].delivery, DeliveryMode::Streamed);
+
+    drop(commands);
+    runtime.stop().await
+}
+
 /// Activates the session's queued turn, checkpoints its initial model call,
 /// and authorizes its send, so the call is durably issued with no terminal
 /// observation. Returns the repository and the authorized call for a later

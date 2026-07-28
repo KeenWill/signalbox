@@ -6,10 +6,10 @@ format-versioned converter seam, Claude Code session and Codex rollout JSONL
 converters, the append-only Postgres import store, the owner-operated one-file
 and directory-scan import surfaces, and the imported-conversation inspection
 read. The one-file surface was verified against the implementing stack through
-PR #252 (`agent/import-surfaces`); the directory scan is verified through PR
-#284 (`agent/import-directory-scan`); the imported-conversation inspection read
-is verified through PR #303 (`agent/imported-conversation-inspection`). Later
-session creation from one imported frontier is owned by
+PR #252 (`agent/import-surfaces`); the directory scan through PR #284
+(`agent/import-directory-scan`); and the imported-conversation inspection read
+through PR #303 (`agent/imported-conversation-inspection`). Later session
+creation from one imported frontier is owned by
 [sessions-and-transcript](sessions-and-transcript.md); native turn activation
 and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and

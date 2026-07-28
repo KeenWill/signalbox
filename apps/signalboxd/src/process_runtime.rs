@@ -93,8 +93,9 @@ use signalbox_process_protocol::{
     ImportedContentKind, ImportedSessionRelationship as WireImportedSessionRelationship,
     ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, MAX_FRAME_BYTES,
     MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState,
-    ModelSelection as WireModelSelection, ProtocolVersion, RejectionDetail, RequestId,
-    ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
+    ModelSelection as WireModelSelection, PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
+    ProtocolVersion, RejectionDetail, RequestId, ReviewDiffSide as WireReviewDiffSide,
+    ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingDisposition as WireReviewFindingDisposition, ReviewFindingInput,
     ReviewFindingSnapshot, ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle,
     ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot,
@@ -5118,7 +5119,7 @@ where
             return write_process_read_error(writer, version, request_id, error).await;
         }
     }
-    let mut subscription = if version == ProtocolVersion::Twelve {
+    let mut subscription = if version.as_u64() >= PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION {
         fanouts.streaming.subscribe()
     } else {
         fanouts.durable.subscribe()
@@ -5164,11 +5165,12 @@ where
             return write_snapshot_spool_error(writer, version, request_id, error).await;
         }
     };
-    let mut updates_queued_at_snapshot = if version == ProtocolVersion::Twelve {
-        subscription.len()
-    } else {
-        0
-    };
+    let mut updates_queued_at_snapshot =
+        if version.as_u64() >= PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION {
+            subscription.len()
+        } else {
+            0
+        };
     let Some(snapshot_write) =
         run_until_shutdown(&mut shutdown, write_spooled_transcript(writer, spool)).await
     else {
@@ -5242,7 +5244,7 @@ where
             }
             ProcessUpdate::ProviderTextDelta(delta) => {
                 if queued_at_snapshot
-                    || version != ProtocolVersion::Twelve
+                    || version.as_u64() < PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION
                     || delta.session() != selected_session
                 {
                     continue;
