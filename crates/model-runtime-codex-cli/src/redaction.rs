@@ -1211,6 +1211,12 @@ enum StreamField {
     Thinking,
 }
 
+enum FlushContinuation {
+    None,
+    One(String),
+    Ambiguous,
+}
+
 struct StreamFragment<C> {
     field: StreamField,
     index: u32,
@@ -1218,9 +1224,65 @@ struct StreamFragment<C> {
     text: String,
 }
 
+#[derive(Clone, Copy)]
+enum PendingBasis {
+    RecomputableCandidate,
+    OpaqueCandidateAtZero,
+    ContextContinuation,
+}
+
 struct PendingStreamText<C> {
     fragments: Vec<StreamFragment<C>>,
     text: String,
+    next_rescan_len: usize,
+    basis: PendingBasis,
+}
+
+impl<C> PendingStreamText<C> {
+    fn candidate(fragments: Vec<StreamFragment<C>>, text: String) -> Self {
+        Self::after_scan(fragments, text, PendingBasis::RecomputableCandidate)
+    }
+
+    fn opaque_candidate(fragments: Vec<StreamFragment<C>>, text: String) -> Self {
+        Self::after_scan(fragments, text, PendingBasis::OpaqueCandidateAtZero)
+    }
+
+    fn context_continuation(fragments: Vec<StreamFragment<C>>, text: String) -> Self {
+        Self::after_scan(fragments, text, PendingBasis::ContextContinuation)
+    }
+
+    /// Builds held state immediately after `text` received a full
+    /// classification. A still-unresolved candidate is classified again only
+    /// after its byte length doubles; the geometric series bounds aggregate
+    /// rescanned bytes while every intervening delta remains held. `basis`
+    /// records whether offset zero is already known to begin the candidate:
+    /// recomputing that fact after the candidate terminates before a clean tail
+    /// would otherwise forget why the bytes were held and release its value.
+    fn after_scan(fragments: Vec<StreamFragment<C>>, text: String, basis: PendingBasis) -> Self {
+        let next_rescan_len = text.len().saturating_mul(2).max(text.len() + 1);
+        Self {
+            fragments,
+            text,
+            next_rescan_len,
+            basis,
+        }
+    }
+
+    fn mark_scanned(&mut self) {
+        self.next_rescan_len = self.text.len().saturating_mul(2).max(self.text.len() + 1);
+    }
+
+    fn push(&mut self, fragment: StreamFragment<C>) {
+        self.text.push_str(&fragment.text);
+        self.fragments.push(fragment);
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+struct PendingRescanWork {
+    classifications: usize,
+    bytes: usize,
 }
 
 /// Holds an incomplete credential shape between streamed facts.
@@ -1246,6 +1308,8 @@ pub(crate) struct RedactingSink<'a, C> {
     /// folding them into the emitted chain would break its adjacency
     /// matching. Match-state only, never emitted.
     dropped_context: String,
+    #[cfg(test)]
+    pending_rescan_work: PendingRescanWork,
 }
 
 impl<'a, C: Clone> RedactingSink<'a, C> {
@@ -1257,6 +1321,11 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             terminal_text_capture: None,
             emitted_context: String::new(),
             dropped_context: String::new(),
+            #[cfg(test)]
+            pending_rescan_work: PendingRescanWork {
+                classifications: 0,
+                bytes: 0,
+            },
         }
     }
 
@@ -1348,6 +1417,11 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     #[cfg(test)]
     pub(crate) fn is_suppressing(&self) -> bool {
         self.suppressing
+    }
+
+    #[cfg(test)]
+    fn pending_rescan_work(&self) -> &PendingRescanWork {
+        &self.pending_rescan_work
     }
 
     /// Fails closed: suppresses all subsequent emitted output. Used when the
@@ -1535,10 +1609,13 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             // A live lookbehind chain (emitted thread id, dropped provider
             // text) ties the held text to bytes outside the stream; the
             // boundary forces a decision, so a chained candidate is
-            // suppressed whole and every chain is spent by the flush. Chains
-            // with no held text survive the boundary — nothing was emitted,
-            // so adjacency is unchanged.
+            // suppressed whole. Its still-live candidate suffix is retained as
+            // match-only context, so a value following the boundary remains a
+            // continuation instead of being released after its marker was
+            // destroyed. Chains with no held text survive the boundary —
+            // nothing was emitted, so adjacency is unchanged.
             let chained = self.pending_extends_a_chain(&pending.text);
+            let continuation = self.flush_continuation(&pending.text);
             self.emitted_context.clear();
             self.dropped_context.clear();
             if chained || stream_candidate_starts_at_zero(&pending.text) {
@@ -1551,6 +1628,36 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             } else {
                 self.emit_original(pending.fragments);
             }
+            match continuation {
+                FlushContinuation::None => {}
+                FlushContinuation::One(context) => self.emitted_context = context,
+                FlushContinuation::Ambiguous => self.suppress_remaining(),
+            }
+        }
+    }
+
+    fn flush_continuation(&self, pending_text: &str) -> FlushContinuation {
+        let mut live = Vec::new();
+        let standalone = trailing_credential_context(pending_text);
+        if !standalone.is_empty() {
+            live.push(standalone.to_string());
+        }
+        for context in [&self.emitted_context, &self.dropped_context] {
+            if context.is_empty() {
+                continue;
+            }
+            let mut joined = String::with_capacity(context.len() + pending_text.len());
+            joined.push_str(context);
+            joined.push_str(pending_text);
+            let continuation = trailing_credential_context(&joined);
+            if !continuation.is_empty() && !live.iter().any(|known| known == continuation) {
+                live.push(continuation.to_string());
+            }
+        }
+        match live.as_slice() {
+            [] => FlushContinuation::None,
+            [only] => FlushContinuation::One(only.clone()),
+            _ => FlushContinuation::Ambiguous,
         }
     }
 
@@ -1577,7 +1684,6 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
 
     /// Flushes already-decoded text when no later provider text can extend it.
     pub(crate) fn finish(&mut self) {
-        self.suppressing = false;
         // Terminal: judged on each chain's joined form so held text
         // completing a credential begun in an already-emitted field (the
         // thread id) or in dropped provider text is suppressed; no chain
@@ -1653,10 +1759,13 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.emit(field, index, correlation, REDACTED.to_string());
             return;
         }
+        if self.defer_pending_rescan(field, index, correlation.clone(), &text) {
+            return;
+        }
         // Each live chain is judged in turn; a chain that consumes the delta
         // (holding or suppressing it) protects the other implicitly, since
-        // the held text is joined with every chain again on later deltas and
-        // at flush points.
+        // the held text is joined with every chain again at its next geometric
+        // checkpoint and at flush points.
         let emitted = std::mem::take(&mut self.emitted_context);
         if !emitted.is_empty() {
             let (consumed, live) =
@@ -1676,74 +1785,114 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             }
         }
         if let Some(mut pending) = self.pending.take() {
-            if !stream_candidate_starts_at_zero(&pending.text)
-                && let Some(unsafe_start) = unsafe_stream_suffix_start(&pending.text)
-            {
-                let (safe, unsafe_fragments) =
-                    split_stream_fragments(pending.fragments, unsafe_start);
-                self.emit_original(safe);
-                pending.fragments = unsafe_fragments;
-                pending.text = pending.text[unsafe_start..].to_string();
+            if !text.is_empty() {
+                pending.push(StreamFragment {
+                    field,
+                    index,
+                    correlation,
+                    text,
+                });
             }
-            let mut combined = pending.text.clone();
-            combined.push_str(&text);
-            if stream_candidate_starts_at_zero(&combined) {
-                // An empty delta extends neither the held candidate nor any
-                // eventual emission; retaining a fragment for it would grow
-                // held metadata without bound, since the pending-byte cap
-                // below measures only text bytes.
-                if !text.is_empty() {
-                    pending.fragments.push(StreamFragment {
-                        field,
-                        index,
-                        correlation,
-                        text,
-                    });
-                }
-                if let Some(unsafe_start) = unsafe_stream_suffix_start(&combined) {
-                    if unsafe_start == 0 {
-                        pending.text = combined;
-                        self.hold_or_suppress(pending);
-                        return;
-                    }
-                    let (redacted, unsafe_fragments) =
-                        split_stream_fragments(pending.fragments, unsafe_start);
-                    self.emit_redacted(redacted);
-                    self.hold_or_suppress(PendingStreamText {
-                        fragments: unsafe_fragments,
-                        text: combined[unsafe_start..].to_string(),
-                    });
-                    return;
-                }
-                self.emit_redacted(pending.fragments);
-                return;
-            }
-            self.emit_original(pending.fragments);
+            self.resolve_scanned_pending(pending);
+            return;
         }
 
         if let Some(unsafe_start) = unsafe_stream_suffix_start(&text) {
+            let opaque_origin = unsafe_start == 0 && escaped_candidate_origin_is_opaque(&text);
             let fragment = StreamFragment {
                 field,
                 index,
                 correlation,
                 text: text.clone(),
             };
-            if text.len() <= MAX_PENDING_STREAM_BYTES {
-                self.hold_or_suppress(PendingStreamText {
-                    fragments: vec![fragment],
-                    text,
-                });
-                return;
-            }
             let (safe, unsafe_fragments) = split_stream_fragments(vec![fragment], unsafe_start);
             self.emit_original(safe);
-            self.hold_or_suppress(PendingStreamText {
-                fragments: unsafe_fragments,
-                text: text[unsafe_start..].to_string(),
-            });
+            let held_text = text[unsafe_start..].to_string();
+            let pending = if opaque_origin {
+                PendingStreamText::opaque_candidate(unsafe_fragments, held_text)
+            } else {
+                PendingStreamText::candidate(unsafe_fragments, held_text)
+            };
+            self.hold_or_suppress(pending);
         } else {
             self.emit(field, index, correlation, redact_text(&text));
         }
+    }
+
+    /// Appends an intervening delta without reclassifying the whole held
+    /// candidate. The bytes remain unavailable to every output channel; a
+    /// full decision is deferred until the held length doubles, while crossing
+    /// the hard cap always forces a final classification before suppression.
+    fn defer_pending_rescan(
+        &mut self,
+        field: StreamField,
+        index: u32,
+        correlation: C,
+        text: &str,
+    ) -> bool {
+        let Some(pending) = &mut self.pending else {
+            return false;
+        };
+        let combined_len = pending.text.len().saturating_add(text.len());
+        if combined_len >= pending.next_rescan_len || combined_len > MAX_PENDING_STREAM_BYTES {
+            return false;
+        }
+        if !text.is_empty() {
+            pending.push(StreamFragment {
+                field,
+                index,
+                correlation,
+                text: text.to_string(),
+            });
+        }
+        true
+    }
+
+    fn resolve_scanned_pending(&mut self, pending: PendingStreamText<C>) {
+        self.record_pending_rescan(pending.text.len());
+        let candidate = matches!(pending.basis, PendingBasis::OpaqueCandidateAtZero)
+            || stream_candidate_starts_at_zero(&pending.text);
+        let unsafe_start = unsafe_stream_suffix_start(&pending.text);
+        match (candidate, unsafe_start) {
+            (true, Some(0)) => {
+                let mut pending = pending;
+                pending.mark_scanned();
+                self.hold_or_suppress(pending);
+            }
+            (true, Some(unsafe_start)) => {
+                let (redacted, unsafe_fragments) =
+                    split_stream_fragments(pending.fragments, unsafe_start);
+                self.emit_redacted(redacted);
+                self.hold_or_suppress(PendingStreamText::candidate(
+                    unsafe_fragments,
+                    pending.text[unsafe_start..].to_string(),
+                ));
+            }
+            (true, None) => self.emit_redacted(pending.fragments),
+            (false, Some(unsafe_start)) => {
+                let (safe, unsafe_fragments) =
+                    split_stream_fragments(pending.fragments, unsafe_start);
+                self.emit_original(safe);
+                self.hold_or_suppress(PendingStreamText::candidate(
+                    unsafe_fragments,
+                    pending.text[unsafe_start..].to_string(),
+                ));
+            }
+            (false, None) => self.emit_original(pending.fragments),
+        }
+    }
+
+    /// Charges the two top-level whole-buffer predicates used by one pending
+    /// classification. Internal fixed scanner passes are an implementation
+    /// detail; the regression bounds how many held bytes reach each classifier.
+    fn record_pending_rescan(&mut self, bytes: usize) {
+        #[cfg(test)]
+        {
+            self.pending_rescan_work.classifications += 1;
+            self.pending_rescan_work.bytes += bytes.saturating_mul(2);
+        }
+        #[cfg(not(test))]
+        let _ = bytes;
     }
 
     /// Processes one delta while a lookbehind chain (the emitted thread id's
@@ -1763,11 +1912,15 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         text: &str,
     ) -> (bool, String) {
         let context_length = context.len();
+        let rescans_pending = self.pending.is_some();
         let mut joined = context.clone();
         if let Some(pending) = &self.pending {
             joined.push_str(&pending.text);
         }
         joined.push_str(text);
+        if rescans_pending {
+            self.record_pending_rescan(joined.len() - context_length);
+        }
         let unsafe_start = unsafe_stream_suffix_start(&joined);
         let candidate = stream_candidate_starts_at_zero(&joined);
         if !candidate && !unsafe_start.is_some_and(|start| start < context_length) {
@@ -1776,24 +1929,24 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             // the context is spent.
             return (false, String::new());
         }
-        let mut pending = self.pending.take().unwrap_or(PendingStreamText {
-            fragments: Vec::new(),
-            text: String::new(),
-        });
+        let mut pending = self
+            .pending
+            .take()
+            .unwrap_or_else(|| PendingStreamText::context_continuation(Vec::new(), String::new()));
         if !text.is_empty() {
-            pending.fragments.push(StreamFragment {
+            pending.push(StreamFragment {
                 field,
                 index,
                 correlation,
                 text: text.to_string(),
             });
-            pending.text.push_str(text);
         }
         match unsafe_start {
             // A candidate begun in (or spanning) the context is still in
             // progress at the joined end; its value bytes may follow, so the
             // held text cannot be emitted or suppressed piecewise yet.
             Some(start) if start < context_length => {
+                pending.mark_scanned();
                 self.hold_or_suppress(pending);
                 (true, context)
             }
@@ -1806,10 +1959,10 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 let pending_split = start - context_length;
                 let (completed, tail) = split_stream_fragments(pending.fragments, pending_split);
                 self.emit_redacted(completed);
-                self.hold_or_suppress(PendingStreamText {
-                    fragments: tail,
-                    text: pending.text[pending_split..].to_string(),
-                });
+                self.hold_or_suppress(PendingStreamText::candidate(
+                    tail,
+                    pending.text[pending_split..].to_string(),
+                ));
                 (true, String::new())
             }
             // The whole join is a completed candidate: every held byte is the
@@ -1906,7 +2059,11 @@ fn stream_candidate_starts_at_zero(text: &str) -> bool {
             // A candidate spelled with `\uXXXX` escapes still starts at zero
             // in the form a JSON consumer reconstructs; an exhausted decode
             // budget is treated as a candidate so the fragment is held.
-            Some(decoded) => decoded != text && stream_candidate_starts_at_zero(&decoded),
+            Some(decoded) => {
+                decoded != text
+                    && (stream_candidate_starts_at_zero(&decoded)
+                        || unsafe_stream_suffix_start(&decoded).is_some())
+            }
             None => true,
         }
         || trailing_partial_unicode_escape(text) == Some(0)
@@ -2320,6 +2477,20 @@ fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
     earliest
 }
 
+/// Whether escape decoding exposed an unsafe suffix away from original offset
+/// zero, so the held origin cannot be recomputed after that candidate closes.
+/// This provenance stays sticky until the candidate is suppressed; ordinary
+/// marker prefixes remain recomputable and can still release when later bytes
+/// prove they were harmless text.
+fn escaped_candidate_origin_is_opaque(text: &str) -> bool {
+    let Some(decoded) = decode_unicode_escapes(text) else {
+        return true;
+    };
+    decoded != text
+        && !stream_candidate_starts_at_zero(&decoded)
+        && unsafe_stream_suffix_start(&decoded).is_some()
+}
+
 /// Holds credential shapes that only appear once `\uXXXX` escapes are decoded,
 /// and holds a trailing partial escape so a sequence split across deltas
 /// (`sk\u00` then `2d…`) is not emitted before it can be completed. A
@@ -2501,10 +2672,10 @@ fn trailing_marker_prefix(text: &str, marker: &str, ascii_case_insensitive: bool
 #[cfg(test)]
 mod tests {
 
-    use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink};
+    use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink, TokenUsage};
 
     use super::{
-        MAX_PENDING_STREAM_BYTES, REDACTED, REDACTED_JSON_OBJECT, RedactingSink,
+        MAX_PENDING_STREAM_BYTES, PendingRescanWork, REDACTED, REDACTED_JSON_OBJECT, RedactingSink,
         decode_unicode_escapes, redact_json, redact_text, stream_candidate_starts_at_zero,
         trailing_credential_context, unsafe_stream_suffix_start, unterminated_json_key_start,
     };
@@ -4041,6 +4212,257 @@ safe-line"
         let emitted: Vec<String> = observed.into_iter().map(observation_text).collect();
 
         assert_eq!(emitted, vec!["key=ordinary value.".to_string()]);
+    }
+
+    /// INV-035: a decoded unsafe suffix held from escaped reasoning remains a
+    /// candidate at offset zero when final text completes it. Neither streamed
+    /// observations nor terminal capture may retain the planted value.
+    #[test]
+    fn inv_035_escaped_held_suffix_is_redacted_in_stream_and_terminal_capture() {
+        const PLANTED_VALUE: &str =
+            "AAAA-SYNTHETIC-SECRET-stream-BBBB safe-tail-that-crosses-checkpoint";
+        let raw = format!(r"thinking about \u0063afé and api_key={PLANTED_VALUE}");
+        let stateless = redact_text(&raw);
+        let mut observed = Vec::new();
+        let captured;
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::ThinkingDelta {
+                    index: 0,
+                    text: r"thinking about \u0063afé and api_key=".to_string(),
+                },
+            });
+            sink.begin_terminal_text_capture();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: PLANTED_VALUE.to_string(),
+                },
+            });
+            sink.finish();
+            captured = sink.take_terminal_text_capture();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!stateless.contains("SYNTHETIC-SECRET"));
+        assert!(!streamed.contains("SYNTHETIC-SECRET"));
+        assert!(!captured.contains("SYNTHETIC-SECRET"));
+    }
+
+    /// INV-035: once the sink fails closed, terminal flushes and repeatable
+    /// usage reports cannot re-arm provider-byte emission.
+    #[test]
+    fn inv_035_suppression_is_absorbing_across_finish_and_usage() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-after-suppression";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.suppress_remaining();
+            sink.finish();
+            assert!(sink.is_suppressing());
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::UsageReported(TokenUsage::unreported()),
+            });
+            assert!(sink.is_suppressing());
+            sink.finish();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::UsageReported(TokenUsage::unreported()),
+            });
+            assert!(sink.is_suppressing());
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: PLANTED_VALUE.to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
+    /// INV-035: forcing a held private-key marker through a non-delta boundary
+    /// retains its continuation state, so the following body is destroyed too.
+    #[test]
+    fn inv_035_flush_boundary_does_not_release_a_credential_continuation() {
+        const PLANTED_VALUE: &str = "MIIB-SYNTHETIC-SECRET-flush";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "-----BEGIN PRIVATE KEY-----\n".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 1,
+                    fragment: String::new(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 2,
+                    text: format!("{PLANTED_VALUE}\n-----END PRIVATE KEY-----"),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
+    #[track_caller]
+    fn assert_cap_edge_destroys_planted_value(total_held_bytes: usize) {
+        const MARKER: &str = "authorization: ";
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-cap-edge";
+        let padding = total_held_bytes - MARKER.len() - PLANTED_VALUE.len();
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: MARKER.to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: format!("{PLANTED_VALUE}{}", "a".repeat(padding)),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+    }
+
+    /// INV-035: every held-size permutation immediately around the 64-KiB
+    /// boundary destroys the planted value; none creates a release seam.
+    #[test]
+    fn inv_035_stream_redaction_covers_cap_edge_permutations() {
+        assert_cap_edge_destroys_planted_value(MAX_PENDING_STREAM_BYTES - 2);
+        assert_cap_edge_destroys_planted_value(MAX_PENDING_STREAM_BYTES - 1);
+        assert_cap_edge_destroys_planted_value(MAX_PENDING_STREAM_BYTES);
+        assert_cap_edge_destroys_planted_value(MAX_PENDING_STREAM_BYTES + 1);
+        assert_cap_edge_destroys_planted_value(MAX_PENDING_STREAM_BYTES + 2);
+    }
+
+    /// A recomputable marker prefix that later proves to be ordinary text is
+    /// released byte-exact; only an unmappable escaped origin stays sticky.
+    #[test]
+    fn broken_stream_marker_prefix_remains_byte_exact() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "s".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "afe text".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert_eq!(streamed, "safe text");
+    }
+
+    /// Plumbing for the ignored stream stress soak: starts an
+    /// unterminated line credential, then extends it one byte per delta.
+    fn observe_one_byte_credential_deltas(sink: &mut RedactingSink<'_, u8>, delta_count: u32) {
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "authorization: ".to_string(),
+            },
+        });
+        for index in 1..=delta_count {
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index,
+                    text: "a".to_string(),
+                },
+            });
+        }
+    }
+
+    /// INV-035: the 66,000 one-byte-delta stress shape receives thirteen
+    /// geometric classification rounds. Charging each round's candidate and
+    /// unsafe-suffix predicates separately stays below six times the 64-KiB
+    /// held-byte cap instead of growing with the square of the delta count.
+    #[test]
+    fn inv_035_stream_redaction_bounds_66000_delta_rescan_work() {
+        const DELTA_COUNT: u32 = 66_000;
+        const EXPECTED_WORK: PendingRescanWork = PendingRescanWork {
+            classifications: 13,
+            bytes: 376_774,
+        };
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        observe_one_byte_credential_deltas(&mut sink, DELTA_COUNT);
+
+        assert_eq!(sink.pending_rescan_work(), &EXPECTED_WORK);
+        assert!(sink.pending_rescan_work().bytes <= 6 * MAX_PENDING_STREAM_BYTES);
+        assert!(sink.is_suppressing());
+    }
+
+    /// Manual 66,000-delta stress soak. The ordinary
+    /// deterministic regression asserts scan work rather than elapsed time.
+    #[test]
+    #[ignore = "manual 66,000-delta stream stress soak"]
+    fn inv_035_stream_redaction_soaks_66000_one_byte_deltas() {
+        const DELTA_COUNT: u32 = 66_000;
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        observe_one_byte_credential_deltas(&mut sink, DELTA_COUNT);
+
+        assert!(sink.is_suppressing());
     }
 }
 
