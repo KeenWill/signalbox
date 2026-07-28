@@ -15,12 +15,15 @@ families in the operator-failure inventory were verified through PR #288
 (`agent/audit-fix-docs-coherence`). The streamed-delivery bridge and ephemeral
 text-delta projection were verified through PR #300
 (`agent/token-level-streaming`); the Claude 5-family thinking-signature stream
-shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). It covers
-the provider-neutral operation, observation, and evidence vocabulary; SSE
-framing; structured-output and tool decode; `ScriptedModel`; the three provider
-adapters; and their credential boundaries. Layer-2 authorization and evidence
-classification ([model-call-execution](model-call-execution.md)), credential
-channels, delivery, and rotation discipline
+shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
+CLI redaction contract was verified through PR #316
+(`agent/redaction-hardening`; shape coverage, absorbing suppression, stateful
+parity, and geometric rescan bound). It covers the provider-neutral operation,
+observation, and evidence vocabulary; SSE framing; structured-output and tool
+decode; `ScriptedModel`; the three provider adapters; and their credential
+boundaries. Layer-2 authorization and evidence classification
+([model-call-execution](model-call-execution.md)), credential channels,
+delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
@@ -652,12 +655,22 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
 
 The singular `token` name and composite names ending in singular `token` are
 credential-bearing while plural usage counters such as `input_tokens` and
-`output_tokens` are not. A recognized credential-bearing long option followed by
-horizontal whitespace consumes its following token value. A password in a URL
-authority's `user:password@host` userinfo or a curl user credential is consumed
-through its authority or credential boundary. A double-quoted credential key
-remains subject to the raw assignment scan whenever malformed JSON prevents the
-structural JSON scanner from claiming it.
+`output_tokens` are not. The additional covered name policies are `passphrase`,
+`passwd`, a normalized name ending in `pwd`, and the exact normalized names
+`signing_key`, `encryption_key`, `ssh_key`, `hmac_key`, and `license_key`;
+arbitrary names ending in `key` are outside this rule. ASCII-case-insensitive
+`--password`, `--api-key`, and `--passphrase` long options at text start or
+after whitespace consume a token argument separated by one or more spaces or
+tabs.
+
+Within any `://` authority-shaped span, without validating its scheme, the
+userinfo password between the first colon before the last `@` and that `@` is
+redacted. The authority-shaped span ends at whitespace, `/`, `?`, `#`, a quote,
+a comma, or a semicolon. The case-sensitive curl options `-u` and `--user`, at
+text start or after whitespace and separated from their possibly quoted argument
+by spaces or tabs, redact the password after that argument's first colon. A
+double-quoted credential key remains subject to the raw assignment scan whenever
+malformed JSON prevents the structural JSON scanner from claiming it.
 
 For any delta fragmentation of one text stream, including Unicode-escaped
 markers, the concatenated streamed output is never less redacted than the

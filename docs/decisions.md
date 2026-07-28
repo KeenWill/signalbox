@@ -16,9 +16,10 @@ recorded here (see `AGENTS.md`). Unresolved questions live in
 candidate so provider-chosen delta boundaries cannot expose its value. Repeating
 the full held-buffer classification after each one-byte delta made that bounded
 memory state an unbounded quadratic-work path. The shape contract also omitted
-common reflected forms — singular `token` names, credential-valued long options,
-and URL userinfo — while leaving unclear whether it correlated credential names
-and values stored in separate structural positions.
+common reflected forms — singular `token`, passphrase/password abbreviations,
+selected operational key names, credential-valued long options, and URL userinfo
+— while leaving unclear whether it correlated credential names and values stored
+in separate structural positions.
 
 **Decision.** Keep the 64-KiB hold. Fully classify an unresolved held prefix
 when it is first held, only after its length at least doubles thereafter, and
@@ -30,7 +31,10 @@ times 64 KiB), independent of delta count. The 66,000 one-byte continuation
 shape performs thirteen rounds: 188,387 aggregate held bytes and 376,774 charged
 classifier-input bytes. Once fail-closed suppression begins, it is absorbing for
 the sink's lifetime; usage, boundary, and finish events cannot re-enable
-provider bytes. Extend the shape contract as specified in
+provider bytes. Extend normalized-name coverage to the `token`,
+passphrase/`passwd`/`pwd`, and explicitly named signing, encryption, SSH, HMAC,
+and license-key families — not arbitrary names ending in `key` — together with
+the option and userinfo shapes specified in
 [runtime-substrate](spec/runtime-substrate.md#codex-cli-shape-redaction-scope),
 while explicitly accepting that the text scanner does not correlate a credential
 name with a value stored in a separate structural position.
@@ -41,7 +45,9 @@ and makes ordinary tests nondeterministic. Truncating the held candidate or
 re-enabling output after a usage event can release the same credential the sink
 had already decided it could not classify safely. Promising cross-field semantic
 correlation would overstate a text-shaped scanner; those formats need a
-format-aware boundary instead.
+format-aware boundary instead. Treating every name ending in `key` as a
+credential would suppress ordinary non-secret values without adding a specific
+credential meaning, so coverage stays with the enumerated key families.
 
 **Affects.** INV-035, the Codex CLI credential contract in
 [runtime-substrate](spec/runtime-substrate.md), and
