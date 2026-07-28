@@ -314,7 +314,7 @@ declaration. Every runner-advertisable tool therefore has model-facing
 description and schema authority even when daemon execution is inadmissible. The
 current daemon-local application `ToolDefinition` is a compatibility
 representation, not a second source of policy. The application adapter compiles
-argument validation from the runner declaration's exact schema and reject a
+argument validation from the runner declaration's exact schema and rejects a
 shared name unless model-facing definition and permission are equal and the
 local effect maps exactly (`EffectFree` to `Pure`, `ExternalEffect` to
 `SideEffecting`). `Idempotent` has no current daemon-local projection, so a tool
