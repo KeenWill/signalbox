@@ -16,8 +16,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      # Full history also fetches `refs/remotes/origin/*`, which the docs
+      # checker reads verification provenance from: the first-parent history of
+      # `origin/main`, never a merge the branch under review contributes.
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Check domain spine sync
         run: python3 scripts/check_domain_spine.py
       - name: Check documentation consistency

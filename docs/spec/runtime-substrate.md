@@ -10,7 +10,9 @@ page states for the composition root, its telemetry, and the production
 `fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The five persistence-repository
 families in the operator-failure inventory were verified through PR #288
-(`agent/audit-fix-docs-coherence`). It covers the provider-neutral operation,
+(`agent/audit-fix-docs-coherence`). The streamed-delivery bridge and ephemeral
+text-delta projection were verified through PR #300
+(`agent/token-level-streaming`). It covers the provider-neutral operation,
 observation, and evidence vocabulary; SSE framing; structured-output and tool
 decode; `ScriptedModel`; the two provider adapters; and the in-process
 credential-access boundary. Layer-2 authorization and evidence classification
@@ -61,6 +63,14 @@ or redacted thinking parts), `ModelSettings` (required `max_output_tokens`;
 optional temperature, top-p, stop sequences), declared `ToolDefinition`s, a
 `ToolChoice` (automatic/any/named), an optional `StructuredOutputContract`, and
 a `DeliveryMode` (buffered or streamed).
+
+The `RuntimeModelCallProvider` bridge sets every operation it prepares to
+`Streamed`. Both HTTP adapters honor that mode by setting the provider-native
+stream flag and decoding the response as SSE; `Buffered` remains available to
+other direct runtime callers. Why: the application provider bridge is the one
+composition point that can request live observations without changing the
+provider-neutral application port or assigning progress facts terminal
+authority.
 
 `ModelOperation::validate` rejects, before any send: duplicate ordinary tool
 names, a named tool choice matching no declared tool, and an ordinary tool
@@ -147,6 +157,14 @@ order), `ToolCallProposed`, `UsageReported` (later reports supersede via
 `TokenUsage::absorb`; reported fields replace, unreported fields never erase),
 and `FinishReported`. Boundary-progress facts exist so the caller can durably
 record how far an attempt provably progressed before a loss.
+
+For a correctly correlated `TextDelta`, the provider bridge copies the
+adapter-sanitized text unchanged to its injected best-effort presentation sink
+and still retains the exact observation on the existing evidence path. A
+cross-wired delta reaches no presentation sink. Presentation delivery neither
+alters nor replaces the terminal report, and sink loss cannot change terminal
+classification. The HTTP adapters perform credential redaction before emitting
+the delta (INV-035); the bridge and daemon do not attempt a second redaction.
 
 ## Terminal evidence
 
@@ -255,8 +273,10 @@ script and records the received operation under one lock; script exhaustion is a
 preparation `Defect`, so it can never be mistaken for provider evidence. The
 prepared capability is opaque and one-shot like a real adapter's; an unpolled
 preparation consumes nothing, and a dropped capability emits nothing. Both
-stages ignore the cancellation signal: a script that describes cancellation must
-declare cancellation evidence explicitly, so an already-fired signal never
+clones share the same ordered script queue and received-operation receipts, so
+an execution composition can retain a probe without cloning model-call work.
+Both stages ignore the cancellation signal: a script that describes cancellation
+must declare cancellation evidence explicitly, so an already-fired signal never
 manufactures `Cancelled` or proven-unsent outcomes from a fixture. Why: nothing
 is inferred from timing; scripted evidence is declared, never simulated.
 

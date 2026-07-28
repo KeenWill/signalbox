@@ -40,7 +40,7 @@ pub use daemon_tools::{
 };
 pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use local_socket::{LocalProcessListener, LocalSocketError};
-pub use process_runtime::{ProcessRuntime, ProcessRuntimeError};
+pub use process_runtime::{ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError};
 pub use signalbox_tools_basic::{
     CurrentTimeClock, CurrentTimeExecutor, CurrentTimeExecutorError, CurrentTimeTool,
     CurrentTimeToolConstructionError, EchoExecutor, EchoExecutorError, EchoTool,
