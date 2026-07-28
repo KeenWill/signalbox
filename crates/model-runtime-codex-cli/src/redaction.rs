@@ -1067,30 +1067,20 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
 
     fn flush_boundary(&mut self) {
         if let Some(pending) = self.pending.take() {
-            // A live emitted-field context chains the held text to bytes in an
-            // out-of-band record; the boundary forces a decision, so a chained
-            // candidate is suppressed whole and the context is spent by the
-            // flush. A context with no held text survives the boundary — no
-            // text was emitted, so reader adjacency to the field is unchanged.
-            let context_length = self.emitted_context.len();
-            let (candidate, unsafe_start) = if context_length == 0 {
-                (
-                    stream_candidate_starts_at_zero(&pending.text),
-                    unsafe_stream_suffix_start(&pending.text),
-                )
-            } else {
-                let mut joined = std::mem::take(&mut self.emitted_context);
-                joined.push_str(&pending.text);
-                (
-                    stream_candidate_starts_at_zero(&joined),
-                    unsafe_stream_suffix_start(&joined),
-                )
-            };
-            if candidate || unsafe_start.is_some_and(|start| start < context_length) {
+            // A live lookbehind chain (emitted thread id, dropped provider
+            // text) ties the held text to bytes outside the stream; the
+            // boundary forces a decision, so a chained candidate is
+            // suppressed whole and every chain is spent by the flush. Chains
+            // with no held text survive the boundary — nothing was emitted,
+            // so adjacency is unchanged.
+            let chained = self.pending_extends_a_chain(&pending.text);
+            self.emitted_context.clear();
+            self.dropped_context.clear();
+            if chained || stream_candidate_starts_at_zero(&pending.text) {
                 self.emit_redacted(pending.fragments);
-            } else if let Some(unsafe_start) = unsafe_start {
+            } else if let Some(unsafe_start) = unsafe_stream_suffix_start(&pending.text) {
                 let (safe, unsafe_fragments) =
-                    split_stream_fragments(pending.fragments, unsafe_start - context_length);
+                    split_stream_fragments(pending.fragments, unsafe_start);
                 self.emit_original(safe);
                 self.emit_redacted(unsafe_fragments);
             } else {
@@ -1099,20 +1089,49 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         }
     }
 
+    /// Whether the held text is chained to any live lookbehind context — a
+    /// candidate begins at the joined start or inside the context and runs
+    /// into the held bytes, so the held text may be a credential
+    /// continuation.
+    fn pending_extends_a_chain(&self, pending_text: &str) -> bool {
+        for context in [&self.emitted_context, &self.dropped_context] {
+            if context.is_empty() {
+                continue;
+            }
+            let mut joined = String::with_capacity(context.len() + pending_text.len());
+            joined.push_str(context);
+            joined.push_str(pending_text);
+            if stream_candidate_starts_at_zero(&joined)
+                || unsafe_stream_suffix_start(&joined).is_some_and(|start| start < context.len())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Flushes already-decoded text when no later provider text can extend it.
     pub(crate) fn finish(&mut self) {
         self.suppressing = false;
-        // Terminal: judged on the joined form so held text completing a
-        // credential begun in an already-emitted field (the thread id) is
-        // suppressed; the context cannot outlive the terminal either way.
-        let context = std::mem::take(&mut self.emitted_context);
+        // Terminal: judged on each chain's joined form so held text
+        // completing a credential begun in an already-emitted field (the
+        // thread id) or in dropped provider text is suppressed; no chain
+        // outlives the terminal either way.
+        let emitted = std::mem::take(&mut self.emitted_context);
+        let dropped = std::mem::take(&mut self.dropped_context);
         if let Some(pending) = self.pending.take() {
-            let mut joined = context;
-            joined.push_str(&pending.text);
-            if redact_text(&joined) == joined {
-                self.emit_original(pending.fragments);
-            } else {
+            let dirty = ["", emitted.as_str(), dropped.as_str()]
+                .iter()
+                .any(|context| {
+                    let mut joined = String::with_capacity(context.len() + pending.text.len());
+                    joined.push_str(context);
+                    joined.push_str(&pending.text);
+                    redact_text(&joined) != joined
+                });
+            if dirty {
                 self.emit_redacted(pending.fragments);
+            } else {
+                self.emit_original(pending.fragments);
             }
         }
     }
@@ -1169,10 +1188,27 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.emit(field, index, correlation, REDACTED.to_string());
             return;
         }
-        if !self.emitted_context.is_empty()
-            && self.redact_delta_with_context(field, index, correlation.clone(), &text)
-        {
-            return;
+        // Each live chain is judged in turn; a chain that consumes the delta
+        // (holding or suppressing it) protects the other implicitly, since
+        // the held text is joined with every chain again on later deltas and
+        // at flush points.
+        let emitted = std::mem::take(&mut self.emitted_context);
+        if !emitted.is_empty() {
+            let (consumed, live) =
+                self.delta_against_context(emitted, field, index, correlation.clone(), &text);
+            self.emitted_context = live;
+            if consumed {
+                return;
+            }
+        }
+        let dropped = std::mem::take(&mut self.dropped_context);
+        if !dropped.is_empty() {
+            let (consumed, live) =
+                self.delta_against_context(dropped, field, index, correlation.clone(), &text);
+            self.dropped_context = live;
+            if consumed {
+                return;
+            }
         }
         if let Some(mut pending) = self.pending.take() {
             if !stream_candidate_starts_at_zero(&pending.text)
@@ -1245,22 +1281,24 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         }
     }
 
-    /// Processes one delta while an emitted-field context is live. Decisions
-    /// are made on the joined form `context + pending + delta` — the bytes a
-    /// reader can lay side by side — and emissions are mapped back into
-    /// pending space (the context itself was already emitted elsewhere and is
-    /// never re-emitted). Returns `true` when the delta was consumed here;
-    /// `false` when the join resolved credential-clean, the context is spent,
-    /// and ordinary lookbehind processing should run instead.
-    fn redact_delta_with_context(
+    /// Processes one delta while a lookbehind chain (the emitted thread id's
+    /// suffix or dropped provider text's suffix) is live. Decisions are made
+    /// on the joined form `context + pending + delta` and emissions are
+    /// mapped back into pending space (the context itself appears in no
+    /// stream output and is never emitted). Returns whether the delta was
+    /// consumed here (held or suppressed) plus the chain's surviving context;
+    /// an unconsumed delta with a spent chain falls through to the next chain
+    /// or to ordinary lookbehind processing.
+    fn delta_against_context(
         &mut self,
+        context: String,
         field: StreamField,
         index: u32,
         correlation: C,
         text: &str,
-    ) -> bool {
-        let context_length = self.emitted_context.len();
-        let mut joined = self.emitted_context.clone();
+    ) -> (bool, String) {
+        let context_length = context.len();
+        let mut joined = context.clone();
         if let Some(pending) = &self.pending {
             joined.push_str(&pending.text);
         }
@@ -1268,11 +1306,10 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         let unsafe_start = unsafe_stream_suffix_start(&joined);
         let candidate = stream_candidate_starts_at_zero(&joined);
         if !candidate && !unsafe_start.is_some_and(|start| start < context_length) {
-            // The join resolved clean: no candidate begins inside the emitted
-            // field's suffix anymore, so adjacency to it is no longer a
-            // hazard and the context is spent.
-            self.emitted_context.clear();
-            return false;
+            // The join resolved clean: no candidate begins inside the chain's
+            // suffix anymore, so adjacency to it is no longer a hazard and
+            // the context is spent.
+            return (false, String::new());
         }
         let mut pending = self.pending.take().unwrap_or(PendingStreamText {
             fragments: Vec::new(),
@@ -1291,7 +1328,10 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             // A candidate begun in (or spanning) the context is still in
             // progress at the joined end; its value bytes may follow, so the
             // held text cannot be emitted or suppressed piecewise yet.
-            Some(start) if start < context_length => self.hold_or_suppress(pending),
+            Some(start) if start < context_length => {
+                self.hold_or_suppress(pending);
+                (true, context)
+            }
             // A candidate begun in the context completed within the join and
             // a distinct unsafe suffix follows: suppress the completed
             // portion's pending bytes whole and hold the tail as a fresh
@@ -1301,20 +1341,19 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 let pending_split = start - context_length;
                 let (completed, tail) = split_stream_fragments(pending.fragments, pending_split);
                 self.emit_redacted(completed);
-                self.emitted_context.clear();
                 self.hold_or_suppress(PendingStreamText {
                     fragments: tail,
                     text: pending.text[pending_split..].to_string(),
                 });
+                (true, String::new())
             }
             // The whole join is a completed candidate: every held byte is the
             // credential's continuation, suppressed whole.
             None => {
                 self.emit_redacted(pending.fragments);
-                self.emitted_context.clear();
+                (true, String::new())
             }
         }
-        true
     }
 }
 
@@ -2865,6 +2904,35 @@ safe-line"
             sink.redact_terminal_failure_text(" opaque-dropped-value"),
             REDACTED
         );
+    }
+
+    /// INV-035: a dropped-text marker (an error item's message) governs
+    /// streamed deltas too: the value continuation flowing through the delta
+    /// machinery is suppressed rather than emitted beside nothing the reader
+    /// can see but the provider controls.
+    #[test]
+    fn inv_035_dropped_context_suppresses_a_streamed_continuation() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.extend_dropped_context("api_");
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "key=opaque-error-continuation done".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted: Vec<String> = observed.into_iter().map(observation_text).collect();
+
+        assert!(
+            !emitted
+                .iter()
+                .any(|text| text.contains("opaque-error-continuation"))
+        );
+        assert!(emitted.iter().any(|text| text.contains(REDACTED)));
     }
 
     /// INV-035: the dropped chain and the emitted-id chain are judged

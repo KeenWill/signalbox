@@ -582,10 +582,7 @@ async fn execute_process<C: Clone + Send + Sync>(
                     redacting_sink.finish();
                     return decoder.provider_error(&detail);
                 }
-                if !decoder.terminal_observed()
-                    && stdout.buffer().is_empty()
-                    && already_fired(cancellation)
-                {
+                if !decoder.terminal_observed() && already_fired(cancellation) {
                     // Work-first: an already-exited leader's status is
                     // definitive and outranks a simultaneous cancellation.
                     if let Some((status, detail)) =
@@ -604,10 +601,12 @@ async fn execute_process<C: Clone + Send + Sync>(
                     redacting_sink.finish();
                     return decoder.boundary_loss(LossCause::CancellationRequested);
                 }
-                if !decoder.terminal_observed()
-                    && stdout.buffer().is_empty()
-                    && tokio::time::Instant::now() >= deadline
-                {
+                // Rechecked after every decoded line — never gated on an
+                // empty reader buffer: a descendant continuously filling
+                // stdout keeps the biased read arm always ready AND the
+                // buffer non-empty, which would otherwise starve the deadline
+                // (and the cancellation check above) indefinitely.
+                if !decoder.terminal_observed() && tokio::time::Instant::now() >= deadline {
                     // Work-first, as in the cancellation arm: a leader that
                     // already exited on its own is definitive evidence this
                     // synchronous deadline check must not discard — a nonzero

@@ -179,7 +179,13 @@ impl<C: Clone> EventDecoder<C> {
                         }
                     }
                     ItemDetails::Error { message } => {
-                        let _ = redact_text(&message);
+                        // An error item is dropped from the output in both
+                        // delivery modes, but a credential marker inside it
+                        // still marks the value that follows (in streamed
+                        // deltas or the buffered final text) as a secret;
+                        // feed the dropped bytes into the match-only
+                        // lookbehind exactly as buffered reasoning is.
+                        sink.extend_dropped_context(&message);
                     }
                     ItemDetails::Other => {}
                 }
