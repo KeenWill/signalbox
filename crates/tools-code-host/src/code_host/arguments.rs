@@ -10,6 +10,7 @@ pub(super) const MAX_REPOSITORY_BYTES: usize = 256;
 pub(super) const MAX_FILE_PATH_BYTES: usize = 4 * 1024;
 pub(super) const MAX_COMMENT_BODY_BYTES: usize = 64 * 1024;
 pub(super) const MAX_OPAQUE_ID_BYTES: usize = 512;
+pub(super) const MAX_CURSOR_BYTES: usize = 512;
 
 /// A code-host argument value did not satisfy its checked representation.
 #[doc(hidden)]
@@ -384,6 +385,106 @@ impl JsonSchema for CodeHostOpaqueId {
             "minLength": 1,
             "maxLength": MAX_OPAQUE_ID_BYTES,
             "pattern": r"^[^\u0000-\u001F\u007F-\u009F]+$",
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
+/// One bounded opaque GraphQL pagination cursor.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(try_from = "String")]
+pub struct CodeHostCursor(String);
+
+impl CodeHostCursor {
+    pub(super) fn try_new(value: String) -> Result<Self, InvalidCodeHostArguments> {
+        valid_cursor(&value)
+            .then_some(Self(value))
+            .ok_or(InvalidCodeHostArguments)
+    }
+
+    /// Borrows the opaque cursor exactly as the code host returned it.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for CodeHostCursor {
+    type Error = InvalidCodeHostArguments;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl JsonSchema for CodeHostCursor {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CodeHostCursor")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_CURSOR_BYTES,
+            "pattern": r"^[^\u0000-\u001F\u007F-\u009F]+$",
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
+pub(super) fn valid_cursor(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_CURSOR_BYTES && !value.chars().any(char::is_control)
+}
+
+/// One positive REST page encoded as an opaque continuation cursor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(try_from = "String")]
+pub struct CodeHostPageCursor(u32);
+
+impl CodeHostPageCursor {
+    /// Returns the positive REST page named by this cursor.
+    pub const fn page(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<String> for CodeHostPageCursor {
+    type Error = InvalidCodeHostArguments;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.is_empty()
+            || value.len() > 9
+            || !value.bytes().all(|byte| byte.is_ascii_digit())
+            || value.starts_with('0')
+        {
+            return Err(InvalidCodeHostArguments);
+        }
+        value
+            .parse::<u32>()
+            .ok()
+            .filter(|page| *page > 0)
+            .map(Self)
+            .ok_or(InvalidCodeHostArguments)
+    }
+}
+
+impl JsonSchema for CodeHostPageCursor {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CodeHostPageCursor")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 9,
+            "pattern": "^[1-9][0-9]{0,8}$",
         })
     }
 

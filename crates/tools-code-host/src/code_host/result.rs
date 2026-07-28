@@ -11,7 +11,7 @@ use super::arguments::{valid_opaque_id, valid_revision};
 const MAX_RESULT_TEXT_BYTES: usize = 64 * 1024;
 const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
 const MAX_RESULT_PATH_BYTES: usize = 4 * 1024;
-const MAX_RESULT_ITEMS: usize = 100;
+pub(super) const MAX_RESULT_ITEMS: usize = 100;
 pub(super) const MAX_ENCODED_RESULT_BYTES: usize = 512 * 1024;
 
 /// Whether a bounded code-host result exhausted its source.
@@ -44,11 +44,11 @@ impl ReviewThreadResolution {
     }
 }
 
-fn valid_text(value: &str) -> bool {
+pub(super) fn valid_text(value: &str) -> bool {
     value.len() <= MAX_RESULT_TEXT_BYTES && !value.contains('\0')
 }
 
-fn valid_required_text(value: &str) -> bool {
+pub(super) fn valid_required_text(value: &str) -> bool {
     !value.is_empty() && valid_text(value)
 }
 
@@ -102,7 +102,7 @@ impl JsonSchema for CodeHostUrl {
     }
 }
 
-fn valid_path(value: &str) -> bool {
+pub(super) fn valid_path(value: &str) -> bool {
     !value.is_empty()
         && !value.starts_with('/')
         && value.len() <= MAX_RESULT_PATH_BYTES
@@ -612,6 +612,14 @@ pub enum CodeHostResult {
     CiJobLog(CiJobLogResult),
     /// Accepted rerun request.
     RerunFailedJobs(RerunFailedJobsResult),
+    /// Deterministic convergence evidence and verdict.
+    ConvergenceState(super::ConvergenceStateResult),
+    /// Parent and immediate-child stack ancestry evidence.
+    StackState(super::StackStateResult),
+    /// Structured bounded thread inventory.
+    ThreadInventory(super::ThreadInventoryResult),
+    /// Pure review-protocol gate composition.
+    ReviewGateCheck(super::ReviewGateCheckResult),
 }
 
 impl CodeHostResult {
@@ -628,6 +636,10 @@ impl CodeHostResult {
             Self::ThreadResolve(result) => result.into_value(),
             Self::CiJobLog(result) => result.into_value(),
             Self::RerunFailedJobs(result) => result.into_value(),
+            Self::ConvergenceState(result) => super::review_slog::convergence_into_value(result),
+            Self::StackState(result) => super::review_slog::stack_into_value(result),
+            Self::ThreadInventory(result) => super::review_slog::inventory_into_value(result),
+            Self::ReviewGateCheck(result) => super::review_slog::gate_into_value(result),
         }
     }
 }

@@ -15,12 +15,20 @@ use signalbox_tools_basic::{
 };
 
 use super::result::absolute_https_url;
+use super::review_slog::{
+    ReviewerActivity, author_class, disposition_class, finding_title, reviewer_verdict_evidence,
+};
 use super::{
     ChangeRequestCommentResult, ChangeRequestSummaryFields, ChangeRequestSummaryResult,
-    ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult, CiJobLogResult,
-    CodeHostOperation, CodeHostResult, CodeHostResultCompleteness, CodeHostTransport,
-    CodeHostTransportFailure, FilePatchResult, RerunFailedJobsResult, ReviewThread,
-    ReviewThreadComment, ReviewThreadFields, ReviewThreadResolution, ReviewThreadsResult,
+    ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult, ChildStackState,
+    CiJobLogResult, CodeHostChangeRequestNumber, CodeHostCursor, CodeHostOperation,
+    CodeHostRepository, CodeHostResult, CodeHostResultCompleteness, CodeHostTransport,
+    CodeHostTransportFailure, ConvergenceStateArguments, ConvergenceStateFields,
+    ConvergenceStateResult, FilePatchResult, RerunFailedJobsResult, ReviewCheck,
+    ReviewDispositionClass, ReviewGateCheckArguments, ReviewGateCheckResult, ReviewThread,
+    ReviewThreadComment, ReviewThreadFields, ReviewThreadIdentity, ReviewThreadInventoryFields,
+    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult, StackStateArguments,
+    StackStateFields, StackStateResult, ThreadInventoryArguments, ThreadInventoryResult,
     ThreadReplyResult, ThreadResolveResult,
 };
 
@@ -56,6 +64,72 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!) {
           }
         }
         pageInfo { hasNextPage }
+      }
+    }
+  }
+}
+"#;
+
+const CONVERGENCE_QUERY: &str = r#"
+query Convergence($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid
+      mergeable
+      comments(last: 100) {
+        nodes { author { login } body createdAt }
+        pageInfo { hasPreviousPage startCursor }
+      }
+      reviews(last: 100) {
+        nodes { author { login } body createdAt }
+        pageInfo { hasPreviousPage startCursor }
+      }
+      reviewThreads(first: 100) {
+        nodes {
+          id isResolved isOutdated path line
+          firstComment: comments(first: 1) {
+            nodes { author { login __typename } body }
+          }
+          lastComment: comments(last: 1) { nodes { body } }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+      commits(last: 1) {
+        nodes {
+          commit {
+            oid
+            statusCheckRollup {
+              state
+              contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun { name status conclusion }
+                  ... on StatusContext { context state }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
+const THREAD_INVENTORY_QUERY: &str = r#"
+query ThreadInventory($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        nodes {
+          id isResolved isOutdated path line
+          firstComment: comments(first: 1) {
+            nodes { author { login __typename } body }
+          }
+          lastComment: comments(last: 1) { nodes { body } }
+        }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
@@ -314,6 +388,365 @@ impl GitHubCodeHostTransport {
         let result = ReviewThreadsResult::try_new(parsed, completeness)
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         Ok(CodeHostResult::ReviewThreads(result))
+    }
+
+    async fn convergence_state(
+        &self,
+        arguments: ConvergenceStateArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        self.convergence_state_for(arguments.repository(), arguments.number(), credential)
+            .await
+            .map(CodeHostResult::ConvergenceState)
+    }
+
+    async fn convergence_state_for(
+        &self,
+        repository: &CodeHostRepository,
+        number: CodeHostChangeRequestNumber,
+        credential: &CredentialValue,
+    ) -> Result<ConvergenceStateResult, CodeHostTransportFailure> {
+        let value = self
+            .graphql_read(
+                CONVERGENCE_QUERY,
+                serde_json::json!({
+                    "name": repository.name(),
+                    "number": number.get(),
+                    "owner": repository.owner(),
+                }),
+                credential,
+            )
+            .await?;
+        let request = nested(&value, &["data", "repository", "pullRequest"])?;
+        let request = required_object(request)?;
+        let head_revision = required_string(request, "headRefOid")?;
+        let mergeable_state = required_string(request, "mergeable")?;
+
+        let comments = required_object(required(request, "comments")?)?;
+        let reviews = required_object(required(request, "reviews")?)?;
+        let mut activities = parse_reviewer_activities(comments)?;
+        activities.extend(parse_reviewer_activities(reviews)?);
+        let (comments_truncated, comments_previous_cursor) = previous_page(comments)?;
+        let (reviews_truncated, reviews_previous_cursor) = previous_page(reviews)?;
+        let reviewer = reviewer_verdict_evidence(
+            &head_revision,
+            activities,
+            comments_truncated || reviews_truncated,
+            comments_previous_cursor,
+            reviews_previous_cursor,
+        )
+        .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+
+        let thread_connection = required_object(required(request, "reviewThreads")?)?;
+        let thread_nodes = required(thread_connection, "nodes")?
+            .as_array()
+            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        let parsed_threads = thread_nodes
+            .iter()
+            .map(parse_slog_thread)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut unresolved_threads = Vec::new();
+        let mut open_escalations = Vec::new();
+        let mut buried_escalations = Vec::new();
+        for thread in parsed_threads {
+            if !thread.resolved {
+                unresolved_threads.push(thread.identity.clone());
+            }
+            if thread.escalated && thread.resolved {
+                buried_escalations.push(thread.identity);
+            } else if thread.escalated {
+                open_escalations.push(thread.identity);
+            }
+        }
+        let (threads_truncated, threads_next_cursor) = next_page(thread_connection)?;
+
+        let commits = required_object(required(request, "commits")?)?;
+        let commit_nodes = required(commits, "nodes")?
+            .as_array()
+            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        let commit = commit_nodes
+            .last()
+            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        let commit = required_object(
+            required_object(commit)?
+                .get("commit")
+                .ok_or(CodeHostTransportFailure::InvalidResponse)?,
+        )?;
+        if required_string(commit, "oid")? != head_revision {
+            return Err(CodeHostTransportFailure::InvalidResponse);
+        }
+        let (ci_rollup_state, checks, checks_truncated, checks_next_cursor) =
+            parse_check_rollup(commit)?;
+
+        ConvergenceStateResult::try_new(ConvergenceStateFields {
+            head_revision,
+            mergeable_state,
+            ci_rollup_state,
+            checks,
+            checks_truncated,
+            checks_next_cursor,
+            unresolved_threads,
+            open_escalations,
+            buried_escalations,
+            threads_truncated,
+            threads_next_cursor,
+            reviewer,
+        })
+        .ok_or(CodeHostTransportFailure::InvalidResponse)
+    }
+
+    async fn thread_inventory(
+        &self,
+        arguments: ThreadInventoryArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        self.thread_inventory_for(
+            arguments.repository(),
+            arguments.number(),
+            arguments.cursor(),
+            credential,
+        )
+        .await
+        .map(CodeHostResult::ThreadInventory)
+    }
+
+    async fn thread_inventory_for(
+        &self,
+        repository: &CodeHostRepository,
+        number: CodeHostChangeRequestNumber,
+        cursor: Option<&CodeHostCursor>,
+        credential: &CredentialValue,
+    ) -> Result<ThreadInventoryResult, CodeHostTransportFailure> {
+        let value = self
+            .graphql_read(
+                THREAD_INVENTORY_QUERY,
+                serde_json::json!({
+                    "cursor": cursor.map(CodeHostCursor::as_str),
+                    "name": repository.name(),
+                    "number": number.get(),
+                    "owner": repository.owner(),
+                }),
+                credential,
+            )
+            .await?;
+        let connection = nested(
+            &value,
+            &["data", "repository", "pullRequest", "reviewThreads"],
+        )?;
+        let connection = required_object(connection)?;
+        let nodes = required(connection, "nodes")?
+            .as_array()
+            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        let threads = nodes
+            .iter()
+            .map(parse_slog_thread)
+            .map(|parsed| parsed.map(|thread| thread.inventory))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (truncated, next_cursor) = next_page(connection)?;
+        ThreadInventoryResult::try_new(threads, truncated, next_cursor)
+            .ok_or(CodeHostTransportFailure::InvalidResponse)
+    }
+
+    async fn stack_state(
+        &self,
+        arguments: StackStateArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        self.stack_state_for(
+            arguments.repository(),
+            arguments.number(),
+            arguments.child_page(),
+            credential,
+        )
+        .await
+        .map(CodeHostResult::StackState)
+    }
+
+    async fn stack_state_for(
+        &self,
+        repository: &CodeHostRepository,
+        number: CodeHostChangeRequestNumber,
+        child_page: u32,
+        credential: &CredentialValue,
+    ) -> Result<StackStateResult, CodeHostTransportFailure> {
+        let request_url =
+            self.repository_url(repository, &["pulls", &number.get().to_string()], None)?;
+        let request_value = self.get_json(request_url, credential).await?;
+        let request = parse_stack_request(&request_value, number.get())?;
+
+        let branch_url = self.repository_url(
+            repository,
+            &["branches", request.default_ref.as_str()],
+            None,
+        )?;
+        let branch_value = self.get_json(branch_url, credential).await?;
+        let default_revision = required_string(
+            required_object(required(required_object(&branch_value)?, "commit")?)?,
+            "sha",
+        )?;
+
+        let base_commits_not_in_head = self
+            .compare_behind_by(
+                repository,
+                request.base_revision.as_str(),
+                request.head_revision.as_str(),
+                credential,
+            )
+            .await?;
+        let main_commits_not_in_base = self
+            .compare_behind_by(
+                repository,
+                default_revision.as_str(),
+                request.base_revision.as_str(),
+                credential,
+            )
+            .await?;
+        let main_commits_not_in_child_base = self
+            .compare_behind_by(
+                repository,
+                default_revision.as_str(),
+                request.head_revision.as_str(),
+                credential,
+            )
+            .await?;
+
+        let child_page_text = child_page.to_string();
+        let children_url = self.repository_url(
+            repository,
+            &["pulls"],
+            Some(&[
+                ("state", "open"),
+                ("base", request.head_ref.as_str()),
+                ("per_page", PAGE_SIZE),
+                ("page", child_page_text.as_str()),
+            ]),
+        )?;
+        let children_response = self
+            .send_authenticated(Method::GET, children_url, None, credential)
+            .await?;
+        let (children_value, completeness) =
+            self.json_page(children_response, StatusCode::OK).await?;
+        let child_values = children_value
+            .as_array()
+            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        let mut children = Vec::with_capacity(child_values.len());
+        for child_value in child_values {
+            let child = parse_stack_child(child_value)?;
+            if child.base_ref != request.head_ref || child.base_revision != request.head_revision {
+                return Err(CodeHostTransportFailure::InvalidResponse);
+            }
+            let child_base_commits_not_in_head = self
+                .compare_behind_by(
+                    repository,
+                    child.base_revision.as_str(),
+                    child.head_revision.as_str(),
+                    credential,
+                )
+                .await?;
+            children.push(
+                ChildStackState::try_new(
+                    child.number,
+                    child.head_ref,
+                    child.head_revision,
+                    child_base_commits_not_in_head,
+                    main_commits_not_in_child_base,
+                )
+                .ok_or(CodeHostTransportFailure::InvalidResponse)?,
+            );
+        }
+        let children_truncated = completeness == CodeHostResultCompleteness::Truncated;
+        let children_next_cursor = if children_truncated {
+            Some(
+                child_page
+                    .checked_add(1)
+                    .ok_or(CodeHostTransportFailure::InvalidResponse)?
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        StackStateResult::try_new(StackStateFields {
+            number: number.get(),
+            base_ref: request.base_ref,
+            base_revision: request.base_revision,
+            head_ref: request.head_ref,
+            head_revision: request.head_revision,
+            default_ref: request.default_ref,
+            default_revision,
+            base_commits_not_in_head,
+            main_commits_not_in_base,
+            children,
+            children_truncated,
+            children_next_cursor,
+        })
+        .ok_or(CodeHostTransportFailure::InvalidResponse)
+    }
+
+    async fn review_gate_check(
+        &self,
+        arguments: ReviewGateCheckArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        let convergence = self
+            .convergence_state_for(arguments.repository(), arguments.number(), credential)
+            .await?;
+        let stack = self
+            .stack_state_for(arguments.repository(), arguments.number(), 1, credential)
+            .await?;
+        let inventory = self
+            .thread_inventory_for(arguments.repository(), arguments.number(), None, credential)
+            .await?;
+        Ok(CodeHostResult::ReviewGateCheck(
+            ReviewGateCheckResult::compose(arguments.purpose(), &convergence, &stack, &inventory),
+        ))
+    }
+
+    async fn compare_behind_by(
+        &self,
+        repository: &CodeHostRepository,
+        base_revision: &str,
+        head_revision: &str,
+        credential: &CredentialValue,
+    ) -> Result<u64, CodeHostTransportFailure> {
+        let comparison = format!("{base_revision}...{head_revision}");
+        let url = self.repository_url(repository, &["compare", comparison.as_str()], None)?;
+        let value = self.get_json(url, credential).await?;
+        required_u64(required_object(&value)?, "behind_by")
+    }
+
+    async fn get_json(
+        &self,
+        url: Url,
+        credential: &CredentialValue,
+    ) -> Result<serde_json::Value, CodeHostTransportFailure> {
+        let response = self
+            .send_authenticated(Method::GET, url, None, credential)
+            .await?;
+        self.json_response(response, StatusCode::OK).await
+    }
+
+    async fn graphql_read(
+        &self,
+        query: &str,
+        variables: serde_json::Value,
+        credential: &CredentialValue,
+    ) -> Result<serde_json::Value, CodeHostTransportFailure> {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "query": query,
+            "variables": variables,
+        }))
+        .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+        let response = self
+            .send_authenticated(
+                Method::POST,
+                self.graphql_url.clone(),
+                Some(body),
+                credential,
+            )
+            .await?;
+        let value = self.json_response(response, StatusCode::OK).await?;
+        reject_graphql_errors(&value)?;
+        Ok(value)
     }
 
     async fn thread_reply(
@@ -598,8 +1031,17 @@ impl CodeHostTransport for GitHubCodeHostTransport {
                 self.checks_status(arguments, credential).await
             }
             CodeHostOperation::Comment(arguments) => self.comment(arguments, credential).await,
+            CodeHostOperation::ConvergenceState(arguments) => {
+                self.convergence_state(arguments, credential).await
+            }
             CodeHostOperation::ReviewThreads(arguments) => {
                 self.review_threads(arguments, credential).await
+            }
+            CodeHostOperation::StackState(arguments) => {
+                self.stack_state(arguments, credential).await
+            }
+            CodeHostOperation::ThreadInventory(arguments) => {
+                self.thread_inventory(arguments, credential).await
             }
             CodeHostOperation::ThreadReply(arguments) => {
                 self.thread_reply(arguments, credential).await
@@ -610,6 +1052,9 @@ impl CodeHostTransport for GitHubCodeHostTransport {
             CodeHostOperation::CiJobLog(arguments) => self.ci_job_log(arguments, credential).await,
             CodeHostOperation::RerunFailedJobs(arguments) => {
                 self.rerun_failed_jobs(arguments, credential).await
+            }
+            CodeHostOperation::ReviewGateCheck(arguments) => {
+                self.review_gate_check(arguments, credential).await
             }
         }
     }
@@ -772,6 +1217,219 @@ fn parse_review_thread_comment(
         required_string(object, "url")?,
     )
     .ok_or(CodeHostTransportFailure::InvalidResponse)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedSlogThread {
+    identity: ReviewThreadIdentity,
+    inventory: ReviewThreadInventoryItem,
+    resolved: bool,
+    escalated: bool,
+}
+
+fn parse_slog_thread(
+    value: &serde_json::Value,
+) -> Result<ParsedSlogThread, CodeHostTransportFailure> {
+    let object = required_object(value)?;
+    let first = first_connection_node(required(object, "firstComment")?)?;
+    let first = required_object(first)?;
+    let last = first_connection_node(required(object, "lastComment")?)?;
+    let last = required_object(last)?;
+    let first_body = required_string(first, "body")?;
+    let last_body = required_string(last, "body")?;
+    let title = finding_title(&first_body);
+    let author_value = required(first, "author")?;
+    let (author, actor_type) = match author_value {
+        serde_json::Value::Null => (None, None),
+        serde_json::Value::Object(author) => (
+            Some(required_string(author, "login")?),
+            Some(required_string(author, "__typename")?),
+        ),
+        _ => return Err(CodeHostTransportFailure::InvalidResponse),
+    };
+    let id = required_string(object, "id")?;
+    let path = required_string(object, "path")?;
+    let resolved = required_bool(object, "isResolved")?;
+    let disposition = disposition_class(&last_body);
+    let identity = ReviewThreadIdentity::try_new(id.clone(), path.clone(), title.clone())
+        .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+    let inventory = ReviewThreadInventoryItem::try_new(ReviewThreadInventoryFields {
+        id,
+        path,
+        line: optional_u64(object, "line")?,
+        resolved,
+        outdated: required_bool(object, "isOutdated")?,
+        author,
+        author_class: author_class(actor_type.as_deref()),
+        finding_title: title,
+        disposition,
+    })
+    .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+    Ok(ParsedSlogThread {
+        identity,
+        inventory,
+        resolved,
+        escalated: disposition == ReviewDispositionClass::EscalationMarker,
+    })
+}
+
+fn first_connection_node(
+    value: &serde_json::Value,
+) -> Result<&serde_json::Value, CodeHostTransportFailure> {
+    required(required_object(value)?, "nodes")?
+        .as_array()
+        .and_then(|nodes| nodes.first())
+        .ok_or(CodeHostTransportFailure::InvalidResponse)
+}
+
+fn parse_reviewer_activities(
+    connection: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<ReviewerActivity>, CodeHostTransportFailure> {
+    required(connection, "nodes")?
+        .as_array()
+        .ok_or(CodeHostTransportFailure::InvalidResponse)?
+        .iter()
+        .map(|value| {
+            let object = required_object(value)?;
+            let author = optional_object_string(object, "author", "login")?;
+            Ok(ReviewerActivity {
+                author,
+                body: required_string(object, "body")?,
+                created_at: required_string(object, "createdAt")?,
+            })
+        })
+        .collect()
+}
+
+fn next_page(
+    connection: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(bool, Option<String>), CodeHostTransportFailure> {
+    page(connection, "hasNextPage", "endCursor")
+}
+
+fn previous_page(
+    connection: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(bool, Option<String>), CodeHostTransportFailure> {
+    page(connection, "hasPreviousPage", "startCursor")
+}
+
+fn page(
+    connection: &serde_json::Map<String, serde_json::Value>,
+    truncated_member: &str,
+    cursor_member: &str,
+) -> Result<(bool, Option<String>), CodeHostTransportFailure> {
+    let page_info = required_object(required(connection, "pageInfo")?)?;
+    let truncated = required_bool(page_info, truncated_member)?;
+    let cursor = optional_string(page_info, cursor_member)?;
+    if truncated != cursor.is_some() {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    Ok((truncated, cursor))
+}
+
+type CheckRollup = (Option<String>, Vec<ReviewCheck>, bool, Option<String>);
+
+fn parse_check_rollup(
+    commit: &serde_json::Map<String, serde_json::Value>,
+) -> Result<CheckRollup, CodeHostTransportFailure> {
+    let Some(rollup) = commit.get("statusCheckRollup") else {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    };
+    let serde_json::Value::Object(rollup) = rollup else {
+        if rollup.is_null() {
+            return Ok((None, Vec::new(), false, None));
+        }
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    };
+    let state = required_string(rollup, "state")?;
+    let contexts = required_object(required(rollup, "contexts")?)?;
+    let checks = required(contexts, "nodes")?
+        .as_array()
+        .ok_or(CodeHostTransportFailure::InvalidResponse)?
+        .iter()
+        .map(parse_rollup_context)
+        .collect::<Result<Vec<_>, _>>()?;
+    let (truncated, cursor) = next_page(contexts)?;
+    Ok((Some(state), checks, truncated, cursor))
+}
+
+fn parse_rollup_context(
+    value: &serde_json::Value,
+) -> Result<ReviewCheck, CodeHostTransportFailure> {
+    let object = required_object(value)?;
+    match required_string(object, "__typename")?.as_str() {
+        "CheckRun" => ReviewCheck::try_new(
+            required_string(object, "name")?,
+            required_string(object, "status")?,
+            optional_string(object, "conclusion")?,
+        ),
+        "StatusContext" => ReviewCheck::try_new(
+            required_string(object, "context")?,
+            String::from("completed"),
+            Some(required_string(object, "state")?),
+        ),
+        _ => None,
+    }
+    .ok_or(CodeHostTransportFailure::InvalidResponse)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StackRequestFacts {
+    base_ref: String,
+    base_revision: String,
+    head_ref: String,
+    head_revision: String,
+    default_ref: String,
+}
+
+fn parse_stack_request(
+    value: &serde_json::Value,
+    expected_number: u32,
+) -> Result<StackRequestFacts, CodeHostTransportFailure> {
+    let object = required_object(value)?;
+    let number: u32 = required_u64(object, "number")?
+        .try_into()
+        .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+    if number != expected_number {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    let base = required_object(required(object, "base")?)?;
+    let head = required_object(required(object, "head")?)?;
+    let base_repository = required_object(required(base, "repo")?)?;
+    Ok(StackRequestFacts {
+        base_ref: required_string(base, "ref")?,
+        base_revision: required_string(base, "sha")?,
+        head_ref: required_string(head, "ref")?,
+        head_revision: required_string(head, "sha")?,
+        default_ref: required_string(base_repository, "default_branch")?,
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StackChildFacts {
+    number: u32,
+    base_ref: String,
+    base_revision: String,
+    head_ref: String,
+    head_revision: String,
+}
+
+fn parse_stack_child(
+    value: &serde_json::Value,
+) -> Result<StackChildFacts, CodeHostTransportFailure> {
+    let object = required_object(value)?;
+    let number = required_u64(object, "number")?
+        .try_into()
+        .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+    let base = required_object(required(object, "base")?)?;
+    let head = required_object(required(object, "head")?)?;
+    Ok(StackChildFacts {
+        number,
+        base_ref: required_string(base, "ref")?,
+        base_revision: required_string(base, "sha")?,
+        head_ref: required_string(head, "ref")?,
+        head_revision: required_string(head, "sha")?,
+    })
 }
 
 fn remaining_exchange_timeout(elapsed: Duration) -> Result<Duration, CodeHostTransportFailure> {
