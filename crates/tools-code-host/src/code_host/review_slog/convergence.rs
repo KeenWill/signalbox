@@ -334,11 +334,18 @@ impl ConvergenceStateResult {
             .is_some_and(|state| state.eq_ignore_ascii_case("success"));
         let mergeable = fields.mergeable_state.eq_ignore_ascii_case("mergeable");
         let merge_conflicting = fields.mergeable_state.eq_ignore_ascii_case("conflicting");
+        let unresolved_non_escalation = fields.unresolved_threads.iter().any(|thread| {
+            !fields
+                .open_escalations
+                .iter()
+                .any(|escalation| escalation.id == thread.id)
+        });
         let verdict = if incomplete || (!mergeable && !merge_conflicting) {
             ConvergenceVerdict::Indeterminate
         } else if !ci_green
             || !fields.buried_escalations.is_empty()
             || !fields.undispositioned_threads.is_empty()
+            || unresolved_non_escalation
             || merge_conflicting
             || fields.reviewer.status != ReviewerVerdictStatus::CurrentHead
             || fields.reviewer.starvation_after_verdict
@@ -411,6 +418,20 @@ impl ConvergenceStateResult {
             .collect()
     }
 
+    pub(super) fn unresolved_ids(&self) -> Vec<String> {
+        self.unresolved_threads
+            .iter()
+            .map(|thread| thread.id.clone())
+            .collect()
+    }
+
+    pub(super) fn undispositioned_ids(&self) -> Vec<String> {
+        self.undispositioned_threads
+            .iter()
+            .map(|thread| thread.id.clone())
+            .collect()
+    }
+
     pub(super) const fn reviewer(&self) -> &ReviewerVerdictEvidence {
         &self.reviewer
     }
@@ -443,6 +464,7 @@ impl ConvergenceStateResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReviewerActivity {
     pub(crate) author: Option<String>,
+    pub(crate) author_association: String,
     pub(crate) body: String,
     pub(crate) created_at: String,
     pub(crate) actor_type: Option<String>,
@@ -462,10 +484,15 @@ pub(crate) fn reviewer_verdict_evidence(
     let mut latest_starvation_at = None;
     let mut latest_review_request_at = None;
     for activity in activities {
-        if activity
-            .body
-            .lines()
-            .any(|line| line.trim() == REVIEW_REQUEST)
+        let authorized_requester = matches!(
+            activity.author_association.as_str(),
+            "OWNER" | "MEMBER" | "COLLABORATOR"
+        );
+        if authorized_requester
+            && activity
+                .body
+                .lines()
+                .any(|line| line.trim() == REVIEW_REQUEST)
         {
             latest_review_request_at = Some(activity.created_at.clone());
         }
@@ -553,6 +580,7 @@ mod tests {
             vec![ReviewerActivity {
                 author: Some(String::from("chatgpt-codex-connector")),
                 actor_type: Some(String::from("Bot")),
+                author_association: String::from("NONE"),
                 body: format!("Reviewed commit: `{HEAD_REVISION}`"),
                 created_at: String::from(EARLIER),
             }],
@@ -577,6 +605,16 @@ mod tests {
             reviewer,
         }
     }
+
+    fn review_thread() -> ReviewThreadIdentity {
+        ReviewThreadIdentity::try_new(
+            String::from("PRRT_fixture"),
+            String::from("src/lib.rs"),
+            String::from("Finding"),
+        )
+        .expect("fixture thread identity is admitted")
+    }
+
     fn evidence(activities: Vec<ReviewerActivity>) -> ReviewerVerdictEvidence {
         reviewer_verdict_evidence(HEAD_REVISION, activities, false, None, None)
             .expect("fixture reviewer evidence is admitted")
@@ -591,6 +629,7 @@ mod tests {
             vec![ReviewerActivity {
                 author: Some(String::from("chatgpt-codex-connector")),
                 actor_type: Some(String::from("Bot")),
+                author_association: String::from("NONE"),
                 body: format!("Reviewed commit: `{HEAD_REVISION}`"),
                 created_at: String::from(EARLIER),
             }],
@@ -614,12 +653,14 @@ mod tests {
                 ReviewerActivity {
                     author: Some(String::from("chatgpt-codex-connector")),
                     actor_type: Some(String::from("Bot")),
+                    author_association: String::from("NONE"),
                     body: String::from("You have reached your Codex usage limits"),
                     created_at: String::from(LATER),
                 },
                 ReviewerActivity {
                     author: Some(String::from("chatgpt-codex-connector")),
                     actor_type: Some(String::from("Bot")),
+                    author_association: String::from("NONE"),
                     body: format!("Reviewed commit: **`{HEAD_REVISION}`"),
                     created_at: String::from(EARLIER),
                 },
@@ -643,6 +684,7 @@ mod tests {
             vec![ReviewerActivity {
                 author: Some(String::from("chatgpt-codex-connector")),
                 actor_type: Some(String::from("Bot")),
+                author_association: String::from("NONE"),
                 body: format!("Reviewed commit: `{HEAD_REVISION}`"),
                 created_at: String::from(EARLIER),
             }],
@@ -709,17 +751,38 @@ mod tests {
     #[test]
     fn resolved_undispositioned_thread_prevents_convergence() {
         let mut fields = complete_fields();
-        let thread = ReviewThreadIdentity::try_new(
-            String::from("PRRT_resolved"),
-            String::from("src/lib.rs"),
-            String::from("Finding"),
-        )
-        .expect("fixture thread identity is admitted");
-        fields.undispositioned_threads = vec![thread];
+        fields.undispositioned_threads = vec![review_thread()];
         let result = ConvergenceStateResult::try_new(fields)
             .expect("fixture convergence result is admitted");
 
         assert_eq!(result.verdict(), ConvergenceVerdict::NotConverged);
+    }
+
+    /// A recognized disposition does not substitute for resolving its thread.
+    #[test]
+    fn unresolved_dispositioned_thread_prevents_convergence() {
+        let mut fields = complete_fields();
+        fields.unresolved_threads = vec![review_thread()];
+        let result = ConvergenceStateResult::try_new(fields)
+            .expect("fixture convergence result is admitted");
+
+        assert_eq!(result.verdict(), ConvergenceVerdict::NotConverged);
+    }
+
+    /// The dedicated escalation verdict remains available when every open
+    /// thread carries the escalation marker.
+    #[test]
+    fn unresolved_escalation_retains_escalation_verdict() {
+        let mut fields = complete_fields();
+        fields.unresolved_threads = vec![review_thread()];
+        fields.open_escalations = vec![review_thread()];
+        let result = ConvergenceStateResult::try_new(fields)
+            .expect("fixture convergence result is admitted");
+
+        assert_eq!(
+            result.verdict(),
+            ConvergenceVerdict::ConvergedWithEscalations
+        );
     }
 
     /// A similarly named account cannot provide the reviewer verdict.
@@ -728,6 +791,7 @@ mod tests {
         let evidence = evidence(vec![ReviewerActivity {
             author: Some(String::from("not-codex-reviewer")),
             actor_type: Some(String::from("Bot")),
+            author_association: String::from("NONE"),
             body: format!("Reviewed commit: `{HEAD_REVISION}`"),
             created_at: String::from(EARLIER),
         }]);
@@ -744,6 +808,7 @@ mod tests {
         let evidence = evidence(vec![ReviewerActivity {
             author: Some(String::from("chatgpt-codex-connector")),
             actor_type: Some(String::from("Bot")),
+            author_association: String::from("NONE"),
             body,
             created_at: String::from(EARLIER),
         }]);
@@ -757,6 +822,7 @@ mod tests {
         let evidence = evidence(vec![ReviewerActivity {
             author: Some(String::from("chatgpt-codex-connector")),
             actor_type: Some(String::from("Bot")),
+            author_association: String::from("NONE"),
             body: String::from("Reviewed commit: `0123456789abffffffffffffffffffffffffffff`"),
             created_at: String::from(EARLIER),
         }]);
@@ -771,17 +837,34 @@ mod tests {
             ReviewerActivity {
                 author: Some(String::from("chatgpt-codex-connector")),
                 actor_type: Some(String::from("Bot")),
+                author_association: String::from("NONE"),
                 body: format!("Reviewed commit: `{HEAD_REVISION}`"),
                 created_at: String::from(EARLIER),
             },
             ReviewerActivity {
                 author: Some(String::from("owner")),
                 actor_type: Some(String::from("User")),
+                author_association: String::from("OWNER"),
                 body: String::from("@codex review\nReviewed head: current"),
                 created_at: String::from(LATER),
             },
         ]);
 
         assert!(evidence.request_in_flight());
+    }
+
+    /// An unassociated user cannot create a persistent machine-visible review
+    /// request blocker.
+    #[test]
+    fn unauthorized_review_request_is_ignored() {
+        let evidence = evidence(vec![ReviewerActivity {
+            author: Some(String::from("untrusted-user")),
+            actor_type: Some(String::from("User")),
+            author_association: String::from("NONE"),
+            body: String::from("@codex review"),
+            created_at: String::from(LATER),
+        }]);
+
+        assert!(!evidence.request_in_flight());
     }
 }

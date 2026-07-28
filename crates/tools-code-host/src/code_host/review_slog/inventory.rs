@@ -172,22 +172,6 @@ impl ThreadInventoryResult {
         &self.head_revision
     }
 
-    pub(super) fn undispositioned_ids(&self) -> Vec<String> {
-        self.threads
-            .iter()
-            .filter(|thread| thread.disposition == ReviewDispositionClass::Undispositioned)
-            .map(|thread| thread.id.clone())
-            .collect()
-    }
-
-    pub(super) fn unresolved_ids(&self) -> Vec<String> {
-        self.threads
-            .iter()
-            .filter(|thread| !thread.resolved)
-            .map(|thread| thread.id.clone())
-            .collect()
-    }
-
     pub(super) fn into_value(self) -> Value {
         json!({
             "next_cursor": self.next_cursor,
@@ -231,11 +215,17 @@ pub(crate) fn disposition_class(body: &str, reply_exists: bool) -> ReviewDisposi
     if body.contains(ESCALATION_MARKER) {
         return ReviewDispositionClass::EscalationMarker;
     }
-    let lowercase = body.to_ascii_lowercase();
-    if lowercase.contains("declined") {
+    let body = body.trim_start();
+    if body
+        .strip_prefix("Declined:")
+        .is_some_and(|reason| !reason.trim().is_empty())
+    {
         return ReviewDispositionClass::Declined;
     }
-    if lowercase.contains("fix") && contains_commit_token(body) {
+    let fixing_commits = body
+        .strip_prefix("Fixed in commit ")
+        .or_else(|| body.strip_prefix("Fixed in commits "));
+    if fixing_commits.is_some_and(contains_commit_token) {
         return ReviewDispositionClass::FixNamed;
     }
     ReviewDispositionClass::Undispositioned
@@ -284,6 +274,38 @@ mod tests {
     fn narrative_reply_remains_undispositioned() {
         assert_eq!(
             disposition_class("Thanks, I will inspect this.", true),
+            ReviewDispositionClass::Undispositioned
+        );
+    }
+
+    /// Mentioning a decline without the recorded prefix and reason is not a
+    /// disposition.
+    #[test]
+    fn narrative_decline_mention_remains_undispositioned() {
+        assert_eq!(
+            disposition_class("This should not be declined.", true),
+            ReviewDispositionClass::Undispositioned
+        );
+    }
+
+    /// A decline prefix without its required reason is not a disposition.
+    #[test]
+    fn reasonless_decline_remains_undispositioned() {
+        assert_eq!(
+            disposition_class("Declined:   ", true),
+            ReviewDispositionClass::Undispositioned
+        );
+    }
+
+    /// Narrative use of a word containing `fix` and a hexadecimal token does
+    /// not impersonate the recorded fixing-commit reply shape.
+    #[test]
+    fn narrative_fix_token_remains_undispositioned() {
+        assert_eq!(
+            disposition_class(
+                "The fixture 0123456 demonstrates the issue but names no fix.",
+                true,
+            ),
             ReviewDispositionClass::Undispositioned
         );
     }

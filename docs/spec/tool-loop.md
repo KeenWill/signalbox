@@ -601,10 +601,11 @@ The declarations and compact result objects are:
   `chatgpt-codex-connector` bot can supply a verdict or usage-limit response;
   the last complete, line-anchored `Reviewed commit:` record is the verdict. The
   evidence also reports usage-limit starvation and whether the latest explicit
-  `@codex review` request has no later verdict or starvation response. Its
-  derived verdict is `converged`, `converged_with_escalations`, `not_converged`,
-  or `indeterminate`. A missing or non-successful CI rollup, conflicting
-  mergeability, any undispositioned thread, reviewer starvation, or a
+  `@codex review` request by an owner, member, or collaborator has no later
+  verdict or starvation response. Its derived verdict is `converged`,
+  `converged_with_escalations`, `not_converged`, or `indeterminate`. A missing
+  or non-successful CI rollup, conflicting mergeability, any unresolved
+  non-escalation or undispositioned thread, reviewer starvation, or a
   still-pending request prevents convergence; an additive unknown mergeability
   state or any truncated evidence required for the verdict makes it
   indeterminate.
@@ -613,25 +614,30 @@ The declarations and compact result objects are:
   default-branch refs and revisions; base commits absent from the head;
   default-branch commits absent from the base chain; and one page of immediate
   child requests whose base names the request's head branch. Each child carries
-  the same merge-forward and default-chain comparison for its level. The child
-  page carries `children_truncated` and `children_next_cursor`.
+  the same merge-forward and default-chain comparison for its level. Children
+  are discovered in the request's head repository. The child page carries
+  `children_truncated` and `children_next_cursor`.
 - `change_request_thread_inventory` accepts `repository`, `number`, and an
   optional opaque GraphQL `cursor`. It returns the observed head revision and at
   most 100 review threads with exact resolution and outdated posture, path and
   optional line, first-comment author and `bot` / `human` / `unknown` class, the
   bounded first-comment finding title, and the actual reply's `fix_named` /
   `declined` / `escalation_marker` / `undispositioned` class. A thread without a
-  reply is undispositioned. The page carries `truncated` and `next_cursor`.
+  reply is undispositioned. `fix_named` requires a reply beginning with
+  `Fixed in commit` or `Fixed in commits`, followed by a space and a 7-to-40-hex
+  commit token; `declined` requires a reply beginning `Declined:` and a nonempty
+  reason. The page carries `truncated` and `next_cursor`.
 - `review_gate_check` accepts `repository`, `number`, and purpose
   `request_review_wave` or `declare_convergence`. It reads the same fresh typed
-  evidence as the three slog tools, re-reading convergence last, then purely
-  derives `ready`, the exact head, and stable blocker codes with affected
-  identities. Both purposes block when the three evidence sources name different
-  heads, a review request is still in flight, evidence is incomplete, CI is not
-  green, threads are undispositioned or unresolved, escalations are buried, or
-  parent, default-chain, or immediate-child ancestry is unhealthy. Declaring
-  convergence additionally requires the exact mergeable posture and an actual
-  current-head reviewer verdict not followed by usage-limit starvation.
+  evidence as the three slog tools, re-reading convergence last and using that
+  final read for thread blockers, then purely derives `ready`, the exact head,
+  and stable blocker codes with affected identities. Both purposes block when
+  the three evidence sources name different heads, a review request is still in
+  flight, evidence is incomplete, CI is not green, threads are undispositioned
+  or unresolved, escalations are buried, or parent, default-chain, or
+  immediate-child ancestry is unhealthy. Declaring convergence additionally
+  requires the exact mergeable posture and an actual current-head reviewer
+  verdict not followed by usage-limit starvation.
 
 Shared typed admission rejects extra object members; repositories are at most
 256 bytes, paths 4 KiB, comment bodies and returned text fields 64 KiB, and

@@ -77,11 +77,11 @@ query Convergence($owner: String!, $name: String!, $number: Int!) {
       headRefOid
       mergeable
       comments(last: 100) {
-        nodes { author { login __typename } body createdAt }
+        nodes { author { login __typename } authorAssociation body createdAt }
         pageInfo { hasPreviousPage startCursor }
       }
       reviews(last: 100) {
-        nodes { author { login __typename } body createdAt }
+        nodes { author { login __typename } authorAssociation body createdAt }
         pageInfo { hasPreviousPage startCursor }
       }
       reviewThreads(first: 100) {
@@ -618,7 +618,7 @@ impl GitHubCodeHostTransport {
 
         let child_page_text = child_page.to_string();
         let children_url = self.repository_url(
-            repository,
+            &request.head_repository,
             &["pulls"],
             Some(&[
                 ("state", "open"),
@@ -643,7 +643,7 @@ impl GitHubCodeHostTransport {
             }
             let child_base_commits_not_in_head = self
                 .compare_behind_by(
-                    repository,
+                    &request.head_repository,
                     child.base_revision.as_str(),
                     child.head_revision.as_str(),
                     credential,
@@ -1311,6 +1311,7 @@ fn parse_reviewer_activities(
             };
             Ok(ReviewerActivity {
                 author,
+                author_association: required_string(object, "authorAssociation")?,
                 actor_type,
                 body: required_string(object, "body")?,
                 created_at: required_string(object, "createdAt")?,
@@ -1399,6 +1400,7 @@ struct StackRequestFacts {
     base_revision: String,
     head_ref: String,
     head_revision: String,
+    head_repository: CodeHostRepository,
     default_ref: String,
 }
 
@@ -1415,12 +1417,18 @@ fn parse_stack_request(
     }
     let base = required_object(required(object, "base")?)?;
     let head = required_object(required(object, "head")?)?;
+    let head_repository = required_object(required(head, "repo")?)?;
     let base_repository = required_object(required(base, "repo")?)?;
     Ok(StackRequestFacts {
         base_ref: required_string(base, "ref")?,
         base_revision: required_string(base, "sha")?,
         head_ref: required_string(head, "ref")?,
         head_revision: required_string(head, "sha")?,
+        head_repository: CodeHostRepository::try_new(required_string(
+            head_repository,
+            "full_name",
+        )?)
+        .map_err(|_| CodeHostTransportFailure::InvalidResponse)?,
         default_ref: required_string(base_repository, "default_branch")?,
     })
 }
@@ -1803,6 +1811,31 @@ mod tests {
             Err(CodeHostTransportFailure::InvalidResponse)
         );
     }
+
+    /// Immediate-child discovery retains the pull request's admitted head
+    /// repository rather than assuming the base repository owns the branch.
+    #[test]
+    fn stack_request_preserves_head_repository() {
+        const HEAD_REPOSITORY: &str = "contributor/repository";
+        let value = serde_json::json!({
+            "number": 17,
+            "base": {
+                "ref": "main",
+                "sha": "1111111111111111111111111111111111111111",
+                "repo": {"default_branch": "main"}
+            },
+            "head": {
+                "ref": "feature",
+                "sha": "2222222222222222222222222222222222222222",
+                "repo": {"full_name": HEAD_REPOSITORY}
+            }
+        });
+
+        let request = parse_stack_request(&value, 17).expect("fixture request is admitted");
+
+        assert_eq!(request.head_repository.as_str(), HEAD_REPOSITORY);
+    }
+
     /// Lossy decoding cannot expand a retained job-log prefix beyond its
     /// declared byte bound.
     #[test]

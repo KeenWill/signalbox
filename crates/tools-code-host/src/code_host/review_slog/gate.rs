@@ -127,14 +127,14 @@ impl ReviewGateCheckResult {
                 convergence.failing_checks(),
             ));
         }
-        let undispositioned = inventory.undispositioned_ids();
+        let undispositioned = convergence.undispositioned_ids();
         if !undispositioned.is_empty() {
             blockers.push(ReviewGateBlocker::new(
                 ReviewGateBlockerCode::UndispositionedThreads,
                 undispositioned,
             ));
         }
-        let unresolved = inventory.unresolved_ids();
+        let unresolved = convergence.unresolved_ids();
         if !unresolved.is_empty() {
             blockers.push(ReviewGateBlocker::new(
                 ReviewGateBlockerCode::UnresolvedThreads,
@@ -227,7 +227,8 @@ impl ReviewGateCheckResult {
 #[cfg(test)]
 mod tests {
     use crate::code_host::{
-        ConvergenceStateFields, ReviewerVerdictEvidence, ReviewerVerdictFields, StackStateFields,
+        ConvergenceStateFields, ReviewThreadIdentity, ReviewerVerdictEvidence,
+        ReviewerVerdictFields, StackStateFields,
     };
 
     use super::*;
@@ -309,6 +310,31 @@ mod tests {
 
     fn convergence(reviewer: ReviewerVerdictEvidence) -> ConvergenceStateResult {
         convergence_with_merge(reviewer, "mergeable")
+    }
+
+    fn convergence_with_unresolved_thread() -> ConvergenceStateResult {
+        let thread = ReviewThreadIdentity::try_new(
+            String::from("PRRT_late"),
+            String::from("src/lib.rs"),
+            String::from("Late finding"),
+        )
+        .expect("fixture thread identity is admitted");
+        ConvergenceStateResult::try_new(ConvergenceStateFields {
+            head_revision: String::from(HEAD_REVISION),
+            mergeable_state: String::from("mergeable"),
+            ci_rollup_state: Some(String::from("success")),
+            checks: Vec::new(),
+            checks_truncated: false,
+            checks_next_cursor: None,
+            unresolved_threads: vec![thread],
+            open_escalations: Vec::new(),
+            buried_escalations: Vec::new(),
+            undispositioned_threads: Vec::new(),
+            threads_truncated: false,
+            threads_next_cursor: None,
+            reviewer: current_reviewer(),
+        })
+        .expect("fixture convergence evidence is admitted")
     }
 
     fn stack() -> StackStateResult {
@@ -400,6 +426,23 @@ mod tests {
         assert_eq!(
             gate.into_value()["blockers"][0]["code"],
             "evidence_head_mismatch"
+        );
+    }
+
+    /// Thread blockers come from the final convergence read, so a finding
+    /// created after the earlier inventory read still closes the gate.
+    #[test]
+    fn gate_blocks_thread_observed_by_final_read() {
+        let gate = ReviewGateCheckResult::compose(
+            ReviewGatePurpose::RequestReviewWave,
+            &convergence_with_unresolved_thread(),
+            &stack(),
+            &inventory(),
+        );
+
+        assert_eq!(
+            gate.into_value()["blockers"][0]["code"],
+            "unresolved_threads"
         );
     }
 
