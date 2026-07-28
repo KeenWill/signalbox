@@ -445,7 +445,7 @@ private struct ProcessConversationDetailScreen: View {
         UnavailableProcessCapabilityView(
           title: conversation.displayTitle,
           detail:
-            "Imported transcript reading and continuation require the next process-protocol read slice."
+            "Imported transcript presentation and continuation are not yet wired into this native client."
         )
       }
     }

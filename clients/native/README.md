@@ -36,8 +36,8 @@ WebSocket, or OpenAI-compatible surfaces.
 The process protocol exposes no runner, template, monitor, or artifact catalog;
 those views remain explicit capability gates rather than fabricated client
 behavior. Imported conversations appear in the unified list, while transcript
-inspection and continuation await the separately landing imported inspection
-read.
+inspection and continuation remain deferred to a separate native UI slice over
+the landed version-seventeen read.
 
 ## Transport gate
 
@@ -76,14 +76,14 @@ scripts/capture-macos-screenshots.sh
 scripts/check-screenshot-goldens.sh
 ```
 
-The operations and remote setup captures intentionally present capability
-gates. They are not previews of unimplemented server behavior.
-Selective capture fails before building when a requested screenshot name is not
-in the checked-in matrix or the selection normalizes to no names, so a typo or
-blank selector cannot silently validate an empty selection. The iPad capture
-uses UI automation only to establish landscape orientation, then launches each
-state independently with a bounded settle so one state cannot carry transient
-lifecycle diagnostics into the next golden.
+The operations and remote setup captures intentionally present capability gates.
+They are not previews of unimplemented server behavior. Selective capture fails
+before building when a requested screenshot name is not in the checked-in matrix
+or the selection normalizes to no names, so a typo or blank selector cannot
+silently validate an empty selection. The iPad capture uses UI automation only
+to establish landscape orientation, then launches each state independently with
+a bounded settle so one state cannot carry transient lifecycle diagnostics into
+the next golden.
 
 ## Tart VM validation
 
@@ -106,25 +106,24 @@ none in a URL or log.
 
 ## Rewire inventory
 
-The live process path closes the imported transport and synchronization findings:
-settings now
-install only the client for the tested socket path, and stale connection or
-session-list probes cannot publish; every reconnect path is capped; deadlines
-are typed separately from heartbeat concerns; snapshot/stream ordering is owned
-by the synchronization machine; fallbacks preserve diagnostics; failed
-submission preserves the exact composer text; one submission is in flight at a
-time; an unresolved ambiguous submission, including a lost receipt or receive
-failure, preserves its prepared command identity while the exact UTF-8 draft is
-unchanged; process results remain neutral unless the wire reports a failure;
-internal wire details do not become legacy `visible_to_user` failures; and no
-credential crosses a plaintext URL.
+The live process path closes the imported transport and synchronization
+findings: settings now install only the client for the tested socket path, and
+stale connection or session-list probes cannot publish; every reconnect path is
+capped; deadlines are typed separately from heartbeat concerns; snapshot/stream
+ordering is owned by the synchronization machine; fallbacks preserve
+diagnostics; failed submission preserves the exact composer text; one submission
+is in flight at a time; an unresolved ambiguous submission, including a lost
+receipt or receive failure, preserves its prepared command identity while the
+exact UTF-8 draft is unchanged; process results remain neutral unless the wire
+reports a failure; internal wire details do not become legacy `visible_to_user`
+failures; and no credential crosses a plaintext URL.
 
 The following work remains:
 
 - Remote/mobile transport, authentication, authorization, and revocation await
   an owner-approved server design.
-- Imported transcript inspection and continuation await the imported inspection
-  protocol stack.
+- Imported transcript inspection and continuation await their native UI slice
+  over the version-seventeen read.
 - Runners, templates, monitor summaries, and artifacts await real
   process-protocol operations.
 - Compact-width navigation omits Templates until its information architecture is

@@ -29,6 +29,7 @@ public enum SignalboxProcessProtocolVersion: UInt64, Codable, CaseIterable, Send
   case twelve = 12
   case thirteen = 13
   case sixteen = 16
+  case seventeen = 17
   case eighteen = 18
 }
 
