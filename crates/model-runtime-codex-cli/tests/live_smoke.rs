@@ -690,6 +690,13 @@ async fn version_gate_rejects_a_failing_probe() {
 /// The projection returns the capability for a prepared outcome; preparation
 /// is offline here — validation, translation, and request construction only,
 /// with no process spawn.
+// Gated to supported hosts: this exercises the preparation projection through
+// a real `CodexCliRuntime`, whose construction rejects platforms without
+// process-group supervision (`CodexCliConstructionError::UnsupportedPlatform`,
+// confirmed by `unsupported_platform_is_rejected_at_construction`). On such a
+// host the projection cannot be reached without the runtime, so the case is
+// skipped rather than panicking the ordinary workspace suite at construction.
+#[cfg(unix)]
 #[tokio::test]
 async fn preparation_projection_returns_a_prepared_capability() {
     let working_directory = tempfile::tempdir().expect("smoke working directory is created");
