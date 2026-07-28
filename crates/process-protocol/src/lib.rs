@@ -54,6 +54,13 @@ pub const REVIEW_WORKFLOW_PROTOCOL_VERSION: u64 = 11;
 /// The ephemeral provider-text streaming protocol version.
 pub const PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION: u64 = 12;
 
+/// The unified conversation-listing protocol version.
+///
+/// Versions thirteen and fourteen were reserved by concurrent protocol work,
+/// and fifteen by the imported-conversation inspection stack, when this
+/// version was selected.
+pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
+
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProtocolVersion {
@@ -81,6 +88,8 @@ pub enum ProtocolVersion {
     Eleven,
     /// Ephemeral provider-text presentation events on follow streams.
     Twelve,
+    /// Unified conversation-listing vocabulary.
+    Sixteen,
 }
 
 impl ProtocolVersion {
@@ -99,6 +108,7 @@ impl ProtocolVersion {
             Self::Ten => IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION,
             Self::Eleven => REVIEW_WORKFLOW_PROTOCOL_VERSION,
             Self::Twelve => PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
+            Self::Sixteen => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
         }
     }
 
@@ -116,6 +126,7 @@ impl ProtocolVersion {
             IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION => Some(Self::Ten),
             REVIEW_WORKFLOW_PROTOCOL_VERSION => Some(Self::Eleven),
             PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION => Some(Self::Twelve),
+            UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION => Some(Self::Sixteen),
             _ => None,
         }
     }
@@ -1289,6 +1300,176 @@ impl MetadataLastWriter {
     }
 }
 
+/// Maximum Unicode scalars in one imported-conversation display title,
+/// restating the domain derivation bound on the wire.
+pub const MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS: usize = 256;
+
+/// One closed conversation origin class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationOrigin {
+    /// A native session.
+    NativeSession,
+    /// An immutable imported conversation.
+    ImportedConversation,
+}
+
+/// Which conversation origin classes one unified list request selects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationOriginFilter {
+    /// Native sessions only.
+    Native,
+    /// Imported conversations only.
+    Imported,
+    /// Both origin classes.
+    All,
+}
+
+/// One exclusive unified keyset cursor naming the last listed conversation.
+///
+/// The unified page order is by conversation identity UUID value, native
+/// before imported for a theoretical equal identity, so the cursor names one
+/// total position across both origin classes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationCursor {
+    /// Origin class of the cursor position.
+    origin: ConversationOrigin,
+    /// Conversation identity at the cursor position.
+    conversation_id: CanonicalUuid,
+}
+
+impl ConversationCursor {
+    /// Names one exact unified cursor position.
+    pub const fn new(origin: ConversationOrigin, conversation_id: CanonicalUuid) -> Self {
+        Self {
+            origin,
+            conversation_id,
+        }
+    }
+
+    /// Returns the origin class of the cursor position.
+    pub const fn origin(self) -> ConversationOrigin {
+        self.origin
+    }
+
+    /// Returns the conversation identity at the cursor position.
+    pub const fn conversation_id(self) -> CanonicalUuid {
+        self.conversation_id
+    }
+}
+
+/// One exact stored imported source format and converter version.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportedConversationSourceFormat {
+    /// Claude Code session JSONL interpreted by converter version 1.
+    ClaudeCodeSessionJsonlV1,
+    /// Claude Code session JSONL interpreted by converter version 2.
+    ClaudeCodeSessionJsonlV2,
+    /// Codex rollout JSONL interpreted by converter version 1.
+    CodexRolloutJsonlV1,
+}
+
+/// One closed per-origin unified conversation summary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "origin", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConversationSummary {
+    /// One native session with its current organizational facts.
+    NativeSession {
+        /// Session identity.
+        session_id: CanonicalUuid,
+        /// Exact optional metadata title.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        title: Option<String>,
+        /// Whether the session is archived.
+        archived: bool,
+        /// Current defaults version.
+        defaults_version: CanonicalU64,
+    },
+    /// One immutable imported conversation snapshot.
+    ImportedConversation {
+        /// Imported conversation identity.
+        imported_conversation_id: CanonicalUuid,
+        /// Exact optional source-derived display title.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        title: Option<String>,
+        /// Total normalized entry count; the greatest position a
+        /// continuation may select.
+        entry_count: CanonicalU64,
+        /// Exact stored source format and converter version.
+        source_format: ImportedConversationSourceFormat,
+    },
+}
+
+impl ConversationSummary {
+    /// Returns the unified cursor position this summary occupies.
+    pub const fn cursor(&self) -> ConversationCursor {
+        match self {
+            Self::NativeSession { session_id, .. } => {
+                ConversationCursor::new(ConversationOrigin::NativeSession, *session_id)
+            }
+            Self::ImportedConversation {
+                imported_conversation_id,
+                ..
+            } => ConversationCursor::new(
+                ConversationOrigin::ImportedConversation,
+                *imported_conversation_id,
+            ),
+        }
+    }
+
+    fn validate(&self) -> Result<(), FrameValidationError> {
+        match self {
+            Self::NativeSession {
+                title,
+                defaults_version,
+                ..
+            } => {
+                if let Some(title) = title {
+                    validate_nonempty_metadata_text(title)
+                        .map_err(|_| FrameValidationError::ConversationListShape)?;
+                    let mut total_utf8_bytes = 0usize;
+                    add_metadata_utf8_bytes(&mut total_utf8_bytes, title)
+                        .map_err(|_| FrameValidationError::ConversationListShape)?;
+                }
+                if defaults_version.value() == 0 {
+                    return Err(FrameValidationError::ConversationListShape);
+                }
+                Ok(())
+            }
+            Self::ImportedConversation {
+                title, entry_count, ..
+            } => {
+                if let Some(title) = title {
+                    validate_imported_display_title(title)?;
+                }
+                if entry_count.value() == 0 {
+                    return Err(FrameValidationError::ConversationListShape);
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Validates the wire restatement of the derived display-title shape:
+/// nonempty single-line text without U+0000, at most
+/// [`MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS`] Unicode scalars, and
+/// no leading or trailing ASCII space or tab.
+fn validate_imported_display_title(title: &str) -> Result<(), FrameValidationError> {
+    if title.is_empty()
+        || title.contains(['\0', '\n', '\r'])
+        || title.chars().count() > MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS
+        || title.starts_with([' ', '\t'])
+        || title.ends_with([' ', '\t'])
+    {
+        return Err(FrameValidationError::ConversationListShape);
+    }
+    Ok(())
+}
+
 /// Closed versioned request family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -1342,6 +1523,21 @@ pub enum ClientRequest {
         /// Exclusive session-identity cursor.
         #[serde(deserialize_with = "deserialize_required_nullable")]
         after_session_id: Option<CanonicalUuid>,
+    },
+    /// Read one filtered bounded unified conversation-summary page.
+    ListConversations {
+        /// Optional exact case-sensitive title substring.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        title_contains: Option<String>,
+        /// Which origin classes participate.
+        origin: ConversationOriginFilter,
+        /// Whether archived native sessions participate.
+        include_archived: bool,
+        /// Inclusive result bound from one through one hundred.
+        page_size: CanonicalU64,
+        /// Exclusive unified keyset cursor.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        after: Option<ConversationCursor>,
     },
     /// Read one complete current metadata snapshot.
     ReadSessionMetadata {
@@ -1570,6 +1766,7 @@ impl ClientRequest {
             | Self::ReadReviewFinding { .. }
             | Self::ListReviewFindings { .. } => REVIEW_WORKFLOW_PROTOCOL_VERSION,
             Self::StopTurn { .. } | Self::DecideToolRequest { .. } => TURN_CONTROL_PROTOCOL_VERSION,
+            Self::ListConversations { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
             Self::ReadSessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::CreateSessionFromImportedFrontier { .. } => {
                 IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION
@@ -1613,6 +1810,23 @@ impl ClientRequest {
             }
             if !(1..=100).contains(&page_size.value()) {
                 return Err(FrameValidationError::MetadataShape);
+            }
+        }
+        if let Self::ListConversations {
+            title_contains,
+            page_size,
+            ..
+        } = self
+        {
+            if let Some(query) = title_contains {
+                validate_nonempty_metadata_text(query)
+                    .map_err(|_| FrameValidationError::ConversationListShape)?;
+                let mut total_utf8_bytes = 0usize;
+                add_metadata_utf8_bytes(&mut total_utf8_bytes, query)
+                    .map_err(|_| FrameValidationError::ConversationListShape)?;
+            }
+            if !(1..=100).contains(&page_size.value()) {
+                return Err(FrameValidationError::ConversationListShape);
             }
         }
         Ok(())
@@ -2750,6 +2964,22 @@ pub enum ServerMessage {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         next_after_session_id: Option<CanonicalUuid>,
     },
+    /// Begins one bounded unified conversation-summary page.
+    ConversationPageStart {},
+    /// One unified conversation summary.
+    ConversationSummary {
+        /// Closed per-origin summary.
+        conversation: ConversationSummary,
+    },
+    /// Completes one bounded unified conversation-summary page.
+    ConversationPageEnd {
+        /// Number of preceding summaries.
+        conversation_count: CanonicalU64,
+        /// Exclusive cursor for another page, or null when no later match
+        /// existed in this page snapshot.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        next_after: Option<ConversationCursor>,
+    },
     /// One complete current metadata read.
     SessionMetadata {
         /// Selected session.
@@ -3026,6 +3256,9 @@ impl ServerMessage {
             | Self::ReviewFindingItem { .. }
             | Self::ReviewFindingsEnd { .. } => REVIEW_WORKFLOW_PROTOCOL_VERSION,
             Self::ToolRequestDecided { .. } => TURN_CONTROL_PROTOCOL_VERSION,
+            Self::ConversationPageStart {}
+            | Self::ConversationSummary { .. }
+            | Self::ConversationPageEnd { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
             Self::SessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::Error { detail, .. } => detail.minimum_protocol_version(),
             Self::SessionCreated { .. }
@@ -3076,6 +3309,17 @@ impl ServerMessage {
                     || (next_after_session_id.is_some() && session_count.value() == 0)
                 {
                     return Err(FrameValidationError::MetadataShape);
+                }
+            }
+            Self::ConversationSummary { conversation } => conversation.validate()?,
+            Self::ConversationPageEnd {
+                conversation_count,
+                next_after,
+            } => {
+                if conversation_count.value() > 100
+                    || (next_after.is_some() && conversation_count.value() == 0)
+                {
+                    return Err(FrameValidationError::ConversationListShape);
                 }
             }
             Self::SessionMetadata {
@@ -3232,6 +3476,8 @@ pub enum FrameValidationError {
     TurnStateShape,
     /// A metadata request or response carried an invalid correlated shape.
     MetadataShape,
+    /// A unified conversation-listing frame carried an invalid shape.
+    ConversationListShape,
     /// A version-nine frame omitted its required system-prompt member.
     SystemPromptShape,
     /// An imported-frontier request carried a nonpositive position.
@@ -3250,6 +3496,9 @@ impl fmt::Display for FrameValidationError {
             Self::ErrorDetailShape => "server error detail does not match its code",
             Self::TurnStateShape => "transcript turn state is inconsistent",
             Self::MetadataShape => "session metadata frame shape is inconsistent",
+            Self::ConversationListShape => {
+                "unified conversation-listing frame shape is inconsistent"
+            }
             Self::SystemPromptShape => "version-nine frame omits its required system-prompt member",
             Self::ImportedFrontierShape => "imported frontier position is not positive",
         })
@@ -3305,7 +3554,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1 through 12",
+                "process-protocol version is unsupported; supported versions are 1 through 12, and 16",
             ),
         }
     }
@@ -3516,7 +3765,7 @@ fn probe_header(
     }
     if !matches!(
         version_spelling,
-        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" | "12"
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" | "12" | "16"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -3632,6 +3881,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "10" => Some(ProtocolVersion::Ten),
         "11" => Some(ProtocolVersion::Eleven),
         "12" => Some(ProtocolVersion::Twelve),
+        "16" => Some(ProtocolVersion::Sixteen),
         _ => None,
     }
 }
@@ -3673,11 +3923,13 @@ pub fn recover_bounded_client_protocol_version(content: &[u8]) -> Option<Protoco
 mod tests {
     use super::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ConversationImportFormat, ConversationImportSource, CurrentModelCall,
-        CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallDisposition,
-        FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
-        ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker, ImportedSpeaker,
-        InputContent, MAX_CONTENT_FRAGMENT_BYTES, MAX_JSON_CONTAINER_DEPTH,
+        ConversationCursor, ConversationImportFormat, ConversationImportSource, ConversationOrigin,
+        ConversationOriginFilter, ConversationSummary, CurrentModelCall, CurrentModelCallState,
+        ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
+        FrameDecodeErrorKind, FrameEncodeError, FrameValidationError, ImportedContentKind,
+        ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
+        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
+        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_JSON_CONTAINER_DEPTH,
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
         MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
@@ -3686,7 +3938,8 @@ mod tests {
         SESSION_METADATA_PROTOCOL_VERSION, SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, ServerFrame,
         ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
         ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
+        UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION, decode_client_line, decode_server_line,
+        encode_client_line, encode_server_line,
     };
     use uuid::Uuid;
 
@@ -3768,7 +4021,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1 through 12")
+                .contains("supported versions are 1 through 12, and 16")
         );
     }
 
@@ -4565,6 +4818,238 @@ mod tests {
         Ok(())
     }
 
+    /// INV-033: the unified listing request is admitted only from version
+    /// sixteen and keeps its exact closed shape across one round trip.
+    #[test]
+    fn inv033_version_sixteen_list_conversations_request_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let request_value = ClientRequest::ListConversations {
+            title_contains: Some(String::from("Plan")),
+            origin: ConversationOriginFilter::All,
+            include_archived: true,
+            page_size: CanonicalU64::new(25),
+            after: Some(ConversationCursor::new(
+                ConversationOrigin::ImportedConversation,
+                uuid(6),
+            )),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Twelve,
+                request_id,
+                request_value.clone(),
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::Sixteen, request_id, request_value)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            format!(
+                "{{\"version\":{UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION},\"request_id\":\"1\",\
+                 \"request\":{{\"type\":\"list_conversations\",\"title_contains\":\"Plan\",\
+                 \"origin\":\"all\",\"include_archived\":true,\"page_size\":\"25\",\
+                 \"after\":{{\"origin\":\"imported_conversation\",\
+                 \"conversation_id\":\"00000000-0000-0000-0000-000000000006\"}}}}}}\n"
+            )
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: the nullable filter and cursor members are required, the
+    /// origin filter is a closed set, and the cursor rejects unknown members.
+    #[test]
+    fn inv033_list_conversations_members_are_required_and_closed() {
+        assert_client_malformed(
+            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50"}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"everything","include_archived":false,"page_size":"50","after":null}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50","after":{"origin":"native_session","conversation_id":"00000000-0000-0000-0000-000000000006","extra":true}}}"#,
+        );
+    }
+
+    /// INV-033: the empty-title, U+0000, and page-size bounds reject a
+    /// listing request before application construction.
+    #[test]
+    fn inv033_list_conversations_validates_title_and_page_size() {
+        assert_client_malformed(
+            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":"","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
+        );
+        assert_client_malformed(
+            "{\"version\":16,\"request_id\":\"1\",\"request\":{\"type\":\"list_conversations\",\"title_contains\":\"a\\u0000b\",\"origin\":\"all\",\"include_archived\":false,\"page_size\":\"50\",\"after\":null}}",
+        );
+        assert_client_malformed(
+            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"0","after":null}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"101","after":null}}"#,
+        );
+    }
+
+    /// INV-033: a listing request carried under any retained version one
+    /// through twelve is malformed rather than reinterpreted.
+    #[test]
+    fn inv033_list_conversations_is_rejected_below_version_sixteen() {
+        assert_client_malformed(
+            r#"{"version":12,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
+        );
+    }
+
+    /// INV-033: the three unified page messages exist only from version
+    /// sixteen and keep their exact closed shapes across round trips.
+    #[test]
+    fn inv033_version_sixteen_conversation_page_messages_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::ConversationPageStart {},
+            r#"{"type":"conversation_page_start"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::ConversationSummary {
+                conversation: ConversationSummary::NativeSession {
+                    session_id: uuid(1),
+                    title: Some(String::from("Planning")),
+                    archived: false,
+                    defaults_version: CanonicalU64::new(2),
+                },
+            },
+            r#"{"type":"conversation_summary","conversation":{"origin":"native_session","session_id":"00000000-0000-0000-0000-000000000001","title":"Planning","archived":false,"defaults_version":"2"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::ConversationSummary {
+                conversation: ConversationSummary::ImportedConversation {
+                    imported_conversation_id: uuid(4),
+                    title: Some(String::from("Imported plan")),
+                    entry_count: CanonicalU64::new(7),
+                    source_format: ImportedConversationSourceFormat::CodexRolloutJsonlV1,
+                },
+            },
+            r#"{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":"Imported plan","entry_count":"7","source_format":"codex_rollout_jsonl_v1"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::ConversationSummary {
+                conversation: ConversationSummary::ImportedConversation {
+                    imported_conversation_id: uuid(4),
+                    title: None,
+                    entry_count: CanonicalU64::new(1),
+                    source_format: ImportedConversationSourceFormat::ClaudeCodeSessionJsonlV1,
+                },
+            },
+            r#"{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":null,"entry_count":"1","source_format":"claude_code_session_jsonl_v1"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(5)?,
+            ServerMessage::ConversationPageEnd {
+                conversation_count: CanonicalU64::new(2),
+                next_after: Some(ConversationCursor::new(
+                    ConversationOrigin::NativeSession,
+                    uuid(1),
+                )),
+            },
+            r#"{"type":"conversation_page_end","conversation_count":"2","next_after":{"origin":"native_session","conversation_id":"00000000-0000-0000-0000-000000000001"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(6)?,
+            ServerMessage::ConversationPageEnd {
+                conversation_count: CanonicalU64::new(0),
+                next_after: None,
+            },
+            r#"{"type":"conversation_page_end","conversation_count":"0","next_after":null}"#,
+        )?;
+        Ok(())
+    }
+
+    /// INV-033: a page end never names a cursor for an empty page or a count
+    /// beyond the page bound.
+    #[test]
+    fn inv033_conversation_page_end_shape_is_bounded() {
+        assert_server_malformed(
+            r#"{"version":16,"request_id":"1","message":{"type":"conversation_page_end","conversation_count":"0","next_after":{"origin":"native_session","conversation_id":"00000000-0000-0000-0000-000000000001"}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":16,"request_id":"1","message":{"type":"conversation_page_end","conversation_count":"101","next_after":null}}"#,
+        );
+    }
+
+    /// INV-033: a native summary title follows the metadata title rules and
+    /// an imported summary restates the derived display-title shape.
+    #[test]
+    fn inv033_conversation_summary_shapes_are_validated() {
+        assert_server_malformed(
+            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"native_session","session_id":"00000000-0000-0000-0000-000000000001","title":"","archived":false,"defaults_version":"1"}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":"line\nbreak","entry_count":"1","source_format":"codex_rollout_jsonl_v1"}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":" padded","entry_count":"1","source_format":"codex_rollout_jsonl_v1"}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":null,"entry_count":"0","source_format":"codex_rollout_jsonl_v1"}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"native_session","session_id":"00000000-0000-0000-0000-000000000001","title":null,"archived":false,"defaults_version":"0"}}}"#,
+        );
+    }
+
+    /// INV-033: an in-memory imported summary title beyond the scalar bound
+    /// fails encoding rather than crossing the wire.
+    #[test]
+    fn inv033_conversation_summary_rejects_an_oversized_imported_title()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::ConversationSummary {
+            conversation: ConversationSummary::ImportedConversation {
+                imported_conversation_id: uuid(4),
+                title: Some("x".repeat(MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS + 1)),
+                entry_count: CanonicalU64::new(1),
+                source_format: ImportedConversationSourceFormat::ClaudeCodeSessionJsonlV2,
+            },
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::Sixteen, request(1)?, message)
+                .expect_err("oversized imported title must fail validation"),
+            FrameValidationError::ConversationListShape
+        );
+        Ok(())
+    }
+
+    /// INV-033: the unified page messages are rejected under every retained
+    /// version below sixteen.
+    #[test]
+    fn inv033_conversation_page_messages_require_version_sixteen()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::Twelve,
+                request(1)?,
+                ServerMessage::ConversationPageStart {},
+            )
+            .expect_err("a retained version must reject the newer message"),
+            FrameValidationError::MessageRequiresNewerVersion
+        );
+        assert_server_malformed(
+            r#"{"version":12,"request_id":"1","message":{"type":"conversation_page_start"}}"#,
+        );
+        Ok(())
+    }
+
     #[test]
     fn inv033_version_five_import_request_preserves_exact_bytes_and_format()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -5296,13 +5781,17 @@ mod tests {
     }
 
     /// INV-033: the admitted version set is closed exactly at one through
-    /// twelve, with version nine seated between turn control and the
-    /// imported-frontier creation version.
+    /// twelve plus sixteen; thirteen, fourteen, and fifteen remain reserved
+    /// by concurrent protocol stacks and are not admitted here.
     #[test]
-    fn inv033_version_twelve_completes_the_admitted_set() {
+    fn inv033_version_sixteen_completes_the_admitted_set() {
         assert_eq!(
             ProtocolVersion::Nine.as_u64(),
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            ProtocolVersion::Sixteen.as_u64(),
+            UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION
         );
         assert_eq!(ProtocolVersion::from_u64(8), Some(ProtocolVersion::Eight));
         assert_eq!(ProtocolVersion::from_u64(9), Some(ProtocolVersion::Nine));
@@ -5310,6 +5799,13 @@ mod tests {
         assert_eq!(ProtocolVersion::from_u64(11), Some(ProtocolVersion::Eleven));
         assert_eq!(ProtocolVersion::from_u64(12), Some(ProtocolVersion::Twelve));
         assert_eq!(ProtocolVersion::from_u64(13), None);
+        assert_eq!(ProtocolVersion::from_u64(14), None);
+        assert_eq!(ProtocolVersion::from_u64(15), None);
+        assert_eq!(
+            ProtocolVersion::from_u64(16),
+            Some(ProtocolVersion::Sixteen)
+        );
+        assert_eq!(ProtocolVersion::from_u64(17), None);
     }
 
     #[test]
