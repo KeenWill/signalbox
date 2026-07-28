@@ -67,6 +67,7 @@ turn. Killing only the direct launcher could strand its native descendant.
 
 **Affects.** `.github/workflows/codex-smoke.yml` and the operational duration of
 the non-merge-gating, manually dispatched compatibility smoke.
+
 ## 2026-07-28 — Load versioned session templates and copy them at creation
 
 **Context.** Session creation can already set a model selection and one bounded
