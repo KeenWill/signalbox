@@ -1109,8 +1109,8 @@ async fn send(
             &command_id.into_uuid().hyphenated().to_string(),
         )?;
     }
-    let (delivery, recovery_turn_id) = match delivery {
-        SendDeliveryArgument::StartWhenIdle => (None, None),
+    let (delivery, wait_mode) = match delivery {
+        SendDeliveryArgument::StartWhenIdle => (None, TurnWaitMode::SelectedTurn),
         SendDeliveryArgument::Queue {
             expected_active_turn_id,
         } => {
@@ -1123,7 +1123,7 @@ async fn send(
                 Some(InputDelivery::Queue {
                     expected_active_turn_id: expected_active_turn,
                 }),
-                Some(expected_active_turn),
+                TurnWaitMode::QueuedTurn,
             )
         }
     };
@@ -1143,7 +1143,7 @@ async fn send(
         return Err(ClientError::Protocol("send returned a steering receipt").mutation());
     };
 
-    await_and_report_turn(client, output, session_id, turn_id, recovery_turn_id).await
+    await_and_report_turn(client, output, session_id, turn_id, wait_mode).await
 }
 
 async fn steer(
@@ -1228,7 +1228,14 @@ async fn reconcile(
     )
     .await?;
 
-    await_and_report_turn(client, output, session_id, successor_turn_id, None).await
+    await_and_report_turn(
+        client,
+        output,
+        session_id,
+        successor_turn_id,
+        TurnWaitMode::SelectedTurn,
+    )
+    .await
 }
 
 /// Requests cancellation of the exact active turn through the interrupt
@@ -1272,7 +1279,14 @@ async fn stop(
     )
     .await?;
 
-    await_and_report_turn(client, output, session_id, successor_turn_id, None).await
+    await_and_report_turn(
+        client,
+        output,
+        session_id,
+        successor_turn_id,
+        TurnWaitMode::SelectedTurn,
+    )
+    .await
 }
 
 /// Reads the authoritative transcript and returns the single turn holding the
@@ -1316,11 +1330,9 @@ async fn await_and_report_turn(
     output: &mut Output<'_>,
     session_id: CanonicalUuid,
     turn_id: CanonicalUuid,
-    recovery_turn_id: Option<CanonicalUuid>,
+    wait_mode: TurnWaitMode,
 ) -> Result<(), ClientError> {
-    match await_turn_terminal_with_predecessor(client, session_id, turn_id, recovery_turn_id)
-        .await?
-    {
+    match await_turn_terminal(client, session_id, turn_id, wait_mode).await? {
         TurnTerminal::Completed => {
             let mut snapshot = transcript(client, session_id).await?;
             let state = snapshot.turn_state(turn_id)?;
@@ -1508,11 +1520,17 @@ enum TurnTerminal {
     ReconciliationRequired,
 }
 
-async fn await_turn_terminal_with_predecessor(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TurnWaitMode {
+    SelectedTurn,
+    QueuedTurn,
+}
+
+async fn await_turn_terminal(
     client: &mut ProcessClient,
     session_id: CanonicalUuid,
     turn_id: CanonicalUuid,
-    predecessor_turn_id: Option<CanonicalUuid>,
+    wait_mode: TurnWaitMode,
 ) -> Result<TurnTerminal, ClientError> {
     loop {
         let mut connection = client
@@ -1523,12 +1541,10 @@ async fn await_turn_terminal_with_predecessor(
         if let Some(terminal) = terminal_snapshot_state(state.as_ref())? {
             return Ok(terminal);
         }
-        if let Some(predecessor_turn_id) = predecessor_turn_id {
-            let predecessor_state = snapshot.turn_state(predecessor_turn_id)?;
-            if let Some(terminal) = predecessor_recovery_snapshot_state(predecessor_state.as_ref())?
-            {
-                return Ok(terminal);
-            }
+        if wait_mode == TurnWaitMode::QueuedTurn
+            && let Some(terminal) = queued_turn_blocker_recovery(&mut snapshot, turn_id)?
+        {
+            return Ok(terminal);
         }
         let mut observed_cursor = snapshot.cursor();
         loop {
@@ -1558,20 +1574,18 @@ async fn await_turn_terminal_with_predecessor(
                         };
                         return Ok(terminal);
                     }
-                    if let Some(predecessor_turn_id) = predecessor_turn_id
-                        && (model_call_recovery_transition(&event, predecessor_turn_id)
-                            || tool_recovery_transition(&event, predecessor_turn_id))
+                    if wait_mode == TurnWaitMode::QueuedTurn && session_recovery_transition(&event)
                     {
                         let mut refreshed = transcript(client, session_id).await?;
-                        let predecessor_state = refreshed.turn_state(predecessor_turn_id)?;
+                        let refreshed_state = refreshed.turn_state(turn_id)?;
+                        if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
+                            return Ok(terminal);
+                        }
                         if let Some(terminal) =
-                            predecessor_recovery_snapshot_state(predecessor_state.as_ref())?
+                            queued_turn_blocker_recovery(&mut refreshed, turn_id)?
                         {
                             return Ok(terminal);
                         }
-                        return Err(ClientError::Protocol(
-                            "a predecessor recovery event did not retain recovery state",
-                        ));
                     }
                 }
                 ServerMessage::ProviderTextDelta {
@@ -1597,30 +1611,69 @@ async fn await_turn_terminal_with_predecessor(
     }
 }
 
-fn predecessor_recovery_snapshot_state(
-    state: Option<&TurnState>,
+fn queued_turn_blocker_recovery(
+    snapshot: &mut TranscriptSnapshot,
+    selected_turn: CanonicalUuid,
 ) -> Result<Option<TurnTerminal>, ClientError> {
-    match state {
-        Some(
-            TurnState::ActiveAwaitingModelCallRecovery { .. }
-            | TurnState::ActiveAwaitingToolRecovery { .. },
-        ) => Err(ClientError::TurnRecoveryRequired),
-        Some(
-            TurnState::ReconciliationRequired { .. } | TurnState::ToolReconciliationRequired { .. },
-        ) => Ok(Some(TurnTerminal::ReconciliationRequired)),
-        Some(
-            TurnState::Queued { .. }
-            | TurnState::ActiveRunning { .. }
-            | TurnState::ActiveAwaitingToolApproval { .. }
-            | TurnState::Completed { .. }
-            | TurnState::Failed { .. }
-            | TurnState::Refused { .. }
-            | TurnState::Cancelled { .. },
-        ) => Ok(None),
-        None => Err(ClientError::Protocol(
-            "follow snapshot omitted the queued input predecessor",
-        )),
+    let selected_position = {
+        let mut replay = snapshot.replay()?;
+        let mut selected_position = None;
+        for record in &mut replay {
+            if let SnapshotRecord::Turn(turn) = record?
+                && turn.turn_id == selected_turn
+            {
+                selected_position = Some(turn.acceptance_position);
+                break;
+            }
+        }
+        selected_position.ok_or(ClientError::Protocol(
+            "follow snapshot omitted the submitted queued turn",
+        ))?
+    };
+
+    let mut replay = snapshot.replay()?;
+    for record in &mut replay {
+        if let SnapshotRecord::Turn(turn) = record?
+            && turn.acceptance_position < selected_position
+            && let Some(terminal) = blocker_recovery_snapshot_state(&turn.state)?
+        {
+            return Ok(Some(terminal));
+        }
     }
+    Ok(None)
+}
+
+fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<Option<TurnTerminal>, ClientError> {
+    match state {
+        TurnState::ActiveAwaitingModelCallRecovery { .. }
+        | TurnState::ActiveAwaitingToolRecovery { .. } => Err(ClientError::TurnRecoveryRequired),
+        TurnState::ReconciliationRequired { .. } | TurnState::ToolReconciliationRequired { .. } => {
+            Ok(Some(TurnTerminal::ReconciliationRequired))
+        }
+        TurnState::Queued { .. }
+        | TurnState::ActiveRunning { .. }
+        | TurnState::ActiveAwaitingToolApproval { .. }
+        | TurnState::Completed { .. }
+        | TurnState::Failed { .. }
+        | TurnState::Refused { .. }
+        | TurnState::Cancelled { .. } => Ok(None),
+    }
+}
+
+fn session_recovery_transition(event: &SessionEvent) -> bool {
+    matches!(
+        event,
+        SessionEvent::ModelCallTransition {
+            state: ModelCallState::Terminal {
+                disposition: ModelCallDisposition::Ambiguous,
+            },
+            ..
+        } | SessionEvent::ToolBatchTransition {
+            state: ToolBatchState::RecoveryRequired { .. },
+            ..
+        } | SessionEvent::TurnReconciliationRequired { .. }
+            | SessionEvent::TurnToolReconciliationRequired { .. }
+    )
 }
 
 fn tool_recovery_transition(event: &SessionEvent, selected_turn: CanonicalUuid) -> bool {
@@ -2351,11 +2404,12 @@ mod tests {
     use super::{
         MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
         MAX_REVIEW_FINDINGS_PER_RUN, ProcessClient, ReviewCommand, SessionMetadataPageRequest,
-        SnapshotSelection, SubmitInputReceipt, TurnTerminal, await_turn_terminal_with_predecessor,
+        SnapshotSelection, SubmitInputReceipt, TurnTerminal, TurnWaitMode, await_turn_terminal,
         collect_import_paths, create, decide, model_call_recovery_transition,
         open_scanned_import_source, read_input, read_system_prompt_file, reconcile_turn, review,
-        run, search, socket_path, stop_turn, submit_input, terminal_event_state,
-        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
+        run, search, session_recovery_transition, socket_path, stop_turn, submit_input,
+        terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
+        tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -2456,75 +2510,138 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_send_wait_reports_recovery_on_its_active_predecessor()
+    async fn queued_send_wait_reports_live_recovery_on_its_current_active_blocker()
     -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let listener = UnixListener::bind(&socket)?;
         let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
-        let predecessor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
-        let queued_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let original_predecessor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let current_blocker_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let queued_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(4));
         let server = tokio::spawn(async move {
             let (stream, mut writer) = listener.accept().await?.0.into_split();
             let mut reader = BufReader::new(stream);
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
-            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            let follow_request = decode_client_line(&line).map_err(io::Error::other)?;
             assert_eq!(
-                request.request(),
+                follow_request.request(),
                 &ClientRequest::FollowSession { session_id }
             );
-            let frame = |message| {
-                ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
-                    .map_err(io::Error::other)
+            let snapshot = |version, request_id, cursor, blocker_state| -> io::Result<Vec<u8>> {
+                let frame = |message| {
+                    ServerFrame::try_new_for_version(version, request_id, message)
+                        .map_err(io::Error::other)
+                };
+                let mut response =
+                    encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                        session_id,
+                        cursor: CanonicalU64::new(cursor),
+                    })?)
+                    .map_err(io::Error::other)?;
+                response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptTurn {
+                        turn_id: original_predecessor_turn_id,
+                        acceptance_position: CanonicalU64::new(1),
+                        state: TurnState::Completed {
+                            terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+                            terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(6)),
+                            terminal_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(7)),
+                        },
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptTurn {
+                        turn_id: current_blocker_turn_id,
+                        acceptance_position: CanonicalU64::new(2),
+                        state: blocker_state,
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptTurn {
+                        turn_id: queued_turn_id,
+                        acceptance_position: CanonicalU64::new(3),
+                        state: TurnState::Queued {
+                            accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(10)),
+                            content: InputContent::new(String::from("wait behind recovery")),
+                        },
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                        session_id,
+                        cursor: CanonicalU64::new(cursor),
+                        turn_count: CanonicalU64::new(3),
+                        entry_count: CanonicalU64::new(0),
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                Ok(response)
             };
-            let mut response =
-                encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
-                    session_id,
-                    cursor: CanonicalU64::new(0),
-                })?)
-                .map_err(io::Error::other)?;
-            response.extend_from_slice(
-                &encode_server_line(&frame(ServerMessage::TranscriptTurn {
-                    turn_id: predecessor_turn_id,
-                    acceptance_position: CanonicalU64::new(1),
-                    state: TurnState::ActiveAwaitingModelCallRecovery {
-                        ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
-                        recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
-                    },
-                })?)
+            let mut initial = snapshot(
+                follow_request.version(),
+                follow_request.request_id(),
+                0,
+                TurnState::ActiveRunning {
+                    current_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(8)),
+                    current_model_call: None,
+                },
+            )?;
+            initial.extend_from_slice(
+                &encode_server_line(
+                    &ServerFrame::try_new_for_version(
+                        follow_request.version(),
+                        follow_request.request_id(),
+                        ServerMessage::SessionEvent {
+                            cursor: CanonicalU64::new(1),
+                            session_id,
+                            event: SessionEvent::ModelCallTransition {
+                                turn_id: current_blocker_turn_id,
+                                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(9)),
+                                state: ModelCallState::Terminal {
+                                    disposition: ModelCallDisposition::Ambiguous,
+                                },
+                            },
+                        },
+                    )
+                    .map_err(io::Error::other)?,
+                )
                 .map_err(io::Error::other)?,
             );
-            response.extend_from_slice(
-                &encode_server_line(&frame(ServerMessage::TranscriptTurn {
-                    turn_id: queued_turn_id,
-                    acceptance_position: CanonicalU64::new(2),
-                    state: TurnState::Queued {
-                        accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(7)),
-                        content: InputContent::new(String::from("wait behind recovery")),
-                    },
-                })?)
-                .map_err(io::Error::other)?,
+            writer.write_all(&initial).await?;
+
+            let (refresh_stream, mut refresh_writer) = listener.accept().await?.0.into_split();
+            let mut refresh_reader = BufReader::new(refresh_stream);
+            let mut refresh_line = Vec::new();
+            refresh_reader.read_until(b'\n', &mut refresh_line).await?;
+            let refresh_request = decode_client_line(&refresh_line).map_err(io::Error::other)?;
+            assert_eq!(
+                refresh_request.request(),
+                &ClientRequest::ReadTranscript { session_id }
             );
-            response.extend_from_slice(
-                &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
-                    session_id,
-                    cursor: CanonicalU64::new(0),
-                    turn_count: CanonicalU64::new(2),
-                    entry_count: CanonicalU64::new(0),
-                })?)
-                .map_err(io::Error::other)?,
-            );
-            writer.write_all(&response).await?;
+            let refreshed = snapshot(
+                refresh_request.version(),
+                refresh_request.request_id(),
+                1,
+                TurnState::ActiveAwaitingModelCallRecovery {
+                    ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(8)),
+                    recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(9)),
+                },
+            )?;
+            refresh_writer.write_all(&refreshed).await?;
             Ok::<(), io::Error>(())
         });
 
         let mut client = ProcessClient::new(socket);
-        let result = await_turn_terminal_with_predecessor(
+        let result = await_turn_terminal(
             &mut client,
             session_id,
             queued_turn_id,
-            Some(predecessor_turn_id),
+            TurnWaitMode::QueuedTurn,
         )
         .await;
 
@@ -2612,7 +2729,8 @@ mod tests {
 
         let mut client = ProcessClient::new(socket);
         let terminal =
-            await_turn_terminal_with_predecessor(&mut client, session_id, turn_id, None).await?;
+            await_turn_terminal(&mut client, session_id, turn_id, TurnWaitMode::SelectedTurn)
+                .await?;
 
         assert_eq!(terminal, TurnTerminal::Completed);
         server.await??;
@@ -2684,7 +2802,7 @@ mod tests {
 
         let mut client = ProcessClient::new(socket);
         let result =
-            await_turn_terminal_with_predecessor(&mut client, session_id, turn_id, None).await;
+            await_turn_terminal(&mut client, session_id, turn_id, TurnWaitMode::SelectedTurn).await;
 
         assert!(matches!(
             result,
@@ -2724,6 +2842,7 @@ mod tests {
             terminal_event_state(&event, selected_turn),
             Some(TurnTerminal::ReconciliationRequired)
         );
+        assert!(session_recovery_transition(&event));
     }
 
     #[test]
@@ -2758,6 +2877,7 @@ mod tests {
         };
 
         assert!(model_call_recovery_transition(&event, selected_turn));
+        assert!(session_recovery_transition(&event));
         assert!(!model_call_recovery_transition(
             &event,
             CanonicalUuid::from_uuid(Uuid::from_u128(3))
@@ -2776,6 +2896,7 @@ mod tests {
         };
 
         assert!(tool_recovery_transition(&event, selected_turn));
+        assert!(session_recovery_transition(&event));
         assert!(!tool_recovery_transition(
             &event,
             CanonicalUuid::from_uuid(Uuid::from_u128(4))

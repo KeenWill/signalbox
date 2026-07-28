@@ -6348,6 +6348,21 @@ mod tests {
             },
         );
         assert_eq!(invalid, Err(FrameValidationError::InputDeliveryShape));
+
+        let zero = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(4)?,
+            ClientRequest::SubmitInput {
+                command_id: command(6)?,
+                session_id: uuid(2),
+                content: InputContent::new(String::from("zero-version steering")),
+                expected_defaults_version: Some(CanonicalU64::new(0)),
+                delivery: Some(InputDelivery::Steer {
+                    expected_active_turn_id: uuid(3),
+                }),
+            },
+        );
+        assert_eq!(zero, Err(FrameValidationError::InputDeliveryShape));
         Ok(())
     }
 

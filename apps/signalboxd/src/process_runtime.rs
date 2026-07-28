@@ -4125,7 +4125,7 @@ where
             .map(|configuration| DeliveryRequest::StartWhenNoActiveTurn { configuration }),
         Some(InputDelivery::Steer {
             expected_active_turn_id,
-        }) if expected_version.is_none() => Some(DeliveryRequest::NextSafePoint {
+        }) if expected_defaults_version.is_none() => Some(DeliveryRequest::NextSafePoint {
             expected_active_turn: TurnId::from_uuid(expected_active_turn_id.into_uuid()),
         }),
         Some(InputDelivery::Queue {
