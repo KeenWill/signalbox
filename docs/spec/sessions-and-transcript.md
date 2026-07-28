@@ -13,9 +13,11 @@ prompt was verified through PR #286 (`agent/session-system-prompt`); and the
 version-thirteen input-delivery surface and its user-reachable steering boundary
 were verified through PR #302 (`agent/mid-turn-steering`). The append-only
 context-compaction record and projection were verified against
-`agent/context-compaction-core`. The imported-conversation record and converter
-are owned by [conversation-import](conversation-import.md). Where a law is cited
-as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
+`agent/context-compaction-core`; the command path and canonical visible-range
+selection were verified against `agent/context-compaction-protocol`. The
+imported-conversation record and converter are owned by
+[conversation-import](conversation-import.md). Where a law is cited as
+`INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
 mechanics owned by another decision are summarized, the owning sibling page is
 linked inline.
 

@@ -13,8 +13,9 @@ verified through PR #296 (`agent/continuation-reconstitution-siblings`); the
 version-thirteen delivery surface, queued restart behavior, and protocol-driven
 continuation steering were verified through PR #302 (`agent/mid-turn-steering`).
 Exact start-frontier reconstitution across a validated compaction boundary was
-verified against `agent/context-compaction-core`. Code homes:
-`crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
+verified against `agent/context-compaction-core`; the corresponding persistent
+final-state gate was verified against `agent/context-compaction-protocol`. Code
+homes: `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,`

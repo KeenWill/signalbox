@@ -49,6 +49,11 @@ pub(crate) enum Command {
         selection: ModelSelection,
         command_id: Option<CommandId>,
     },
+    Compact {
+        session_id: CanonicalUuid,
+        through_position: Option<CanonicalU64>,
+        command_id: Option<CommandId>,
+    },
     List,
     Search(SessionMetadataPageRequest),
     Conversations(ConversationsPageRequest),
@@ -203,6 +208,8 @@ enum CliCommand {
     Create(CreateArguments),
     /// Create a live session from an imported conversation boundary.
     Continue(ContinueArguments),
+    /// Compact model-visible session history without rewriting its transcript.
+    Compact(CompactArguments),
     /// List current sessions.
     List,
     /// Read one filtered page of current session metadata.
@@ -436,6 +443,19 @@ struct ContinueArguments {
     /// Select a configured model alias.
     #[arg(long, value_name = "UUID", value_parser = canonical_uuid)]
     alias: Option<CanonicalUuid>,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct CompactArguments {
+    /// Session whose model-visible frontier should be compacted.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Inclusive semantic transcript position to summarize through.
+    #[arg(long, value_name = "DECIMAL", value_parser = positive_canonical_u64)]
+    through_position: Option<CanonicalU64>,
     /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
@@ -795,6 +815,11 @@ pub(crate) fn parse(
                     )));
                 }
             },
+            command_id: arguments.command_id,
+        },
+        CliCommand::Compact(arguments) => Command::Compact {
+            session_id: arguments.session_id,
+            through_position: arguments.through_position,
             command_id: arguments.command_id,
         },
         CliCommand::List => Command::List,
@@ -1927,6 +1952,33 @@ mod tests {
     }
 
     #[test]
+    fn compact_defaults_to_the_latest_safe_boundary() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let parsed = parse(["compact", session].map(Into::into));
+
+        assert_compact_parse(parsed, session, None, None);
+    }
+
+    #[test]
+    fn compact_maps_an_explicit_boundary_and_command_identity() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let command = "00000000-0000-0000-0000-000000000002";
+        let parsed = parse(
+            [
+                "compact",
+                session,
+                "--through-position",
+                "3",
+                "--command-id",
+                command,
+            ]
+            .map(Into::into),
+        );
+
+        assert_compact_parse(parsed, session, Some(3), Some(command));
+    }
+
+    #[test]
     fn continue_maps_an_explicit_imported_frontier_and_relationship() {
         let parsed = parse(
             [
@@ -2040,6 +2092,35 @@ mod tests {
                 .map(Into::into)
             )
             .is_err()
+        );
+    }
+
+    #[track_caller]
+    fn assert_compact_parse(
+        parsed: Result<ParseOutcome, UsageError>,
+        expected_session: &str,
+        expected_position: Option<u64>,
+        expected_command: Option<&str>,
+    ) {
+        let Ok(ParseOutcome::Run(arguments)) = parsed else {
+            panic!("the successful compact parse runs the client");
+        };
+        let Command::Compact {
+            session_id,
+            through_position,
+            command_id,
+        } = arguments.command
+        else {
+            panic!("the successful compact parse selects compact");
+        };
+        assert_eq!(
+            session_id.into_uuid().hyphenated().to_string(),
+            expected_session
+        );
+        assert_eq!(through_position.map(CanonicalU64::value), expected_position);
+        assert_eq!(
+            command_id.map(|identity| identity.into_uuid().hyphenated().to_string()),
+            expected_command.map(str::to_owned)
         );
     }
 

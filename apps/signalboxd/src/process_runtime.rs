@@ -1,6 +1,7 @@
 //! Local process-protocol serving and durable outbox fan-out.
 
 use std::{
+    collections::BTreeMap,
     error::Error,
     fmt,
     future::Future,
@@ -11,52 +12,61 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use signalbox_application::{
-    ConversationListCursor, ConversationListItem, ConversationListQuery, ConversationOriginFilter,
-    ConversationPageReader, CreateSessionError, CreateSessionFromImportedFrontierOutcome,
-    CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
-    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
-    EligibilityNudge, ImportConversationError, ImportConversationOutcome,
-    ImportConversationService, ImportedConversationConverter, InProcessEligibilityNudge,
-    InProcessToolDispatchGate, ListConversationsService, ListSessionMetadataService,
-    LoadSessionMetadataService, PromptMemberStatement, ReplaceSessionDefaultsOutcome,
-    ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome,
-    ReplaceSessionMetadataRequest, ReplaceSessionMetadataService, ReviewWorkflowCommand,
-    ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult, ReviewWorkflowCommandService,
-    ReviewWorkflowOperation, ReviewWorkflowOperationKind, SessionMetadataListItem,
-    SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
-    SubmitInputTransaction, UuidV7CreateSessionFromImportedFrontierIdGenerator,
+    ClassifyOperatorFailure, ConversationListCursor, ConversationListItem, ConversationListQuery,
+    ConversationOriginFilter, ConversationPageReader, CreateSessionError,
+    CreateSessionFromImportedFrontierOutcome, CreateSessionFromImportedFrontierRequest,
+    CreateSessionFromImportedFrontierService, CreateSessionOutcome, CreateSessionRequest,
+    CreateSessionService, DecideToolRequestService, EligibilityNudge, ImportConversationError,
+    ImportConversationOutcome, ImportConversationService, ImportedConversationConverter,
+    InProcessEligibilityNudge, InProcessToolDispatchGate, ListConversationsService,
+    ListSessionMetadataService, LoadSessionMetadataService, PromptMemberStatement,
+    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
+    ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
+    ReviewWorkflowCommand, ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult,
+    ReviewWorkflowCommandService, ReviewWorkflowOperation, ReviewWorkflowOperationKind,
+    SessionMetadataListItem, SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest,
+    SubmitInputService, SubmitInputTransaction, UuidV7CreateSessionFromImportedFrontierIdGenerator,
     UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
     UuidV7ToolLoopIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
 use signalbox_domain::{
-    AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextFrontierId,
-    DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestRejectedResult,
-    DecideToolRequestResult, DeliveryRequest, DirectModelSelection, DurableCommandId,
-    ImportedConversationFormat, ImportedConversationId,
-    ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedTranscriptPosition,
-    ModelAlias, ModelSelectionOverride, ModelSelectionRequest, PerInputConfigurationChoices,
-    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
-    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult, ReviewChangeRequestNumber,
-    ReviewConfidence, ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
-    ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkId,
-    ReviewExternalObjectKind, ReviewFinding, ReviewFindingContent, ReviewFindingDiffSide,
-    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
-    ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal,
-    ReviewFindingRef, ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass,
-    ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
-    ReviewPassRef, ReviewPassResult, ReviewPassState, ReviewPassTurnEvidence,
-    ReviewPassTurnOutcome, ReviewPolicy, ReviewProducedFindings, ReviewRun, ReviewRunEvidence,
-    ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject,
-    ReviewText, ReviewWorkflowKind, SessionConfigurationDefaults,
+    AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextCompactionId,
+    ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest,
+    DecideToolRequestRejectedResult, DecideToolRequestResult, DeliveryRequest,
+    DirectModelSelection, DurableCommandId, FrozenModelSelection, ImportedConversationFormat,
+    ImportedConversationId, ImportedSessionRelationship as DomainImportedSessionRelationship,
+    ImportedTranscriptPosition, ModelAlias, ModelCallId, ModelSelectionOverride,
+    ModelSelectionRequest, PerInputConfigurationChoices, ReplaceSessionDefaultsRejectedResult,
+    ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
+    ReplaceSessionMetadataResult, ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal,
+    ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
+    ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
+    ReviewFinding, ReviewFindingContent, ReviewFindingDiffSide, ReviewFindingEvent,
+    ReviewFindingEventKind, ReviewFindingEventResult, ReviewFindingEventResultKind,
+    ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal, ReviewFindingRef,
+    ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence,
+    ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassResult,
+    ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
+    ReviewProducedFindings, ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunRef,
+    ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
+    ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
     SessionMetadataLastWriter, SessionMetadataSnapshot, SubmitInput, SubmitInputAppliedResult,
     SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision, ToolDenialReason,
     ToolRequestId, TurnId, UserContent,
 };
-use signalbox_model_provider_runtime::{ProviderTextDelta, ProviderTextDeltaSink};
+use signalbox_model_provider_runtime::{
+    ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
+    ProviderTextDelta, ProviderTextDeltaSink,
+};
 use signalbox_persistence::{
+    context_compaction::{
+        AppliedContextCompaction, ContextCompactionRepository, ContextCompactionRepositoryError,
+        FailedContextCompactionDisposition, PrepareContextCompactionOutcome,
+        PrepareContextCompactionRequest, PreparedContextCompaction,
+    },
     conversation_import::{
         ImportedConversationIdentityCollision, ImportedConversationRepository,
         ImportedConversationRepositoryError,
@@ -135,12 +145,36 @@ const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
 
+#[derive(Debug)]
+struct UnavailableContextCompactionModel;
+
+impl ContextCompactionModel for UnavailableContextCompactionModel {
+    fn execute<'a>(
+        &'a self,
+        _request: ContextCompactionModelRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        signalbox_model_provider_runtime::ContextCompactionModelResult,
+                        ContextCompactionModelError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Err(ContextCompactionModelError::UnconfiguredTarget) })
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ConnectionServices {
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: Arc<HubModelConfiguration>,
+    context_compaction_model: Arc<dyn ContextCompactionModel>,
+    context_compaction_credential_reference: Option<Arc<str>>,
     fanouts: ProcessFanouts,
     inbound_frame_budget: Arc<Semaphore>,
     import_budget: Arc<Semaphore>,
@@ -157,6 +191,8 @@ pub struct ProcessRuntime {
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
+    context_compaction_model: Arc<dyn ContextCompactionModel>,
+    context_compaction_credential_reference: Option<Arc<str>>,
     fanouts: ProcessFanouts,
 }
 
@@ -183,6 +219,8 @@ impl ProcessRuntime {
             eligibility_nudge,
             tool_dispatch_gate,
             model_configuration,
+            context_compaction_model: Arc::new(UnavailableContextCompactionModel),
+            context_compaction_credential_reference: None,
             fanouts: ProcessFanouts {
                 durable: durable_updates,
                 streaming: streaming_updates,
@@ -192,6 +230,17 @@ impl ProcessRuntime {
 
     /// Returns the nonblocking sink that places already-redacted provider text
     /// on this runtime incarnation's ordered follow fan-out.
+    /// Installs the dedicated summary-call adapter used by explicit and automatic compaction.
+    pub fn with_context_compaction_model(
+        mut self,
+        model: impl ContextCompactionModel + 'static,
+        credential_reference: impl Into<Arc<str>>,
+    ) -> Self {
+        self.context_compaction_model = Arc::new(model);
+        self.context_compaction_credential_reference = Some(credential_reference.into());
+        self
+    }
+
     pub fn provider_text_delta_sink(&self) -> ProcessProviderTextDeltaSink {
         ProcessProviderTextDeltaSink {
             updates: self.fanouts.streaming.clone(),
@@ -201,17 +250,24 @@ impl ProcessRuntime {
     /// Serves requests and dispatches durable updates until `shutdown` changes
     /// to true or its sender closes.
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), ProcessRuntimeError> {
-        let fanouts = self.fanouts;
-        let server = serve_connections(
-            &self.listener,
-            self.pool.clone(),
-            self.eligibility_nudge,
-            self.tool_dispatch_gate,
-            self.model_configuration,
-            fanouts.clone(),
-            shutdown.clone(),
-        );
-        let dispatcher = dispatch_updates(self.pool, fanouts, shutdown);
+        let snapshot_reader_capacity =
+            snapshot_reader_capacity(self.pool.options().get_max_connections())
+                .ok_or(ProcessRuntimeError::InsufficientPoolCapacity)?;
+        let services = ConnectionServices {
+            pool: self.pool.clone(),
+            eligibility_nudge: self.eligibility_nudge,
+            tool_dispatch_gate: self.tool_dispatch_gate,
+            model_configuration: Arc::new(self.model_configuration),
+            context_compaction_model: self.context_compaction_model,
+            context_compaction_credential_reference: self.context_compaction_credential_reference,
+            fanouts: self.fanouts.clone(),
+            inbound_frame_budget: Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES)),
+            import_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS)),
+            review_command_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS)),
+            snapshot_reader_budget: Arc::new(Semaphore::new(snapshot_reader_capacity)),
+        };
+        let server = serve_connections(&self.listener, services, shutdown.clone());
+        let dispatcher = dispatch_updates(self.pool, self.fanouts, shutdown);
         let result = tokio::try_join!(server, dispatcher);
         let cleanup = self.listener.cleanup();
 
@@ -268,26 +324,9 @@ async fn dispatch_updates(
 
 async fn serve_connections(
     listener: &LocalProcessListener,
-    pool: PgPool,
-    eligibility_nudge: InProcessEligibilityNudge,
-    tool_dispatch_gate: InProcessToolDispatchGate,
-    model_configuration: HubModelConfiguration,
-    fanouts: ProcessFanouts,
+    services: ConnectionServices,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessRuntimeError> {
-    let snapshot_reader_capacity = snapshot_reader_capacity(pool.options().get_max_connections())
-        .ok_or(ProcessRuntimeError::InsufficientPoolCapacity)?;
-    let services = ConnectionServices {
-        pool,
-        eligibility_nudge,
-        tool_dispatch_gate,
-        model_configuration: Arc::new(model_configuration),
-        fanouts,
-        inbound_frame_budget: Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES)),
-        import_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS)),
-        review_command_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS)),
-        snapshot_reader_budget: Arc::new(Semaphore::new(snapshot_reader_capacity)),
-    };
     let mut connections = JoinSet::new();
     loop {
         if shutdown_requested(&shutdown) {
@@ -710,12 +749,19 @@ where
             )
             .await
         }
-        ClientRequest::CompactSession { .. } => {
-            write_error(
+        ClientRequest::CompactSession {
+            command_id,
+            session_id,
+            through_position,
+        } => {
+            handle_compact_session(
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Unavailable),
+                command_id,
+                session_id,
+                through_position,
+                services,
             )
             .await
         }
@@ -3160,6 +3206,871 @@ where
     }
 }
 
+async fn handle_compact_session<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: signalbox_process_protocol::CommandId,
+    session_id: CanonicalUuid,
+    through_position: Option<CanonicalU64>,
+    services: &ConnectionServices,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let Some(credential_reference) = services
+        .context_compaction_credential_reference
+        .as_ref()
+        .map(|value| value.to_string())
+    else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::Unavailable),
+        )
+        .await;
+    };
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let defaults = match ProcessReadRepository::new(services.pool.clone())
+        .read_session_defaults(session, None)
+        .await
+    {
+        Ok(ProcessSessionDefaultsRead::Read(defaults)) => defaults,
+        Ok(ProcessSessionDefaultsRead::SessionNotFound) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::NotFound),
+            )
+            .await;
+        }
+        Ok(ProcessSessionDefaultsRead::VersionNotFound) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await;
+        }
+        Err(error) => {
+            return write_context_compaction_read_error(writer, version, request_id, error).await;
+        }
+    };
+    let selection = match defaults.defaults().model() {
+        ModelSelectionRequest::Direct(selection) => selection,
+        ModelSelectionRequest::Alias(alias) => {
+            let Some(definition) = services.model_configuration.resolve_alias(alias) else {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::Unavailable),
+                )
+                .await;
+            };
+            definition.selected()
+        }
+    };
+    let target = match services
+        .model_configuration
+        .target_catalog()
+        .resolve(FrozenModelSelection::Direct(selection))
+    {
+        Ok(resolved) => resolved.target(),
+        Err(_) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await;
+        }
+    };
+    let repository = ContextCompactionRepository::new(services.pool.clone());
+    let prepared = loop {
+        let request = PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(command_id.into_uuid()),
+            session,
+            requested_through_position: through_position.map(CanonicalU64::value),
+            defaults_version: defaults.version(),
+            selection,
+            target,
+            credential_reference: credential_reference.clone(),
+            call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+            compaction: ContextCompactionId::from_uuid(uuid::Uuid::now_v7()),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
+            result_frontier: ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+        };
+        match repository.prepare(request).await {
+            Ok(PrepareContextCompactionOutcome::Prepared(prepared)) => break prepared,
+            Ok(PrepareContextCompactionOutcome::Replayed(applied)) => {
+                return write_context_compaction_receipt(
+                    writer, version, request_id, session_id, applied,
+                )
+                .await;
+            }
+            Ok(PrepareContextCompactionOutcome::ConflictingReuse) => {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+                )
+                .await;
+            }
+            Ok(PrepareContextCompactionOutcome::SessionNotFound) => {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::NotFound),
+                )
+                .await;
+            }
+            Ok(PrepareContextCompactionOutcome::InvalidBoundary) => {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
+            Ok(
+                PrepareContextCompactionOutcome::DefaultsChanged
+                | PrepareContextCompactionOutcome::Busy
+                | PrepareContextCompactionOutcome::NoBoundary
+                | PrepareContextCompactionOutcome::FailedReplay,
+            ) => {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::Unavailable),
+                )
+                .await;
+            }
+            Err(ContextCompactionRepositoryError::IdentityCollision) => continue,
+            Err(error) => {
+                return write_context_compaction_repository_error(
+                    writer, version, request_id, error,
+                )
+                .await;
+            }
+        }
+    };
+    let rendered_range = match load_context_compaction_range(&services.pool, &prepared).await {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            return fail_context_compaction_before_response(
+                writer,
+                version,
+                request_id,
+                &repository,
+                &prepared,
+                error,
+            )
+            .await;
+        }
+    };
+    if let Err(error) = repository.authorize(&prepared).await {
+        return write_context_compaction_repository_error(writer, version, request_id, error).await;
+    }
+    let request = ContextCompactionModelRequest {
+        call: prepared.call(),
+        session,
+        selection: prepared.selection(),
+        target: prepared.target(),
+        credential_reference: prepared.credential_reference().to_owned(),
+        system_prompt: services.model_configuration.compaction_prompt().to_owned(),
+        rendered_range,
+    };
+    let result = match services.context_compaction_model.execute(request).await {
+        Ok(result) => result,
+        Err(error) => {
+            let disposition = context_compaction_failure_disposition(error);
+            if let Err(repository_error) = repository.fail(&prepared, disposition).await {
+                return write_context_compaction_repository_error(
+                    writer,
+                    version,
+                    request_id,
+                    repository_error,
+                )
+                .await;
+            }
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await;
+        }
+    };
+    let usage = ContextCompactionTokenUsage::unreported()
+        .with_input_tokens(result.usage.input_tokens)
+        .with_output_tokens(result.usage.output_tokens)
+        .with_cache_creation_input_tokens(result.usage.cache_creation_input_tokens)
+        .with_cache_read_input_tokens(result.usage.cache_read_input_tokens);
+    let applied = match repository.complete(&prepared, &result.summary, usage).await {
+        Ok(applied) => applied,
+        Err(error) => {
+            return write_context_compaction_repository_error(writer, version, request_id, error)
+                .await;
+        }
+    };
+    write_context_compaction_receipt(writer, version, request_id, session_id, applied).await
+}
+
+#[derive(Debug)]
+pub(crate) enum AutomaticContextCompactionError {
+    Read(ProcessReadError),
+    Repository(ContextCompactionRepositoryError),
+    Model,
+    Configuration,
+    State,
+    Integrity,
+}
+
+impl fmt::Display for AutomaticContextCompactionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("automatic context compaction failed")
+    }
+}
+
+impl Error for AutomaticContextCompactionError {}
+
+impl ClassifyOperatorFailure for AutomaticContextCompactionError {
+    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass {
+        match self {
+            Self::Read(ProcessReadError::Database(_))
+            | Self::Repository(ContextCompactionRepositoryError::Database(_))
+            | Self::Model => signalbox_application::OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            Self::Repository(ContextCompactionRepositoryError::CommitAmbiguous(_)) => {
+                signalbox_application::OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                }
+            }
+            Self::Read(ProcessReadError::Corruption(_))
+            | Self::Repository(ContextCompactionRepositoryError::Corruption(_))
+            | Self::Integrity => signalbox_application::OperatorFailureClass::FailClosedCorruption,
+            Self::Repository(ContextCompactionRepositoryError::IdentityCollision) => {
+                signalbox_application::OperatorFailureClass::IdentityCollision
+            }
+            Self::Configuration | Self::State => {
+                signalbox_application::OperatorFailureClass::CallerOrHubBug
+            }
+        }
+    }
+}
+
+pub(crate) async fn compact_automatically(
+    pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
+    model: &Arc<dyn ContextCompactionModel>,
+    credential_reference: &str,
+    session: SessionId,
+) -> Result<AppliedContextCompaction, AutomaticContextCompactionError> {
+    let defaults = match ProcessReadRepository::new(pool.clone())
+        .read_session_defaults(session, None)
+        .await
+    {
+        Ok(ProcessSessionDefaultsRead::Read(defaults)) => defaults,
+        Ok(ProcessSessionDefaultsRead::SessionNotFound)
+        | Ok(ProcessSessionDefaultsRead::VersionNotFound) => {
+            return Err(AutomaticContextCompactionError::State);
+        }
+        Err(error) => return Err(AutomaticContextCompactionError::Read(error)),
+    };
+    let selection = match defaults.defaults().model() {
+        ModelSelectionRequest::Direct(selection) => selection,
+        ModelSelectionRequest::Alias(alias) => model_configuration
+            .resolve_alias(alias)
+            .ok_or(AutomaticContextCompactionError::Configuration)?
+            .selected(),
+    };
+    let target = model_configuration
+        .target_catalog()
+        .resolve(FrozenModelSelection::Direct(selection))
+        .map_err(|_| AutomaticContextCompactionError::Configuration)?
+        .target();
+    let repository = ContextCompactionRepository::new(pool.clone());
+    let prepared = loop {
+        let request = PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            session,
+            requested_through_position: None,
+            defaults_version: defaults.version(),
+            selection,
+            target,
+            credential_reference: credential_reference.to_owned(),
+            call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+            compaction: ContextCompactionId::from_uuid(uuid::Uuid::now_v7()),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
+            result_frontier: ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+        };
+        match repository.prepare(request).await {
+            Ok(PrepareContextCompactionOutcome::Prepared(prepared)) => break prepared,
+            Ok(
+                PrepareContextCompactionOutcome::Replayed(_)
+                | PrepareContextCompactionOutcome::ConflictingReuse
+                | PrepareContextCompactionOutcome::SessionNotFound
+                | PrepareContextCompactionOutcome::DefaultsChanged
+                | PrepareContextCompactionOutcome::Busy
+                | PrepareContextCompactionOutcome::NoBoundary
+                | PrepareContextCompactionOutcome::InvalidBoundary
+                | PrepareContextCompactionOutcome::FailedReplay,
+            ) => {
+                return Err(AutomaticContextCompactionError::State);
+            }
+            Err(ContextCompactionRepositoryError::IdentityCollision) => continue,
+            Err(error) => return Err(AutomaticContextCompactionError::Repository(error)),
+        }
+    };
+    let rendered_range = match load_context_compaction_range(pool, &prepared).await {
+        Ok(rendered) => rendered,
+        Err(ContextCompactionRangeLoadError::Read(error)) => {
+            repository
+                .fail(&prepared, FailedContextCompactionDisposition::KnownFailed)
+                .await
+                .map_err(AutomaticContextCompactionError::Repository)?;
+            return Err(AutomaticContextCompactionError::Read(error));
+        }
+        Err(ContextCompactionRangeLoadError::Integrity) => {
+            repository
+                .fail(&prepared, FailedContextCompactionDisposition::KnownFailed)
+                .await
+                .map_err(AutomaticContextCompactionError::Repository)?;
+            return Err(AutomaticContextCompactionError::Integrity);
+        }
+    };
+    repository
+        .authorize(&prepared)
+        .await
+        .map_err(AutomaticContextCompactionError::Repository)?;
+    let request = ContextCompactionModelRequest {
+        call: prepared.call(),
+        session,
+        selection: prepared.selection(),
+        target: prepared.target(),
+        credential_reference: prepared.credential_reference().to_owned(),
+        system_prompt: model_configuration.compaction_prompt().to_owned(),
+        rendered_range,
+    };
+    let result = match model.execute(request).await {
+        Ok(result) => result,
+        Err(error) => {
+            repository
+                .fail(&prepared, context_compaction_failure_disposition(error))
+                .await
+                .map_err(AutomaticContextCompactionError::Repository)?;
+            return Err(AutomaticContextCompactionError::Model);
+        }
+    };
+    let usage = ContextCompactionTokenUsage::unreported()
+        .with_input_tokens(result.usage.input_tokens)
+        .with_output_tokens(result.usage.output_tokens)
+        .with_cache_creation_input_tokens(result.usage.cache_creation_input_tokens)
+        .with_cache_read_input_tokens(result.usage.cache_read_input_tokens);
+    repository
+        .complete(&prepared, &result.summary, usage)
+        .await
+        .map_err(AutomaticContextCompactionError::Repository)
+}
+
+async fn load_context_compaction_range(
+    pool: &PgPool,
+    prepared: &PreparedContextCompaction,
+) -> Result<String, ContextCompactionRangeLoadError> {
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(prepared.session())
+        .await?
+        .ok_or(ContextCompactionRangeLoadError::Integrity)?;
+    let entries_by_reference = transcript
+        .entries()
+        .iter()
+        .map(|entry| (transcript_entry_reference(entry), entry))
+        .collect::<BTreeMap<_, _>>();
+    if entries_by_reference.len() != transcript.entries().len() {
+        return Err(ContextCompactionRangeLoadError::Integrity);
+    }
+    let entries = prepared
+        .summarized_entries()
+        .iter()
+        .map(|reference| {
+            entries_by_reference
+                .get(reference)
+                .copied()
+                .ok_or(ContextCompactionRangeLoadError::Integrity)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some(first) = entries.first() else {
+        return Err(ContextCompactionRangeLoadError::Integrity);
+    };
+    let Some(through) = entries.last() else {
+        return Err(ContextCompactionRangeLoadError::Integrity);
+    };
+    if transcript_entry_reference(first) != prepared.first()
+        || transcript_entry_reference(through) != prepared.through()
+    {
+        return Err(ContextCompactionRangeLoadError::Integrity);
+    }
+    let values = entries
+        .into_iter()
+        .map(context_compaction_entry_value)
+        .collect::<Vec<_>>();
+    serde_json::to_string(&values).map_err(|_| ContextCompactionRangeLoadError::Integrity)
+}
+
+fn transcript_entry_reference(
+    entry: &ProcessTranscriptEntry,
+) -> signalbox_domain::SemanticTranscriptEntryRef {
+    let (source_session, entry) = match entry {
+        ProcessTranscriptEntry::ModelIdentityChanged {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::ContextSummary {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::User {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::Assistant {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::AssistantToolUse {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::ToolExecutionResult {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::ToolDenied {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::ToolClosed {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::TurnFailed {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::TurnCompleted {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::TurnCancelled {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::ImportedText {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::Imported {
+            source_session,
+            entry,
+            ..
+        } => (*source_session, *entry),
+    };
+    signalbox_domain::SemanticTranscriptEntryRef::from_source(source_session, entry)
+}
+
+fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json::Value {
+    let reference = transcript_entry_reference(entry);
+    let source_session_id = reference
+        .source_session()
+        .into_uuid()
+        .hyphenated()
+        .to_string();
+    let entry_id = reference.entry().into_uuid().hyphenated().to_string();
+    match entry {
+        ProcessTranscriptEntry::ModelIdentityChanged {
+            entry_index,
+            turn,
+            defaults_version,
+            selected,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "model_identity_changed",
+            "turn_id": turn.into_uuid().hyphenated().to_string(),
+            "defaults_version": defaults_version,
+            "selected_model_id": selected.into_uuid().hyphenated().to_string(),
+        }),
+        ProcessTranscriptEntry::ContextSummary {
+            entry_index,
+            model_call,
+            first,
+            through,
+            content,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "context_summary",
+            "model_call_id": model_call.into_uuid().hyphenated().to_string(),
+            "first_source_session_id": first.source_session().into_uuid().hyphenated().to_string(),
+            "first_entry_id": first.entry().into_uuid().hyphenated().to_string(),
+            "through_source_session_id": through.source_session().into_uuid().hyphenated().to_string(),
+            "through_entry_id": through.entry().into_uuid().hyphenated().to_string(),
+            "content": content,
+        }),
+        ProcessTranscriptEntry::User {
+            entry_index,
+            accepted_input,
+            turn,
+            content,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "user",
+            "accepted_input_id": accepted_input.into_uuid().hyphenated().to_string(),
+            "turn_id": turn.into_uuid().hyphenated().to_string(),
+            "content": content,
+        }),
+        ProcessTranscriptEntry::Assistant {
+            entry_index,
+            turn,
+            model_call,
+            content,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "assistant",
+            "turn_id": turn.into_uuid().hyphenated().to_string(),
+            "model_call_id": model_call.into_uuid().hyphenated().to_string(),
+            "content": content,
+        }),
+        ProcessTranscriptEntry::AssistantToolUse {
+            entry_index,
+            turn,
+            model_call,
+            request,
+            name,
+            arguments,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "assistant_tool_use",
+            "turn_id": turn.into_uuid().hyphenated().to_string(),
+            "model_call_id": model_call.into_uuid().hyphenated().to_string(),
+            "tool_request_id": request.into_uuid().hyphenated().to_string(),
+            "name": name,
+            "arguments": arguments,
+        }),
+        ProcessTranscriptEntry::ToolExecutionResult {
+            entry_index,
+            request,
+            attempt,
+            content,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "tool_execution_result",
+            "tool_request_id": request.into_uuid().hyphenated().to_string(),
+            "tool_attempt_id": attempt.into_uuid().hyphenated().to_string(),
+            "content": content,
+        }),
+        ProcessTranscriptEntry::ToolDenied {
+            entry_index,
+            request,
+            content,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "tool_denied",
+            "tool_request_id": request.into_uuid().hyphenated().to_string(),
+            "content": content,
+        }),
+        ProcessTranscriptEntry::ToolClosed {
+            entry_index,
+            request,
+            content,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "tool_closed_by_turn_end",
+            "tool_request_id": request.into_uuid().hyphenated().to_string(),
+            "content": content,
+        }),
+        ProcessTranscriptEntry::TurnFailed {
+            entry_index, turn, ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "turn_failed",
+            "turn_id": turn.into_uuid().hyphenated().to_string(),
+        }),
+        ProcessTranscriptEntry::TurnCompleted {
+            entry_index, turn, ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "turn_completed",
+            "turn_id": turn.into_uuid().hyphenated().to_string(),
+        }),
+        ProcessTranscriptEntry::TurnCancelled {
+            entry_index, turn, ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "turn_cancelled",
+            "turn_id": turn.into_uuid().hyphenated().to_string(),
+        }),
+        ProcessTranscriptEntry::ImportedText {
+            entry_index,
+            imported_conversation,
+            imported_entry,
+            source_speaker,
+            content,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "imported_text",
+            "imported_conversation_id": imported_conversation.into_uuid().hyphenated().to_string(),
+            "imported_entry_id": imported_entry.into_uuid().hyphenated().to_string(),
+            "source_speaker": imported_source_speaker_label(*source_speaker),
+            "content": content,
+        }),
+        ProcessTranscriptEntry::Imported {
+            entry_index,
+            imported_conversation,
+            imported_entry,
+            source_speaker,
+            content_kind,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "imported",
+            "imported_conversation_id": imported_conversation.into_uuid().hyphenated().to_string(),
+            "imported_entry_id": imported_entry.into_uuid().hyphenated().to_string(),
+            "source_speaker": imported_source_speaker_label(*source_speaker),
+            "content_kind": imported_content_kind_label(*content_kind),
+        }),
+    }
+}
+
+const fn imported_source_speaker_label(speaker: ProcessImportedSourceSpeaker) -> &'static str {
+    match speaker {
+        ProcessImportedSourceSpeaker::NotAttested => "not_attested",
+        ProcessImportedSourceSpeaker::AttestedAbsent => "attested_absent",
+        ProcessImportedSourceSpeaker::User => "user",
+        ProcessImportedSourceSpeaker::Assistant => "assistant",
+    }
+}
+
+const fn imported_content_kind_label(kind: ProcessImportedContentKind) -> &'static str {
+    match kind {
+        ProcessImportedContentKind::SourceEvent => "source_event",
+        ProcessImportedContentKind::SourceMessageBlock => "source_message_block",
+        ProcessImportedContentKind::Text => "text",
+        ProcessImportedContentKind::ToolCall => "tool_call",
+        ProcessImportedContentKind::ToolResult => "tool_result",
+        ProcessImportedContentKind::Thinking => "thinking",
+        ProcessImportedContentKind::RedactedThinking => "redacted_thinking",
+        ProcessImportedContentKind::Document => "document",
+        ProcessImportedContentKind::MessageContentAbsent => "message_content_absent",
+    }
+}
+
+const fn context_compaction_failure_disposition(
+    error: ContextCompactionModelError,
+) -> FailedContextCompactionDisposition {
+    match error {
+        ContextCompactionModelError::CancelledBeforeSend => {
+            FailedContextCompactionDisposition::Cancelled
+        }
+        ContextCompactionModelError::CorrelationMismatch
+        | ContextCompactionModelError::NotCompleted => {
+            FailedContextCompactionDisposition::Ambiguous
+        }
+        ContextCompactionModelError::UnconfiguredTarget
+        | ContextCompactionModelError::PreparationFailed
+        | ContextCompactionModelError::PreparationDefect
+        | ContextCompactionModelError::ProviderTargetSubstituted
+        | ContextCompactionModelError::IncompleteSummary
+        | ContextCompactionModelError::NonTextSummary
+        | ContextCompactionModelError::InvalidSummary => {
+            FailedContextCompactionDisposition::KnownFailed
+        }
+    }
+}
+
+async fn fail_context_compaction_before_response<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    repository: &ContextCompactionRepository,
+    prepared: &PreparedContextCompaction,
+    error: ContextCompactionRangeLoadError,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    match error {
+        ContextCompactionRangeLoadError::Read(error) => {
+            if let Err(repository_error) = repository
+                .fail(prepared, FailedContextCompactionDisposition::KnownFailed)
+                .await
+            {
+                return write_context_compaction_repository_error(
+                    writer,
+                    version,
+                    request_id,
+                    repository_error,
+                )
+                .await;
+            }
+            write_context_compaction_read_error(writer, version, request_id, error).await
+        }
+        ContextCompactionRangeLoadError::Integrity => {
+            if let Err(repository_error) = repository
+                .fail(prepared, FailedContextCompactionDisposition::KnownFailed)
+                .await
+            {
+                return write_context_compaction_repository_error(
+                    writer,
+                    version,
+                    request_id,
+                    repository_error,
+                )
+                .await;
+            }
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await
+        }
+    }
+}
+
+async fn write_context_compaction_receipt<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    applied: AppliedContextCompaction,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    write_mutation_receipt_via_spool(
+        writer,
+        version,
+        request_id,
+        ServerMessage::SessionCompacted {
+            session_id,
+            context_compaction_id: wire_uuid(applied.compaction.into_uuid()),
+            model_call_id: wire_uuid(applied.call.into_uuid()),
+            through_position: CanonicalU64::new(applied.through_position),
+            summary_entry_id: wire_uuid(applied.summary_entry.into_uuid()),
+            result_frontier_id: wire_uuid(applied.result_frontier.into_uuid()),
+        },
+    )
+    .await
+}
+
+async fn write_context_compaction_repository_error<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    error: ContextCompactionRepositoryError,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let response = match error {
+        ContextCompactionRepositoryError::Database(_) => ProtocolError::mutation_unavailable(false),
+        ContextCompactionRepositoryError::CommitAmbiguous(_) => {
+            ProtocolError::mutation_unavailable(true)
+        }
+        ContextCompactionRepositoryError::IdentityCollision
+        | ContextCompactionRepositoryError::Corruption(_) => {
+            ProtocolError::without_detail(ErrorCode::Internal)
+        }
+    };
+    write_error(writer, version, request_id, response).await
+}
+
+async fn write_context_compaction_read_error<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    error: ProcessReadError,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let response = match error {
+        ProcessReadError::Database(_) => ProtocolError::mutation_unavailable(false),
+        ProcessReadError::Corruption(_) => ProtocolError::without_detail(ErrorCode::Internal),
+    };
+    write_error(writer, version, request_id, response).await
+}
+
+#[derive(Debug)]
+enum ContextCompactionRangeLoadError {
+    Read(ProcessReadError),
+    Integrity,
+}
+
+impl From<ProcessReadError> for ContextCompactionRangeLoadError {
+    fn from(error: ProcessReadError) -> Self {
+        Self::Read(error)
+    }
+}
+
 async fn handle_create_session<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -5484,8 +6395,34 @@ where
             )
             .await
         }
-        ProcessTranscriptEntry::ContextSummary { .. } => {
-            Err(ProcessConnectionError::MessageRequiresVersion(17))
+        ProcessTranscriptEntry::ContextSummary {
+            entry_index,
+            source_session,
+            entry,
+            model_call,
+            first,
+            through,
+            content,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptTextEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptTextEntry::ContextSummary {
+                        model_call_id: wire_uuid(model_call.into_uuid()),
+                        first_source_session_id: wire_uuid(first.source_session().into_uuid()),
+                        first_entry_id: wire_uuid(first.entry().into_uuid()),
+                        through_source_session_id: wire_uuid(through.source_session().into_uuid()),
+                        through_entry_id: wire_uuid(through.entry().into_uuid()),
+                    },
+                },
+            )
+            .await?;
+            write_content(writer, version, request_id, *entry_index, content).await
         }
         ProcessTranscriptEntry::User {
             entry_index,
@@ -6436,7 +7373,7 @@ impl ProtocolError {
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1 through 13, and 16"
+                    "the protocol version is unsupported; supported versions: 1 through 13, 16, and 17"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
@@ -7191,7 +8128,7 @@ mod tests {
         assert!(
             ProtocolError::without_detail(ErrorCode::UnsupportedVersion)
                 .message
-                .contains("1 through 13, and 16")
+                .contains("1 through 13, 16, and 17")
         );
     }
 

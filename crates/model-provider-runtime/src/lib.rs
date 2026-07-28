@@ -8,11 +8,19 @@
 //! docs/spec/model-call-execution.md. It owns no retry, fallback, lifecycle,
 //! or durable state.
 
+mod context_compaction;
+
+pub use context_compaction::{
+    ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
+    ContextCompactionModelResult, RuntimeContextCompactionModel,
+};
+
 use std::{collections::HashMap, error::Error, fmt, future::Future, sync::Arc};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallProvider,
-    ModelConversationMessage, ModelToolResultContent, OperatorFailureClass, PreparedModelOperation,
+    ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallInputTokenCount,
+    ModelCallInputTokenCounter, ModelCallProvider, ModelConversationMessage,
+    ModelToolResultContent, OperatorFailureClass, PreparedModelOperation,
 };
 use signalbox_domain::{
     AssistantResponsePart, AssistantText, AuthorizedModelCall, ContextFrontierId,
@@ -775,6 +783,110 @@ impl<R> fmt::Debug for RuntimeModelCallProvider<R> {
             .field("runtime", &"[provider runtime]")
             .field("models", &self.models)
             .finish()
+    }
+}
+
+/// Sanitized exact-count adapter failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeInputTokenCountError {
+    /// The durable target has no runtime mapping.
+    UnconfiguredTarget,
+    /// A checked application schema could not form runtime JSON.
+    InvalidToolSchema,
+    /// The runtime returned a different caller-owned correlation.
+    CorrelationMismatch,
+    /// The provider-native count request did not return a validated count.
+    CountFailed,
+}
+
+impl fmt::Display for RuntimeInputTokenCountError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("exact model input token counting failed")
+    }
+}
+
+impl Error for RuntimeInputTokenCountError {}
+
+impl ClassifyOperatorFailure for RuntimeInputTokenCountError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::CountFailed => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            Self::UnconfiguredTarget | Self::InvalidToolSchema | Self::CorrelationMismatch => {
+                OperatorFailureClass::CallerOrHubBug
+            }
+        }
+    }
+}
+
+impl<R> ModelCallInputTokenCounter for RuntimeModelCallProvider<R>
+where
+    R: signalbox_model_runtime::ModelInputTokenCounter<ModelCallId> + Send + Sync,
+{
+    type Error = RuntimeInputTokenCountError;
+
+    async fn count_input_tokens<Cancellation>(
+        &self,
+        operation: PreparedModelOperation,
+        cancellation: Cancellation,
+    ) -> Result<ModelCallInputTokenCount, Self::Error>
+    where
+        Cancellation: Future<Output = ()> + Send + 'static,
+    {
+        let request = operation.request();
+        let call = request.call();
+        let correlation = call.id();
+        let definition = self
+            .models
+            .resolve(call.target())
+            .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
+        let messages = render_runtime_messages(operation.messages());
+        let tools = operation
+            .tools()
+            .iter()
+            .map(|definition| {
+                let schema = decode_checked_raw_json(definition.input_schema().as_str())
+                    .map_err(|_| RuntimeInputTokenCountError::InvalidToolSchema)?;
+                Ok(ToolDefinition::with_raw_schema(
+                    definition.name().as_str(),
+                    definition.description(),
+                    schema,
+                ))
+            })
+            .collect::<Result<Vec<_>, RuntimeInputTokenCountError>>()?;
+        let mut runtime_operation = ModelOperation::new(
+            correlation,
+            CredentialReference::new(operation.credential_reference().as_str().to_owned()),
+            RequestedTarget::new(render_requested_target(call.selection())),
+            ResolvedTarget::new(definition.provider_model().to_owned()),
+            messages,
+            ModelSettings::new(definition.max_output_tokens()),
+        );
+        runtime_operation.system = operation.system_prompt().map(str::to_owned);
+        runtime_operation.tools = tools;
+        runtime_operation.delivery = DeliveryMode::Streamed;
+        match self
+            .runtime
+            .count_input_tokens(runtime_operation, CancellationSignal::when(cancellation))
+            .await
+        {
+            signalbox_model_runtime::InputTokenCountOutcome::Counted {
+                correlation: returned,
+                input_tokens,
+            } if returned == correlation => Ok(ModelCallInputTokenCount::Counted(input_tokens)),
+            signalbox_model_runtime::InputTokenCountOutcome::Cancelled {
+                correlation: returned,
+            } if returned == correlation => Ok(ModelCallInputTokenCount::Cancelled),
+            signalbox_model_runtime::InputTokenCountOutcome::Failed {
+                correlation: returned,
+            } if returned == correlation => Err(RuntimeInputTokenCountError::CountFailed),
+            signalbox_model_runtime::InputTokenCountOutcome::Counted { .. }
+            | signalbox_model_runtime::InputTokenCountOutcome::Cancelled { .. }
+            | signalbox_model_runtime::InputTokenCountOutcome::Failed { .. } => {
+                Err(RuntimeInputTokenCountError::CorrelationMismatch)
+            }
+        }
     }
 }
 

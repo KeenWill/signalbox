@@ -222,7 +222,7 @@ impl ToolLoopFixture {
                 target,
                 String::from("scripted-tool-loop"),
                 64,
-            200_000,
+                200_000,
             )
             .expect("fixture runtime definition is valid")])
             .expect("one fixture runtime target is unique");

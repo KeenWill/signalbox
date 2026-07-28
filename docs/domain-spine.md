@@ -2633,6 +2633,10 @@ pub struct ModelCallExecutionReconstitutionError { /* private */ }
 
 pub struct ModelCallExecution { /* private */ }
 impl ModelCallExecution {
+    pub fn preview_initial_call(
+        &self,
+        call: ModelCallId,
+    ) -> Result<PreparedModelCallRequest, ModelCallPreparationError>;
     pub fn prepare_initial_call_consuming_steering(
         self,
         call: ModelCallId,
@@ -4377,6 +4381,13 @@ pub enum ModelToolResultContent {
 
 pub struct PreparedModelOperation { /* private */ }
 impl PreparedModelOperation {
+    pub fn render(
+        request: PreparedModelCallRequest,
+        credential_reference: ModelCallCredentialReference,
+        system_prompt: Option<SessionSystemPrompt>,
+        tools: Box<[ToolDefinition]>,
+        tool_entries: &[ResolvedToolConversationEntry],
+    ) -> Result<Self, ModelFrontierRenderingError>;
     // accessors: request(), credential_reference(), system_prompt(), messages(), tools()
 }
 
@@ -4514,6 +4525,22 @@ pub enum ModelCallCapabilityPreparation<Capability> {
     Ready(Capability),
     Cancelled,
     KnownFailure,
+}
+
+pub enum ModelCallInputTokenCount {
+    Counted(u64),
+    Cancelled,
+}
+
+pub trait ModelCallInputTokenCounter {
+    type Error: ClassifyOperatorFailure;
+    fn count_input_tokens<Cancellation>(
+        &self,
+        operation: PreparedModelOperation,
+        cancellation: Cancellation,
+    ) -> impl Future<Output = Result<ModelCallInputTokenCount, Self::Error>> + Send
+    where
+        Cancellation: Future<Output = ()> + Send + 'static;
 }
 
 pub trait ModelCallProvider {
@@ -6916,7 +6943,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
 | application: list_conversations                    | 8 (incl. 2 traits)   |
 | application: load_session                          | 2 (incl. 1 trait)    |
-| application: model_execution                       | 30 (incl. 7 traits)  |
+| application: model_execution                       | 32 (incl. 8 traits)  |
 | application: tool_loop                             | 23 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 5 (incl. 1 trait)    |
@@ -6928,4 +6955,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **153**              |
+| **signalbox-application total**                    | **155**              |

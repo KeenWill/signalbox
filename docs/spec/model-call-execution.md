@@ -27,7 +27,10 @@ the prepared operation was verified through PR #286
 (`agent/session-system-prompt`); the empty-thinking completion rule was verified
 through PR #305 (`agent/sonnet-streamed-tool-use`). Invariant tags cite
 [docs/invariants.md](../invariants.md). The context-summary projection and
-dedicated compaction-call evidence were verified against `319dd05b`.
+dedicated compaction-call evidence were verified against `319dd05b`; the
+version-seventeen explicit trigger, pre-activation context guard, configured
+prompt, and provider-native input counting were verified against
+`agent/context-compaction-protocol`.
 
 ## Call records and lifecycle
 
@@ -201,13 +204,14 @@ position, summary entry, and result frontier.
 
 Every catalog model selection also declares `context_window_tokens` as a
 required nonzero integer beside `max_output_tokens`. It is operator-declared per
-selection and is never inferred from provider/model names. Before authorizing an
-ordinary model send, the daemon obtains the exact rendered-input token count
-from that selection's provider adapter. When the count exceeds the declared
-window, the ordinary call is not sent; the daemon runs compaction through the
-latest safe boundary, reloads the resulting complete frontier, renders again,
-and proceeds only when the new input fits. A compaction result that still cannot
-fit fails closed rather than looping or guessing a different limit.
+selection and is never inferred from provider/model names. Before activating an
+eligible turn, the daemon renders its prospective initial ordinary call and
+obtains the exact input-token count from that selection's provider adapter. When
+the count exceeds the declared window, the turn is not activated and the
+ordinary call is not sent; the daemon runs compaction through the latest safe
+boundary, reloads the resulting complete frontier, renders and counts again, and
+proceeds only when the new input fits. A compaction result that still cannot fit
+fails closed rather than looping or guessing a different limit.
 
 Both triggers share the same compaction transaction and provider-call lifecycle.
 Provider interaction remains outside database transactions, and restart treats a

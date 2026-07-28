@@ -1880,7 +1880,8 @@ impl ClientRequest {
             return Err(FrameValidationError::ImportedFrontierShape);
         }
         if let Self::CompactSession {
-            through_position: Some(position), ..
+            through_position: Some(position),
+            ..
         } = self
             && position.value() == 0
         {
@@ -3711,7 +3712,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1 through 13, and 16",
+                "process-protocol version is unsupported; supported versions are 1 through 13, 16, and 17",
             ),
         }
     }
@@ -3922,7 +3923,20 @@ fn probe_header(
     }
     if !matches!(
         version_spelling,
-        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" | "12" | "13" | "16"
+        "1" | "2"
+            | "3"
+            | "4"
+            | "5"
+            | "6"
+            | "7"
+            | "8"
+            | "9"
+            | "10"
+            | "11"
+            | "12"
+            | "13"
+            | "16"
+            | "17"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -4040,6 +4054,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "12" => Some(ProtocolVersion::Twelve),
         "13" => Some(ProtocolVersion::Thirteen),
         "16" => Some(ProtocolVersion::Sixteen),
+        "17" => Some(ProtocolVersion::Seventeen),
         _ => None,
     }
 }
@@ -4179,7 +4194,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1 through 13, and 16")
+                .contains("supported versions are 1 through 13, 16, and 17")
         );
     }
 
@@ -5944,10 +5959,10 @@ mod tests {
     }
 
     /// INV-033: the admitted version set is closed exactly at one through
-    /// thirteen plus sixteen; fourteen and fifteen remain reserved by concurrent
-    /// protocol stacks and are not admitted here.
+    /// thirteen plus sixteen and seventeen; fourteen and fifteen remain
+    /// reserved by concurrent protocol stacks and are not admitted here.
     #[test]
-    fn inv033_versions_thirteen_and_sixteen_complete_the_admitted_set() {
+    fn inv033_versions_thirteen_sixteen_and_seventeen_complete_the_admitted_set() {
         assert_eq!(
             ProtocolVersion::Nine.as_u64(),
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
@@ -5971,7 +5986,56 @@ mod tests {
             ProtocolVersion::from_u64(16),
             Some(ProtocolVersion::Sixteen)
         );
-        assert_eq!(ProtocolVersion::from_u64(17), None);
+        assert_eq!(
+            ProtocolVersion::from_u64(17),
+            Some(ProtocolVersion::Seventeen)
+        );
+    }
+
+    /// INV-033: explicit context compaction has one closed version-seventeen
+    /// request shape, and a requested semantic position must be nonzero.
+    #[test]
+    fn inv033_version_seventeen_compaction_request_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let compact = ClientRequest::CompactSession {
+            command_id: command(1)?,
+            session_id: uuid(2),
+            through_position: Some(CanonicalU64::new(7)),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Sixteen,
+                request(3)?,
+                compact.clone(),
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::Seventeen, request(3)?, compact)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            concat!(
+                "{\"version\":17,\"request_id\":\"3\",\"request\":{",
+                "\"type\":\"compact_session\",",
+                "\"command_id\":\"00000000-0000-0000-0000-000000000001\",",
+                "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
+                "\"through_position\":\"7\"}}\n"
+            )
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+
+        let zero = ClientRequest::CompactSession {
+            command_id: command(4)?,
+            session_id: uuid(5),
+            through_position: Some(CanonicalU64::new(0)),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::Seventeen, request(6)?, zero,),
+            Err(FrameValidationError::ContextCompactionShape)
+        );
+        Ok(())
     }
 
     #[test]

@@ -11,6 +11,7 @@ use std::{
     io::{self, ErrorKind},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -20,10 +21,10 @@ use signalbox_application::{
     CreateSessionFromImportedFrontierService, ImportConversationOutcome, ImportConversationService,
     ImportedConversationIdGenerator, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
     InProcessToolDispatchGate, ModelCallCredentialReference, ModelCallExecutionOutcome,
-    ModelCallExecutionService, SchedulerLoop, SchedulerLoopExit, ScriptedModelCallProvider,
-    ScriptedModelCallStep, StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
-    UuidV7ModelCallExecutionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7StartupScanIdGenerator,
+    ModelCallExecutionService, NoToolCatalog, SchedulerLoop, SchedulerLoopExit,
+    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnOutcome,
+    StartEligibleTurnService, StartupScanService, UuidV7ModelCallExecutionIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -36,11 +37,13 @@ use signalbox_domain::{
     ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
     ToolUsingAssistantResponse, TurnId,
 };
-use signalbox_model_provider_runtime::RuntimeModelCallProvider;
+use signalbox_model_provider_runtime::{RuntimeContextCompactionModel, RuntimeModelCallProvider};
 use signalbox_model_runtime::{
-    AssistantPart, BoundaryLossEvidence, CompletionEvidence, CompletionFinish, DeliveryMode,
-    ExchangeFacts, LossCause, ObservationFact, ProviderReportedModel, Script, ScriptedModel,
-    TerminalEvidence, TokenUsage,
+    AssistantPart, BoundaryLossEvidence, CancellationSignal, CompletionEvidence, CompletionFinish,
+    DeliveryMode, ExchangeFacts, InputTokenCountOutcome, LossCause, MessagePart,
+    ModelInputTokenCounter, ModelOperation, ModelRuntime, ObservationFact, ObservationSink,
+    PreparationOutcome, ProviderReportedModel, Script, ScriptedModel, ScriptedPrepared,
+    TerminalEvidence, TerminalReport, TokenUsage,
 };
 use signalbox_persistence::{
     conversation_import::ImportedConversationRepository,
@@ -61,9 +64,9 @@ use signalbox_process_protocol::{
     TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
-    ActivatedTurnPass, FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
-    PostgresProviderModelExecution, ProcessProviderTextDeltaSink, ProcessRuntime,
-    ProcessRuntimeError,
+    ActivatedTurnPass, ContextGuardedTurnPass, FatalExecutionSupervisor, HubModelConfiguration,
+    LocalProcessListener, PostgresProviderModelExecution, ProcessProviderTextDeltaSink,
+    ProcessRuntime, ProcessRuntimeError,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -116,6 +119,91 @@ context_window_tokens = 200000
 alias_id = "00000000-0000-0000-0000-000000000002"
 selection_id = "00000000-0000-0000-0000-000000000001"
 "#;
+
+#[derive(Clone, Debug)]
+struct RecordingCountedScriptedModel {
+    inner: ScriptedModel<ModelCallId>,
+    prepared_operations: Arc<Mutex<Vec<ModelOperation<ModelCallId>>>>,
+    counted_operations: Arc<Mutex<Vec<ModelOperation<ModelCallId>>>>,
+    counts: Arc<Mutex<VecDeque<u64>>>,
+}
+
+impl RecordingCountedScriptedModel {
+    fn following(
+        scripts: impl IntoIterator<Item = Script>,
+        counts: impl IntoIterator<Item = u64>,
+    ) -> Self {
+        Self {
+            inner: ScriptedModel::following(scripts),
+            prepared_operations: Arc::new(Mutex::new(Vec::new())),
+            counted_operations: Arc::new(Mutex::new(Vec::new())),
+            counts: Arc::new(Mutex::new(counts.into_iter().collect())),
+        }
+    }
+
+    fn prepared_operations(&self) -> Vec<ModelOperation<ModelCallId>> {
+        self.prepared_operations
+            .lock()
+            .expect("the recording fixture lock is available")
+            .clone()
+    }
+
+    fn counted_operations(&self) -> Vec<ModelOperation<ModelCallId>> {
+        self.counted_operations
+            .lock()
+            .expect("the counting fixture lock is available")
+            .clone()
+    }
+}
+
+impl ModelRuntime<ModelCallId> for RecordingCountedScriptedModel {
+    type Prepared = ScriptedPrepared<ModelCallId>;
+
+    async fn prepare(
+        &self,
+        operation: ModelOperation<ModelCallId>,
+        cancellation: CancellationSignal,
+    ) -> PreparationOutcome<ModelCallId, Self::Prepared> {
+        self.prepared_operations
+            .lock()
+            .expect("the recording fixture lock is available")
+            .push(operation.clone());
+        self.inner.prepare(operation, cancellation).await
+    }
+
+    async fn execute(
+        &self,
+        prepared: Self::Prepared,
+        sink: &mut (dyn ObservationSink<ModelCallId> + Send),
+        cancellation: CancellationSignal,
+    ) -> TerminalReport<ModelCallId> {
+        self.inner.execute(prepared, sink, cancellation).await
+    }
+}
+
+impl ModelInputTokenCounter<ModelCallId> for RecordingCountedScriptedModel {
+    async fn count_input_tokens(
+        &self,
+        operation: ModelOperation<ModelCallId>,
+        _cancellation: CancellationSignal,
+    ) -> InputTokenCountOutcome<ModelCallId> {
+        let correlation = operation.correlation;
+        self.counted_operations
+            .lock()
+            .expect("the counting fixture lock is available")
+            .push(operation);
+        let input_tokens = self
+            .counts
+            .lock()
+            .expect("the count-script lock is available")
+            .pop_front()
+            .expect("the exact-count fixture has a scripted result");
+        InputTokenCountOutcome::Counted {
+            correlation,
+            input_tokens,
+        }
+    }
+}
 
 async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -351,19 +439,38 @@ struct RunningRuntime {
 
 impl RunningRuntime {
     async fn start() -> Result<Self, Box<dyn Error>> {
+        Self::start_with_optional_compaction(None).await
+    }
+
+    async fn start_with_compaction(
+        model: ScriptedModel<ModelCallId>,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_optional_compaction(Some(model)).await
+    }
+
+    async fn start_with_optional_compaction(
+        compaction_model: Option<ScriptedModel<ModelCallId>>,
+    ) -> Result<Self, Box<dyn Error>> {
         let (container, pool) = postgres().await?;
         let socket_directory = SocketDirectory::create()?;
         let listener = LocalProcessListener::bind(socket_directory.socket())?;
         let sweep = PostgresEligibilitySweep::new(pool.clone());
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
         let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
-        let runtime = ProcessRuntime::new(
+        let runtime_models = model_configuration.runtime_model_catalog();
+        let mut runtime = ProcessRuntime::new(
             listener,
             pool.clone(),
             eligibility_nudge,
             InProcessToolDispatchGate::default(),
             model_configuration,
         );
+        if let Some(compaction_model) = compaction_model {
+            runtime = runtime.with_context_compaction_model(
+                RuntimeContextCompactionModel::new(compaction_model, runtime_models),
+                "scripted-compaction",
+            );
+        }
         let provider_text_deltas = runtime.provider_text_delta_sink();
         let (shutdown, shutdown_receiver) = watch::channel(false);
         let runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
@@ -791,6 +898,164 @@ async fn execute_streamed_turn_until(
     );
     assert!(!fatal_execution.is_triggered());
     Ok(probe)
+}
+
+async fn execute_recorded_turn(
+    runtime: &mut RunningRuntime,
+    scripted: RecordingCountedScriptedModel,
+    model_configuration: HubModelConfiguration,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+) -> Result<RecordingCountedScriptedModel, Box<dyn Error>> {
+    let probe = scripted.clone();
+    let provider =
+        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
+            .with_text_delta_sink(runtime.provider_text_delta_sink());
+    let (execution, fatal_execution) =
+        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+            PostgresModelCallRepository::new(
+                runtime.pool.clone(),
+                model_configuration.target_catalog(),
+                ModelCallCredentialReference::new("recording-fixture"),
+            ),
+            InProcessAttemptDispatchGate::default(),
+            provider,
+        ));
+    let pass = ActivatedTurnPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(runtime.pool.clone()),
+        ),
+        execution,
+    );
+    let mut scheduler = SchedulerLoop::new(runtime.take_work_source(), pass);
+    let observation_pool = runtime.pool.clone();
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let turn = TurnId::from_uuid(turn_id.into_uuid());
+    let fatal_shutdown = fatal_execution.clone();
+    let shutdown = async move {
+        tokio::select! {
+            () = wait_for_turn_settle(&observation_pool, session, turn, TurnSettle::Terminal) => {}
+            () = fatal_shutdown.wait() => {}
+        }
+    };
+    let scheduler_outcome = timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await;
+    let Ok(scheduler_exit) = scheduler_outcome else {
+        let lifecycle = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT state_kind, active_phase_kind
+               FROM turn_lifecycle
+              WHERE session_id = $1 AND turn_id = $2",
+        )
+        .bind(session.into_uuid())
+        .bind(turn.into_uuid())
+        .fetch_one(&runtime.pool)
+        .await?;
+        let calls: Vec<String> = sqlx::query_scalar(
+            "SELECT state_kind FROM model_call
+              WHERE session_id = $1 AND turn_id = $2",
+        )
+        .bind(session.into_uuid())
+        .bind(turn.into_uuid())
+        .fetch_all(&runtime.pool)
+        .await?;
+        let mut diagnostic_activation = StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(runtime.pool.clone()),
+        );
+        let activation = diagnostic_activation.execute(session).await;
+        panic!(
+            "recorded turn timed out: lifecycle={lifecycle:?}; calls={calls:?}; activation={activation:?}"
+        );
+    };
+    assert_eq!(scheduler_exit, SchedulerLoopExit::Shutdown);
+    assert!(!fatal_execution.is_triggered());
+    Ok(probe)
+}
+
+async fn execute_guarded_turn(
+    runtime: &mut RunningRuntime,
+    scripted: RecordingCountedScriptedModel,
+    summary_runtime: ScriptedModel<ModelCallId>,
+    model_configuration: HubModelConfiguration,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+) -> Result<RecordingCountedScriptedModel, Box<dyn Error>> {
+    let probe = scripted.clone();
+    let runtime_models = model_configuration.runtime_model_catalog();
+    let provider = RuntimeModelCallProvider::new(scripted, runtime_models.clone())
+        .with_text_delta_sink(runtime.provider_text_delta_sink());
+    let counter = provider.clone();
+    let repository = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        model_configuration.target_catalog(),
+        ModelCallCredentialReference::new("guarded-recording-fixture"),
+    );
+    let guarded_repository = repository.clone();
+    let (execution, fatal_execution) =
+        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+            repository,
+            InProcessAttemptDispatchGate::default(),
+            provider,
+        ));
+    let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
+        Arc::new(RuntimeContextCompactionModel::new(
+            summary_runtime,
+            runtime_models.clone(),
+        ));
+    let pass = ContextGuardedTurnPass::new(
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+        guarded_repository,
+        counter,
+        NoToolCatalog,
+        runtime_models,
+        model_configuration,
+        compaction_model,
+        "guarded-summary-fixture",
+        execution,
+    );
+    let mut scheduler = SchedulerLoop::new(runtime.take_work_source(), pass);
+    let observation_pool = runtime.pool.clone();
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let turn = TurnId::from_uuid(turn_id.into_uuid());
+    let fatal_shutdown = fatal_execution.clone();
+    let shutdown = async move {
+        tokio::select! {
+            () = wait_for_turn_settle(&observation_pool, session, turn, TurnSettle::Terminal) => {}
+            () = fatal_shutdown.wait() => {}
+        }
+    };
+    assert_eq!(
+        timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await?,
+        SchedulerLoopExit::Shutdown
+    );
+    assert!(!fatal_execution.is_triggered());
+    Ok(probe)
+}
+
+fn completed_script(provider_model: &str, text: &str, usage: TokenUsage) -> Script {
+    Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+        exchange: ExchangeFacts::default(),
+        message_id: None,
+        reported_model: Some(ProviderReportedModel::new(provider_model)),
+        finish: CompletionFinish::EndTurn,
+        content: vec![AssistantPart::Text(text.to_owned())],
+        usage,
+    }))
+}
+
+fn rendered_text_messages(
+    operation: &ModelOperation<ModelCallId>,
+) -> Vec<(signalbox_model_runtime::ConversationRole, String)> {
+    operation
+        .messages
+        .iter()
+        .map(|message| {
+            let [MessagePart::Text(text)] = message.parts.as_slice() else {
+                panic!("the compaction fixture expects text-only runtime messages")
+            };
+            (message.role, text.clone())
+        })
+        .collect()
 }
 
 #[track_caller]
@@ -4342,5 +4607,337 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
     );
 
     drop(connection);
+    runtime.stop().await
+}
+
+/// S01 / S03 / INV-005 / INV-014 / INV-015: explicit compaction uses a
+/// dedicated scripted call, retains the complete transcript and exact usage /
+/// range provenance, survives startup scan, and projects summary plus suffix
+/// into the next ordinary scripted call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_projects()
+-> Result<(), Box<dyn Error>> {
+    let usage = TokenUsage {
+        input_tokens: Some(41),
+        output_tokens: Some(7),
+        cache_creation_input_tokens: Some(5),
+        cache_read_input_tokens: Some(29),
+    };
+    let summary_text = String::from("durable scripted summary");
+    let summary_runtime =
+        ScriptedModel::single(completed_script("fixture-model", &summary_text, usage));
+    let mut runtime = RunningRuntime::start_with_compaction(summary_runtime).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let first_user = String::from("first durable request");
+    let (_, first_turn) =
+        submit_first_input(&mut connection, session_id, first_user.clone()).await?;
+    let first_assistant = String::from("first durable reply");
+    let first_model = ScriptedModel::single(completed_script(
+        "fixture-model",
+        &first_assistant,
+        TokenUsage::unreported(),
+    ));
+    let first_probe =
+        execute_streamed_turn(&mut runtime, first_model, session_id, first_turn).await?;
+    assert_eq!(first_probe.received_operations().len(), 1);
+    let before_members = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT member.source_session_id, member.semantic_entry_id
+           FROM turn_lifecycle AS lifecycle
+           JOIN context_frontier_member AS member
+             ON member.owning_session_id = lifecycle.session_id
+            AND member.context_frontier_id = lifecycle.terminal_frontier_id
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.turn_id = $2
+          ORDER BY member.member_position",
+    )
+    .bind(session_id.into_uuid())
+    .bind(first_turn.into_uuid())
+    .fetch_all(&runtime.pool)
+    .await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Seventeen,
+            3,
+            ClientRequest::CompactSession {
+                command_id: command()?,
+                session_id,
+                through_position: None,
+            },
+        )
+        .await?;
+    let receipt = response_within(&mut connection).await?;
+    let ServerMessage::SessionCompacted {
+        session_id: compacted_session,
+        context_compaction_id,
+        model_call_id,
+        through_position,
+        summary_entry_id,
+        result_frontier_id,
+    } = receipt.message()
+    else {
+        panic!(
+            "the explicit compaction fixture expected a receipt, got {:?}",
+            receipt.message()
+        )
+    };
+    assert_eq!(*compacted_session, session_id);
+    assert_eq!(through_position.value(), before_members.len() as u64);
+    let after_members = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT source_session_id, semantic_entry_id
+           FROM context_frontier_member
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2
+          ORDER BY member_position",
+    )
+    .bind(session_id.into_uuid())
+    .bind(result_frontier_id.into_uuid())
+    .fetch_all(&runtime.pool)
+    .await?;
+    assert_eq!(
+        &after_members[..before_members.len()],
+        before_members.as_slice()
+    );
+    assert_eq!(after_members.len(), before_members.len() + 1);
+    assert_eq!(
+        after_members.last().map(|member| member.1),
+        Some(summary_entry_id.into_uuid())
+    );
+    let stored_provenance = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, Uuid, Uuid)>(
+        "SELECT compaction.producing_call_id,
+                compaction.first_source_session_id, compaction.first_entry_id,
+                compaction.through_source_session_id, compaction.through_entry_id,
+                summary.context_summary_producing_call_id
+           FROM context_compaction AS compaction
+           JOIN semantic_transcript_entry AS summary
+             ON summary.source_session_id = compaction.session_id
+            AND summary.semantic_entry_id = compaction.summary_entry_id
+          WHERE compaction.context_compaction_id = $1",
+    )
+    .bind(context_compaction_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(stored_provenance.0, model_call_id.into_uuid());
+    assert_eq!(
+        (stored_provenance.1, stored_provenance.2),
+        before_members[0]
+    );
+    assert_eq!(
+        (stored_provenance.3, stored_provenance.4),
+        *before_members
+            .last()
+            .expect("the terminal frontier is nonempty")
+    );
+    assert_eq!(stored_provenance.5, model_call_id.into_uuid());
+    let stored_usage = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>, Option<i64>)>(
+        "SELECT input_tokens::bigint, output_tokens::bigint,
+                cache_creation_input_tokens::bigint, cache_read_input_tokens::bigint
+           FROM context_compaction_model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(model_call_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(stored_usage.0, usage.input_tokens.map(|value| value as i64));
+    assert_eq!(
+        stored_usage.1,
+        usage.output_tokens.map(|value| value as i64)
+    );
+    assert_eq!(
+        stored_usage.2,
+        usage.cache_creation_input_tokens.map(|value| value as i64)
+    );
+    assert_eq!(
+        stored_usage.3,
+        usage.cache_read_input_tokens.map(|value| value as i64)
+    );
+
+    drop(connection);
+    assert_eq!(runtime.restart().await?, 0);
+    let mut successor = Connection::connect(runtime.socket()).await?;
+    let second_user = String::from("post-restart suffix request");
+    successor
+        .request_version(
+            ProtocolVersion::Seventeen,
+            4,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(second_user.clone()),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
+            },
+        )
+        .await?;
+    let second_turn = accepted_successor_turn(&mut successor, session_id, 2).await?;
+    let second_model = RecordingCountedScriptedModel::following(
+        [completed_script(
+            "fixture-model",
+            "post-restart reply",
+            TokenUsage::unreported(),
+        )],
+        [],
+    );
+    let second_probe = execute_recorded_turn(
+        &mut runtime,
+        second_model,
+        HubModelConfiguration::parse(MODEL_CONFIGURATION)?,
+        session_id,
+        second_turn,
+    )
+    .await?;
+    let prepared = second_probe.prepared_operations();
+    assert_eq!(prepared.len(), 1);
+    assert_eq!(
+        rendered_text_messages(&prepared[0]),
+        vec![
+            (
+                signalbox_model_runtime::ConversationRole::User,
+                format!("Signalbox prior-conversation summary:\n{summary_text}"),
+            ),
+            (signalbox_model_runtime::ConversationRole::User, second_user,),
+        ]
+    );
+    let persisted_summary: String = sqlx::query_scalar(
+        "SELECT context_summary_value
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1
+            AND semantic_entry_id = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(summary_entry_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(persisted_summary, summary_text);
+
+    drop(successor);
+    runtime.stop().await
+}
+
+/// S01 / S03 / INV-014 / INV-015: an exact provider-native count above the
+/// operator-declared context window compacts before activation, recounts the
+/// projected summary-plus-suffix input, and sends only that fitting operation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let first_user = String::from("automatic guard historical request");
+    let (_, first_turn) =
+        submit_first_input(&mut connection, session_id, first_user.clone()).await?;
+    let first_assistant = String::from("automatic guard historical reply");
+    let first_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        &first_assistant,
+        TokenUsage::unreported(),
+    ));
+    let first_probe =
+        execute_streamed_turn(&mut runtime, first_runtime, session_id, first_turn).await?;
+    assert_eq!(first_probe.received_operations().len(), 1);
+
+    drop(connection);
+    assert_eq!(runtime.restart().await?, 0);
+    let mut successor = Connection::connect(runtime.socket()).await?;
+    let second_user = String::from("automatic guard current suffix");
+    successor
+        .request_version(
+            ProtocolVersion::Seventeen,
+            3,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(second_user.clone()),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
+            },
+        )
+        .await?;
+    let second_turn = accepted_successor_turn(&mut successor, session_id, 2).await?;
+    let guarded_configuration = HubModelConfiguration::parse(&MODEL_CONFIGURATION.replace(
+        "context_window_tokens = 200000",
+        "context_window_tokens = 4",
+    ))?;
+    let ordinary_runtime = RecordingCountedScriptedModel::following(
+        [completed_script(
+            "fixture-model",
+            "automatic guard current reply",
+            TokenUsage::unreported(),
+        )],
+        [40, 4],
+    );
+    let summary_text = String::from("automatic guard summary");
+    let summary_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        &summary_text,
+        TokenUsage::unreported(),
+    ));
+    let probe = execute_guarded_turn(
+        &mut runtime,
+        ordinary_runtime,
+        summary_runtime,
+        guarded_configuration,
+        session_id,
+        second_turn,
+    )
+    .await?;
+    let counted = probe.counted_operations();
+    assert_eq!(counted.len(), 2);
+    let first_counted_text = rendered_text_messages(&counted[0]);
+    assert!(
+        first_counted_text
+            .iter()
+            .any(|message| message.1 == first_user)
+    );
+    assert!(
+        first_counted_text
+            .iter()
+            .any(|message| message.1 == first_assistant)
+    );
+    assert_eq!(
+        rendered_text_messages(&counted[1]),
+        vec![
+            (
+                signalbox_model_runtime::ConversationRole::User,
+                format!("Signalbox prior-conversation summary:\n{summary_text}"),
+            ),
+            (
+                signalbox_model_runtime::ConversationRole::User,
+                second_user.clone(),
+            ),
+        ]
+    );
+    let prepared = probe.prepared_operations();
+    assert_eq!(prepared.len(), 1);
+    assert_eq!(
+        rendered_text_messages(&prepared[0]),
+        rendered_text_messages(&counted[1])
+    );
+    let compaction_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM context_compaction
+          WHERE session_id = $1",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(compaction_count, 1);
+    let summary_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1
+            AND payload_kind = 'context_summary'
+            AND context_summary_value = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(&summary_text)
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(summary_count, 1);
+
+    drop(successor);
     runtime.stop().await
 }

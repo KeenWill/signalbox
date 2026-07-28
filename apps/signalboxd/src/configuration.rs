@@ -103,8 +103,7 @@ impl HubModelConfiguration {
                 return Err(HubModelConfigurationError::InvalidProviderModel);
             }
             let max_output_tokens = required_positive_u32(model, "max_output_tokens")?;
-            let context_window_tokens =
-                required_positive_u32(model, "context_window_tokens")?;
+            let context_window_tokens = required_positive_u32(model, "context_window_tokens")?;
             let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 required_uuid(model, "target_id")?,
             ));
@@ -275,7 +274,9 @@ impl fmt::Display for HubModelConfigurationError {
             Self::UnsupportedProvider => "model configuration names an unsupported provider",
             Self::InvalidProviderModel => "model configuration contains an invalid provider model",
             Self::InvalidLimit => "model configuration contains an invalid token limit",
-            Self::InvalidCompactionPrompt => "model configuration contains an invalid compaction prompt",
+            Self::InvalidCompactionPrompt => {
+                "model configuration contains an invalid compaction prompt"
+            }
             Self::DuplicateSelection => "model configuration repeats a direct selection",
             Self::ConflictingTarget => "model configuration gives one target conflicting meaning",
             Self::InvalidAliases => "model aliases are not an array of tables",
@@ -376,7 +377,7 @@ mod tests {
 
     use super::{
         ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
-        HubModelConfigurationError, credential_bytes,
+        HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES, credential_bytes,
     };
 
     const CONFIGURATION: &str = r#"
@@ -445,6 +446,73 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         assert_eq!(
             HubModelConfiguration::parse(&dangling).err(),
             Some(HubModelConfigurationError::DanglingAlias)
+        );
+    }
+
+    #[test]
+    fn configuration_requires_a_positive_declared_context_window() {
+        let missing = CONFIGURATION.replace("\ncontext_window_tokens = 200000", "");
+        assert_eq!(
+            HubModelConfiguration::parse(&missing).err(),
+            Some(HubModelConfigurationError::InvalidField)
+        );
+
+        let zero = CONFIGURATION.replace(
+            "context_window_tokens = 200000",
+            "context_window_tokens = 0",
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&zero).err(),
+            Some(HubModelConfigurationError::InvalidLimit)
+        );
+    }
+
+    #[test]
+    fn configuration_requires_one_bounded_exact_compaction_prompt() {
+        let missing_table = CONFIGURATION.replace(
+            "[compaction]\nprompt = \"Summarize the prior conversation faithfully for continuation.\"\n\n",
+            "",
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&missing_table).err(),
+            Some(HubModelConfigurationError::MissingCompaction)
+        );
+
+        let missing_prompt = CONFIGURATION.replace(
+            "prompt = \"Summarize the prior conversation faithfully for continuation.\"\n",
+            "",
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&missing_prompt).err(),
+            Some(HubModelConfigurationError::InvalidField)
+        );
+
+        let empty = CONFIGURATION.replace(
+            "Summarize the prior conversation faithfully for continuation.",
+            "",
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&empty).err(),
+            Some(HubModelConfigurationError::InvalidCompactionPrompt)
+        );
+
+        let nul = CONFIGURATION.replace(
+            "Summarize the prior conversation faithfully for continuation.",
+            "contains\\u0000nul",
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&nul).err(),
+            Some(HubModelConfigurationError::InvalidCompactionPrompt)
+        );
+
+        let oversized_prompt = "x".repeat(MAX_COMPACTION_PROMPT_UTF8_BYTES + 1);
+        let oversized = CONFIGURATION.replace(
+            "Summarize the prior conversation faithfully for continuation.",
+            &oversized_prompt,
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&oversized).err(),
+            Some(HubModelConfigurationError::InvalidCompactionPrompt)
         );
     }
 

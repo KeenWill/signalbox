@@ -24,6 +24,7 @@ use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepos
 use tokio::sync::watch;
 
 mod configuration;
+mod context_guard;
 mod daemon_tools;
 mod fenced_database;
 mod local_socket;
@@ -34,6 +35,7 @@ pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
     HubModelConfigurationError,
 };
+pub use context_guard::{ContextGuardedTurnPass, ContextGuardedTurnPassError};
 pub use daemon_tools::{
     DaemonToolCatalog, DaemonToolExecutor, DaemonToolExecutorError, DaemonTools,
     DaemonToolsConstructionError,

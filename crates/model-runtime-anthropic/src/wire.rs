@@ -86,6 +86,37 @@ pub(crate) enum WireToolChoice {
     },
 }
 
+/// Exact request accepted by `POST /v1/messages/count_tokens`.
+#[derive(Debug, Serialize)]
+pub(crate) struct CountTokensRequest {
+    pub model: String,
+    pub messages: Vec<WireMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<WireTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<WireToolChoice>,
+}
+
+impl From<MessagesRequest> for CountTokensRequest {
+    fn from(request: MessagesRequest) -> Self {
+        Self {
+            model: request.model,
+            messages: request.messages,
+            system: request.system,
+            tools: request.tools,
+            tool_choice: request.tool_choice,
+        }
+    }
+}
+
+/// Complete successful count-tokens response.
+#[derive(Debug, Deserialize)]
+pub(crate) struct CountTokensResponse {
+    pub input_tokens: u64,
+}
+
 // --- Response ---
 
 #[derive(Debug, Deserialize)]

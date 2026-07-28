@@ -12,12 +12,13 @@ use reqwest::{Client, Url};
 
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CancellationSignal, CompletionFinish, DeliveryMode,
-    ExchangeFacts, FinishReason, LossCause, ModelOperation, ModelRuntime, NativeErrorFacts,
-    Observation, ObservationFact, ObservationSink, PreparationDefect, PreparationFailure,
-    PreparationOutcome, ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind,
-    ProviderMessageId, ProviderReportedModel, ProviderRequestId, SseFraming, StreamInterruption,
-    TerminalEvidence, TerminalReport, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
-    TransportFacts, UnsentCause, validate_provider_json_nesting,
+    ExchangeFacts, FinishReason, InputTokenCountOutcome, LossCause, ModelInputTokenCounter,
+    ModelOperation, ModelRuntime, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
+    PreparationDefect, PreparationFailure, PreparationOutcome, ProvenUnsentEvidence,
+    ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderReportedModel,
+    ProviderRequestId, SseFraming, StreamInterruption, TerminalEvidence, TerminalReport,
+    TokenUsage, ToolCallId, ToolCallProposal, ToolName, TransportFacts, UnsentCause,
+    validate_provider_json_nesting,
 };
 
 use signalbox_model_runtime::{CredentialAccess, CredentialValue};
@@ -27,7 +28,7 @@ use crate::response::decode_buffered_response;
 use crate::status::{classify_error, classify_error_status};
 use crate::stream::{StreamDecoder, StreamStep};
 use crate::translate::build_request;
-use crate::wire::ErrorEnvelope;
+use crate::wire::{CountTokensRequest, CountTokensResponse, ErrorEnvelope};
 
 /// A response body is provider-controlled input. Keep complete buffered
 /// responses bounded independently of the requested output-token ceiling.
@@ -43,6 +44,7 @@ const MAX_STREAMED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub struct AnthropicRuntime<A> {
     client: Client,
     messages_url: Url,
+    count_tokens_url: Url,
     credentials: A,
     version_header: HeaderValue,
     sse_record_limit: usize,
@@ -80,6 +82,7 @@ impl<A> std::fmt::Debug for AnthropicRuntime<A> {
         f.debug_struct("AnthropicRuntime")
             .field("client", &self.client)
             .field("messages_url", &self.messages_url)
+            .field("count_tokens_url", &self.count_tokens_url)
             .field("credentials", &"[redacted]")
             .field("version_header", &"[sensitive]")
             .field("sse_record_limit", &self.sse_record_limit)
@@ -236,6 +239,13 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         .map_err(|error| AnthropicConstructionError::InvalidBaseUrl {
             detail: error.to_string(),
         })?;
+        let count_tokens_url = Url::parse(&format!(
+            "{}/v1/messages/count_tokens",
+            config.base_url.trim_end_matches('/')
+        ))
+        .map_err(|error| AnthropicConstructionError::InvalidBaseUrl {
+            detail: error.to_string(),
+        })?;
         let version_header = HeaderValue::from_str(&config.anthropic_version)
             .map_err(|_| AnthropicConstructionError::InvalidVersion)?;
         // The workspace graph selects only ring; installation may already
@@ -263,6 +273,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         Ok(Self {
             client,
             messages_url,
+            count_tokens_url,
             credentials,
             version_header,
             sse_record_limit: config.sse_record_limit,
@@ -572,6 +583,76 @@ fn process_streamed_chunk<C: Clone>(
         PrefixBudget::Overflowed { .. } => Some(decoder.violation_evidence(format!(
             "streamed response exceeded the {MAX_STREAMED_RESPONSE_BYTES}-byte adapter limit"
         ))),
+    }
+}
+
+impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
+    for AnthropicRuntime<A>
+{
+    async fn count_input_tokens(
+        &self,
+        operation: ModelOperation<C>,
+        mut cancellation: CancellationSignal,
+    ) -> InputTokenCountOutcome<C> {
+        let correlation = operation.correlation.clone();
+        let wire_request = match build_request(&operation) {
+            Ok(request) => CountTokensRequest::from(request),
+            Err(_) => return InputTokenCountOutcome::Failed { correlation },
+        };
+        let body = match serialize_request(&wire_request) {
+            Ok(body) => body,
+            Err(_) => return InputTokenCountOutcome::Failed { correlation },
+        };
+        let credential = match with_cancellation(
+            &mut cancellation,
+            self.credentials.resolve(&operation.credential_reference),
+        )
+        .await
+        {
+            None => return InputTokenCountOutcome::Cancelled { correlation },
+            Some(Err(_)) => return InputTokenCountOutcome::Failed { correlation },
+            Some(Ok(credential)) => credential,
+        };
+        let Some(api_key_header) = sensitive_header(&credential) else {
+            return InputTokenCountOutcome::Failed { correlation };
+        };
+        let request = match build_http_request(
+            self.client
+                .post(self.count_tokens_url.clone())
+                .header("x-api-key", api_key_header)
+                .header("anthropic-version", self.version_header.clone())
+                .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+                .body(body),
+        ) {
+            Ok(request) => request,
+            Err(_) => return InputTokenCountOutcome::Failed { correlation },
+        };
+        let response =
+            match with_cancellation(&mut cancellation, self.client.execute(request)).await {
+                None => return InputTokenCountOutcome::Cancelled { correlation },
+                Some(Err(_)) => return InputTokenCountOutcome::Failed { correlation },
+                Some(Ok(response)) => response,
+            };
+        if !response.status().is_success() {
+            let _ = collect_response_body(response, &mut cancellation).await;
+            return InputTokenCountOutcome::Failed { correlation };
+        }
+        let body = match collect_response_body(response, &mut cancellation).await {
+            None => return InputTokenCountOutcome::Cancelled { correlation },
+            Some(Err(_)) => return InputTokenCountOutcome::Failed { correlation },
+            Some(Ok(body)) => body,
+        };
+        if validate_provider_json_nesting(&body).is_err() {
+            return InputTokenCountOutcome::Failed { correlation };
+        }
+        let response: CountTokensResponse = match serde_json::from_slice(&body) {
+            Ok(response) => response,
+            Err(_) => return InputTokenCountOutcome::Failed { correlation },
+        };
+        InputTokenCountOutcome::Counted {
+            correlation,
+            input_tokens: response.input_tokens,
+        }
     }
 }
 

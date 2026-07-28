@@ -135,6 +135,24 @@ impl<'a> Output<'a> {
         writeln!(self.stdout, "{session_id}")
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn session_compacted(
+        &mut self,
+        session_id: CanonicalUuid,
+        context_compaction_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        through_position: u64,
+        summary_entry_id: CanonicalUuid,
+        result_frontier_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "session={session_id} compaction={context_compaction_id} call={model_call_id} \
+             through_position={through_position} summary_entry={summary_entry_id} \
+             result_frontier={result_frontier_id}"
+        )
+    }
+
     pub(crate) fn steering_submitted(
         &mut self,
         accepted_input_id: CanonicalUuid,
