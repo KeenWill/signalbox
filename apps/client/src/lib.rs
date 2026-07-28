@@ -15,14 +15,17 @@ use arguments::{
 };
 use connection::ProcessClient;
 use error::ClientError;
-use presentation::{ImportedEntryRow, Output, SessionMetadataRow, SnapshotSelection};
+use presentation::{
+    ConversationRow, ImportedEntryRow, Output, SessionMetadataRow, SnapshotSelection,
+};
 use rustix::{
     fd::OwnedFd,
     fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fstat, openat, statat},
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportFormat,
-    ConversationImportSource, ErrorCode, InputContent, MAX_FRAME_BYTES,
+    CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationCursor,
+    ConversationImportFormat, ConversationImportSource, ConversationOrigin,
+    ConversationOriginFilter, ConversationSummary, ErrorCode, InputContent, MAX_FRAME_BYTES,
     MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState, ModelSelection,
     ReviewPassSnapshot, ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent,
     SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
@@ -65,6 +68,28 @@ impl SessionMetadataPageRequest {
             include_archived: self.include_archived,
             page_size: self.page_size,
             after_session_id: self.after_session_id,
+        }
+    }
+}
+
+/// One complete bounded `list_conversations` request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ConversationsPageRequest {
+    pub(crate) title_contains: Option<String>,
+    pub(crate) origin: ConversationOriginFilter,
+    pub(crate) include_archived: bool,
+    pub(crate) page_size: CanonicalU64,
+    pub(crate) after: Option<ConversationCursor>,
+}
+
+impl ConversationsPageRequest {
+    fn request(&self) -> ClientRequest {
+        ClientRequest::ListConversations {
+            title_contains: self.title_contains.clone(),
+            origin: self.origin,
+            include_archived: self.include_archived,
+            page_size: self.page_size,
+            after: self.after,
         }
     }
 }
@@ -160,6 +185,7 @@ async fn execute(
         | Command::Imported { .. }
         | Command::List
         | Command::Search(_)
+        | Command::Conversations(_)
         | Command::Send { .. }
         | Command::Model { .. }
         | Command::Transcript { .. }
@@ -182,6 +208,7 @@ async fn execute(
         Command::Create { .. }
         | Command::List
         | Command::Search(_)
+        | Command::Conversations(_)
         | Command::Send { .. }
         | Command::Reconcile { .. }
         | Command::Stop { .. }
@@ -237,6 +264,7 @@ async fn execute(
         } => imported(&mut client, &mut output, imported_conversation_id).await,
         Command::List => list(&mut client, &mut output).await,
         Command::Search(page) => search(&mut client, &mut output, page).await,
+        Command::Conversations(page) => conversations(&mut client, &mut output, page).await,
         Command::Send {
             session_id,
             command_id,
@@ -1203,6 +1231,170 @@ async fn search(
         output.next_page_cursor(next_after_session_id)?;
     }
     Ok(())
+}
+
+/// Orders unified cursors exactly as the daemon lists rows: by identity UUID
+/// value, native before imported for a theoretical equal identity.
+fn conversation_cursor_key(cursor: ConversationCursor) -> (Uuid, u8) {
+    let origin_rank = match cursor.origin() {
+        ConversationOrigin::NativeSession => 0,
+        ConversationOrigin::ImportedConversation => 1,
+    };
+    (cursor.conversation_id().into_uuid(), origin_rank)
+}
+
+async fn read_conversation_page(
+    client: &mut ProcessClient,
+    page: &ConversationsPageRequest,
+    mut consume: impl FnMut(&ServerFrame) -> Result<(), ClientError>,
+) -> Result<Option<ConversationCursor>, ClientError> {
+    let mut connection = client.request(page.request()).await?;
+    match connection.message().await? {
+        ServerMessage::ConversationPageStart {} => {}
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(code, message, detail)),
+        _ => {
+            return Err(ClientError::Protocol(
+                "conversation page did not begin with its start frame",
+            ));
+        }
+    }
+    let mut prior_cursor = page.after;
+    let mut last_in_page = None;
+    let mut summary_count = 0_u64;
+    loop {
+        let frame = connection.frame().await?;
+        match frame.message() {
+            ServerMessage::ConversationSummary { conversation } => {
+                let cursor = conversation.cursor();
+                if prior_cursor.is_some_and(|prior| {
+                    conversation_cursor_key(prior) >= conversation_cursor_key(cursor)
+                }) {
+                    return Err(ClientError::Protocol(
+                        "conversation summaries were not strictly ordered",
+                    ));
+                }
+                summary_count = summary_count
+                    .checked_add(1)
+                    .ok_or(ClientError::Protocol("conversation count overflowed"))?;
+                if summary_count > page.page_size.value() {
+                    return Err(ClientError::Protocol(
+                        "conversation page exceeded its requested bound",
+                    ));
+                }
+                prior_cursor = Some(cursor);
+                last_in_page = Some(cursor);
+                consume(&frame)?;
+            }
+            ServerMessage::ConversationPageEnd {
+                conversation_count,
+                next_after,
+            } => {
+                if conversation_count.value() != summary_count
+                    || next_after.is_some() && *next_after != last_in_page
+                {
+                    return Err(ClientError::Protocol(
+                        "conversation page count or cursor was invalid",
+                    ));
+                }
+                return Ok(*next_after);
+            }
+            ServerMessage::Error {
+                code,
+                message,
+                detail,
+            } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+            _ => {
+                return Err(ClientError::Protocol(
+                    "conversation page sequence or count was invalid",
+                ));
+            }
+        }
+    }
+}
+
+async fn conversations(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    page: ConversationsPageRequest,
+) -> Result<(), ClientError> {
+    let mut spool = tempfile::tempfile()?;
+    let next_after = read_conversation_page(client, &page, |frame| {
+        spool.write_all(&encode_server_line(frame)?)?;
+        Ok(())
+    })
+    .await?;
+    spool.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(spool);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        match decode_server_line(&line)?.message() {
+            ServerMessage::ConversationSummary { conversation } => match conversation {
+                ConversationSummary::NativeSession {
+                    session_id,
+                    title,
+                    archived,
+                    defaults_version,
+                } => output.conversation_summary(&ConversationRow::Native {
+                    session_id: *session_id,
+                    archived: *archived,
+                    defaults_version: defaults_version.value(),
+                    title: title.as_deref(),
+                })?,
+                ConversationSummary::ImportedConversation {
+                    imported_conversation_id,
+                    title,
+                    entry_count,
+                    source_format,
+                } => output.conversation_summary(&ConversationRow::Imported {
+                    imported_conversation_id: *imported_conversation_id,
+                    format: imported_source_format_label(*source_format),
+                    entry_count: entry_count.value(),
+                    title: title.as_deref(),
+                })?,
+            },
+            _ => {
+                return Err(ClientError::Protocol(
+                    "conversation spool contained a non-summary frame",
+                ));
+            }
+        }
+        line.clear();
+    }
+    if let Some(next_after) = next_after {
+        output.next_conversation_cursor(
+            conversation_origin_label(next_after.origin()),
+            next_after.conversation_id(),
+        )?;
+    }
+    Ok(())
+}
+
+/// The exact origin spelling the `--after` cursor argument accepts back.
+const fn conversation_origin_label(origin: ConversationOrigin) -> &'static str {
+    match origin {
+        ConversationOrigin::NativeSession => "native",
+        ConversationOrigin::ImportedConversation => "imported",
+    }
+}
+
+const fn imported_source_format_label(
+    format: signalbox_process_protocol::ImportedConversationSourceFormat,
+) -> &'static str {
+    match format {
+        signalbox_process_protocol::ImportedConversationSourceFormat::ClaudeCodeSessionJsonlV1 => {
+            "claude-code-session-jsonl-v1"
+        }
+        signalbox_process_protocol::ImportedConversationSourceFormat::ClaudeCodeSessionJsonlV2 => {
+            "claude-code-session-jsonl-v2"
+        }
+        signalbox_process_protocol::ImportedConversationSourceFormat::CodexRolloutJsonlV1 => {
+            "codex-rollout-jsonl-v1"
+        }
+    }
 }
 
 async fn send(
@@ -2300,12 +2492,13 @@ mod tests {
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        FrameEncodeError, ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker,
-        InputContent, ModelCallDisposition, ModelCallState, ModelSelection, ReviewFindingInput,
-        ReviewFindingSnapshot, ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle,
-        ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow,
-        ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState,
-        decode_client_line, encode_server_line,
+        ConversationOriginFilter, ConversationSummary, FrameEncodeError, ImportedContentKind,
+        ImportedSessionRelationship, ImportedSourceSpeaker, InputContent, ModelCallDisposition,
+        ModelCallState, ModelSelection, ReviewFindingInput, ReviewFindingSnapshot,
+        ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot,
+        ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame,
+        ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
+        encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -2315,10 +2508,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
+        ConversationsPageRequest, MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
         MAX_REVIEW_FINDINGS_PER_RUN, ProcessClient, ReviewCommand, SessionMetadataPageRequest,
         SnapshotSelection, ThroughPositionArgument, TurnTerminal, await_turn_terminal,
-        collect_import_paths, continue_imported, create, decide, imported,
+        collect_import_paths, continue_imported, conversations, create, decide, imported,
         model_call_recovery_transition, open_scanned_import_source, read_input,
         read_system_prompt_file, reconcile_turn, review, run, search, socket_path, stop_turn,
         submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
@@ -3285,6 +3478,166 @@ mod tests {
 
         assert_eq!(String::from_utf8(stdout)?, format!("{session_id}\n"));
         assert_eq!(String::from_utf8(stderr)?, "through_position=2\n");
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conversations_rejects_a_page_that_exceeds_its_requested_bound()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::ListConversations {
+                    title_contains: None,
+                    origin: ConversationOriginFilter::All,
+                    include_archived: false,
+                    page_size: CanonicalU64::new(1),
+                    after: None,
+                }
+            );
+            let frame = |message| {
+                ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
+                    .map_err(io::Error::other)
+            };
+            let summary = |seed| ServerMessage::ConversationSummary {
+                conversation: ConversationSummary::NativeSession {
+                    session_id: CanonicalUuid::from_uuid(Uuid::from_u128(seed)),
+                    title: None,
+                    archived: false,
+                    defaults_version: CanonicalU64::new(1),
+                },
+            };
+            let mut response = Vec::new();
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ConversationPageStart {})?)
+                    .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(summary(1))?).map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(summary(2))?).map_err(io::Error::other)?,
+            );
+            writer.write_all(&response).await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let result = conversations(
+            &mut client,
+            &mut output,
+            ConversationsPageRequest {
+                title_contains: None,
+                origin: ConversationOriginFilter::All,
+                include_archived: false,
+                page_size: CanonicalU64::new(1),
+                after: None,
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(ClientError::Protocol(
+                "conversation page exceeded its requested bound"
+            ))
+        ));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conversations_rejects_summaries_out_of_unified_cursor_order()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            let frame = |message| {
+                ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
+                    .map_err(io::Error::other)
+            };
+            let mut response = Vec::new();
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ConversationPageStart {})?)
+                    .map_err(io::Error::other)?,
+            );
+            // The imported row shares identity value 1 with the native row
+            // that follows it, so the pair inverts the native-before-imported
+            // tiebreak of the unified order.
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ConversationSummary {
+                    conversation: ConversationSummary::ImportedConversation {
+                        imported_conversation_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+                        title: None,
+                        entry_count: CanonicalU64::new(1),
+                        source_format:
+                            signalbox_process_protocol::ImportedConversationSourceFormat::CodexRolloutJsonlV1,
+                    },
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ConversationSummary {
+                    conversation: ConversationSummary::NativeSession {
+                        session_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+                        title: None,
+                        archived: false,
+                        defaults_version: CanonicalU64::new(1),
+                    },
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            writer.write_all(&response).await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let result = conversations(
+            &mut client,
+            &mut output,
+            ConversationsPageRequest {
+                title_contains: None,
+                origin: ConversationOriginFilter::All,
+                include_archived: false,
+                page_size: CanonicalU64::new(50),
+                after: None,
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(ClientError::Protocol(
+                "conversation summaries were not strictly ordered"
+            ))
+        ));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
         server.await??;
         Ok(())
     }

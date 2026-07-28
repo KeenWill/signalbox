@@ -464,6 +464,23 @@ impl ImportedConversation {
     ) -> Option<&[ImportedTranscriptEntry]>;
     // accessors: id(), format(), source_digest(), raw_records(), entries()
 }
+
+pub struct ImportedConversationDisplayTitle(/* private String */);
+impl ImportedConversationDisplayTitle {
+    pub const MAX_SCALARS: usize;
+    pub fn try_new(value: String) -> Result<Self, ImportedConversationDisplayTitleError>;
+    pub fn derive(conversation: &ImportedConversation) -> Option<Self>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+
+pub enum ImportedConversationDisplayTitleError {
+    Empty,
+    ContainsNul,
+    ContainsLineBreak,
+    ExceedsMaxScalars { scalars: usize },
+    UntrimmedEdgeWhitespace,
+}
 ```
 
 ## domain: session
@@ -3221,12 +3238,23 @@ pub enum ToolAttemptObservation {
 }
 
 pub struct ToolAttemptDispatchCorrelation { /* private */ }
+// canonical durable-fact reconstitution plus fence accessors
+pub struct ToolAttemptDispatchCorrelationReconstitutionInput {
+    /* public complete typed fence facts */
+}
 impl ToolAttemptDispatchCorrelation {
+    pub const fn reconstitute(
+        input: ToolAttemptDispatchCorrelationReconstitutionInput,
+    ) -> Self;
+    // accessors: session(), turn(), issuing_attempt(), request(), attempt(), generation()
+}
+pub struct IssuedExecutorFence { /* private */ }
+impl IssuedExecutorFence {
+    pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation;
     pub const fn bind(
         self,
         observation: ToolAttemptObservation,
     ) -> CorrelatedToolAttemptObservation;
-    // accessors: session(), turn(), issuing_attempt(), request(), attempt(), generation()
 }
 pub struct CorrelatedToolAttemptObservation { /* private */ }
 // accessors: correlation(), observation()
@@ -3245,7 +3273,7 @@ impl CurrentToolAttempt {
     // generation(), state()
 }
 pub struct AuthorizedToolAttempt { /* private */ }
-// accessors: attempt(), correlation(), into_parts()
+// accessors: attempt(), correlation(), executor_fence(), into_parts()
 pub struct EndedToolAttempt { /* private */ }
 // accessors: attempt(), request(), session(), turn(), issuing_attempt(), effect_class(),
 // generation(), end()
@@ -4038,6 +4066,97 @@ impl<
         &mut self,
         request: CreateSessionFromImportedFrontierRequest,
     ) -> Result<CreateSessionFromImportedFrontierOutcome, Transaction::Error>;
+}
+```
+
+## application: list_conversations
+
+```rust
+pub enum ConversationOriginFilter {
+    Native,
+    Imported,
+    All,
+}
+impl ConversationOriginFilter {
+    pub const fn selects_native(self) -> bool;
+    pub const fn selects_imported(self) -> bool;
+}
+
+pub enum ConversationListCursor {
+    NativeSession(SessionId),
+    ImportedConversation(ImportedConversationId),
+}
+impl ConversationListCursor {
+    pub const fn identity_uuid(self) -> uuid::Uuid;
+}
+
+pub struct ConversationListQuery { /* private */ }
+impl ConversationListQuery {
+    pub fn default_page() -> Self;
+    pub fn try_new(
+        title_contains: Option<String>,
+        origin: ConversationOriginFilter,
+        include_archived: bool,
+        page_size: u64,
+        after: Option<ConversationListCursor>,
+    ) -> Result<Self, ConversationListQueryError>;
+    // accessors: title_contains(), origin(), include_archived(), page_size(),
+    // after()
+}
+
+pub enum ConversationListQueryError {
+    EmptyTitleSearch,
+    TitleSearchContainsNul,
+    TitleSearchExceedsUtf8Bytes,
+    PageSizeOutOfRange,
+}
+
+pub enum ConversationListItem {
+    NativeSession {
+        session: SessionId,
+        title: Option<String>,
+        archived: bool,
+        defaults_version: SessionConfigurationDefaultsVersion,
+    },
+    ImportedConversation {
+        conversation: ImportedConversationId,
+        title: Option<String>,
+        entry_count: u64,
+        format: ImportedConversationFormat,
+    },
+}
+impl ConversationListItem {
+    pub const fn cursor(&self) -> ConversationListCursor;
+    pub fn title(&self) -> Option<&str>;
+}
+
+pub trait ConversationPageReader {
+    type Error;
+    fn next_item(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<ConversationListItem>, Self::Error>> + Send;
+    fn next_after(&self) -> Option<ConversationListCursor>;
+}
+
+pub trait ConversationLister {
+    type Error;
+    type Page: ConversationPageReader<Error = Self::Error>;
+    fn open_conversation_page(
+        &self,
+        query: ConversationListQuery,
+    ) -> impl Future<Output = Result<Self::Page, Self::Error>> + Send;
+}
+
+pub struct ListConversationsService<Lister> { /* private */ }
+impl<Lister> ListConversationsService<Lister> {
+    pub const fn new(lister: Lister) -> Self;
+    pub fn into_lister(self) -> Lister;
+}
+impl<Lister: ConversationLister> ListConversationsService<Lister> {
+    pub async fn execute(
+        &self,
+        query: ConversationListQuery,
+    ) -> Result<Lister::Page, Lister::Error>;
 }
 ```
 
@@ -5474,6 +5593,7 @@ pub enum RunnerDomainError {
     ToolUnavailable,
     GrantRevoked,
     RegistrationChanged,
+    RegistrationInProgress,
     CorruptStoredFacts,
 }
 
@@ -5533,6 +5653,7 @@ impl CredentialProfilePolicy {
         approvals: impl IntoIterator<Item = (ToolName, CredentialToolApproval)>,
     ) -> Result<Self, RunnerDomainError>;
     // accessors: name(), approval_for()
+    pub fn approvals(&self) -> impl Iterator<Item = (&ToolName, CredentialToolApproval)>;
 }
 pub enum WorkspaceCapability {
     WorktreePerSession,
@@ -5569,20 +5690,36 @@ impl RunnerEnrollment {
         allowed_classes: impl IntoIterator<Item = RunnerCapabilityClass>,
     ) -> Self;
     pub fn revoke(self) -> Result<Self, RunnerDomainError>;
+    pub fn revoke_in_place(&mut self) -> Result<(), RunnerDomainError>;
     pub fn register(
         &self,
         advertisement: RunnerAdvertisement,
         catalog: &RunnerCatalog,
     ) -> Result<ValidatedRunnerRegistration, RunnerDomainError>;
+    pub fn prepare_registration(
+        &self,
+        advertisement: RunnerAdvertisement,
+        catalog: &RunnerCatalog,
+    ) -> Result<PreparedRunnerRegistration, RunnerDomainError>;
     pub fn reconstitute(
         input: RunnerEnrollmentReconstitutionInput,
     ) -> Result<Self, RunnerDomainError>;
-    // accessors: enrollment(), runner(), authentication(), state()
+    // accessors: enrollment(), runner(), authentication(), state(),
+    // last_issued_registration_revision()
 }
 pub struct RunnerEnrollmentReconstitutionInput {
     /* public complete typed facts, including independently recorded optional last registration revision */
 }
+// enrollment accessors include allowed_classes().
+pub struct PreparedRunnerRegistration { /* private */ }
+impl PreparedRunnerRegistration {
+    pub const fn registration(&self) -> &ValidatedRunnerRegistration;
+    pub fn commit(self) -> Result<ValidatedRunnerRegistration, RunnerDomainError>;
+}
 pub struct ValidatedRunnerRegistration { /* private */ }
+pub struct ValidatedRunnerRegistrationReconstitutionInput {
+    /* public complete typed catalog-validation facts, including exact revision */
+}
 impl ValidatedRunnerRegistration {
     // accessors: enrollment(), runner(), authentication(), revision()
     pub fn satisfies(&self, selector: &RunnerSelector) -> bool;
@@ -5593,6 +5730,15 @@ impl ValidatedRunnerRegistration {
     ) -> Option<&CredentialProfilePolicy>;
     pub fn supports_workspace(&self, capability: WorkspaceCapability) -> bool;
     pub fn tool_names(&self) -> impl Iterator<Item = &ToolName>;
+    pub fn classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass>;
+    pub fn tools(&self) -> impl Iterator<Item = &RunnerToolDeclaration>;
+    pub fn profiles(&self) -> impl Iterator<Item = &CredentialProfilePolicy>;
+    pub fn workspaces(&self) -> impl Iterator<Item = WorkspaceCapability> + '_;
+    pub fn reconstitute(
+        enrollment: &RunnerEnrollment,
+        catalog: &RunnerCatalog,
+        input: ValidatedRunnerRegistrationReconstitutionInput,
+    ) -> Result<Self, RunnerDomainError>;
 }
 
 pub struct RunnerGeneration(/* private NonZeroU64 */);
@@ -5627,7 +5773,7 @@ impl RunnerLeaseNoExecutionProof {
 pub struct RunnerLease { /* private */ }
 impl RunnerLease {
     // accessors: correlation(), state(), generation(), attempt(), tool(),
-    //   credential_authorization()
+    //   credential_authorization(), session(), runner(), effect()
     pub fn claim(
         self,
         correlation: RunnerLeaseCorrelation,
@@ -5648,7 +5794,12 @@ impl RunnerLease {
     pub fn reconstitute_loss(
         input: RunnerLeaseReconstitutionInput,
         registration: &ValidatedRunnerRegistration,
-        no_execution: Option<&RunnerLeaseNoExecutionProof>,
+        no_execution: Option<RunnerLeaseCorrelation>,
+    ) -> Result<RunnerLeaseLoss, RunnerDomainError>;
+    pub fn into_reconstituted_loss(
+        self,
+        no_execution: Option<RunnerLeaseCorrelation>,
+        retry_prepared: bool,
     ) -> Result<RunnerLeaseLoss, RunnerDomainError>;
 }
 pub struct RunnerLeaseReconstitutionInput {
@@ -5656,7 +5807,7 @@ pub struct RunnerLeaseReconstitutionInput {
 }
 pub struct RunnerLeaseLoss { /* private, produced only by checked RunnerLease transitions */ }
 impl RunnerLeaseLoss {
-    // accessors: lost(), retry(), crash_attempt()
+    // accessors: lost(), retry(), crash_attempt(), no_execution_proof()
 }
 pub struct RunnerLeaseRetryAuthority { /* private */ }
 impl RunnerLeaseRetryAuthority {
@@ -5679,7 +5830,7 @@ impl RunnerUnclaimedAttemptReauthorization {
 
 pub struct RunnerClaimedAttemptReplacement { /* private */ }
 impl RunnerClaimedAttemptReplacement {
-    // accessors: batch(), retired()
+    // accessors: batch(), retired(), source(), replacement()
     pub fn into_parts(
         self,
     ) -> (
@@ -5717,6 +5868,9 @@ pub enum SessionRunnerPlacementState {
     RunnerLost(PinnedRunnerPlacement),
 }
 pub struct SessionRunnerPlacement { /* private */ }
+pub struct SessionRunnerPlacementReconstitutionInput {
+    /* public complete typed placement facts */
+}
 impl SessionRunnerPlacement {
     // placement is the only producer of initial and retry lease offers
     pub const fn new(
@@ -5774,10 +5928,7 @@ impl SessionRunnerPlacement {
         registration: Option<&ValidatedRunnerRegistration>,
         profileless_tombstone: Option<&CredentialProfileGrant>,
     ) -> Result<Self, RunnerDomainError>;
-    // accessors: state(), revision()
-}
-pub struct SessionRunnerPlacementReconstitutionInput {
-    /* public complete stored placement facts */
+    // accessors: session(), request(), state(), revision()
 }
 pub struct SessionRunnerPin {
     /* public placement, optional initial grant, and initial lease */
@@ -5797,17 +5948,19 @@ pub enum CredentialProfileGrantState {
     Revoked,
 }
 pub struct CredentialProfileGrant { /* private */ }
+pub struct CredentialProfileGrantReconstitutionInput {
+    /* public complete typed grant and approval facts */
+}
 impl CredentialProfileGrant {
-    // accessors: state(), revision(), lineage(), profile()
+    // accessors: state(), revision(), lineage(), profile(), session(), runner()
+    pub fn tools(&self) -> impl Iterator<Item = &ToolName>;
+    pub fn approvals(&self) -> impl Iterator<Item = (&ToolName, CredentialToolApproval)>;
     pub fn revoke(self) -> Result<Self, RunnerDomainError>;
     pub fn reconstitute(
         input: CredentialProfileGrantReconstitutionInput,
         expected_session: SessionId,
         registration: &ValidatedRunnerRegistration,
     ) -> Result<Self, RunnerDomainError>;
-}
-pub struct CredentialProfileGrantReconstitutionInput {
-    /* public complete stored grant facts */
 }
 pub struct RunnerCredentialGrantChange {
     /* public optional complete before-and-after grant facts */
@@ -6590,7 +6743,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | -------------------------------------------------- | -------------------- |
 | domain: lib.rs identities                          | 20                   |
 | domain: actor                                      | 1                    |
-| domain: imported_conversation                      | 29                   |
+| domain: imported_conversation                      | 31                   |
 | domain: session                                    | 21                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 22                   |
@@ -6607,7 +6760,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: context_frontier                           | 6                    |
 | domain: semantic_entry                             | 4                    |
 | domain: tool                                       | 38                   |
-| domain: tool_attempt                               | 24                   |
+| domain: tool_attempt                               | 26                   |
 | domain: tool_execution                             | 17                   |
 | domain: provider_evidence                          | 5                    |
 | domain: applied_interrupt                          | 2                    |
@@ -6615,11 +6768,12 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: replace_session_defaults                   | 13                   |
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
-| domain: runner                                     | 51                   |
-| **signalbox-domain total**                         | **511 (+1 free fn)** |
+| domain: runner                                     | 53                   |
+| **signalbox-domain total**                         | **517 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
+| application: list_conversations                    | 8 (incl. 2 traits)   |
 | application: load_session                          | 2 (incl. 1 trait)    |
 | application: model_execution                       | 30 (incl. 7 traits)  |
 | application: tool_loop                             | 23 (incl. 5 traits)  |
@@ -6633,4 +6787,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **145**              |
+| **signalbox-application total**                    | **153**              |

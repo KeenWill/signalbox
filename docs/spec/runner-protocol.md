@@ -2,7 +2,9 @@
 
 This page specifies the implemented runner-protocol domain foundation as
 verified against the implementing stack through PR #260
-(`agent/runner-protocol-domain`). It owns logical runner enrollment,
+(`agent/runner-protocol-domain`); its durable Postgres representation and
+restart-recovery authority were verified through PR #267
+(`agent/runner-persistence`). It owns logical runner enrollment,
 daemon-authoritative catalog validation, runner leases, session placement and
 affinity, credential-profile grants, and workspace requirements. The tool
 registry's common declarations remain owned by [tool loop](tool-loop.md);
@@ -11,10 +13,10 @@ session transcript and frontier mechanics remain owned by
 remain owned by [tool loop](tool-loop.md). Invariant tags cite
 [the invariant catalog](../invariants.md).
 
-The verified surface in this stack is domain-only. There is no runner binary,
-store adapter, transport message, streaming connection, authentication
-handshake, or network code. Those implementation edges are listed under
-[Open edges](#open-edges).
+The verified surface in this stack is the domain and its Postgres persistence
+adapter. There is no runner binary, transport message, streaming connection,
+authentication handshake, or network code. Those implementation edges are listed
+under [Open edges](#open-edges).
 
 ## Identity, enrollment, and registration
 
@@ -33,11 +35,17 @@ an authentication secret. Enrollment is either active or revoked. Revocation is
 terminal and makes later registration invalid. Complete reconstitution rejects
 mismatched enrollment, runner, authentication, allowed class inventory, optional
 last issued registration revision, or lifecycle state rather than repairing it.
-Revocation flips the enrollment-shared active fence, so an existing validated
-registration becomes non-current for later leases, reconciliation, runner
-replacement, or grant replacement. A lease offer rechecks the active enrollment
-and its exact enrollment, runner, and authentication-reference correlations; a
-lease already offered is unaffected.
+Durable revocation commits first and then flips the exact caller-held
+enrollment-shared active fence, so an existing validated registration becomes
+non-current for later leases, reconciliation, runner replacement, or grant
+replacement. A failed durable revocation leaves that caller-held fence active. A
+lease offer rechecks the active enrollment and its exact enrollment, runner, and
+authentication-reference correlations; a lease already offered is unaffected.
+The Postgres admission trigger locks the current enrollment and placement heads
+before accepting even a direct lease-row insert, so concurrent revocation,
+runner loss, or runner replacement wins before the stale offer can commit. Both
+the current and audit allowed-class inventories reject row mutation and
+statement-level truncation, including cascading truncation.
 
 A registration carries availability claims only:
 
@@ -50,14 +58,28 @@ It carries no permission default, effect class, placement declaration, approval
 posture, or credential value. Registration validates the advertisement against
 both the enrollment's allowed capability classes and the daemon-side catalog. An
 unknown or disallowed claim rejects the complete registration. A valid
-registration retains the exact advertised subset, attaches the
-daemon-authoritative declarations, and advances the enrollment-owned current
-registration revision. Complete enrollment reconstitution restores the optional
-last issued revision from independently matching stored facts; the next
-successful registration advances it instead of reusing a prior revision.
-Retained copies of every prior registration become stale and cannot authorize a
-later lease, reconciliation, or grant-bearing placement transition. Omitting a
-formerly advertised capability removes its availability from the new
+registration retains the exact advertised subset and attaches the
+daemon-authoritative declarations. Preparing a registration also takes the
+enrollment-shared exclusive preparation fence: a second preparation while one is
+outstanding fails typed, and the fence releases when the prepared registration
+commits or is abandoned. The persistence adapter stages this checked
+registration, commits its complete durable rows and current head, and only then
+advances the enrollment-owned current registration revision; the held fence
+means no concurrent registration can advance that revision between staging and
+this post-commit advance, so a successful durable write is never reported as a
+failed registration, while a failed durable write leaves the prior registration
+current. Enrollment persistence admits only a pristine active enrollment that
+has issued no registration; inserting one whose caller-held authority already
+advanced would reload with no issued revision and disagree with canonical
+storage on every later registration. Complete enrollment reconstitution restores
+the optional last issued revision from independently matching stored facts; the
+next successful registration advances it instead of reusing a prior revision. A
+persistence load supplied with caller-held enrollment authority compares that
+authority's current registration revision with the independently loaded
+canonical enrollment before binding any historical registration to its revision
+fence. Retained copies of every prior registration become stale and cannot
+authorize a later lease, reconciliation, or grant-bearing placement transition.
+Omitting a formerly advertised capability removes its availability from the new
 registration, but never changes its daemon-side policy. A pinned session never
 inherits additions from re-registration. If a new registration omits a
 runner-required capability in that session's pinned snapshot, no later lease is
@@ -78,8 +100,12 @@ vocabulary; the implemented arm is `WorktreePerSession`.
 
 The owner-editable catalog is validated into one `RunnerCatalog` domain value.
 It contains allowed capability classes, complete runner-tool declarations,
-credential-profile policies, and allowed workspace capabilities. Duplicate
-names, a credential policy naming an undeclared tool, or an internally
+credential-profile policies, and allowed workspace capabilities. The persistence
+adapter owns this catalog independently of stored registration rows.
+Registration reconstitution compares every stored class, tool declaration,
+profile policy, and workspace capability with that trusted catalog and rejects
+any difference; stored declarations cannot bootstrap their own authority.
+Duplicate names, a credential policy naming an undeclared tool, or an internally
 inconsistent placement declaration rejects the complete catalog.
 Configuration-file parsing and replacement are later application work; the
 domain value is independent of TOML.
@@ -157,19 +183,28 @@ underlying attempt exists only after the automatic or owner decision authorizes
 that exact attempt, and neither authority nor the resulting lease is cloneable.
 Every checked `ToolBatch` carries a durable per-attempt inventory of runner
 authority already issued. Its in-memory clones share the exact atomic guard for
-each physical attempt, and complete reconstitution restores every consumed guard
-from that inventory. Atomic runner authorization marks that exact attempt issued
-in the batch; a later clone or reconstitution from the updated facts cannot mint
-a second runner lease capability. Current active enrollment, pinned placement,
-its exact validated registration, and any selected active credential grant
-jointly authorize every offer after the first. The initial offer instead creates
-that pinned placement, any selected grant, and generation-one lease in one
-checked transition from `Unpinned`; it does not require those products to exist
-beforehand. The request, attempt, session, and two-way crash class must match
-the selected tool, placement, and declaration-derived effect class (`Pure` to
-`EffectFree`; `Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked
-enrollment, lost placement, or a mismatched runner, request, tool, attempt,
-effect, profile, or grant cannot create a lease.
+each physical attempt. The persistence loader derives the active batch's
+consumed inventory from exact current physical attempts already bound by durable
+runner lease generations, and complete reconstitution restores every consumed
+guard from that inventory. A stored retryable claimed loss leaves its source
+attempt in flight, so a reloaded batch still carries the exact live source the
+checked claimed replacement transition requires; the predecessor leaves the
+current-attempt view, and enters the batch's restored retired-identity
+inventory, only once the atomic replacement commit retires it to terminal
+history. A reloaded batch therefore keeps rejecting retired attempt-identity
+reuse in the domain rather than at the retained row's key. Atomic runner
+authorization marks that exact attempt issued in the batch; a later clone or
+reconstitution from the updated facts cannot mint a second runner lease
+capability. Current active enrollment, pinned placement, its exact validated
+registration, and any selected active credential grant jointly authorize every
+offer after the first. The initial offer instead creates that pinned placement,
+any selected grant, and generation-one lease in one checked transition from
+`Unpinned`; it does not require those products to exist beforehand. The request,
+attempt, session, and two-way crash class must match the selected tool,
+placement, and declaration-derived effect class (`Pure` to `EffectFree`;
+`Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked enrollment, lost
+placement, or a mismatched runner, request, tool, attempt, effect, profile, or
+grant cannot create a lease.
 
 When a credential profile is selected, the lease also retains the exact
 immutable `CredentialDispatchAuthorization`: session, runner, profile, grant
@@ -187,16 +222,41 @@ three-way effect class.
 
 `LostUnclaimed` requires an opaque durable no-execution proof bound to the exact
 lease correlation; complete loss reconstitution requires the same proof. The
-proof exposes no public raw-parts or reconstitution constructor, so an offered
-lease and its public correlation cannot mint this authority. It does not mean
-merely absence of a claim frame after an offer was sent. A future transport must
-supply the independently authoritative producer, durably commit the exact claim,
-and acknowledge it before the runner may execute. Channel loss after delivery
-but before that acknowledgement cannot be interpreted as proof either way by
-transport alone. Without the proof, losing even an `Offered` lease
-conservatively follows the execution-possible law: pure or idempotent work
-requires a fresh physical attempt, while side-effecting work requires crash
-classification.
+proof exposes no public raw-parts constructor, so an offered lease and its
+public correlation cannot mint this authority. The persistence adapter may
+reconstitute it only by comparing the complete stored proof correlation with the
+independently loaded lease correlation through the checked reconstitution input.
+The current adapter refuses to originate `LostUnclaimed` or persist a proof from
+caller-reconstituted domain facts; the authoritative transport producer remains
+an open edge and must commit the proof with the loss before reload can confer
+retry authority. It does not mean merely absence of a claim frame after an offer
+was sent. A future transport must supply the independently authoritative
+producer, durably commit the exact claim, and acknowledge it before the runner
+may execute. Channel loss after delivery but before that acknowledgement cannot
+be interpreted as proof either way by transport alone. The Postgres
+representation commits the proof atomically with the lost-unclaimed event and
+requires it before a successor generation can consume that retry path. Every
+retryable loss admission — lost-unclaimed, whose proof-backed retry reissues the
+never-executed attempt for every effect class, and claimed pure or idempotent
+loss — reads its source attempt under a row lock and requires it to still be in
+flight, so a concurrent terminal attempt update serializes with the loss instead
+of racing past that live-source check. Claimed retry instead requires a durable
+record binding the complete lost lease correlation to the exact fresh
+physical-attempt dispatch. That record is an idempotent reservation: if a
+process exits before the replacement attempt is stored, recovery loads the exact
+reserved dispatch and may replay only that replacement. One transaction retires
+the in-flight source attempt to its effect-correct terminal history and commits
+the fresh replacement attempt with its successor lease generation, and the
+Postgres representation rejects a reserved replacement attempt committed without
+that successor generation, so the durable claimed-retry states are exactly the
+loss over its still-in-flight source — with or without the replayable
+reservation — and the complete consumed retry whose successor lease is already
+offered; a crash can strand neither a consumed one-shot preparation fence
+without its successor lease nor a retired source without its replacement, and a
+different replacement cannot overwrite the reservation. Without the proof,
+losing even an `Offered` lease conservatively follows the execution-possible
+law: pure or idempotent work requires a fresh physical attempt, while
+side-effecting work requires crash classification.
 
 With that proof, loss before claim permits every effect class to be re-leased at
 the checked successor lease-lineage generation. Loss after claim follows the
@@ -310,13 +370,33 @@ lineage whose revision is newer than the placement revision. A profileless
 placement with retained lineage additionally requires the exact terminally
 revoked grant tombstone for that session, runner, and revision; an omitted,
 active, or cross-wired tombstone fails closed. Durable replacement-history
-verification belongs to the later persistence projection. Pinned or lost
-reconstitution validates against the exact registration snapshot that produced
-the pin and rejects any stored tool or runner-required-tool inventory that
-differs from that checked result. A current narrowed re-registration is
+verification is enforced by the persistence projection described below. Pinned
+or lost reconstitution validates against the exact registration snapshot that
+produced the pin and rejects any stored tool or runner-required-tool inventory
+that differs from that checked result. A current narrowed re-registration is
 reconciled separately and is not substituted for that historical snapshot. This
 domain aggregate accepts every positive placement revision because each is
 reachable through checked successor transitions.
+
+The store retains append-only created, pinned, runner-lost, runner-replaced, and
+profile-replaced records behind one current pointer. A profile-replaced record
+carries the pinned registration snapshot forward even though the replacement was
+validated against the enrollment-owned current revision, so an
+availability-equivalent re-registration cannot make profile replacement
+undurable. Relational transition checks require contiguous event history, exact
+revision succession, unchanged affinity facts at runner loss, profile-only
+changes for profile replacement, and each stored tool's runner-required flag to
+match its declaration's runner-only or combined locus. Storing either
+replacement event revalidates, under the enrollment row lock in the committing
+transaction, that the supplied registration's enrollment remains active and that
+its revision remains the enrollment-owned current registration, so a replacement
+prepared before a concurrent revocation or re-registration is rejected instead
+of installed as stale authority. Every appended record advances the
+current-placement head in the same transaction. Reconstitution reads the current
+record with its exact validated registration and tool inventory. The loaded
+persistence wrapper retains that historical registration and its durable
+revision so a caller can reconcile against newer availability and persist
+`RunnerLost` without reconstructing or guessing the pinned evidence.
 
 This stack proves that replacement must be explicit and produces the typed
 change facts. Application orchestration that appends the corresponding semantic
@@ -370,15 +450,31 @@ revision carried by the pinned placement, and creates a checked successor
 revision. A profileless replacement carries both that placement evidence and the
 lineage forward as a new terminal tombstone; omitting the tombstone is therefore
 structurally rejected, and restoring a previously selected profile cannot
-recreate revision one. Every prior revoked revision remains terminal. Revocation
-is also forward-only and gates later lease creation. A lease already offered is
-already dispatched and completes or crash-classifies normally; revocation
-neither rewrites nor cancels it. A revoked grant revision cannot become active
-again. Complete reconstitution accepts a complete public raw-facts input, checks
-an independently authoritative expected session and rejects foreign runner
-facts, a profile absent from the validated registration, or a tool set wider
-than the advertisement. Durable revision history and atomic store dispatch
-gating remain persistence work (INV-045).
+recreate revision one. Every prior revoked revision remains terminal. Every
+successor binds its predecessor through the immediately prior placement's exact
+runner and grant revision. Each independent lineage also carries the immutable
+event ordinal of its revision-one placement through grant, audit, placement, and
+lease references, so repeated equal runner and revision numbers within one
+session cannot cross-wire provenance. Revocation is also forward-only and gates
+later lease creation. A lease already offered is already dispatched and
+completes or crash-classifies normally; revocation neither rewrites nor cancels
+it. A revoked grant revision cannot become active again. Complete reconstitution
+accepts a complete public raw-facts input, checks an independently authoritative
+expected session, and rejects foreign runner facts, a profile absent from the
+validated registration, or a tool set wider than the advertisement. Grants
+created by initial pin or runner replacement contain the complete validated
+registration tool inventory; explicit profile replacement may select a checked
+subset. The store retains normalized grant snapshots and append-only issued,
+replaced, and revoked audit events. Grant relations contain only profile names,
+tool names, pair approval posture, and typed audit correlations: there is no
+credential-value or generic payload column. A stored grant preserves an explicit
+profile approval exactly; only a genuinely absent policy pair may use the
+session-policy fallback. Truncation of immutable grant audit evidence is
+rejected. Lease insertion joins the current unrevoked grant and exact
+tool/profile pair atomically with dispatch authorization, and durable admission
+requires confirmed approval provenance — an owner-command decision or the frozen
+session blanket — for a session-policy pair and for a profileless `Confirm`
+declaration alike, even for a direct lease-row insert (INV-035, INV-045).
 
 ## Workspace provisioning
 
@@ -396,9 +492,9 @@ the later runner workspace stack.
 
 ## Open edges
 
-- Runner transport, authentication exchange, durable registration and lease
-  storage, durable-claim acknowledgement before runner execution, reconnect
-  recovery, compatibility, and result envelopes are recorded in
+- Runner transport, authentication exchange, the authoritative producer and
+  acknowledgement protocol that precede runner execution, reconnect
+  orchestration, compatibility, and result envelopes are recorded in
   [Protocols and persistence](../open-questions.md#protocols-and-persistence)
   and
   [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance).
