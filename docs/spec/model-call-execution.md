@@ -24,8 +24,10 @@ model-call cause codes were verified through PR #280
 projection and identity-before-terminal-evidence precedence were verified
 through PR #288 (`agent/audit-fix-docs-coherence`); the session system prompt on
 the prepared operation was verified through PR #286
-(`agent/session-system-prompt`); the empty-thinking completion rule was verified
-through PR #305 (`agent/sonnet-streamed-tool-use`). Invariant tags cite
+(`agent/session-system-prompt`). Provider-reported token evidence retention and
+exact commit-ambiguity comparison were verified through this PR
+(`agent/token-usage`); the empty-thinking completion rule was verified through
+PR #305 (`agent/sonnet-streamed-tool-use`). Invariant tags cite
 [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
@@ -50,6 +52,16 @@ The predecessor matrix:
   what was externally done, and rewriting it would let later facts silently
   change that record.
 
+The same terminal transition stores the provider's four token-usage fields —
+input, output, cache-creation input, and cache-read input — on the `model_call`
+row. Each field is independently nullable: null means the provider did not
+report that field, while a reported zero remains zero. Calls closed from
+`ProvenUnsent`, `CancellationConfirmed`, capability failure, or restart recovery
+have all four fields unreported because no provider usage evidence exists.
+Historical rows likewise remain unreported. The terminal-row immutability rule
+makes this evidence write-once; no later path estimates, normalizes, or corrects
+it.
+
 Storage enforces the matrix durably
 (`crates/persistence/migrations/202607220001_model_call_execution.sql`): the
 `model_call_changes_are_guarded` trigger rejects any insert whose state is not
@@ -60,7 +72,10 @@ transition, any rewrite of a terminal row, any unsent-terminal disposition other
 than `KnownFailed`/`Cancelled`, and any delete; `model_call_pinned_target_fk`
 forces every call row's resolved target to equal the turn's pinned target. Why:
 the schema backstops the aggregate against any buggy or racing writer, not just
-the audited one.
+the audited one. Migration `202607290301_model_call_token_usage.sql` adds the
+terminal-only usage-field constraints and rejects reported usage on every direct
+`Prepared -> Terminal` transition, because that transition proves no send was
+authorized.
 
 The provider target is pinned as a turn-level fact before any call exists: the
 turn's frozen selection resolves through an immutable configured
@@ -340,6 +355,15 @@ Tool-call parts with a `ToolUse` finish become the normalized proposals owned by
 fails the adapter stage closed because no durable semantic representation
 exists. Scripted providers declare their exact terminal observation; nothing is
 inferred from timing or injected I/O errors.
+
+For `Completed`, `Refused`, `ProviderError`, and `BoundaryLoss`, the bridge also
+copies the runtime terminal evidence's final absorbed `TokenUsage` fields into
+the correlated observation verbatim. Classification does not derive usage from
+the disposition, content, context, or provider family. The observation commit
+stores those fields atomically with the terminal disposition. A commit-ambiguity
+reread returns `AlreadyCommitted` only when the durable disposition, closure,
+and every independently nullable usage field equal the retained observation;
+different or newly absent usage is conflicting evidence, not an equal replay.
 
 ### Provider-target identity
 
