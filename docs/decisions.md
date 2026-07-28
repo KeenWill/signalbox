@@ -38,6 +38,7 @@ indistinguishable from incomplete evidence.
 **Affects.** The Tier 1 code-host catalog and GitHub adapter, typed tool
 results, golden tool schemas, daemon catalog wiring, and offline tool-loop
 tests.
+
 ## 2026-07-27 — Serve the unified conversation listing from authoritative tables
 
 **Context.** The owner needs one read surface listing native sessions and
