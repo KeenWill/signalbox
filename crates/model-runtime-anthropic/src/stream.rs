@@ -324,7 +324,16 @@ impl StreamDecoder {
                 signature,
             } => BlockBuilder::Thinking {
                 text: thinking,
-                signature,
+                // Claude 5-family streams open the thinking block with an
+                // empty-string signature placeholder (`"signature": ""`,
+                // observed live on claude-sonnet-5) and deliver the real
+                // signature through a later `signature_delta`. An empty
+                // opening value is therefore "not delivered yet", never a
+                // first signature: counting it would reject the documented
+                // shape as a duplicate. The close-time law is unchanged —
+                // the block must still end with exactly one non-empty
+                // signature.
+                signature: signature.filter(|value| !value.is_empty()),
             },
             WireResponseBlock::RedactedThinking { data } => BlockBuilder::RedactedThinking { data },
             WireResponseBlock::Fallback { to_model } => {
@@ -1504,6 +1513,89 @@ mod tests {
         ]);
 
         assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    /// The Claude 5-family streamed tool-turn shape, mirrored from a live
+    /// claude-sonnet-5 capture with synthetic content: the thinking block
+    /// opens with empty-string `thinking` and `signature` placeholders and
+    /// the real signature arrives only through `signature_delta`; the
+    /// tool_use start carries a `caller` field and its sole
+    /// `input_json_delta` is empty. Rejecting the placeholder as a first
+    /// signature is the regression that wedged every streamed sonnet-5 tool
+    /// turn as ambiguous.
+    #[test]
+    fn five_family_thinking_tool_stream_with_placeholder_signature_completes() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
+            b"event: ping\ndata: {\"type\": \"ping\"}\n\n",
+            b"event: content_block_delta\n\
+              data: {\"type\":\"content_block_delta\",\"index\":0,\
+              \"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_synthetic_1\"}}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":1,\
+              \"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\
+              \"name\":\"current_time\",\"input\":{},\"caller\":{\"type\":\"direct\"}}}\n\n",
+            b"event: content_block_delta\n\
+              data: {\"type\":\"content_block_delta\",\"index\":1,\
+              \"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\
+              \"stop_sequence\":null,\"stop_details\":null},\
+              \"usage\":{\"output_tokens\":5,\
+              \"output_tokens_details\":{\"thinking_tokens\":0}}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::Completed(completion)) = terminal else {
+            panic!("the 5-family placeholder-signature tool stream must complete");
+        };
+        assert_eq!(completion.finish, CompletionFinish::ToolUse);
+        assert_eq!(
+            completion.content,
+            vec![
+                AssistantPart::Thinking {
+                    text: String::new(),
+                    signature: Some("sig_synthetic_1".to_string()),
+                },
+                AssistantPart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new("toolu_1"),
+                    name: ToolName::new("current_time"),
+                    arguments_json: "{}".to_string(),
+                }),
+            ]
+        );
+    }
+
+    /// The duplicate-signature law survives the placeholder tolerance: a
+    /// non-empty opening signature is a delivered first signature, so a
+    /// later `signature_delta` is still one signature too many.
+    #[test]
+    fn signature_delta_after_a_nonempty_start_signature_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\
+              \"signature\":\"sig_synthetic_1\"}}\n\n",
+            b"event: content_block_delta\n\
+              data: {\"type\":\"content_block_delta\",\"index\":0,\
+              \"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_synthetic_2\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("a second signature must remain a protocol violation");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
     }
 
     #[test]

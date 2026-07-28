@@ -329,12 +329,14 @@ evidence is mapped, including when that evidence is `Refused`. Once identity
 validation passes, that refusal evidence arises only from an authenticated
 complete exchange by the runtime layer's contract
 ([runtime-substrate](runtime-substrate.md)), not a condition rechecked here.
-Empty text blocks are dropped without creating invalid entries. Tool-call parts
-with a `ToolUse` finish become the normalized proposals owned by
-[tool-loop](tool-loop.md); thinking or redacted-thinking still fail the adapter
-stage closed because no durable semantic representation exists. Scripted
-providers declare their exact terminal observation; nothing is inferred from
-timing or injected I/O errors.
+Empty text blocks are dropped without creating invalid entries, and so are
+thinking blocks whose text is empty — the Claude 5-family omitted-display shape,
+which carries only a provider replay signature that no durable representation
+could replay. Tool-call parts with a `ToolUse` finish become the normalized
+proposals owned by [tool-loop](tool-loop.md); thinking with actual text or
+redacted-thinking still fails the adapter stage closed because no durable
+semantic representation exists. Scripted providers declare their exact terminal
+observation; nothing is inferred from timing or injected I/O errors.
 
 ### Provider-target identity
 

@@ -362,14 +362,17 @@ completion by truncation or permissive parsing.
 Stream integrity, Anthropic: the decoder enforces the Messages stream protocol —
 `message_start` first with a complete envelope (discriminators, id, model, input
 usage), content-block bookkeeping by index (no reopened or sparse indices, no
-delta for an unopened block), thinking blocks must close with their integrity
-signature, tool-use argument JSON must be a complete object, a `stop_reason`
-with final output usage must precede `message_stop`, a reported stop sequence
-must be one the request declared, and `message_stop` is the only terminal
-marker. Unknown event names and delta types are tolerated (documented additive
-evolution); an unrecognized content-block type or malformed known event is a
-protocol violation. A stream ending any other way is explicit incomplete-stream
-evidence — never silent success.
+delta for an unopened block), thinking blocks must close with exactly one
+non-empty integrity signature (a Claude 5-family stream opens the thinking block
+with an empty-string signature placeholder and delivers the real signature
+through a later signature delta, so an empty opening value counts as absent,
+never as a first signature), tool-use argument JSON must be a complete object, a
+`stop_reason` with final output usage must precede `message_stop`, a reported
+stop sequence must be one the request declared, and `message_stop` is the only
+terminal marker. Unknown event names and delta types are tolerated (documented
+additive evolution); an unrecognized content-block type or malformed known event
+is a protocol violation. A stream ending any other way is explicit
+incomplete-stream evidence — never silent success.
 
 Stream integrity, OpenAI: the terminal marker is the literal `[DONE]` record,
 and `stream_options.include_usage` is always requested so a conforming stream
