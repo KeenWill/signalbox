@@ -520,7 +520,7 @@ and closed:
   native execution provenance;
 - `TurnCompleted { turn }` — the explicit final marker for a completed turn; and
 - `TurnCancelled { turn }` — the explicit final marker for a turn ended by its
-  applied interrupt or exact runner-abandonment proof.
+  applied interrupt.
 
 There is no generic text, role, metadata, or "other" payload. Entry identity is
 distinct from accepted-input, imported-entry, and turn identity (INV-001); equal
@@ -591,7 +591,9 @@ placement revision. Active continuation and the next eligible origin both extend
 that exact boundary before any successor-runner execution. A same-revision,
 missing-record, non-prefix, cross-session, or second placement boundary fails
 closed. The entry copies no runner advertisement, workspace path, credential
-fact, or tool output; the placement record remains its content authority
+fact, or tool output; the placement record remains its content authority. The
+provider projection resolves that record to the exact injected placement event
+owned by [model-call execution](model-call-execution.md#frontier-rendering)
 (INV-015, INV-044).
 
 Pending steering has a separate safe-point boundary (INV-036). Immediately

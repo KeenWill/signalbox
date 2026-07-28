@@ -204,19 +204,121 @@ effects:
   and
 - `shell_exec` and `build_test` are `SideEffecting`.
 
-Every schema is a closed JSON object. Workspace paths are repository-relative;
-Git repository acquisition names a configured repository key rather than a URL
-with credentials; shell and build/test commands are bounded argument arrays, not
-shell source smuggled through another tool field. `workspace-restricted`
-defaults all ten to `Auto`; `ambient` defaults only `workspace_read` to `Auto`.
-The runner derives advertisement from the same compiled executor registry, while
-the daemon remains the declaration and policy authority.
+### Version-one workstation tool contracts
 
-Each provider operation carries one exact definition snapshot. Initial approval
-for proposals returned by that operation is derived from that same advertised
-snapshot, never from a later catalog lookup. A dynamic catalog change while the
-provider call is in flight therefore cannot upgrade a proposal from `Confirm` to
-unattended execution.
+Every argument schema below is a JSON object with every named member required,
+`additionalProperties: false`, and no nullable member. A repository-relative
+`path` is 1 through 4,096 UTF-8 bytes, uses `/` separators, has no U+0000,
+leading slash, empty component, or `.` or `..` component, and resolves beneath
+the exact session repository without following a symlink. A `cwd` is either `.`
+or such a path resolving to an existing real directory. Text is UTF-8 with no
+U+0000. File content and each edit operand are at most 1,048,576 bytes.
+
+An `argv` is an array of 1 through 128 strings: element zero is nonempty and at
+most 4,096 bytes, every later element is at most 8,192 bytes, the complete array
+contains at most 65,536 UTF-8 bytes, and no element contains U+0000. It is
+passed directly to `execve`; no shell, word splitting, interpolation, or
+response-file expansion is inserted. A timeout is a JSON integer from 1 through
+1,800 seconds. Captured bytes use exactly
+`{ "encoding": "base64", "data": canonical_padded_base64 }`; stdout and stderr
+are each bounded to 1,048,576 decoded bytes. Process success is
+`{ "exit_code": 0, "stdout": captured_bytes, "stderr": captured_bytes }`.
+Crossing either bound terminates the process group and returns known failure
+`result_too_large`; timeout returns `timed_out`. A signal or nonzero exit is
+known failure carrying its signal or integer exit status and the bounded
+captured streams. Runner-side infrastructure uncertainty after process start
+remains ambiguous according to the tool effect.
+
+Git `remote` is 1 through 64 ASCII bytes matching `[A-Za-z0-9][A-Za-z0-9._-]*`.
+Before network use its configured URL must equal a canonical URL from the runner
+repository map and that entry must name the exact granted credential profile. A
+`branch` is at most 255 bytes and must pass `git check-ref-format --branch`; a
+`ref` or refspec is 1 through 1,024 UTF-8 bytes, contains no U+0000, and is
+passed after option termination. A commit message is 1 through 65,536 UTF-8
+bytes with no U+0000. Git commands never use a credential-bearing URL, force,
+delete, tag, recurse-submodule, hook-bypass, amend, or signing option unless a
+later contract adds that operation explicitly.
+
+The exact tools are:
+
+- `workspace_read` takes `{ "path": path }`. It opens one regular file
+  descriptor-relatively, rejects a file larger than 1,048,576 bytes or invalid
+  UTF-8, and returns `{ "content": string }` with the exact bytes decoded as
+  UTF-8.
+- `workspace_write` takes `{ "path": path, "content": text }`. The parent must
+  already exist. The target may be absent or a regular nonsymlink file. It
+  writes and fsyncs a sibling temporary, preserves an existing target mode or
+  uses `0644` for a new file, atomically renames, fsyncs the parent, and returns
+  `{ "bytes_written": canonical_decimal_string }`.
+- `workspace_edit` takes
+  `{ "path": path, "old_text": nonempty_text, "new_text": text, "occurrence": "one" | "all" }`.
+  `one` requires exactly one byte-exact UTF-8 match; `all` requires at least one
+  and replaces nonoverlapping matches from left to right. An output above the
+  file-content bound fails before mutation. The atomic write rules and result
+  are exactly `workspace_write`.
+- `git_clone` takes
+  `{ "repository": checked_repository_key, "destination": path }`. Destination
+  must not exist and its parent must be real. The runner resolves the named
+  canonical URL and exact granted profile, clones without submodules into that
+  destination, and returns
+  `{ "head": canonical_full_commit_hex, "branch": string | null }`. The nullable
+  `branch` is result vocabulary, not an argument.
+- `git_fetch` takes
+  `{ "remote": remote, "refspecs": ref_array, "prune": boolean }`, where the
+  array has 0 through 32 unique refspecs. It validates the remote as above and
+  performs one noninteractive fetch with no tags or submodules and optional
+  prune. Success returns `{ "head": canonical_full_commit_hex }` for the
+  unchanged checked-out HEAD.
+- `git_branch` takes `{ "name": branch, "start_point": ref }`. The name must not
+  already exist and the start point must resolve to one commit. It creates and
+  checks out the branch without force, then returns
+  `{ "branch": string, "head": canonical_full_commit_hex }`.
+- `git_commit` takes `{ "message": commit_message, "paths": path_array }`, where
+  the array contains 1 through 256 unique paths. It stages exactly those paths,
+  requires a nonempty resulting commit, uses the configured runner author name
+  and email, neither amends nor signs, and returns
+  `{ "commit": canonical_full_commit_hex }`. A failed commit honestly retains
+  any index changes already made.
+- `git_push` takes `{ "remote": remote, "branch": branch }`. After validating
+  the remote and exact granted profile, it pushes exactly
+  `HEAD:refs/heads/{branch}` with upstream tracking and without force, deletion,
+  or tags. Success returns
+  `{ "remote": string, "branch": string, "commit": canonical_full_commit_hex }`.
+- `shell_exec` takes `{ "argv": argv, "cwd": cwd, "timeout_seconds": timeout }`
+  and applies the common direct-process result.
+- `build_test` takes
+  `{ "program": "cargo" | "mdformat", "arguments": argument_array, "cwd": cwd, "timeout_seconds": timeout }`,
+  where `argument_array` has 0 through 127 elements and otherwise uses the
+  `argv` element and total bounds. The executable is the exact real `cargo` or
+  `mdformat` found in the declared read-only toolchain allowlist, not a
+  workspace-controlled `PATH` entry, and the common direct-process result
+  applies.
+
+Git full commit hex is exactly 40 or 64 lowercase hexadecimal characters,
+matching the repository object format. Every known-failure code is closed:
+`invalid_arguments`, `path_unavailable`, `not_regular_file`, `symlink_refused`,
+`content_too_large`, `invalid_utf8`, `match_not_found`, `match_not_unique`,
+`repository_unavailable`, `credential_unavailable`, `git_refused`,
+`process_failed`, `timed_out`, or `result_too_large`. Failure detail contains
+only bounded tool output after exact injected-value redaction; it carries no
+host path, configured URL, credential path, or credential value.
+
+`workspace-restricted` defaults all ten tools to `Auto`; `ambient` defaults only
+`workspace_read` to `Auto`. The runner derives advertisement and executor lookup
+from this same compiled registry, while the daemon remains the declaration and
+policy authority.
+
+Each provider operation carries the exact session-executable definition and
+locus snapshot prepared under
+[model-call execution](model-call-execution.md#frontier-rendering). Runner-only
+definitions absent from current selected execution authority are not advertised;
+`RunnerAbandoned` exposes daemon-executable declarations only, and lost
+placement blocks preparation until owner recovery. Initial approval and dispatch
+for a proposal are derived from that same frozen snapshot, never from a later
+catalog or registration lookup. A dynamic catalog or runner change while the
+provider call is in flight therefore cannot upgrade permission, introduce an
+unavailable runner tool, widen its frozen selector, or silently move the
+selected locus.
 
 The registry is advisory input to policy and execution, never request-content
 authority. For daemon-local execution, a model may propose an unknown name;

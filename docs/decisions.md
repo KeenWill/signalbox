@@ -18,11 +18,12 @@ slice needs coding parity on the owner's Ubuntu development host without making
 untested portability or distributed-scheduling claims.
 
 **Decision.** Version one composes one `signalbox-runner` instance on the same
-host and under the same operating-system user as `signalboxd`. Its closed tool
-families are workspace file read/write/edit, Git clone/fetch/branch/commit/push,
-serial shell execution, and serial build/test execution. Mac runners, remote
-transport, concurrent tool execution, and MCP placement are outside version one.
-The wire vocabulary remains additive but carries no remote-only design.
+host and under the same operating-system user as `signalboxd`. Its one compiled
+capability class is `workstation-v1`; its closed tool families are workspace
+file read/write/edit, Git clone/fetch/branch/commit/push, serial shell
+execution, and serial build/test execution. Mac runners, remote transport,
+concurrent tool execution, and MCP placement are outside version one. The wire
+vocabulary remains additive but carries no remote-only design.
 
 **Rejected alternatives.** A cross-platform first slice would multiply sandbox
 and path semantics before one host works. A runner pool would require scheduling
@@ -47,10 +48,12 @@ identity, effective-user peer check, bounded JSON-lines framing, and fail-closed
 version rules. Runner-wire version one uses a fixed 8 MiB frame bound. On the
 first checked same-user connection, the runner sends a durable random request
 identity and the daemon atomically issues the singleton enrollment identities;
-exact replay is idempotent and a second request conflicts. The daemon requests a
-heartbeat every five seconds, fences offers after one miss, and marks the
-connection lost after three consecutive misses. Remote transport is deferred; no
-remote handshake or negotiation is designed here.
+exact replay is idempotent and another request conflicts while that enrollment
+is live. After durable loss, exactly one successor request receives only pending
+provisioning authority until an owner replacement command promotes it. The
+daemon requests a heartbeat every five seconds, fences offers after one miss,
+and marks the connection lost after three consecutive misses. Remote transport
+is deferred; no remote handshake or negotiation is designed here.
 
 **Rejected alternatives.** Reusing the client socket couples independent
 vocabularies and backpressure. Letting runners listen creates an inbound host
@@ -144,7 +147,8 @@ names are registration availability, while daemon-owned sandbox and override
 policy supply the grant posture; tools, effects, loci, and sandbox meanings
 remain compiled daemon authority. Adding another token shape is a config entry,
 not a code branch. Model-provider credentials never enter runner config, wire
-state, or execution.
+state, or injected execution environment; explicit `ambient` retains full
+same-user filesystem access as recorded by the sandbox-profile decision.
 
 **Rejected alternatives.** Sending values from the daemon violates the accepted
 profile boundary. One environment variable per token type hard-codes an
@@ -163,15 +167,19 @@ the session's pinned execution boundary, and an in-flight effect may remain
 ambiguous.
 
 **Decision.** Heartbeat or channel loss marks the exact runner connection lost
-and durably surfaces typed `RunnerLost` state on every affected session. No
-automatic migration, class-based re-placement, or replacement occurs. The only
-runner-loss recovery verbs are owner `replace`, naming either a different exact
-currently registered live runner or the one pending replacement enrollment,
-which is atomically activated while creating a new placement/workspace frontier
-boundary, and owner `abandon`, which consumes proof of the exact lost placement
-and terminalizes through the existing proof-bearing cancellation and ambiguity
-algebra without a successor turn. Replacement never reuses the prior workspace
-or credential grant.
+and durably surfaces typed loss on every affected session, including an
+exact-runner request lost before its first pin. No automatic migration,
+class-based re-placement, or replacement occurs. The only runner-loss recovery
+verbs are owner `replace`, naming either a different exact currently registered
+live runner or the one pending replacement enrollment, and owner `abandon`.
+Pinned replacement durably claims its command before staging a fresh workspace
+under the pending candidate and promotes that candidate only in the terminal
+placement transaction; pre-pin replacement updates the exact selector and
+returns to unpinned state without inventing a workspace or semantic boundary.
+Abandon requires the existing turn-control and ambiguity algebra to leave no
+active turn before it terminalizes only the exact lost placement; it mints no
+second cancellation authority and creates no successor turn. Replacement never
+reuses the prior workspace or credential grant.
 
 **Rejected alternatives.** Automatic migration hides a changed execution
 boundary. Waiting indefinitely without an owner verb strands the progressing
@@ -195,16 +203,18 @@ Each session is a complete non-shared clone at
 `sessions/<canonical-session-uuid>/<placement-revision>/repo`, including its own
 `.git` directory, acquired with the selected runner PAT under a single-use
 provisioning authorization. Provisioning occurs in a sibling staging directory,
-writes a versioned non-secret manifest, fsyncs the manifest and parents, and
-atomically renames into place before the first atomic pin/grant/lease
-transition. An explicit daemon release, accepted only after the exact placement
-is terminal and neither a lease nor unacknowledged result is live, atomically
-renames it below `trash/` before recursive deletion. Startup resumes
-manifest-proven trash and never-published staging cleanup, reconciles every
-ready workspace with the daemon, and reports every unknown, retired-but-present,
-conflicting, or otherwise unreconciled workspace as leaked; it never silently
-deletes a reported leak. Workspaces are never shared or inherited across
-placements or runners.
+writes a versioned non-secret manifest binding the SHA-256 identity of the
+canonical configured clone URL, fsyncs the manifest and parents, and atomically
+renames into place before the first atomic pin/grant/lease transition. An
+explicit daemon release, accepted only after the exact placement is retired by
+replacement or abandonment and neither a lease nor unacknowledged result is
+live, atomically renames it below `trash/` before recursive deletion; the
+session may remain usable. Startup resumes manifest-proven trash and
+never-published staging cleanup, reconciles every ready workspace with the
+daemon, and delivers every unknown, retired-but-present, conflicting, or
+otherwise unreconciled workspace through the bounded acknowledged leak-report
+wire; it never silently deletes a reported leak. Workspaces are never shared or
+inherited across placements or runners.
 
 **Rejected alternatives.** One shared bare clone gives sessions shared mutable
 Git authority outside their jail. Random opaque directory names hinder recovery.
@@ -214,6 +224,95 @@ before daemon reconciliation. Daemon-owned deletion crosses the runner boundary.
 **Affects.** Runner workspace configuration and manifests, provisioning, cleanup
 and startup recovery, session placement, INV-022 and INV-044, and
 [runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-27 — Reconcile durable runner evidence before generic recovery
+
+**Context.** A daemon restart can find a claimed lease whose runner retained
+terminal evidence, and replacement of a lost singleton needs workspace evidence
+before the pending runner can become active. A generic startup scan or
+atomic-only command record would discard one of those authorities.
+
+**Decision.** Receipt of `lease_claimed` and `dispatch` is fsynced through the
+closed local phases `waiting_dispatch`, `dispatch_received`, and
+`execution_may_have_started`; reconnect inventories the exact phase, and
+omission of a daemon-recorded claim becomes effect-class loss rather than repeat
+permission. On startup, the runner socket enters recovery-only mode and
+reconciles retained evidence, claimed-lease loss, and nonterminal replacement
+commands before the generic scan touches remaining daemon-owned attempts. A lost
+active runner admits one provisioning-only pending candidate. Repository-backed
+replacement claims an immutable typed command request, stages one workspace
+without holding a database transaction, then promotes the candidate and appends
+its result in one terminal transaction. Every version-seventeen native-session
+listing uses the same runner projection, and suspect recovery emits `connected`.
+
+**Rejected alternatives.** Scanning first can terminalize an attempt before its
+real result arrives. Keeping claim phase only in memory can strand or repeat an
+effect after runner restart. Granting the candidate leases before owner replace
+would be automatic migration; holding a database transaction across clone I/O
+would make recovery and lock duration unbounded.
+
+**Affects.** Runner enrollment and local journal, daemon startup recovery,
+durable command families, replacement provisioning, owner status/listing
+projections, and [runner protocol](spec/runner-protocol.md),
+[persistence protocol](spec/persistence-protocol.md), and
+[process protocol](spec/process-protocol.md).
+
+## 2026-07-27 — Freeze session-executable runner tools before model calls
+
+**Context.** A process-wide runner catalog can contain tools a particular
+session cannot execute, and runner replacement must be visible to the model
+without copying mutable workspace facts into semantic history.
+
+**Decision.** Model-operation preparation freezes one session-executable tool
+snapshot containing the exact definitions, permissions, effects, and selected
+loci that current placement authority can execute. Lost placement blocks
+preparation, abandonment leaves daemon-executable tools only, and an unpinned
+runner-only selection freezes its exact identity or capability-class selector.
+Only an exact-identity selection binds the current runner before first dispatch;
+a class selection chooses only at the eventual initial pin. A later availability
+change cannot add a tool or move that frozen locus. `RunnerPlacementChanged`
+resolves its referenced successor placement and renders as one injected
+user-role event with the fixed text and canonical revision/profile substitutions
+owned by the model-call specification.
+
+**Rejected alternatives.** Advertising the process catalog lets the model select
+impossible runner-only tools. Looking up locus after the provider returns
+permits a silent policy or runner change. Skipping the placement boundary hides
+that the prior runner-local execution state is unavailable; copying paths,
+credentials, or advertisements into the entry creates a second content
+authority.
+
+**Affects.** Model-operation preparation, provider tool advertisement, runner
+placement recovery, semantic frontier rendering, INV-015 and INV-044, and
+[model-call execution](spec/model-call-execution.md).
+
+## 2026-07-27 — Close runner operational bounds before implementation
+
+**Context.** Availability-only tool names, an unpaged startup leak promise, and
+multiple partial lock orders leave executors and persistence free to implement
+incompatible behavior even when the high-level runner boundary agrees.
+
+**Decision.** The workstation registry compiles the ten exact closed argument,
+result, failure, path, process, Git, and timeout contracts owned by the
+tool-loop specification. Runner startup leak facts cross the runner wire in
+acknowledged, digest-chained pages of at most 64 sorted facts and publish to
+owner status only when the final page commits. Every multi-row runner
+transaction uses the single applicable lock subsequence owned by the persistence
+specification. Workspace manifests bind the SHA-256 identity of the canonical
+configured clone URL, and release keys off a retired placement rather than a
+terminal session.
+
+**Rejected alternatives.** Leaving schemas to executor code makes the daemon
+validator, model definition, tests, and runner disagree. A one-frame leak report
+has no finite workspace-count bound; best-effort notices disappear on reconnect.
+Independent lock orders can deadlock pending-enrollment activation. Trusting the
+writable Git remote or a reused repository key permits configuration drift to
+reinterpret an existing clone.
+
+**Affects.** Workstation tool contracts, runner wire and status projection,
+workspace recovery, runner persistence transactions, and
+[tool-loop](spec/tool-loop.md), [runner-protocol](spec/runner-protocol.md), and
+[persistence-protocol](spec/persistence-protocol.md).
 
 ## 2026-07-27 — Serve the unified conversation listing from authoritative tables
 

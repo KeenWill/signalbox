@@ -358,7 +358,10 @@ Unknown profiles fail before lease claim. A credential failure after a claimed
 dispatch is a fixed `ExecutionFailed` observation naming only the profile and
 failure class. A transport or supervisor loss remains effect-class ambiguous;
 credential failure never authorizes an automatic repeat of side-effecting work.
-Model-provider credentials are daemon-only and cannot be granted to a runner.
+Model-provider credentials are daemon-only and cannot be granted or injected to
+a runner. Explicit `ambient` nevertheless retains same-user filesystem powers
+and therefore does not promise those files are unreadable; that access is
+outside the credential-grant channel.
 
 ## Redaction and logs
 

@@ -167,7 +167,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1` through `12`, or `16`;
+- `version`: JSON integer `1` through `12`, `16`, or `17`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -221,9 +221,9 @@ that variant.
 | `decide_tool_request`                   | 8       | `command_id`, `session_id`, and `tool_request_id` (canonical UUID strings), `decision` (a decision object below)                                                                                                                                                                               | Supply the owner decision for one pending tool request through the canonical decision command.                                                                                                                                                    |
 | `read_session_defaults`                 | 9       | `session_id` (canonical UUID string), `defaults_version` (canonical decimal string or null)                                                                                                                                                                                                    | Read one complete immutable defaults epoch: the current one for null, otherwise exactly the named one.                                                                                                                                            |
 | `list_conversations`                    | 16      | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                                            | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                    |
-| `read_runner_status`                    | 17      | none                                                                                                                                                                                                                                                                                           | Read the singleton runner registration, connection/loss state, advertised availability, and startup workspace-leak report.                                                                                                                        |
-| `replace_lost_runner`                   | 17      | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string), and `replacement` (target object)                                                                                                                                   | Replace the exact current lost placement with a different live runner or atomically activate one pending replacement enrollment, preserving owner policy and provisioning a new revisioned workspace.                                             |
-| `abandon_lost_runner`                   | 17      | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string)                                                                                                                                                                      | Terminalize the exact lost placement and any active turn through cause-specific abandonment proof; idle and queued-only sessions fabricate no turn.                                                                                               |
+| `read_runner_status`                    | 17      | none                                                                                                                                                                                                                                                                                           | Read the active and optional pending runner registrations, connection/loss state, advertised availability, and startup workspace-leak reports.                                                                                                    |
+| `replace_lost_runner`                   | 17      | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string), and `replacement` (target object)                                                                                                                                   | Replace the exact current lost placement with a different live runner or atomically activate one pending replacement enrollment; pinned loss provisions a new workspace boundary, while pre-pin loss returns to unpinned selection.               |
+| `abandon_lost_runner`                   | 17      | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string)                                                                                                                                                                      | Terminalize the exact lost placement only after the existing turn-control algebra has left no active turn; queued work remains and later sees only daemon-executable tools.                                                                       |
 
 Version eleven adds these review-workflow requests. Every `*_id` is a canonical
 UUID string, ordinal and count values are canonical decimal strings, and every
@@ -280,9 +280,9 @@ A version-seventeen replacement target is exactly one of:
 - `{"type":"runner","runner_id":"<canonical UUID>"}` for a different current
   live runner; or
 - `{"type":"pending_enrollment","request_id":"<canonical UUID>"}` for the one
-  authority-free checked request visible in runner status.
+  provisioning-only checked request visible in runner status.
 
-The second arm issues and registers the new runner only inside the successful
+The second arm promotes that exact pending candidate only inside the successful
 replacement command. Neither arm creates automatic placement authority.
 
 A decision object is exactly one of:
@@ -626,10 +626,7 @@ that variant. Every accepted non-review mutation request — `create_session`,
 - `conversation_import_already_imported` with `imported_conversation_id`;
 - `runner_replaced` with `session_id`, `prior_runner_id`, `new_runner_id`,
   successor `placement_revision`, and `sandbox_profile`;
-- `runner_abandoned` with `session_id`, `placement_revision`, nullable
-  `terminal_turn_id`, nullable `terminal_frontier_id`, and nullable terminal
-  `disposition`; all three terminal members are null exactly when no turn was
-  active; or
+- `runner_abandoned` with `session_id` and `placement_revision`; or
 - `error` with a stable `code` and a non-sensitive `message`.
 
 Version-eleven review mutations return exactly one stable acknowledgement:
@@ -658,16 +655,21 @@ validates the selected run, ordering, and terminal count before presenting the
 list.
 
 A successful version-seventeen `read_runner_status` response is a bounded
-sequence: `runner_status_start { pending_replacement_request_id }`, exactly zero
-or one `runner_status` message, zero or more `runner_workspace_leak` messages,
-and `runner_status_end { leak_count }`. The status carries issued runner,
-enrollment, and registration identities, connection state (`connected`,
-`suspect`, or `lost`), registration revision, advertised capability classes,
-tool names, credential-profile names, repository keys, workspace capabilities,
-and sandbox profiles. Each leak carries only manifest identity facts and a
-closed reason, never a host path, repository URL, or credential fact. Strict
-ordering and the terminal count make the complete sequence authoritative without
-an aggregate frame bound.
+sequence: `runner_status_start`; zero or one `runner_status` message; zero or
+one `pending_runner_status` message; zero or more `runner_workspace_leak`
+messages; and `runner_status_end { runner_count, leak_count }`. Each status
+carries issued request, runner, enrollment, and registration identities,
+connection state (`connected`, `suspect`, or `lost`), registration revision,
+advertised capability classes, tool names, credential-profile names, repository
+keys, workspace capabilities, and sandbox profiles. `pending_runner_status` also
+carries the literal authority state `provisioning_only`; it is never presented
+as dispatch-capable. Each leak names its exact runner id and carries the exact
+closed `kind`, bounded runner-root-relative `locator`, lowercase
+manifest-or-entry SHA-256 digest, and nullable `session_id` and positive
+`placement_revision` admitted by that runner final acknowledged wire report. It
+never carries an absolute host path, repository URL, or credential fact.
+Runner-id then locator-byte ordering and the terminal counts make the complete
+sequence authoritative without an aggregate frame bound.
 
 Versions twelve and above additionally admit
 `provider_text_delta { session_id, turn_id, model_call_id, part_index, content }`
@@ -690,22 +692,24 @@ In the server shapes below, notation such as `queued` or
 `"type":"terminal"` plus exactly the named members.
 
 A session summary contains `session_id`, `defaults_version`, and
-`model_selection`. Version seventeen additionally requires `runner`, either null
-or a complete object carrying selector, current runner id when pinned, placement
-revision, sandbox profile, credential-profile name, repository key, and state
-(`unpinned`, `pinned`, `runner_lost`, or `runner_abandoned`). The selected
-profile is therefore visible even before execution, and `ambient` is always
-printed as ambient. A successful `list_sessions` response is `sessions_start`,
-one `session_summary` per result in session-identity order, then
-`sessions_end { session_count }`. The summaries are read in one read-only
-repeatable-read transaction and spooled from one decoded row at a time before
-client output. A slow client therefore retains temporary disk rather than the
-complete session catalog in request heap or an open database transaction. The
-sequence becomes authoritative only after the end message and count validate.
-This avoids an aggregate frame-size limit. Identifiers are canonical UUID
-strings. Request identities, ordinal versions, indices, counts, and outbox
-cursors are canonical decimal strings, preserving their full unsigned 64-bit
-range without JSON-number precision loss.
+`model_selection`. Every version-seventeen native-session listing projection
+adds the same required `runner` member, either null or a complete object
+carrying selector, the current or lost exact runner id when the state names one,
+placement revision, sandbox profile, credential-profile name, repository key,
+and state (`unpinned`, `pinned`, `runner_lost_before_pin`, `runner_lost`, or
+`runner_abandoned`). This exact object is the `runner_projection` below; no
+listing defines a reduced runner shape. The selected profile is therefore
+visible even before execution, and `ambient` is always printed as ambient. A
+successful `list_sessions` response is `sessions_start`, one `session_summary`
+per result in session-identity order, then `sessions_end { session_count }`. The
+summaries are read in one read-only repeatable-read transaction and spooled from
+one decoded row at a time before client output. A slow client therefore retains
+temporary disk rather than the complete session catalog in request heap or an
+open database transaction. The sequence becomes authoritative only after the end
+message and count validate. This avoids an aggregate frame-size limit.
+Identifiers are canonical UUID strings. Request identities, ordinal versions,
+indices, counts, and outbox cursors are canonical decimal strings, preserving
+their full unsigned 64-bit range without JSON-number precision loss.
 
 Version four's metadata list is a bounded sequence:
 
@@ -716,11 +720,12 @@ Version four's metadata list is a bounded sequence:
 
 Each summary carries `session_id`, current `defaults_version`,
 `model_selection`, `dangerous_tool_auto_approval`, `title`, sorted `tags`,
-`archived`, and `last_writer`. `dangerous_tool_auto_approval` is a JSON boolean:
-`false` encodes domain `Disabled` and `true` encodes domain `ApproveAll`. Tags
-are strictly increasing by lexicographic UTF-8 byte sequence. Each summary
-admits at most 256 tags and applies the metadata object's 262,144-byte aggregate
-UTF-8 bound across its title and tags, not merely to each member independently.
+`archived`, and `last_writer`; version seventeen also requires the exact
+`runner_projection`. `dangerous_tool_auto_approval` is a JSON boolean: `false`
+encodes domain `Disabled` and `true` encodes domain `ApproveAll`. Tags are
+strictly increasing by lexicographic UTF-8 byte sequence. Each summary admits at
+most 256 tags and applies the metadata object's 262,144-byte aggregate UTF-8
+bound across its title and tags, not merely to each member independently.
 Attributes are intentionally absent from the list projection. The end cursor is
 null when no later match existed in the page snapshot; otherwise it equals the
 last emitted session identity. The page sequence is spooled before output and
@@ -735,11 +740,11 @@ Version sixteen's unified conversation list is the same bounded sequence shape:
 
 Each summary carries one closed `conversation` object tagged by `origin`. A
 `native_session` summary carries `session_id`, the optional exact metadata
-`title`, `archived`, and the current `defaults_version`. An
-`imported_conversation` summary carries `imported_conversation_id`, the optional
-exact source-derived display `title`
-([conversation-import](conversation-import.md#derived-display-titles) owns the
-derivation), the total normalized `entry_count` — the greatest
+`title`, `archived`, and the current `defaults_version`; version seventeen also
+requires the exact `runner_projection`. An `imported_conversation` summary
+carries `imported_conversation_id`, the optional exact source-derived display
+`title` ([conversation-import](conversation-import.md#derived-display-titles)
+owns the derivation), the total normalized `entry_count` — the greatest
 `through_position` an imported continuation may select — and the exact stored
 `source_format` (`claude_code_session_jsonl_v1`, `claude_code_session_jsonl_v2`,
 or `codex_rollout_jsonl_v1`). Neither summary materializes transcript, entry, or
@@ -816,10 +821,11 @@ Target reason is `not_connected`, `not_current`, `not_advertised`,
 failure class is `credential_unavailable`, `repository_unavailable`,
 `sandbox_unavailable`, or `workspace_conflict`. A version-seventeen
 `abandon_lost_runner` rejection admits `session_not_found`,
-`runner_placement_not_found`, `placement_revision_mismatch`, and
-`placement_not_lost` with those same shapes. Every admitted runner rejection is
-a recorded durable result; equal replay returns it even after runner state
-changes.
+`runner_placement_not_found`, `placement_revision_mismatch`,
+`placement_not_lost`, and
+`active_turn_requires_existing_control { session_id, active_turn_id }` with
+those same shapes. Every admitted runner rejection is a recorded durable result;
+equal replay returns it even after runner state changes.
 
 The `turn_not_awaiting_reconciliation` and `tool_request_not_in_session` details
 report refusals made before command recording, so unlike every other `rejected`
@@ -1134,10 +1140,12 @@ exactly `proposed { frontier_id }`, `results_projected { frontier_id }`, or
 
 Version seventeen additionally admits
 `runner_state_transition { runner_id, placement_revision, sandbox_profile, state }`,
-where state is `pinned`, `suspect`, `runner_lost`, `replaced`, or `abandoned`.
-The event carries no host path, credential fact, or arbitrary runner text. Older
-versions encounter the runner-backed-session compatibility gate before
-subscribing.
+where state is `pinned`, `suspect`, `connected`, `runner_lost_before_pin`,
+`runner_lost`, `replaced`, or `abandoned`. `suspect` is emitted on the first
+missed heartbeat and `connected` exactly when a later acknowledgement clears
+that same suspect epoch before durable loss. The event carries no host path,
+credential fact, or arbitrary runner text. Older versions encounter the
+runner-backed-session compatibility gate before subscribing.
 
 The model-call `state` object is exactly `prepared`, `in_flight`,
 `cancellation_requested`, or `terminal { disposition }`; terminal disposition is

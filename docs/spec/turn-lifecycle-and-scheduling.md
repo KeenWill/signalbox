@@ -48,15 +48,13 @@ terminal disposition kind closed to `failed`, `completed`, `refused`,
 `cancelled`, and `reconciliation_required` (migrations `202607220001` and
 `202607220005`). The domain `TurnDisposition` algebra carries all five accepted
 variants — `Completed`, `Refused`, `Failed`, `Cancelled { cause }`,
-`ReconciliationRequired { marker }` — but ordinary `Cancelled` is constructible
-only from an `AppliedInterruptProof`; the sole cause-specific exception is a
-sealed `RunnerAbandonmentProof` for the exact current lost placement.
-`ReconciliationRequired` remains constructible only from a sealed
-`ReconciliationMarker`. Committed transitions produce every variant: interrupted
-physical ambiguity produces proof-bearing `ReconciliationRequired`, confirmed
-interrupted cancellation produces proof-bearing `Cancelled`, and explicit owner
-runner abandonment produces proof-bearing terminal cancellation without a
-successor origin.
+`ReconciliationRequired { marker }` — but `Cancelled` is constructible only from
+an `AppliedInterruptProof`. `ReconciliationRequired` remains constructible only
+from a sealed `ReconciliationMarker`. Committed transitions produce every
+variant: interrupted physical ambiguity produces proof-bearing
+`ReconciliationRequired`, and confirmed interrupted cancellation produces
+proof-bearing `Cancelled`. Runner abandonment creates no additional turn-ending
+authority.
 
 The domain `ActiveTurnPhase` algebra is `Running { current_attempt }`,
 `AwaitingApproval { request }`,
@@ -294,10 +292,26 @@ through the ports owned by [tool-loop](tool-loop.md).
 After configuration and database connection, signalboxd acquires the dedicated
 single-daemon advisory guard specified by
 [process-protocol](process-protocol.md), then orders startup strictly: embedded
-migrations, the startup scan to completion, process-socket bind, and only then
-request admission, outbox dispatch, and scheduling. Why: any lifecycle writer or
-client read before the scan could observe or alter a live-looking prior-process
-attempt (INV-034).
+migrations; runner-socket bind in recovery-only mode; retained runner inventory,
+evidence, and nonterminal replacement-command reconciliation; the generic
+startup scan to completion; process-socket bind; and only then ordinary runner
+enrollment, client request admission, outbox dispatch, and scheduling. Why: any
+lifecycle writer or client read before recovery could observe or alter a
+live-looking prior-process attempt, while a generic scan before runner evidence
+admission could terminalize the authority that evidence resolves (INV-034).
+
+The runner recovery phase admits only `resume` for a recorded active or pending
+identity and frames needed to reconcile its bounded inventory; it creates no new
+enrollment or lease. For each active attempt owned by a durable claimed runner
+lease, the phase ends only after retained terminal evidence commits, the local
+journal proves execution had not started, or the exact connection passes the
+fifteen-second loss bound and effect-class loss commits. An otherwise complete
+inventory that omits the claimed lease is itself loss evidence, never permission
+to repeat. A durable nonterminal `replace_lost_runner` command resumes its exact
+provisioning authorization and receipt in the same phase. The generic startup
+scan skips runner-owned attempts until this prior phase has resolved them, then
+classifies only remaining daemon-owned tenure. With no retained runner work the
+phase completes immediately.
 
 `StartupScanService` reads the finite inventory of sessions with an active turn
 (deterministic order), then runs one independent transaction per session under
@@ -445,36 +459,47 @@ delivery outcomes implemented here are:
 
 The heartbeat-loss transaction durably advances the exact connection loss epoch
 and fences new offers before bounded per-session propagation. Each restartable
-session transaction then marks its placement `RunnerLost`, preserves exact
-tool-attempt ambiguity, moves an active affected turn to
-`AwaitingRunnerRecovery`, and appends one durable runner state event. A queued
-turn remains queued but cannot activate while its placement is lost. A stale
-connection epoch cannot write after the first commit. Locking, page bounds, and
-crash recovery are owned by [persistence-protocol](persistence-protocol.md).
+session transaction marks a pinned placement `RunnerLost` or an unpinned
+placement whose exact-identity selector names the lost runner
+`RunnerLostBeforePin { runner }`, preserves exact tool-attempt ambiguity, and
+appends one durable runner state event. An active turn already at a runner
+boundary moves to `AwaitingRunnerRecovery`. A daemon-local model operation that
+was physically authorized before loss retains its ordinary completion or
+ambiguity law; its observation may complete the turn, but any returned
+runner-only proposal parks before authorization because the frozen runner locus
+is now lost. No provider call is repeated merely to project runner loss. A
+queued turn remains queued and cannot activate while its placement is lost. An
+unpinned capability-class request names no selected runner and is unaffected
+until a live registration can satisfy it. A stale connection epoch cannot write
+after the first commit. Locking, page bounds, and crash recovery are owned by
+[persistence-protocol](persistence-protocol.md).
 
 Only two owner commands consume that state. `ReplaceLostRunner` requires the
 expected current placement revision and either a different live exact runner or
-the one pending replacement enrollment it atomically activates. Its transaction
-installs the checked successor placement and grant lineage, provisions a new
-revisioned workspace, appends the reference-only `RunnerPlacementChanged`
-semantic entry, extends the next context frontier, and returns the turn to the
-phase justified by its retained work. Safe retry proof may be consumed only
-inside this command. `AbandonLostRunner` requires the same exact lost revision,
-installs terminal `RunnerAbandoned` placement state, and constructs
-`RunnerAbandonmentProof`. If a turn is active, existing cancellation and
-ambiguity rules terminalize it, reclassify its pending steering without
-accepting successor content, and release the slot. With no active turn,
-including an idle session with queued turns, no turn or frontier is fabricated;
-queued work remains queued and later runs with the daemon-only catalog because
-the terminal placement can issue no runner lease. The receipt records an
-optional terminal turn and frontier. No case turns ambiguous effect evidence
-into known failure.
+the one pending replacement enrollment it atomically activates. For a pinned
+loss, its transaction installs the checked successor placement and grant
+lineage, provisions a new revisioned workspace, appends the reference-only
+`RunnerPlacementChanged` semantic entry, extends the next context frontier, and
+returns the turn to the phase justified by its retained work. Safe retry proof
+may be consumed only inside this command. For `RunnerLostBeforePin`, replacement
+installs the new exact selector and returns the placement to `Unpinned` at the
+successor revision; it creates no semantic boundary, workspace, grant, or lease.
+Workspace provisioning and the first pin remain part of the eventual initial
+dispatch. `AbandonLostRunner` requires the same exact lost revision and no
+active turn, then installs terminal `RunnerAbandoned` placement state. If a turn
+is active it records `ActiveTurnRequiresExistingControl`; the owner first uses
+the existing `stop_turn`, approval-decision, or reconciliation flow until the
+slot is empty, so abandonment never mints cancellation authority. With no active
+turn, including an idle session with queued turns, no turn or frontier is
+fabricated; queued work remains queued and later runs with the daemon-only
+executable-tool snapshot because the terminal placement can issue no runner
+lease. No case turns ambiguous effect evidence into known failure.
 
 Equal command replay returns the recorded receipt. Another revision, a live or
-unpinned placement, the same runner, a stale connection, or an already replaced
-or abandoned session fails closed. These commands are administrative recovery,
-not input delivery: they neither widen `Interrupt` nor create a standalone
-ordinary cancellation path (INV-026, INV-029, INV-037, INV-044).
+ordinary unpinned placement, the same runner, a stale connection, or an already
+replaced or abandoned session fails closed. These commands are administrative
+recovery, not input delivery: they neither widen `Interrupt` nor create a
+standalone cancellation path (INV-026, INV-029, INV-037, INV-044).
 
 ## Context frontier snapshots
 
@@ -628,14 +653,15 @@ environment (the provisional configuration channels are
 [configuration-and-credentials](configuration-and-credentials.md) scope). It
 connects, acquires the single-daemon guard, fences the prior pool incarnation,
 migrates and resolves the one-time imported display-title backfill
-([conversation-import](conversation-import.md#derived-display-titles)),
-completes recovery scan, binds the process and runner sockets, then concurrently
-admits protocol requests, dispatches the outbox, and schedules eligible work. On
-a database without the fence migration, the guarded first migration creates the
-fence row before the daemon initializes its first fenced pool. No request,
-dispatch cursor advance, or scheduler pass occurs before recovery completes. Any
-phase failure is a failed startup with a classified, key-bearing log line and a
-failure exit code.
+([conversation-import](conversation-import.md#derived-display-titles)), binds
+the runner socket in recovery-only mode, reconciles retained runner work,
+completes the generic recovery scan, binds the process socket, enables ordinary
+runner admission, then concurrently admits client requests, dispatches the
+outbox, and schedules eligible work. On a database without the fence migration,
+the guarded first migration creates the fence row before the daemon initializes
+its first fenced pool. No request, dispatch cursor advance, or scheduler pass
+occurs before recovery completes. Any phase failure is a failed startup with a
+classified, key-bearing log line and a failure exit code.
 
 The dedicated guard connection is checked once per second while the runtime is
 active. Losing that session is a fatal fencing event: admission, dispatch, and

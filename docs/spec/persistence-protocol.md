@@ -111,7 +111,9 @@ Implemented table families (across the forward-only migrations):
 - `durable_command` plus typed command records (`create_session_command`,
   `create_session_from_imported_frontier_command`,
   `replace_session_defaults_command`, `replace_session_metadata_command`,
-  `submit_input_command`, `decide_tool_request_command`);
+  `submit_input_command`, `decide_tool_request_command`,
+  `replace_lost_runner_command`, `replace_lost_runner_result`, and
+  `abandon_lost_runner_command`);
 - `session`, `imported_session_seed`, `session_defaults_version`,
   `session_current_defaults`, `session_scheduler`;
 - `session_metadata` plus its current tag and attribute satellites,
@@ -287,20 +289,27 @@ One append-only, owner-global `durable_command` registry claims every command
 identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
-`replace_session_metadata`, `submit_input`, `decide_tool_request`) and a
-kind-scoped `storage_version`. Defaults-bearing create, imported-create, and
+`replace_session_metadata`, `submit_input`, `decide_tool_request`,
+`replace_lost_runner`, `abandon_lost_runner`) and a kind-scoped
+`storage_version`. Defaults-bearing create, imported-create, and
 replace-defaults records write version 3; they reconstitute version 1 with the
 disabled dangerous-tool posture, and versions 1 and 2 with no system prompt — a
 pre-version-three row carrying one fails closed in both the schema and every
-Rust reader. Metadata, submit, and decision records use version 1. Each kind has
-one typed subordinate record keyed by `command_id` that stores every
-caller-supplied semantic field in typed, `CHECK`-constrained columns, plus the
-terminal `applied`/`rejected` result and its typed result fields; result-shape
-`CHECK` constraints tie each rejection kind to exactly its fields, and deferred
-reverse constraints require exactly one typed record per claimed registry row at
-commit. Why: typed per-kind records keep replay semantics reviewable and
-constraint-checked, where a universal serialized payload would make the
-serializer a second semantic authority.
+Rust reader. Metadata, submit, decision, and runner-recovery records use version
+1\. Each kind has one typed subordinate request record keyed by `command_id` that
+stores every caller-supplied semantic field in typed, `CHECK`-constrained
+columns. Every kind except runner replacement also stores the terminal
+`applied`/`rejected` result and typed result fields there.
+`replace_lost_runner_command` is the immutable request and
+provisioning-authorization root; at most one append-only
+`replace_lost_runner_result` supplies its terminal result after off-transaction
+runner I/O. Result-shape `CHECK` constraints tie each rejection kind to exactly
+its fields. Deferred reverse constraints require exactly one typed request per
+claimed registry row at commit and forbid a replacement result without its
+request; acknowledgement requires the terminal result. Why: typed per-kind
+records keep replay semantics reviewable and constraint-checked, where a
+universal serialized payload would make the serializer a second semantic
+authority.
 
 Adapter mechanics behind the shared protocol: registry inspection is the first
 durable operation, before any current-state read, and an unseen identifier is
@@ -391,20 +400,28 @@ Locks per transaction, in acquisition order:
   and each opened streaming list page use one read-only repeatable-read
   transaction, so their root and satellite values come from one database
   snapshot.
+- **Runner total order**: every transaction that takes more than one runner
+  authority lock uses the same applicable subsequence, omitting absent rows but
+  never reordering them: `session_scheduler` when present; current enrollment or
+  pending replacement-request heads in canonical identity order; runner
+  connection/loss heads in runner-identity order; current registration head;
+  placement; current credential grant; lease; and only then semantic-frontier
+  and turn rows. A durable owner-command claim precedes this subsequence.
 - **Runner enrollment and registration**: the current enrollment or pending
-  replacement-request head is locked first, followed by the current registration
-  head. Activating a pending replacement locks old and new runner heads in
-  runner identity order, retires the old enrollment, persists the issued
-  successor identities and registration, and installs the owner-command effect
-  in one transaction.
+  replacement-request head is locked first, followed by the relevant runner
+  heads in runner-identity order and then the current registration head.
+  Activating a pending replacement retires the old enrollment, persists the
+  issued successor identities and registration, and installs the owner-command
+  effect in one transaction.
 - **Runner dispatch and result**: `session_scheduler` is the first lock,
-  followed by current runner connection/loss head, enrollment and registration
-  heads, placement head, current credential grant when present, and lease head.
-  The initial dispatch transaction then stores workspace receipt consumption,
-  pin, grant, `InFlight` attempt, and offered lease together. Claim locks the
-  runner head then lease head and commits before acknowledgement. Result
-  admission takes the session scheduler first, then the same runner and lease
-  rows, and commits the checked terminal attempt observation and claimed-lease
+  followed by enrollment, current runner connection/loss, registration,
+  placement, current credential grant when present, and lease heads in the total
+  order above. The initial dispatch transaction then stores workspace receipt
+  consumption, pin, grant, `InFlight` attempt, and offered lease together. Claim
+  locks enrollment, runner, registration, and lease in that order and commits
+  before acknowledgement. Result admission takes the session scheduler first,
+  then the applicable runner and lease rows without acquiring an earlier omitted
+  lock, and commits the checked terminal attempt observation and claimed-lease
   completion together.
 - **Runner loss**: one short transaction locks only the current connection/loss
   head, advances a positive durable loss epoch, and thereby makes every trigger
@@ -417,16 +434,21 @@ Locks per transaction, in acquisition order:
   loss law. A crash resumes at the first uncommitted session, while every
   not-yet-projected placement is already effectively lost through the epoch
   fence.
-- **Runner replace, abandon, and release**: an unseen owner command first owns
-  its durable-command claim. It then locks `session_scheduler`, relevant runner
-  heads in identity order, current enrollment/registration, placement, grant and
-  lease heads, and only then guarded semantic-frontier and turn rows.
-  Replacement may atomically activate one pending enrollment and consumes
-  workspace-ready evidence before installing the placement frontier. Abandon
-  stores terminal placement state and applies active-turn cancellation when one
-  exists. Either transition enqueues the retired placement release; release
-  acknowledgement uses the same scheduler-then-placement order and never mutates
-  turn lifecycle.
+- **Runner replace, abandon, and release**: an unseen abandonment command owns
+  its durable-command claim and terminalizes in one transaction. An unseen
+  replacement command first claims its immutable request and provisioning
+  authorization in a short transaction, performs no runner I/O under database
+  locks, then its terminal transaction follows the runner total order exactly:
+  `session_scheduler`, enrollment or pending-request heads, relevant runner
+  heads in identity order, registration, placement, grant and lease, then
+  guarded semantic-frontier and turn rows. Replacement rechecks and atomically
+  activates one pending enrollment, consumes workspace-ready evidence when
+  required, installs the placement frontier, and appends the terminal command
+  result. A crash before that result leaves the immutable request and
+  authorization resumable. Abandon requires an empty active-turn slot and stores
+  only terminal placement state. Either transition enqueues the retired
+  placement release; release acknowledgement uses the same
+  scheduler-then-placement order and never mutates turn lifecycle.
 - **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
   exactly `delivered_through + 1` and its typed record are read. Only an
   accepted synchronous offer advances that same singleton inside the
