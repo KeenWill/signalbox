@@ -172,7 +172,9 @@ in
   scripts.signalbox = {
     description = "Run the Signalbox terminal client from the working tree.";
     exec = ''
-      exec cargo run -q -p signalbox-client -- "$@"
+      cd "$DEVENV_ROOT"
+      exec cargo run -q --manifest-path "$DEVENV_ROOT/Cargo.toml" \
+        -p signalbox-client -- "$@"
     '';
   };
 

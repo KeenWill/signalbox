@@ -137,8 +137,8 @@ Provision the default code-host path from the GitHub CLI, and create the
 Anthropic path for editing, with these one-line commands:
 
 ```console
-install -d -m 700 "$HOME/.config/signalbox" && (umask 077; gh auth token >"$HOME/.config/signalbox/github-token")
-install -d -m 700 "$HOME/.config/signalbox" && install -m 600 /dev/null "$HOME/.config/signalbox/anthropic-api-key" && "${EDITOR:-vi}" "$HOME/.config/signalbox/anthropic-api-key"
+install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.config/signalbox/github-token"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; gh auth token >"$temporary" && mv "$temporary" "$destination" && trap - EXIT)
+install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.config/signalbox/anthropic-api-key"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; if [ -e "$destination" ]; then cp "$destination" "$temporary" || exit; fi; "${EDITOR:-vi}" "$temporary" && mv "$temporary" "$destination" && trap - EXIT)
 ```
 
 Most of `devenv.nix` exists to satisfy the ambient-configuration refusals that
