@@ -418,6 +418,7 @@ struct CreateArguments {
     #[arg(
         long,
         value_name = "NAME",
+        value_parser = template_name,
         conflicts_with_all = ["model", "alias", "system_prompt_file"]
     )]
     template: Option<String>,
@@ -1134,6 +1135,27 @@ fn canonical_uuid(value: &str) -> Result<CanonicalUuid, String> {
 fn command_id(value: &str) -> Result<CommandId, String> {
     CommandId::try_from_uuid(canonical_uuid(value)?.into_uuid())
         .map_err(|_| "command UUID uses a reserved value".to_owned())
+}
+
+fn template_name(value: &str) -> Result<String, String> {
+    const MAX_UTF8_BYTES: usize = 128;
+
+    let first_is_admitted = value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+    if value.len() > MAX_UTF8_BYTES
+        || !first_is_admitted
+        || value.bytes().any(|byte| {
+            !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && !b"._-".contains(&byte)
+        })
+    {
+        return Err(
+            "template name must use 1 through 128 bytes of lowercase ASCII letters, digits, dot, dash, or underscore and begin with a letter or digit"
+                .to_owned(),
+        );
+    }
+    Ok(value.to_owned())
 }
 
 fn metadata_filter_text(value: &str) -> Result<String, String> {
@@ -2042,6 +2064,11 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn create_rejects_an_invalid_template_name_at_the_parse_boundary() {
+        assert!(parse(["create", "--template", "Reviewer"].map(Into::into)).is_err());
     }
 
     #[test]

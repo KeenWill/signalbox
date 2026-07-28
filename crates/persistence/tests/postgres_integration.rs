@@ -9018,6 +9018,16 @@ async fn inv047_template_creation_persists_copy_and_name_keyed_replay() -> Resul
             "pre-version-four template provenance"
         ))
     ));
+    let pre_version_four_session = SessionRepository::new(pool.clone())
+        .load_session(winner)
+        .await
+        .expect_err("session loading must reject pre-version-four template provenance");
+    assert!(matches!(
+        pre_version_four_session,
+        SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(
+            "pre-version-four template provenance"
+        ))
+    ));
 
     pool.close().await;
     drop(container);

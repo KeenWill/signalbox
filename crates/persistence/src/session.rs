@@ -134,10 +134,11 @@ impl SessionRepository {
     /// The query is driven by `session` and left-joins the authoritative
     /// current-defaults pointer and exactly the immutable defaults row selected
     /// by that pointer. Imported ancestry additionally joins its one-to-one
-    /// seed record and seed-frontier header as a constant-size proof. It
-    /// intentionally loads no imported aggregate, frontier membership,
-    /// semantic entry, creation receipt, turn, command history, or unselected
-    /// defaults version.
+    /// seed record and seed-frontier header as a constant-size proof. Native
+    /// template provenance additionally correlates the creation command's
+    /// storage version. It intentionally loads no imported aggregate, frontier
+    /// membership, semantic entry, creation receipt, turn, command history, or
+    /// unselected defaults version.
     pub async fn load_session(
         &self,
         requested_session: SessionId,
@@ -169,6 +170,7 @@ pub(crate) async fn load_session_from_connection(
             s.ancestry_kind AS stored_ancestry,
             s.template_name AS stored_template_name,
             s.template_content_digest AS stored_template_digest,
+            creation.storage_version AS create_storage_version,
             s.imported_conversation_id AS stored_conversation_id,
             s.imported_frontier_entry_id AS stored_frontier_entry_id,
             s.imported_frontier_position AS stored_frontier_position,
@@ -193,6 +195,8 @@ pub(crate) async fn load_session_from_connection(
          LEFT JOIN session_defaults_version AS v
            ON v.session_id = p.session_id
           AND v.version = p.current_version
+         LEFT JOIN create_session_command AS creation
+           ON creation.created_session_id = s.session_id
          LEFT JOIN imported_session_seed AS seed
            ON seed.session_id = s.session_id
          LEFT JOIN context_frontier AS seed_frontier
@@ -253,6 +257,14 @@ fn decode_complete(
         row.try_get("stored_template_name")?,
         row.try_get("stored_template_digest")?,
     )?;
+    if template_provenance.is_some()
+        && !matches!(
+            row.try_get::<Option<i16>, _>("create_storage_version")?,
+            Some(version) if version >= 4
+        )
+    {
+        return Err(SessionCorruption::Inconsistent("pre-version-four template provenance").into());
+    }
     let current_defaults_session =
         session_id_from_uuid(required(&row, "current_defaults_session_id")?);
     let current_defaults_version = decode_ordinal(&row, "current_version")?;
