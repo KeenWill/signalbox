@@ -26,10 +26,10 @@ the superseded steering blocker were verified through PR #291
 (`agent/turn-control-verbs`). [docs/invariants.md](../invariants.md) remains the
 law catalog; INV tags below reference its rows without restating them. Designed
 lifecycle behavior that has no committed code path appears only under
-[Open edges](#open-edges). The runner-loss recovery paragraphs are the
-foundation proposal at the bottom of their implementing stack and become
-verified only with those child pull requests. Sibling pages named in scope
-deferrals below (identity-and-commands, sessions-and-transcript,
+[Open edges](#open-edges). The runner-loss recovery and runner-socket startup
+paragraphs are the foundation proposal at the bottom of their implementing stack
+and become verified only with those child pull requests. Sibling pages named in
+scope deferrals below (identity-and-commands, sessions-and-transcript,
 persistence-protocol, model-call-execution, configuration-and-credentials,
 runtime-substrate) are companion pages of this spec set; each deferral names the
 owning page rather than restating its material.
@@ -623,15 +623,15 @@ rather than repairs, and no effect is authorized from a failed reconstruction
 signalboxd is the composition root. It reads exactly `DATABASE_URL`,
 `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML naming provider targets,
 selections, and aliases), `ANTHROPIC_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, and
-`SIGNALBOX_SOCKET_PATH` from the process environment (the provisional
-configuration channels are
+`SIGNALBOX_SOCKET_PATH`, and `SIGNALBOX_RUNNER_SOCKET_PATH` from the process
+environment (the provisional configuration channels are
 [configuration-and-credentials](configuration-and-credentials.md) scope). It
 connects, acquires the single-daemon guard, fences the prior pool incarnation,
 migrates and resolves the one-time imported display-title backfill
 ([conversation-import](conversation-import.md#derived-display-titles)),
-completes recovery scan, binds the process socket, then concurrently admits
-protocol requests, dispatches the outbox, and schedules eligible work. On a
-database without the fence migration, the guarded first migration creates the
+completes recovery scan, binds the process and runner sockets, then concurrently
+admits protocol requests, dispatches the outbox, and schedules eligible work. On
+a database without the fence migration, the guarded first migration creates the
 fence row before the daemon initializes its first fenced pool. No request,
 dispatch cursor advance, or scheduler pass occurs before recovery completes. Any
 phase failure is a failed startup with a classified, key-bearing log line and a
