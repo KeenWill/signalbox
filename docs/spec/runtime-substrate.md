@@ -437,9 +437,14 @@ do not reach the CLI. A proxy variable whose URL authority embeds userinfo
 `ProvenUnsent(ConnectFailed)` naming only the variable — the CLI could reflect
 its proxy configuration in output the adapter can only shape-redact, so an
 inherited proxy credential never reaches the child; a proxy value that is not
-UTF-8 cannot be verified credential-free and is refused the same way. It neither
-resumes nor persists a Codex thread. Why: a fresh ephemeral invocation keeps
-provider session state out of memory, and the caller supplies the complete
+UTF-8 cannot be verified credential-free and is refused the same way. A `HOME`
+or `CODEX_HOME` the parent cannot resolve to an absolute directory — empty, or
+relative with no resolvable current directory to resolve it against — is refused
+the same way, because the child would otherwise read its login store from
+beneath its own configured working root and select an unintended ambient login;
+a resolvable one is absolutized against the parent's directory before spawn. It
+neither resumes nor persists a Codex thread. Why: a fresh ephemeral invocation
+keeps provider session state out of memory, and the caller supplies the complete
 conversation frontier instead of an in-memory resume pointer. The read-only
 sandbox and working root are the adapter's filesystem boundary; Unix
 process-group supervision bounds descendant lifetime, so construction rejects
@@ -586,10 +591,14 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   quote; object- or array-shaped credential values consume through their
   balanced structural close, and a container still open at the end of the
   controlled text is suppressed through that end rather than released piecewise;
-  and JSON identity/session-token members are included. Envelope-decode errors
-  are content-silent rather than embedding a rejected provider value. Why:
-  subscription authentication remains wholly inside the intended CLI control
-  surface while credential-shaped reflection still fails closed.
+  a private-key PEM block is consumed through its matching end marker whether or
+  not an assignment introduces it; credential labels are recognized in their
+  space-separated spellings as well as their underscore, hyphenated, and
+  concatenated ones; and JSON identity/session-token members are included.
+  Envelope-decode errors are content-silent rather than embedding a rejected
+  provider value. Why: subscription authentication remains wholly inside the
+  intended CLI control surface while credential-shaped reflection still fails
+  closed.
 
 ## Operator failure taxonomy
 
