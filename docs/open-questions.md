@@ -51,9 +51,9 @@ identifiers refer to [scenarios.md](scenarios.md).
   and [model-call execution](spec/model-call-execution.md) own the implemented
   model-input projections; [conversation-import](spec/conversation-import.md)
   owns only normalized imported source content. Rich imported tool/result/media
-  projection, semantic compaction, selective omission, summarization, rebasing,
-  and context-window policy remain routed through the accepted frontier
-  extension gate owned by
+  projection, selective omission beyond the fixed compaction projection,
+  alternative summaries, and rebasing remain routed through the accepted
+  frontier extension gate owned by
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
   [sessions-and-transcript](spec/sessions-and-transcript.md). Blocks those
   extensions. (S02, S17, S28)

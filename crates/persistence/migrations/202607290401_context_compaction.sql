@@ -325,6 +325,10 @@ CREATE UNIQUE INDEX context_compaction_one_root_per_session
     ON context_compaction (session_id)
     WHERE predecessor_compaction_id IS NULL;
 
+CREATE UNIQUE INDEX context_compaction_one_successor_per_predecessor
+    ON context_compaction (session_id, predecessor_compaction_id)
+    WHERE predecessor_compaction_id IS NOT NULL;
+
 CREATE FUNCTION require_context_compaction_exact_evidence()
 RETURNS trigger
 LANGUAGE plpgsql
