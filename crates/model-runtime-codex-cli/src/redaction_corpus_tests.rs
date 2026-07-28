@@ -6,8 +6,8 @@ const CORPUS: &str = include_str!("testdata/redaction-corpus.txt");
 const CLASSIFICATIONS: &str = include_str!("testdata/redaction-corpus.classifications");
 const SYNTHETIC_SECRET_MARKER: &str = "SYNTHETIC-SECRET";
 const CORPUS_LINE_COUNT: usize = 130;
-const BASELINE_REDACTED_COUNT: usize = 57;
-const BASELINE_ACCEPTED_UNCOVERED_COUNT: usize = 73;
+const EXPECTED_REDACTED_COUNT: usize = 102;
+const EXPECTED_ACCEPTED_UNCOVERED_COUNT: usize = 28;
 const CORRELATION: u8 = 7;
 const BOUNDARY_FRAGMENT: &str = "{}";
 const GENERATOR_SEED: u64 = 0x5eed_c0de_d15c_a11e;
@@ -617,20 +617,27 @@ fn assert_stateful_equals_stateless(seed: u64, case_count: usize) {
         let case = generate_case(ordinal, &mut rng);
         let stateless = redact_text(&case.input);
         let stateful = generated_stateful_output(&case);
-        if !stateless.contains(&case.marker) {
-            assert!(
-                !stateful.contains(&case.marker),
-                "STATEFUL-EQUALS-STATELESS failed for generated case {} ({:?}); \
-                 input={:?}, chunks={:?}, interludes={:?}, stateless={:?}, stateful={:?}",
-                case.ordinal,
-                case.family,
-                case.input,
-                case.chunks,
-                case.interludes,
-                stateless,
-                stateful
-            );
-        }
+        assert!(
+            !stateless.contains(&case.marker),
+            "generated stateless redaction retained the planted marker for case \
+             {} ({:?}); input={:?}, stateless={:?}",
+            case.ordinal,
+            case.family,
+            case.input,
+            stateless
+        );
+        assert!(
+            !stateful.contains(&case.marker),
+            "STATEFUL-EQUALS-STATELESS failed for generated case {} ({:?}); \
+             input={:?}, chunks={:?}, interludes={:?}, stateless={:?}, stateful={:?}",
+            case.ordinal,
+            case.family,
+            case.input,
+            case.chunks,
+            case.interludes,
+            stateless,
+            stateful
+        );
     }
 }
 
@@ -768,7 +775,7 @@ fn corpus_decoder_decodes_byte_and_event_tokens() {
 #[test]
 fn classification_parser_requires_the_parallel_line_and_cited_reason() {
     let parsed = parse_expectation_line(
-        "007 | ACCEPTED-UNCOVERED | redaction.rs::credential_key: baseline omission.",
+        "007 | ACCEPTED-UNCOVERED | redaction.rs::credential_key: accepted scope limit.",
         7,
     );
 
@@ -777,7 +784,7 @@ fn classification_parser_requires_the_parallel_line_and_cited_reason() {
         CorpusExpectation {
             line: 7,
             status: CorpusStatus::AcceptedUncovered,
-            reason: "redaction.rs::credential_key: baseline omission.".to_string(),
+            reason: "redaction.rs::credential_key: accepted scope limit.".to_string(),
         }
     );
 }
@@ -788,7 +795,7 @@ fn stateless_driver_classifies_redacted_and_uncovered_shapes() {
         "api_key=SYNTHETIC-SECRET-HELPER-REDACTED",
     ));
     let uncovered = outputs_for(decode_corpus_line(
-        "token=SYNTHETIC-SECRET-HELPER-UNCOVERED",
+        "Authentication: SYNTHETIC-SECRET-HELPER-UNCOVERED",
     ));
 
     assert_eq!(status_for(&redacted), CorpusStatus::Redacted);
@@ -805,33 +812,30 @@ fn stateful_driver_preserves_empty_deltas() {
 }
 
 #[test]
-fn stateful_driver_exposes_baseline_escape_release() {
-    let escaped_release = outputs_for(decode_corpus_line(
+fn stateful_driver_redacts_escaped_held_text() {
+    let escaped = outputs_for(decode_corpus_line(
         "note \\u0061pi_key=<|D|>SYNTHETIC-SECRET-HELPER-RELEASED",
     ));
 
-    assert_eq!(
-        status_for(&escaped_release),
-        CorpusStatus::AcceptedUncovered
-    );
+    assert_eq!(status_for(&escaped), CorpusStatus::Redacted);
 }
 
-/// Every synthetic corpus line has an explicit, exact baseline
+/// Every synthetic corpus line has an explicit, exact final
 /// classification across all redaction output surfaces it can drive.
 #[test]
 fn redaction_corpus_classification_is_exact() {
     let summary = run_corpus();
 
     assert_eq!(summary.lines, CORPUS_LINE_COUNT);
-    assert_eq!(summary.redacted, BASELINE_REDACTED_COUNT);
-    assert_eq!(
-        summary.accepted_uncovered,
-        BASELINE_ACCEPTED_UNCOVERED_COUNT
-    );
     assert!(
         summary.mismatches.is_empty(),
         "corpus classifications changed in either direction: {:#?}",
         summary.mismatches
+    );
+    assert_eq!(summary.redacted, EXPECTED_REDACTED_COUNT);
+    assert_eq!(
+        summary.accepted_uncovered,
+        EXPECTED_ACCEPTED_UNCOVERED_COUNT
     );
 }
 
@@ -846,8 +850,8 @@ fn deterministic_generator_replays_the_pinned_seed() {
 }
 
 /// STATEFUL-EQUALS-STATELESS: every generated delta/event schedule must
-/// remove a planted marker whenever `redact_text` removes it from the joined
-/// input.
+/// remove a planted marker that `redact_text` also removes from the joined
+/// input; every corpus-seeded family is required to satisfy both sides.
 #[test]
 fn stateful_equals_stateless_for_generated_corpus_families() {
     assert_stateful_equals_stateless(GENERATOR_SEED, DEFAULT_GENERATIVE_CASES);
