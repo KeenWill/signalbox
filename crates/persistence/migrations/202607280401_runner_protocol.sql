@@ -3227,20 +3227,29 @@ BEFORE INSERT ON runner_lease_event
 FOR EACH ROW
 EXECUTE FUNCTION guard_runner_lease_event();
 
--- A retryable claimed loss requires its live dispatched physical attempt but
--- does not retire it: the source attempt stays in flight so a reloaded batch
--- still carries the exact in-flight source the checked claimed replacement
--- transition requires. The atomic replacement commit retires it to its
--- effect-correct terminal history together with the fresh attempt and
--- successor lease generation.
+-- A retryable loss requires its live dispatched physical attempt but does
+-- not retire it: the source attempt stays in flight so a reloaded batch
+-- still carries the exact in-flight source the checked retry transitions
+-- require. This covers lost_unclaimed — whose proof-backed retry reissues
+-- the never-executed attempt for every effect class — and the pure and
+-- idempotent claimed losses; claimed side-effecting loss instead follows
+-- crash classification. The attempt row is read under FOR SHARE so a
+-- concurrent terminal attempt update serializes with the loss instead of
+-- racing past this check. The atomic replacement commit retires the claimed
+-- source to its effect-correct terminal history together with the fresh
+-- attempt and successor lease generation.
 CREATE FUNCTION require_runner_retryable_loss_live_attempt()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
     lease runner_lease_generation%ROWTYPE;
+    attempt_state text;
+    attempt_effect text;
 BEGIN
-    IF NEW.state_kind NOT IN ('lost_execution_possible', 'lost_claimed') THEN
+    IF NEW.state_kind NOT IN
+        ('lost_unclaimed', 'lost_execution_possible', 'lost_claimed')
+    THEN
         RETURN NULL;
     END IF;
     SELECT * INTO lease
@@ -3251,21 +3260,24 @@ BEGIN
         RAISE EXCEPTION 'runner claimed loss lacks its lease generation'
             USING ERRCODE = '23514';
     END IF;
-    IF lease.effect_class = 'side_effecting' THEN
+    IF NEW.state_kind <> 'lost_unclaimed'
+       AND lease.effect_class = 'side_effecting'
+    THEN
         RETURN NULL;
     END IF;
-    IF NOT EXISTS (
-        SELECT 1
-          FROM tool_attempt
-         WHERE attempt_id = lease.attempt_id
-           AND session_id = lease.session_id
-           AND state_kind = 'in_flight'
-           AND effect_class =
-                CASE lease.effect_class
-                    WHEN 'pure' THEN 'effect_free'
-                    ELSE 'external_effect'
-                END
-    )
+    SELECT state_kind, effect_class
+      INTO attempt_state, attempt_effect
+      FROM tool_attempt
+     WHERE attempt_id = lease.attempt_id
+       AND session_id = lease.session_id
+       FOR SHARE;
+    IF attempt_state IS DISTINCT FROM 'in_flight'
+       OR attempt_effect IS DISTINCT FROM (
+            CASE lease.effect_class
+                WHEN 'pure' THEN 'effect_free'
+                ELSE 'external_effect'
+            END
+       )
     THEN
         RAISE EXCEPTION 'runner retryable loss lacks its live physical attempt'
             USING ERRCODE = '23514';

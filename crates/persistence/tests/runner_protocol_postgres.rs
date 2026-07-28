@@ -2492,6 +2492,128 @@ async fn s32_inv045_replaced_grant_is_not_a_current_revocation_target() -> Resul
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s30_inv044_profile_replacement_requires_current_registration() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries a credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the current registration validates the replacement");
+    store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+
+    let stale = store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await
+        .expect_err("a superseded registration cannot install replacement authority");
+
+    assert_store_domain_error(stale, RunnerDomainError::RegistrationChanged);
+    let retained = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the pre-replacement placement remains current");
+    assert_eq!(retained.placement(), &pin.placement);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv044_runner_replacement_requires_active_enrollment() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
+    let lost = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .mark_runner_lost()
+        .expect("the pinned runner may be marked lost");
+    store
+        .store_placement(&lost, Some(&registration), pin.grant.as_ref())
+        .await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the credential-bearing pin has its grant");
+    let revoked = store
+        .revoke_grant(
+            pin.placement.session(),
+            original_grant.runner(),
+            original_grant.revision(),
+        )
+        .await?
+        .expect("the active grant revokes exactly once");
+    let replacement = lost
+        .replace_lost_runner(
+            pin.placement.request().clone(),
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/replacement".to_owned())
+                .expect("the replacement directory is valid"),
+            None,
+            Some(revoked),
+        )
+        .expect("the caller-held authority still validates the replacement");
+    let enrollment_uuid = expected_enrollment.enrollment().into_uuid();
+    let mut revocation = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_enrollment_audit
+            (enrollment_id, revision, runner_id,
+             authentication_reference_id, allowed_class_count, state_kind)
+         SELECT enrollment_id, 2, runner_id,
+                authentication_reference_id, allowed_class_count, 'revoked'
+           FROM runner_enrollment_audit
+          WHERE enrollment_id = $1 AND revision = 1",
+    )
+    .bind(enrollment_uuid)
+    .execute(&mut *revocation)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_enrollment_audit_allowed_class
+            (enrollment_id, revision, capability_class)
+         SELECT enrollment_id, 2, capability_class
+           FROM runner_enrollment_audit_allowed_class
+          WHERE enrollment_id = $1 AND revision = 1",
+    )
+    .bind(enrollment_uuid)
+    .execute(&mut *revocation)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_enrollment
+            SET revision = 2, state_kind = 'revoked'
+          WHERE enrollment_id = $1",
+    )
+    .bind(enrollment_uuid)
+    .execute(&mut *revocation)
+    .await?;
+    revocation.commit().await?;
+
+    let rejected = store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            replacement.grant.as_ref(),
+        )
+        .await
+        .expect_err("a revoked enrollment cannot install replacement authority");
+
+    assert_store_domain_error(rejected, RunnerDomainError::EnrollmentRevoked);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s30_inv044_first_placement_record_is_created_unpinned() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session_for(&pool, uuid(FOREIGN_SESSION)).await?;
@@ -4432,6 +4554,63 @@ async fn s31_inv043_unclaimed_retry_authority_survives_reconstitution() -> Resul
             .generation(),
         RunnerGeneration::try_from_u64(2).expect("two is positive")
     );
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_unclaimed_loss_requires_live_source_attempt() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let correlation = pin.lease.correlation();
+
+    let rejected = sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, $2, 2, 'lost_unclaimed')",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .execute(&pool)
+    .await
+    .expect_err("a lost-unclaimed event requires its live never-executed source attempt");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s31_inv043_retryable_loss_serializes_with_attempt_termination()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
+        .claim(pin.lease.correlation())
+        .expect("the exact first lease fence claims");
+    store.store_lease(&claimed).await?;
+    let loss = claimed
+        .lose()
+        .expect("claimed pure work may enter durable retry classification");
+    let mut termination = pool.begin().await?;
+    sqlx::query(
+        "SELECT attempt_id
+           FROM tool_attempt
+          WHERE attempt_id = $1
+            FOR UPDATE",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
+    .fetch_one(&mut *termination)
+    .await?;
+    let mut loss_store = Box::pin(store.store_lease_loss(&loss));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut loss_store)
+        .await
+        .expect_err("the retryable loss must wait for the locked source attempt row");
+    termination.commit().await?;
+    loss_store.await?;
     drop(pool);
     Ok(())
 }

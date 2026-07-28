@@ -425,6 +425,51 @@ impl RunnerProtocolStore {
             .checked_add(1)
             .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
         let event_kind = classify_placement_event(prior.as_ref(), placement)?;
+        // Both replacement events install successor authority, so the supplied
+        // registration must still be the enrollment-owned current revision of
+        // an active enrollment at commit time, verified under the enrollment
+        // row lock: a replacement prepared before a concurrent revocation or
+        // re-registration is rejected rather than committed as stale authority.
+        if event_kind == "runner_replaced" || event_kind == "profile_replaced" {
+            let registration = registration.ok_or(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ))?;
+            let enrollment_id = registration.registration().enrollment();
+            let locked = sqlx::query(RUNNER_ENROLLMENT)
+                .bind(enrollment_id.into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?;
+            if locked.is_none() {
+                return Err(RunnerProtocolStoreError::Corruption(
+                    RunnerProtocolCorruption::MissingCanonicalEnrollment,
+                ));
+            }
+            let state: String = sqlx::query_scalar(
+                "SELECT state_kind
+                   FROM runner_enrollment
+                  WHERE enrollment_id = $1",
+            )
+            .bind(enrollment_id.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if state != "active" {
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::EnrollmentRevoked,
+                ));
+            }
+            let current: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
+                .bind(enrollment_id.into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?;
+            let current = current.ok_or(RunnerProtocolStoreError::Corruption(
+                RunnerProtocolCorruption::MissingCanonicalRegistration,
+            ))?;
+            if decode_registration_revision(current)?.get() != registration.revision().get() {
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::RegistrationChanged,
+                ));
+            }
+        }
         let grant_origin = placement_grant_origin(prior.as_ref(), event_ordinal, placement)?;
         // A profile replacement changes only profile axes: the placement
         // record carries the prior pinned registration snapshot forward even

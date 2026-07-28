@@ -235,23 +235,28 @@ producer, durably commit the exact claim, and acknowledge it before the runner
 may execute. Channel loss after delivery but before that acknowledgement cannot
 be interpreted as proof either way by transport alone. The Postgres
 representation commits the proof atomically with the lost-unclaimed event and
-requires it before a successor generation can consume that retry path. Claimed
-retry instead requires a durable record binding the complete lost lease
-correlation to the exact fresh physical-attempt dispatch. That record is an
-idempotent reservation: if a process exits before the replacement attempt is
-stored, recovery loads the exact reserved dispatch and may replay only that
-replacement. One transaction retires the in-flight source attempt to its
-effect-correct terminal history and commits the fresh replacement attempt with
-its successor lease generation, and the Postgres representation rejects a
-reserved replacement attempt committed without that successor generation, so the
-durable claimed-retry states are exactly the loss over its still-in-flight
-source — with or without the replayable reservation — and the complete consumed
-retry whose successor lease is already offered; a crash can strand neither a
-consumed one-shot preparation fence without its successor lease nor a retired
-source without its replacement, and a different replacement cannot overwrite the
-reservation. Without the proof, losing even an `Offered` lease conservatively
-follows the execution-possible law: pure or idempotent work requires a fresh
-physical attempt, while side-effecting work requires crash classification.
+requires it before a successor generation can consume that retry path. Every
+retryable loss admission — lost-unclaimed, whose proof-backed retry reissues the
+never-executed attempt for every effect class, and claimed pure or idempotent
+loss — reads its source attempt under a row lock and requires it to still be in
+flight, so a concurrent terminal attempt update serializes with the loss instead
+of racing past that live-source check. Claimed retry instead requires a durable
+record binding the complete lost lease correlation to the exact fresh
+physical-attempt dispatch. That record is an idempotent reservation: if a
+process exits before the replacement attempt is stored, recovery loads the exact
+reserved dispatch and may replay only that replacement. One transaction retires
+the in-flight source attempt to its effect-correct terminal history and commits
+the fresh replacement attempt with its successor lease generation, and the
+Postgres representation rejects a reserved replacement attempt committed without
+that successor generation, so the durable claimed-retry states are exactly the
+loss over its still-in-flight source — with or without the replayable
+reservation — and the complete consumed retry whose successor lease is already
+offered; a crash can strand neither a consumed one-shot preparation fence
+without its successor lease nor a retired source without its replacement, and a
+different replacement cannot overwrite the reservation. Without the proof,
+losing even an `Offered` lease conservatively follows the execution-possible
+law: pure or idempotent work requires a fresh physical attempt, while
+side-effecting work requires crash classification.
 
 With that proof, loss before claim permits every effect class to be re-leased at
 the checked successor lease-lineage generation. Loss after claim follows the
@@ -381,12 +386,17 @@ availability-equivalent re-registration cannot make profile replacement
 undurable. Relational transition checks require contiguous event history, exact
 revision succession, unchanged affinity facts at runner loss, profile-only
 changes for profile replacement, and each stored tool's runner-required flag to
-match its declaration's runner-only or combined locus. Every appended record
-advances the current-placement head in the same transaction. Reconstitution
-reads the current record with its exact validated registration and tool
-inventory. The loaded persistence wrapper retains that historical registration
-and its durable revision so a caller can reconcile against newer availability
-and persist `RunnerLost` without reconstructing or guessing the pinned evidence.
+match its declaration's runner-only or combined locus. Storing either
+replacement event revalidates, under the enrollment row lock in the committing
+transaction, that the supplied registration's enrollment remains active and that
+its revision remains the enrollment-owned current registration, so a replacement
+prepared before a concurrent revocation or re-registration is rejected instead
+of installed as stale authority. Every appended record advances the
+current-placement head in the same transaction. Reconstitution reads the current
+record with its exact validated registration and tool inventory. The loaded
+persistence wrapper retains that historical registration and its durable
+revision so a caller can reconcile against newer availability and persist
+`RunnerLost` without reconstructing or guessing the pinned evidence.
 
 This stack proves that replacement must be explicit and produces the typed
 change facts. Application orchestration that appends the corresponding semantic
