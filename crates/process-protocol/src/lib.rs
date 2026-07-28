@@ -3489,7 +3489,9 @@ impl fmt::Display for FrameValidationError {
             Self::ErrorDetailShape => "server error detail does not match its code",
             Self::TurnStateShape => "transcript turn state is inconsistent",
             Self::MetadataShape => "session metadata frame shape is inconsistent",
-            Self::ConversationListShape => "unified conversation-listing frame shape is inconsistent",
+            Self::ConversationListShape => {
+                "unified conversation-listing frame shape is inconsistent"
+            }
             Self::SystemPromptShape => "version-nine frame omits its required system-prompt member",
             Self::ImportedFrontierShape => "imported frontier position is not positive",
         })
@@ -3914,14 +3916,14 @@ pub fn recover_bounded_client_protocol_version(content: &[u8]) -> Option<Protoco
 mod tests {
     use super::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ConversationImportFormat, ConversationImportSource, CurrentModelCall,
-        CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallDisposition,
-        FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
-        ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker, ImportedSpeaker,
-        InputContent, MAX_CONTENT_FRAGMENT_BYTES, MAX_JSON_CONTAINER_DEPTH,
+        ConversationCursor, ConversationImportFormat, ConversationImportSource, ConversationOrigin,
+        ConversationOriginFilter, ConversationSummary, CurrentModelCall, CurrentModelCallState,
+        ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
+        FrameDecodeErrorKind, FrameEncodeError, FrameValidationError, ImportedContentKind,
+        ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
+        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
+        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_JSON_CONTAINER_DEPTH,
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
-        ConversationCursor, ConversationOrigin, ConversationOriginFilter, ConversationSummary,
-        ImportedConversationSourceFormat, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
         MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
         MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION,

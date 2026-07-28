@@ -2355,13 +2355,12 @@ mod tests {
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ConversationCursor, ConversationOrigin, ConversationOriginFilter, ConversationSummary,
-        FrameEncodeError, InputContent, ModelCallDisposition, ModelCallState, ModelSelection,
-        ProtocolVersion, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
-        ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot, ReviewRunLifecycle,
-        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
-        SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
-        encode_server_line,
+        ConversationOriginFilter, ConversationSummary, FrameEncodeError, InputContent,
+        ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion, ReviewFindingInput,
+        ReviewFindingSnapshot, ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle,
+        ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow,
+        ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState,
+        decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -2371,11 +2370,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ConversationsPageRequest, MAX_INPUT_CONTENT_BYTES,
-        MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES, MAX_REVIEW_FINDINGS_PER_RUN, ProcessClient,
-        ReviewCommand, SessionMetadataPageRequest, SnapshotSelection, TurnTerminal,
-        await_turn_terminal, collect_import_paths, conversations, create, decide,
-        model_call_recovery_transition, open_scanned_import_source, read_input,
+        ConversationsPageRequest, MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
+        MAX_REVIEW_FINDINGS_PER_RUN, ProcessClient, ReviewCommand, SessionMetadataPageRequest,
+        SnapshotSelection, TurnTerminal, await_turn_terminal, collect_import_paths, conversations,
+        create, decide, model_call_recovery_transition, open_scanned_import_source, read_input,
         read_system_prompt_file, reconcile_turn, review, run, search, socket_path, stop_turn,
         submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
         tool_recovery_transition,
@@ -2499,7 +2497,7 @@ mod tests {
             );
             let frame = |message| {
                 ServerFrame::try_new_for_version(
-                    ProtocolVersion::Twelve,
+                    ProtocolVersion::Sixteen,
                     request.request_id(),
                     message,
                 )
@@ -2587,7 +2585,7 @@ mod tests {
             );
             let frame = |message| {
                 ServerFrame::try_new_for_version(
-                    ProtocolVersion::Twelve,
+                    ProtocolVersion::Sixteen,
                     request.request_id(),
                     message,
                 )

@@ -187,9 +187,7 @@ impl ConversationListItem {
     /// Returns the unified cursor position this item occupies.
     pub const fn cursor(&self) -> ConversationListCursor {
         match self {
-            Self::NativeSession { session, .. } => {
-                ConversationListCursor::NativeSession(*session)
-            }
+            Self::NativeSession { session, .. } => ConversationListCursor::NativeSession(*session),
             Self::ImportedConversation { conversation, .. } => {
                 ConversationListCursor::ImportedConversation(*conversation)
             }

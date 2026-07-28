@@ -16,8 +16,8 @@ use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     conversation_import::{
-        DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING,
-        DISPLAY_TITLE_STATE_UNDERIVABLE, decode_format, positive_u64,
+        DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING, DISPLAY_TITLE_STATE_UNDERIVABLE,
+        decode_format, positive_u64,
     },
     mapping::{PositiveOrdinalMappingError, defaults_version_from_numeric},
 };
@@ -230,11 +230,11 @@ impl ConversationListingRepository {
         sqlx::query(REPEATABLE_READ_ONLY)
             .execute(&mut *transaction)
             .await?;
-        let next_after = query.after();
+        let keyset_position = query.after();
         Ok(PostgresConversationPage {
             transaction: Some(transaction),
             query,
-            next_after,
+            keyset_position,
             yielded: 0,
             last_emitted: None,
             continuation: None,
@@ -260,7 +260,7 @@ impl ConversationLister for ConversationListingRepository {
 pub struct PostgresConversationPage {
     transaction: Option<Transaction<'static, Postgres>>,
     query: ConversationListQuery,
-    next_after: Option<ConversationListCursor>,
+    keyset_position: Option<ConversationListCursor>,
     yielded: u64,
     last_emitted: Option<ConversationListCursor>,
     continuation: Option<ConversationListCursor>,
@@ -277,17 +277,16 @@ impl PostgresConversationPage {
         }
         if self.yielded == self.query.page_size() {
             let has_more = self.has_later_match().await?;
-            self.continuation = has_more
-                .then_some(self.last_emitted.ok_or(
-                    ConversationListingCorruption::Inconsistent(
-                        "nonempty full page lacks last emitted conversation",
-                    ),
-                )?);
+            self.continuation = has_more.then_some(self.last_emitted.ok_or(
+                ConversationListingCorruption::Inconsistent(
+                    "nonempty full page lacks last emitted conversation",
+                ),
+            )?);
             self.finish().await?;
             return Ok(None);
         }
 
-        let binds = CursorBinds::from_cursor(self.next_after);
+        let binds = CursorBinds::from_cursor(self.keyset_position);
         let selects_native = self.query.origin().selects_native();
         let include_archived = self.query.include_archived();
         let title_contains = self.query.title_contains().map(str::to_owned);
@@ -295,30 +294,33 @@ impl PostgresConversationPage {
         let transaction = self.transaction_mut()?;
         let row = sqlx::query(UNIFIED_PAGE_ITEM_SQL)
             .bind(binds.identity)
-        .bind(binds.origin_rank)
-        .bind(selects_native)
-        .bind(include_archived)
-        .bind(title_contains)
-        .bind(selects_imported)
-        .fetch_optional(&mut **transaction)
-        .await?;
+            .bind(binds.origin_rank)
+            .bind(selects_native)
+            .bind(include_archived)
+            .bind(title_contains)
+            .bind(selects_imported)
+            .fetch_optional(&mut **transaction)
+            .await?;
 
         let Some(row) = row else {
             self.finish().await?;
             return Ok(None);
         };
         let item = decode_list_item(&row)?;
-        self.next_after = Some(item.cursor());
+        self.keyset_position = Some(item.cursor());
         self.last_emitted = Some(item.cursor());
-        self.yielded = self.yielded.checked_add(1).ok_or(
-            ConversationListingCorruption::Inconsistent("page item count overflowed"),
-        )?;
+        self.yielded =
+            self.yielded
+                .checked_add(1)
+                .ok_or(ConversationListingCorruption::Inconsistent(
+                    "page item count overflowed",
+                ))?;
         Ok(Some(item))
     }
 
     /// Returns whether another match exists past the full page's last row.
     async fn has_later_match(&mut self) -> Result<bool, ConversationListingRepositoryError> {
-        let binds = CursorBinds::from_cursor(self.next_after);
+        let binds = CursorBinds::from_cursor(self.keyset_position);
         let selects_native = self.query.origin().selects_native();
         let include_archived = self.query.include_archived();
         let title_contains = self.query.title_contains().map(str::to_owned);
@@ -326,13 +328,13 @@ impl PostgresConversationPage {
         let transaction = self.transaction_mut()?;
         let exists: bool = sqlx::query_scalar(UNIFIED_PAGE_PROBE_SQL)
             .bind(binds.identity)
-        .bind(binds.origin_rank)
-        .bind(selects_native)
-        .bind(include_archived)
-        .bind(title_contains)
-        .bind(selects_imported)
-        .fetch_one(&mut **transaction)
-        .await?;
+            .bind(binds.origin_rank)
+            .bind(selects_native)
+            .bind(include_archived)
+            .bind(title_contains)
+            .bind(selects_imported)
+            .fetch_one(&mut **transaction)
+            .await?;
         Ok(exists)
     }
 
@@ -407,10 +409,12 @@ fn decode_list_item(
                 required(row, "defaults_version")?;
             let defaults_version = defaults_version
                 .ok_or(ConversationListingCorruption::Missing("defaults version"))?;
-            let defaults_version = defaults_version_from_numeric(defaults_version)
-                .map_err(|reason| ConversationListingCorruption::InvalidOrdinal {
-                    field: "defaults version",
-                    reason,
+            let defaults_version =
+                defaults_version_from_numeric(defaults_version).map_err(|reason| {
+                    ConversationListingCorruption::InvalidOrdinal {
+                        field: "defaults version",
+                        reason,
+                    }
                 })?;
             Ok(ConversationListItem::NativeSession {
                 session: SessionId::from_uuid(conversation_id),
@@ -462,8 +466,7 @@ fn decode_resolved_display_title(
 ) -> Result<Option<String>, ConversationListingRepositoryError> {
     match display_title_state {
         DISPLAY_TITLE_STATE_DERIVED => {
-            let title =
-                title.ok_or(ConversationListingCorruption::Missing("display title"))?;
+            let title = title.ok_or(ConversationListingCorruption::Missing("display title"))?;
             let title = ImportedConversationDisplayTitle::try_new(title)
                 .map_err(|_| ConversationListingCorruption::InvalidDisplayTitle)?;
             Ok(Some(title.into_string()))

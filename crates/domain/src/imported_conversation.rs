@@ -1601,7 +1601,7 @@ impl ImportedConversationDisplayTitle {
     /// Derives the display title for one complete imported conversation.
     ///
     /// Candidate strings are tried in a fixed per-format order and the first
-    /// candidate that [shapes](Self::shape_candidate) to a nonempty title
+    /// candidate that shapes to a nonempty title
     /// wins; a conversation with no shapeable candidate has no display title:
     ///
     /// - Claude Code versions 1 and 2: for every raw record in physical order
@@ -4782,7 +4782,10 @@ mod tests {
         let raw_records = vec![ImportedRawSourceRecord::from_converted(
             br#"{"type":"session_meta","payload":{}}"#.to_vec(),
             object_with_members(vec![
-                ("type", ImportedStructuredValue::String(text("session_meta"))),
+                (
+                    "type",
+                    ImportedStructuredValue::String(text("session_meta")),
+                ),
                 ("payload", object_with_members(payload)),
             ]),
         )];

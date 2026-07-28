@@ -136,13 +136,9 @@ async fn write_fixture_metadata(
     title: Option<&str>,
     archived: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let content = SessionMetadataContent::try_new(
-        title.map(str::to_owned),
-        Vec::new(),
-        Vec::new(),
-        archived,
-    )
-    .expect("fixture metadata is valid");
+    let content =
+        SessionMetadataContent::try_new(title.map(str::to_owned), Vec::new(), Vec::new(), archived)
+            .expect("fixture metadata is valid");
     SessionMetadataRepository::new(pool.clone())
         .handle(ReplaceSessionMetadata::new(
             command(command_seed),
@@ -261,8 +257,8 @@ fn query(
 async fn unified_page_lists_both_origin_classes_in_identity_order() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let first_session = create_fixture_session(&pool, 0x10).await?;
-    let imported_claude = import_claude_fixture(&pool, imported(0x20), 0x300, CLAUDE_SUMMARY_SOURCE)
-        .await?;
+    let imported_claude =
+        import_claude_fixture(&pool, imported(0x20), 0x300, CLAUDE_SUMMARY_SOURCE).await?;
     let second_session = create_fixture_session(&pool, 0x30).await?;
     write_fixture_metadata(&pool, 0x9001, second_session, Some("Native plan"), false).await?;
 
@@ -375,12 +371,18 @@ async fn unified_title_filter_matches_native_and_imported_titles() -> Result<(),
     let titled_session = create_fixture_session(&pool, 0x10).await?;
     write_fixture_metadata(&pool, 0x9001, titled_session, Some("planning ahead"), false).await?;
     let untitled_session = create_fixture_session(&pool, 0x20).await?;
-    let imported_claude = import_claude_fixture(&pool, imported(0x30), 0x300, CLAUDE_SUMMARY_SOURCE)
-        .await?;
+    let imported_claude =
+        import_claude_fixture(&pool, imported(0x30), 0x300, CLAUDE_SUMMARY_SOURCE).await?;
 
     let (matched, _) = collect_page(
         &pool,
-        query(Some("planning"), ConversationOriginFilter::All, false, 50, None),
+        query(
+            Some("planning"),
+            ConversationOriginFilter::All,
+            false,
+            50,
+            None,
+        ),
     )
     .await?;
     assert_eq!(
@@ -391,19 +393,49 @@ async fn unified_title_filter_matches_native_and_imported_titles() -> Result<(),
         ]
     );
 
-    let (case_sensitive, _) = collect_page(
+    let (imported_case, _) = collect_page(
         &pool,
-        query(Some("Planning"), ConversationOriginFilter::All, false, 50, None),
+        query(
+            Some("Imported"),
+            ConversationOriginFilter::All,
+            false,
+            50,
+            None,
+        ),
     )
     .await?;
     assert_eq!(
-        case_sensitive.iter().map(cursor_of).collect::<Vec<_>>(),
-        vec![ConversationListCursor::ImportedConversation(imported_claude)]
+        imported_case.iter().map(cursor_of).collect::<Vec<_>>(),
+        vec![ConversationListCursor::ImportedConversation(
+            imported_claude
+        )]
+    );
+
+    let (case_folded, _) = collect_page(
+        &pool,
+        query(
+            Some("imported"),
+            ConversationOriginFilter::All,
+            false,
+            50,
+            None,
+        ),
+    )
+    .await?;
+    assert!(
+        case_folded.is_empty(),
+        "the substring filter is case-sensitive, so a lowercased spelling matches nothing"
     );
 
     let (unmatched, _) = collect_page(
         &pool,
-        query(Some("absent"), ConversationOriginFilter::All, false, 50, None),
+        query(
+            Some("absent"),
+            ConversationOriginFilter::All,
+            false,
+            50,
+            None,
+        ),
     )
     .await?;
     assert!(unmatched.is_empty());
@@ -422,8 +454,8 @@ async fn unified_pagination_reports_its_cursor_without_silent_truncation()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let first_session = create_fixture_session(&pool, 0x10).await?;
-    let imported_claude = import_claude_fixture(&pool, imported(0x20), 0x300, CLAUDE_SUMMARY_SOURCE)
-        .await?;
+    let imported_claude =
+        import_claude_fixture(&pool, imported(0x20), 0x300, CLAUDE_SUMMARY_SOURCE).await?;
     let second_session = create_fixture_session(&pool, 0x30).await?;
 
     let (first_page, first_cursor) = collect_page(
@@ -447,11 +479,15 @@ async fn unified_pagination_reports_its_cursor_without_silent_truncation()
     .await?;
     assert_eq!(
         second_page.iter().map(cursor_of).collect::<Vec<_>>(),
-        vec![ConversationListCursor::ImportedConversation(imported_claude)]
+        vec![ConversationListCursor::ImportedConversation(
+            imported_claude
+        )]
     );
     assert_eq!(
         second_cursor,
-        Some(ConversationListCursor::ImportedConversation(imported_claude))
+        Some(ConversationListCursor::ImportedConversation(
+            imported_claude
+        ))
     );
 
     let (final_page, final_cursor) = collect_page(
@@ -476,13 +512,14 @@ async fn unified_pagination_reports_its_cursor_without_silent_truncation()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s28_import_derives_and_stores_the_display_title() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let imported_claude = import_claude_fixture(&pool, imported(0x10), 0x300, CLAUDE_SUMMARY_SOURCE)
-        .await?;
+    let imported_claude =
+        import_claude_fixture(&pool, imported(0x10), 0x300, CLAUDE_SUMMARY_SOURCE).await?;
     let imported_codex =
         import_codex_fixture(&pool, imported(0x20), 0x400, CODEX_USER_SOURCE).await?;
 
-    let stored: Vec<(Uuid, Option<String>, String)> = sqlx::query_as(
-        "SELECT imported_conversation_id, display_title, display_title_state
+    let stored: Vec<(Uuid, Option<String>, String, i64)> = sqlx::query_as(
+        "SELECT imported_conversation_id, display_title, display_title_state,
+                declared_entry_count::bigint
            FROM imported_conversation
           ORDER BY imported_conversation_id",
     )
@@ -495,11 +532,13 @@ async fn s28_import_derives_and_stores_the_display_title() -> Result<(), Box<dyn
                 imported_claude.into_uuid(),
                 Some(String::from(CLAUDE_SUMMARY_TITLE)),
                 String::from("derived"),
+                i64::try_from(CLAUDE_SUMMARY_ENTRY_COUNT)?,
             ),
             (
                 imported_codex.into_uuid(),
                 Some(String::from(CODEX_USER_TITLE)),
                 String::from("derived"),
+                i64::try_from(CODEX_USER_ENTRY_COUNT)?,
             ),
         ]
     );
@@ -516,8 +555,8 @@ async fn s28_import_derives_and_stores_the_display_title() -> Result<(), Box<dyn
 async fn s28_display_title_backfill_resolves_pending_rows_exactly_once()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let imported_claude = import_claude_fixture(&pool, imported(0x10), 0x300, CLAUDE_SUMMARY_SOURCE)
-        .await?;
+    let imported_claude =
+        import_claude_fixture(&pool, imported(0x10), 0x300, CLAUDE_SUMMARY_SOURCE).await?;
     force_pending_display_title(&pool, imported_claude).await?;
 
     let resolved = backfill_imported_conversation_display_titles(&pool).await?;
@@ -552,8 +591,8 @@ async fn s28_display_title_backfill_resolves_pending_rows_exactly_once()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn pending_display_title_fails_closed_in_the_serving_listing() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let imported_claude = import_claude_fixture(&pool, imported(0x10), 0x300, CLAUDE_SUMMARY_SOURCE)
-        .await?;
+    let imported_claude =
+        import_claude_fixture(&pool, imported(0x10), 0x300, CLAUDE_SUMMARY_SOURCE).await?;
     force_pending_display_title(&pool, imported_claude).await?;
 
     let mut page = ConversationListingRepository::new(pool.clone())
@@ -574,6 +613,9 @@ async fn pending_display_title_fails_closed_in_the_serving_listing() -> Result<(
             ConversationListingCorruption::UnresolvedDisplayTitle
         )
     ));
+    // The failed page still owns its open transaction's pooled connection;
+    // release it before closing the pool, which waits for every connection.
+    drop(page);
 
     pool.close().await;
     drop(container);
@@ -586,8 +628,8 @@ async fn pending_display_title_fails_closed_in_the_serving_listing() -> Result<(
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn corrupt_display_title_fails_closed_on_load() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let imported_claude = import_claude_fixture(&pool, imported(0x10), 0x300, CLAUDE_SUMMARY_SOURCE)
-        .await?;
+    let imported_claude =
+        import_claude_fixture(&pool, imported(0x10), 0x300, CLAUDE_SUMMARY_SOURCE).await?;
     sqlx::query("ALTER TABLE imported_conversation DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
@@ -625,8 +667,8 @@ async fn corrupt_display_title_fails_closed_on_load() -> Result<(), Box<dyn Erro
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn header_admits_only_the_display_title_backfill_update() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let imported_claude = import_claude_fixture(&pool, imported(0x10), 0x300, CLAUDE_SUMMARY_SOURCE)
-        .await?;
+    let imported_claude =
+        import_claude_fixture(&pool, imported(0x10), 0x300, CLAUDE_SUMMARY_SOURCE).await?;
 
     assert!(
         sqlx::query(

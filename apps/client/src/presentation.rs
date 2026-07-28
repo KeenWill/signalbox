@@ -402,8 +402,7 @@ impl<'a> Output<'a> {
                 defaults_version,
                 title,
             } => {
-                let title =
-                    title.map(|title| self.render_field(title, TextField::TrailingOnLine));
+                let title = title.map(|title| self.render_field(title, TextField::TrailingOnLine));
                 writeln!(
                     self.stdout,
                     "origin=native session_id={session_id} archived={archived} \
@@ -417,8 +416,7 @@ impl<'a> Output<'a> {
                 entry_count,
                 title,
             } => {
-                let title =
-                    title.map(|title| self.render_field(title, TextField::TrailingOnLine));
+                let title = title.map(|title| self.render_field(title, TextField::TrailingOnLine));
                 writeln!(
                     self.stdout,
                     "origin=imported imported_conversation_id={imported_conversation_id} \
@@ -1726,7 +1724,9 @@ mod tests {
                 imported_conversation_id: wire_uuid(1),
                 format: "claude-code-session-jsonl-v2",
                 entry_count: 1,
-                title: Some("forged\norigin=native session_id=00000000-0000-0000-0000-000000000002"),
+                title: Some(
+                    "forged\norigin=native session_id=00000000-0000-0000-0000-000000000002",
+                ),
             })
             .expect("in-memory output cannot fail");
 

@@ -6,12 +6,13 @@
 -- evidence only: it never participates in the source digest, the
 -- imported-conversation identity, or the unique source-identity constraint.
 
+-- The retained 'pending' default supplies exactly the transitional state: a
+-- writer that does not state a resolved title has not derived one, and a
+-- pending row is resolved by the startup backfill or fails closed at a
+-- serving read. Production insertion always states the resolved columns.
 ALTER TABLE imported_conversation
     ADD COLUMN display_title text,
     ADD COLUMN display_title_state text NOT NULL DEFAULT 'pending';
-
-ALTER TABLE imported_conversation
-    ALTER COLUMN display_title_state DROP DEFAULT;
 
 ALTER TABLE imported_conversation
     ADD CONSTRAINT imported_conversation_display_title_state_closed CHECK (

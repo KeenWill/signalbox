@@ -52,13 +52,12 @@ use signalbox_persistence::{
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationImportFormat,
-    ConversationImportSource, ConversationOriginFilter, ConversationSummary,
-    CurrentModelCallState, ErrorCode, ImportedContentKind,
-    ImportedConversationSourceFormat,
-    ImportedSourceSpeaker, ImportedSpeaker, InputContent, MetadataActor, ModelSelection,
-    ProtocolVersion, RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
-    SessionMetadata, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
-    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
+    ConversationImportSource, ConversationOriginFilter, ConversationSummary, CurrentModelCallState,
+    ErrorCode, ImportedContentKind, ImportedConversationSourceFormat, ImportedSourceSpeaker,
+    ImportedSpeaker, InputContent, MetadataActor, ModelSelection, ProtocolVersion, RejectionDetail,
+    RequestId, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember,
+    SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
+    decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
@@ -1491,8 +1490,8 @@ async fn metadata_list_uses_bounded_keyset_pages() -> Result<(), Box<dyn Error>>
 /// count, and stored source format.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s28_version_sixteen_lists_native_and_imported_conversations()
--> Result<(), Box<dyn Error>> {
+async fn s28_version_sixteen_lists_native_and_imported_conversations() -> Result<(), Box<dyn Error>>
+{
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let native_session = create_alias_session(&mut connection).await?;
@@ -1520,9 +1519,7 @@ async fn s28_version_sixteen_lists_native_and_imported_conversations()
             imported_conversation_id,
         } => *imported_conversation_id,
         message => {
-            return Err(
-                io::Error::other(format!("unexpected import receipt: {message:?}")).into(),
-            );
+            return Err(io::Error::other(format!("unexpected import receipt: {message:?}")).into());
         }
     };
 

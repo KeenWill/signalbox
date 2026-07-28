@@ -810,7 +810,8 @@ pub(crate) fn parse(
             })
         }
         CliCommand::Conversations(arguments) => {
-            if arguments.title.as_deref().map_or(0, str::len) > MAX_SESSION_METADATA_TOTAL_UTF8_BYTES
+            if arguments.title.as_deref().map_or(0, str::len)
+                > MAX_SESSION_METADATA_TOTAL_UTF8_BYTES
             {
                 return Err(UsageError(Cli::command().error(
                     ErrorKind::ValueValidation,
@@ -1533,8 +1534,8 @@ mod tests {
 
     #[test]
     fn conversations_defaults_to_the_unfiltered_unified_view() {
-        let parsed = parse(["conversations"].map(Into::into))
-            .expect("the bare conversations verb parses");
+        let parsed =
+            parse(["conversations"].map(Into::into)).expect("the bare conversations verb parses");
 
         let ParseOutcome::Run(arguments) = parsed else {
             panic!("the successful conversations parse runs the client");
@@ -1643,8 +1644,7 @@ mod tests {
         let one_byte_beyond = "t".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES + 1);
 
         assert!(
-            parse(["conversations", "--title", whole_bound_title.as_str()].map(Into::into))
-                .is_ok()
+            parse(["conversations", "--title", whole_bound_title.as_str()].map(Into::into)).is_ok()
         );
         assert!(
             parse(["conversations", "--title", one_byte_beyond.as_str()].map(Into::into)).is_err()
@@ -1660,8 +1660,12 @@ mod tests {
     fn conversations_rejects_a_malformed_cursor_before_socket_use() {
         assert!(
             parse(
-                ["conversations", "--after", "00000000-0000-0000-0000-000000000001"]
-                    .map(Into::into)
+                [
+                    "conversations",
+                    "--after",
+                    "00000000-0000-0000-0000-000000000001"
+                ]
+                .map(Into::into)
             )
             .is_err()
         );

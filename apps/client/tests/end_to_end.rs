@@ -596,8 +596,8 @@ async fn import_fixture_conversation(socket: PathBuf) -> Result<String, Box<dyn 
 /// with their derived title, entry count, and source format.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn terminal_client_conversations_lists_native_and_imported_rows()
--> Result<(), Box<dyn Error>> {
+async fn terminal_client_conversations_lists_native_and_imported_rows() -> Result<(), Box<dyn Error>>
+{
     let runtime = MetadataSearchRuntime::start().await?;
     let native_session = create_fixture_session(runtime.socket()).await?;
     let imported_identity = import_fixture_conversation(runtime.socket()).await?;
@@ -691,8 +691,7 @@ async fn terminal_client_conversations_prints_the_cursor_that_continues_a_full_p
 /// appears among the native rows of the same unified surface.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn terminal_client_conversations_imported_row_feeds_continue()
--> Result<(), Box<dyn Error>> {
+async fn terminal_client_conversations_imported_row_feeds_continue() -> Result<(), Box<dyn Error>> {
     let runtime = MetadataSearchRuntime::start().await?;
     let imported_identity = import_fixture_conversation(runtime.socket()).await?;
 
