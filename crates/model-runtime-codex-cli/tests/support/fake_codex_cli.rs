@@ -147,6 +147,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             completed();
         }
+        "final_text_marker_before_message_id" => {
+            agent_message(
+                &format!(" {}", fixtures::SENSITIVE_SPLIT_AUTHORIZATION),
+                r#"{"outcome":"completed","text":"Authorization:","tool_calls":[]}"#,
+            );
+            completed();
+        }
         "split_stream_authorization_before_tool_name" => {
             reasoning("reason-split-tool-name", "Authorization:");
             envelope(&format!(
