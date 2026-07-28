@@ -967,20 +967,42 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     /// be reassembled as `api_key=` despite the intervening text.
     pub(crate) fn redact_final_envelope_text(&mut self, text: &str) -> String {
         let redacted = self.redact_terminal_failure_text(text);
-        if !self.dropped_context.is_empty() && !self.suppressing {
-            let mut joined = std::mem::take(&mut self.dropped_context);
-            let dropped_length = joined.len();
-            joined.push_str(text);
-            if unsafe_stream_suffix_start(&joined).is_some_and(|start| start < dropped_length) {
-                let context = trailing_credential_context(&joined);
-                if context.len() > MAX_PENDING_STREAM_BYTES {
-                    self.suppressing = true;
-                } else {
-                    self.dropped_context = context.to_string();
-                }
-            }
+        if !self.suppressing {
+            // Both chains resolve through the final text: the emitted
+            // thread-id chain because the text's bytes now sit between the id
+            // record and every later field (a clean text breaks that
+            // adjacency), and the dropped chain because its marker either
+            // completed inside the text or was broken by it.
+            let emitted = std::mem::take(&mut self.emitted_context);
+            self.emitted_context = self.resolve_context_through(emitted, text);
+            let dropped = std::mem::take(&mut self.dropped_context);
+            self.dropped_context = self.resolve_context_through(dropped, text);
         }
         redacted
+    }
+
+    /// Resolves one lookbehind chain through the final envelope text: a
+    /// candidate the text completed was suppressed with it, a candidate the
+    /// text broke cannot be continued by later fields, and only a candidate
+    /// still in progress at the text's end stays live (its updated suffix is
+    /// returned). An unsafe suffix past the pending byte cap is an unresolved
+    /// oversized candidate and fails closed into suppression.
+    fn resolve_context_through(&mut self, context: String, text: &str) -> String {
+        if context.is_empty() {
+            return context;
+        }
+        let context_length = context.len();
+        let mut joined = context;
+        joined.push_str(text);
+        if unsafe_stream_suffix_start(&joined).is_some_and(|start| start < context_length) {
+            let live = trailing_credential_context(&joined);
+            if live.len() > MAX_PENDING_STREAM_BYTES {
+                self.suppressing = true;
+                return String::new();
+            }
+            return live.to_string();
+        }
+        String::new()
     }
 
     /// Redacts tool-argument JSON against the held lookbehind state:
@@ -2859,6 +2881,35 @@ safe-line"
             sink.redact_terminal_failure_text("key=opaque-context-value done"),
             REDACTED
         );
+    }
+
+    /// The emitted thread-id chain a clean final text breaks is consumed by
+    /// that text: its bytes now sit between the id record and every later
+    /// field, so a clean provider id beginning `key=` is NOT rejoined to
+    /// `api_` across them.
+    #[test]
+    fn emitted_chain_broken_by_final_text_releases_later_ids() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.seed_emitted_context("api_");
+
+        assert_eq!(
+            sink.redact_final_envelope_text("hello there."),
+            "hello there."
+        );
+        assert_eq!(sink.redact_provider_id("", "key=call-7"), "key=call-7");
+    }
+
+    /// INV-035: the emitted chain stays live through an empty final text —
+    /// nothing intervened between the id record and the fields that follow.
+    #[test]
+    fn inv_035_emitted_chain_survives_an_empty_final_text() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.seed_emitted_context("api_");
+
+        assert_eq!(sink.redact_final_envelope_text(""), "");
+        assert_eq!(sink.redact_provider_id("", "key=call-7"), REDACTED);
     }
 
     /// A dropped-marker chain the final text breaks (`api_` then `hello`)

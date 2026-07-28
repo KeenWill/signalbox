@@ -608,6 +608,19 @@ async fn execute_process<C: Clone + Send + Sync>(
                     && stdout.buffer().is_empty()
                     && tokio::time::Instant::now() >= deadline
                 {
+                    // Work-first, as in the cancellation arm: a leader that
+                    // already exited on its own is definitive evidence this
+                    // synchronous deadline check must not discard — a nonzero
+                    // exit classifies as a provider error, and a successful
+                    // exit without a terminal marker stays typed exit
+                    // evidence, rather than either becoming timeout loss.
+                    if let Some((status, detail)) =
+                        reap_exited_leader(&mut child, &mut stderr_task).await
+                    {
+                        reaped_status = Some(status);
+                        deadline_stderr = Some(detail);
+                        break;
+                    }
                     force_kill(&mut child).await;
                     abort_stderr_task(&mut stderr_task).await;
                     redacting_sink.finish();

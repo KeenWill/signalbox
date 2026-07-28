@@ -1964,6 +1964,45 @@ async fn held_stderr_is_drained_during_stdout_cleanup() {
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-stderr-held-group"));
 }
 
+/// A nonterminal line read after the deadline — while a descendant keeps
+/// stdout alive but the leader has already exited — preserves the leader's
+/// definitive nonzero status at the post-line deadline check: it classifies
+/// as a typed provider error instead of being force-killed into timeout loss,
+/// mirroring the adjacent cancellation arm's work-first probe.
+#[cfg(unix)]
+#[tokio::test]
+async fn post_line_deadline_preserves_an_exited_leader() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = keepalive_after_exit_credential_failure_cli(temporary.path());
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(2));
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let error = provider_error(&report.evidence);
+
+    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
+    assert!(
+        error
+            .native
+            .message
+            .as_deref()
+            .expect("the failure carries the drained stderr detail")
+            .contains("authentication failed")
+    );
+    assert_recorded_process_group_exited(temporary.path().join("fake-codex-keepalive-group"));
+}
+
 /// The retained output-schema argument is absolute, so the child's move to
 /// the configured working root cannot re-root a relative schema path.
 #[tokio::test]
@@ -2779,6 +2818,33 @@ exec 2>&-
 exit 7
 "#;
     script_cli(directory, "stderr-credential-codex", script)
+}
+
+/// Scripts a CLI that emits its nonterminal preamble, writes a classifiable
+/// stderr failure, hands stdout to a descendant that floods benign unknown
+/// keepalive events continuously, and exits nonzero. The flood keeps the
+/// biased select's read arm always ready, so the deadline is only ever
+/// noticed by the post-line check — on a freshly read line while the
+/// leader's definitive status is already waitable.
+#[cfg(unix)]
+fn keepalive_after_exit_credential_failure_cli(directory: &Path) -> std::path::PathBuf {
+    let script = format!(
+        r#"#!/bin/sh
+printf '%s
+' '{{"type":"thread.started","thread_id":"{thread_id}"}}'
+printf '%s
+' '{{"type":"turn.started"}}'
+printf 'authentication failed
+' >&2
+yes '{{"type":"keepalive"}}' &
+printf 'process_group=%s
+descendant=%s
+' "$$" "$!" > fake-codex-keepalive-group
+exit 7
+"#,
+        thread_id = fixtures::THREAD_ID
+    );
+    script_cli(directory, "keepalive-exit-codex", &script)
 }
 
 /// Scripts a CLI that writes a classifiable stderr failure, then hands its

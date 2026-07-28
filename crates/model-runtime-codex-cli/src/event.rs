@@ -405,10 +405,17 @@ impl<C: Clone> EventDecoder<C> {
         // dropped-reasoning contexts), not just the stateless scan: a buffered
         // final text whose start completes a credential marker ending either
         // chain must be suppressed whole, exactly as the streamed path
-        // suppresses it delta by delta. Also resolves the dropped chain
-        // through this text so a chain the text broke does not misfire on the
-        // clean provider ids that follow.
-        let text = sink.redact_final_envelope_text(&envelope.text);
+        // suppresses it delta by delta. Buffered delivery also resolves both
+        // chains through this text — a chain the text broke must not misfire
+        // on the clean provider ids that follow. Streamed delivery must NOT
+        // consume the chains here: the same text is about to flow through the
+        // delta machinery, which needs the live context to suppress the
+        // continuation and resolves the chains itself.
+        let text = if self.delivery == DeliveryMode::Buffered {
+            sink.redact_final_envelope_text(&envelope.text)
+        } else {
+            sink.redact_terminal_failure_text(&envelope.text)
+        };
         if !text.is_empty() {
             content.push(AssistantPart::Text(text));
         }
