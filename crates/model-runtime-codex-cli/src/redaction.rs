@@ -47,6 +47,8 @@ const VALUE_CREDENTIAL_MARKERS: &[&str] = &[
     "\"session_token\":",
 ];
 const TOKEN_PREFIXES: &[&str] = &["sk-", "eyJ"];
+const SPACE_SEPARATED_CREDENTIAL_FLAGS: &[&str] = &["--password", "--api-key", "--passphrase"];
+const CURL_USER_FLAGS: &[&str] = &["-u", "--user"];
 /// PEM armor opening a block, and the label substring that makes the block a
 /// private key of any type (`PRIVATE KEY`, `RSA PRIVATE KEY`, `OPENSSH PRIVATE
 /// KEY`, `ENCRYPTED PRIVATE KEY`). Such a block is an unambiguous credential on
@@ -109,10 +111,22 @@ const CREDENTIAL_INDICATORS: &[&str] = &[
     "private-key",
     "privatekey",
     "password",
+    "passphrase",
+    "passwd",
+    "_pwd",
     "secret",
     "credential",
+    "token",
+    "signing_key",
+    "encryption_key",
+    "ssh_key",
+    "hmac_key",
+    "license_key",
     "sk-",
     "eyJ",
+    "://",
+    "-u ",
+    "--user",
     // Space-separated labels a diagnostic prints (`API key: …`): the JSON key
     // policy normalizes across punctuation, so the plaintext spellings must be
     // recognized here too or the fast path releases them unscanned.
@@ -163,6 +177,9 @@ fn redact_text_literal(text: &str) -> String {
     for prefix in TOKEN_PREFIXES {
         sanitized = redact_prefixed_token(&sanitized, prefix);
     }
+    sanitized = redact_space_separated_flags(&sanitized);
+    sanitized = redact_url_userinfo_passwords(&sanitized);
+    sanitized = redact_curl_userinfo_passwords(&sanitized);
     for name in LINE_CREDENTIAL_NAMES {
         sanitized = redact_spaced_credential(&sanitized, name, ValueTermination::Line);
     }
@@ -185,6 +202,8 @@ fn credential_key_is_free_form(key: &str) -> bool {
     [
         "authorization",
         "password",
+        "passphrase",
+        "passwd",
         "secret",
         "credential",
         "cookie",
@@ -196,9 +215,7 @@ fn credential_key_is_free_form(key: &str) -> bool {
 /// The credential identifier immediately before an assignment separator: a
 /// bare `[A-Za-z0-9_-]+` run or a quoted key, whichever ends the text. Returns
 /// the identifier content for the `credential_key` contains-policy check, plus
-/// the opening quote (`Some('"')` / `Some('\'')`) when the key was quoted so the
-/// caller can distinguish a double-quoted JSON member from a single-quoted or
-/// bare plaintext assignment.
+/// the opening quote (`Some('"')` / `Some('\'')`) when the key was quoted.
 fn trailing_identifier(before_separator: &str) -> Option<(&str, Option<char>)> {
     let trimmed = before_separator.trim_end_matches([' ', '\t']);
     for quote in ['"', '\''] {
@@ -305,25 +322,17 @@ fn redact_identifier_assignment(text: &str) -> String {
         .bytes()
         .position(|byte| matches!(byte, b'=' | b':'))
     {
-        let is_colon = remaining.as_bytes()[separator] == b':';
-        // A *double*-quoted key before `:` is exempt only where the JSON
-        // scanner actually owns it — after `{`, `,`, or at the scan start. A
-        // quoted key embedded after prose (`detail: "client_secret":"v"`) is
-        // one the JSON scanner rejects, so this scanner must take it or a
-        // composite credential name leaks. A single-quoted key before `:`
-        // (`'api_key': value`) is never JSON, and a `=` after any quoted key
-        // (TOML) or any separator after a bare key is a plaintext credential
-        // assignment this scanner owns outright.
+        // The JSON scanner runs first, but malformed quote pairing or an
+        // invalid encoded key can make it decline a position whose raw
+        // identifier still carries a credential name. Rechecking the already
+        // redacted well-formed case is idempotent; exempting it would create a
+        // gap where both scanners decline the same key.
         if let Some((identifier, quote)) = trailing_identifier(&remaining[..separator])
-            && !(quote == Some('"')
-                && is_colon
-                && json_key_can_start_at(
-                    text,
-                    identifier.as_ptr() as usize - text.as_ptr() as usize - 1,
-                ))
             && credential_key(identifier)
         {
-            let termination = if credential_key_is_free_form(identifier) {
+            let termination = if quote == Some('"') {
+                ValueTermination::Token
+            } else if credential_key_is_free_form(identifier) {
                 ValueTermination::Line
             } else {
                 ValueTermination::Token
@@ -422,6 +431,140 @@ fn redact_spaced_credential(text: &str, name: &str, termination: ValueTerminatio
             output.push_str(&remaining[..after_name]);
             remaining = &remaining[after_name..];
         }
+    }
+    output.push_str(remaining);
+    output
+}
+
+/// Redacts the value of a credential-bearing long option whose argument is
+/// separated by horizontal whitespace (`--password value`). Assignment forms
+/// with `=` remain owned by the ordinary marker and identifier scanners.
+fn redact_space_separated_flags(text: &str) -> String {
+    let mut sanitized = text.to_string();
+    for flag in SPACE_SEPARATED_CREDENTIAL_FLAGS {
+        sanitized = redact_space_separated_flag(&sanitized, flag);
+    }
+    sanitized
+}
+
+fn redact_space_separated_flag(text: &str, flag: &str) -> String {
+    let mut remaining = text;
+    let mut output = String::with_capacity(text.len());
+    while let Some(index) = find_ascii_case_insensitive(remaining, flag) {
+        let after_flag = index + flag.len();
+        let boundary_before = index == 0
+            || remaining[..index]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace);
+        let whitespace = remaining[after_flag..]
+            .bytes()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        if boundary_before && whitespace > 0 {
+            output.push_str(&remaining[..after_flag]);
+            let (prefix, token_start, value_end) =
+                credential_value_bounds(remaining, after_flag, ValueTermination::Token);
+            output.push_str(prefix);
+            output.push_str(REDACTED);
+            remaining = &remaining[value_end.max(token_start)..];
+        } else {
+            output.push_str(&remaining[..after_flag]);
+            remaining = &remaining[after_flag..];
+        }
+    }
+    output.push_str(remaining);
+    output
+}
+
+/// Redacts the password component of URL userinfo while retaining the scheme,
+/// username, authority delimiter, host, and path byte-for-byte.
+fn redact_url_userinfo_passwords(text: &str) -> String {
+    let mut remaining = text;
+    let mut output = String::with_capacity(text.len());
+    while let Some(separator) = remaining.find("://") {
+        let authority_start = separator + 3;
+        let authority_end = remaining[authority_start..]
+            .find(is_url_authority_boundary)
+            .map_or(remaining.len(), |length| authority_start + length);
+        let authority = &remaining[authority_start..authority_end];
+        let Some(at) = authority.rfind('@') else {
+            output.push_str(&remaining[..authority_start]);
+            remaining = &remaining[authority_start..];
+            continue;
+        };
+        let Some(colon) = authority[..at].find(':') else {
+            output.push_str(&remaining[..authority_start + at + 1]);
+            remaining = &remaining[authority_start + at + 1..];
+            continue;
+        };
+        let password_start = authority_start + colon + 1;
+        let password_end = authority_start + at;
+        output.push_str(&remaining[..password_start]);
+        output.push_str(REDACTED);
+        remaining = &remaining[password_end..];
+    }
+    output.push_str(remaining);
+    output
+}
+
+fn is_url_authority_boundary(character: char) -> bool {
+    character.is_whitespace() || matches!(character, '/' | '?' | '#' | '"' | '\'' | ',' | ';')
+}
+
+/// Redacts the password inside curl's `-u user:password` and
+/// `--user user:password` arguments while retaining the user name and option
+/// spelling. Quoted arguments consume through their matching quote.
+fn redact_curl_userinfo_passwords(text: &str) -> String {
+    let mut sanitized = text.to_string();
+    for flag in CURL_USER_FLAGS {
+        sanitized = redact_curl_userinfo_password(&sanitized, flag);
+    }
+    sanitized
+}
+
+fn redact_curl_userinfo_password(text: &str, flag: &str) -> String {
+    let mut remaining = text;
+    let mut output = String::with_capacity(text.len());
+    while let Some(index) = remaining.find(flag) {
+        let after_flag = index + flag.len();
+        let boundary_before = index == 0
+            || remaining[..index]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace);
+        let whitespace = remaining[after_flag..]
+            .bytes()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        if !boundary_before || whitespace == 0 {
+            output.push_str(&remaining[..after_flag]);
+            remaining = &remaining[after_flag..];
+            continue;
+        }
+        let argument_start = after_flag + whitespace;
+        let opening_quote = remaining[argument_start..]
+            .chars()
+            .next()
+            .filter(|character| matches!(character, '"' | '\''));
+        let body_start = argument_start + opening_quote.map_or(0, char::len_utf8);
+        let argument_end = opening_quote.map_or_else(
+            || {
+                remaining[body_start..]
+                    .find(char::is_whitespace)
+                    .map_or(remaining.len(), |length| body_start + length)
+            },
+            |quote| quoted_value_end(remaining, body_start, quote),
+        );
+        let Some(colon) = remaining[body_start..argument_end].find(':') else {
+            output.push_str(&remaining[..argument_end]);
+            remaining = &remaining[argument_end..];
+            continue;
+        };
+        let password_start = body_start + colon + 1;
+        output.push_str(&remaining[..password_start]);
+        output.push_str(REDACTED);
+        remaining = &remaining[argument_end..];
     }
     output.push_str(remaining);
     output
@@ -552,6 +695,44 @@ fn next_json_credential_value(text: &str) -> Option<(usize, usize)> {
     None
 }
 
+fn json_scanner_claims_credential_key_at(text: &str, target: usize) -> bool {
+    let mut offset = 0;
+    while let Some(relative_start) = text[offset..].find('"') {
+        let key_start = offset + relative_start;
+        if key_start > target {
+            return false;
+        }
+        if !json_key_can_start_at(text, key_start) {
+            offset = key_start + 1;
+            continue;
+        }
+        let key_end = quoted_value_end(text, key_start + 1, '"');
+        if key_end == text.len() {
+            return false;
+        }
+        let encoded_key = &text[key_start..=key_end];
+        let Ok(key) = serde_json::from_str::<String>(encoded_key) else {
+            if key_start == target {
+                return false;
+            }
+            offset = key_end + 1;
+            continue;
+        };
+        let whitespace_end = key_end
+            + 1
+            + text[key_end + 1..]
+                .chars()
+                .take_while(|character| character.is_whitespace())
+                .map(char::len_utf8)
+                .sum::<usize>();
+        if key_start == target {
+            return text.as_bytes().get(whitespace_end) == Some(&b':') && credential_key(&key);
+        }
+        offset = key_end + 1;
+    }
+    false
+}
+
 fn json_key_can_start_at(text: &str, key_start: usize) -> bool {
     text[..key_start]
         .chars()
@@ -617,7 +798,7 @@ fn redact_value(value: &mut Value) -> bool {
 }
 
 fn credential_key(key: &str) -> bool {
-    let key = key
+    let normalized = key
         .chars()
         .filter(|character| character.is_ascii_alphanumeric())
         .map(|character| character.to_ascii_lowercase())
@@ -634,11 +815,42 @@ fn credential_key(key: &str) -> bool {
         "privatekey",
         "credential",
         "password",
+        "passphrase",
+        "passwd",
         "secret",
         "cookie",
     ]
     .iter()
-    .any(|shape| key.contains(shape))
+    .any(|shape| normalized.contains(shape))
+        || normalized == "token"
+        || normalized.ends_with("token")
+        || normalized == "pwd"
+        || normalized.ends_with("pwd")
+        || [
+            "signingkey",
+            "encryptionkey",
+            "sshkey",
+            "hmackey",
+            "licensekey",
+        ]
+        .iter()
+        .any(|shape| normalized.contains(shape))
+}
+
+fn credential_identifier_could_extend_to_credential(identifier: &str) -> bool {
+    let lower = identifier.to_ascii_lowercase();
+    let (qualified, tail) = lower
+        .rfind(['_', '-'])
+        .map_or((false, lower.as_str()), |separator| {
+            (true, &lower[separator + 1..])
+        });
+    if tail.is_empty() {
+        return false;
+    }
+    ["token", "passwd", "pwd", "passphrase"]
+        .iter()
+        .any(|shape| tail.len() < shape.len() && shape.starts_with(tail))
+        || (qualified && tail.len() < "key".len() && "key".starts_with(tail))
 }
 
 fn redact_after_marker(text: &str, marker: &str) -> String {
@@ -1699,7 +1911,10 @@ fn stream_candidate_starts_at_zero(text: &str) -> bool {
         }
         || trailing_partial_unicode_escape(text) == Some(0)
         || spaced_credential_starts_at_zero(text)
-        || identifier_assignment_unsafe_start(text) == Some(0)
+        || space_separated_flag_candidate(text)
+        || url_userinfo_candidate(text)
+        || curl_userinfo_candidate(text)
+        || identifier_assignment_candidate(text)
         || pem_private_key_starts_at_zero(text)
 }
 
@@ -1726,6 +1941,175 @@ fn spaced_credential_starts_at_zero(text: &str) -> bool {
             let separator = name.len() + whitespace;
             separator == text.len() || matches!(text.as_bytes().get(separator), Some(b'=' | b':'))
         })
+}
+
+fn space_separated_flag_candidate(text: &str) -> bool {
+    space_separated_flag_unsafe_start(text) == Some(0) || redact_space_separated_flags(text) != text
+}
+
+fn space_separated_flag_unsafe_start(text: &str) -> Option<usize> {
+    let mut earliest: Option<usize> = None;
+    for flag in SPACE_SEPARATED_CREDENTIAL_FLAGS {
+        let prefix_length = trailing_marker_prefix(text, flag, true);
+        if prefix_length > 0 {
+            let start = text.len() - prefix_length;
+            earliest = Some(earliest.map_or(start, |current| current.min(start)));
+        }
+        let mut offset = 0;
+        while let Some(relative) = find_ascii_case_insensitive(&text[offset..], flag) {
+            let start = offset + relative;
+            let after_flag = start + flag.len();
+            let boundary_before = start == 0
+                || text[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace);
+            let whitespace = text[after_flag..]
+                .bytes()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            if boundary_before && after_flag + whitespace == text.len() {
+                earliest = Some(earliest.map_or(start, |current| current.min(start)));
+                break;
+            }
+            if boundary_before && whitespace > 0 {
+                let (_, token_start, value_end) =
+                    credential_value_bounds(text, after_flag, ValueTermination::Token);
+                if value_end.max(token_start) == text.len() {
+                    earliest = Some(earliest.map_or(start, |current| current.min(start)));
+                    break;
+                }
+            }
+            offset = after_flag;
+        }
+    }
+    earliest
+}
+
+fn url_userinfo_candidate(text: &str) -> bool {
+    url_userinfo_unsafe_start(text) == Some(0) || redact_url_userinfo_passwords(text) != text
+}
+
+fn url_userinfo_unsafe_start(text: &str) -> Option<usize> {
+    let prefix_length = trailing_marker_prefix(text, "://", false);
+    let mut earliest = (prefix_length > 0).then_some(text.len() - prefix_length);
+    let mut offset = 0;
+    while let Some(relative) = text[offset..].find("://") {
+        let separator = offset + relative;
+        let authority_start = separator + 3;
+        let authority_end = text[authority_start..]
+            .find(is_url_authority_boundary)
+            .map_or(text.len(), |length| authority_start + length);
+        let authority = &text[authority_start..authority_end];
+        let has_password = authority
+            .rfind('@')
+            .is_some_and(|at| authority[..at].contains(':'));
+        if authority_end == text.len() && !has_password {
+            let start = text[..separator]
+                .char_indices()
+                .rev()
+                .take_while(|(_, character)| {
+                    character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+                })
+                .last()
+                .map_or(separator, |(start, _)| start);
+            earliest = Some(earliest.map_or(start, |current| current.min(start)));
+        }
+        offset = authority_end.max(authority_start);
+    }
+    earliest
+}
+
+fn curl_userinfo_candidate(text: &str) -> bool {
+    curl_userinfo_unsafe_start(text) == Some(0) || redact_curl_userinfo_passwords(text) != text
+}
+
+fn curl_userinfo_unsafe_start(text: &str) -> Option<usize> {
+    let mut earliest: Option<usize> = None;
+    for flag in CURL_USER_FLAGS {
+        let prefix_length = trailing_marker_prefix(text, flag, false);
+        if prefix_length > 0 {
+            let start = text.len() - prefix_length;
+            earliest = Some(earliest.map_or(start, |current| current.min(start)));
+        }
+        let mut offset = 0;
+        while let Some(relative) = text[offset..].find(flag) {
+            let start = offset + relative;
+            let after_flag = start + flag.len();
+            let boundary_before = start == 0
+                || text[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace);
+            let whitespace = text[after_flag..]
+                .bytes()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            if boundary_before && after_flag == text.len() {
+                earliest = Some(earliest.map_or(start, |current| current.min(start)));
+                break;
+            }
+            if !boundary_before || whitespace == 0 {
+                offset = after_flag;
+                continue;
+            }
+            let argument_start = after_flag + whitespace;
+            let opening_quote = text[argument_start..]
+                .chars()
+                .next()
+                .filter(|character| matches!(character, '"' | '\''));
+            let body_start = argument_start + opening_quote.map_or(0, char::len_utf8);
+            let argument_end = opening_quote.map_or_else(
+                || {
+                    text[body_start..]
+                        .find(char::is_whitespace)
+                        .map_or(text.len(), |length| body_start + length)
+                },
+                |quote| quoted_value_end(text, body_start, quote),
+            );
+            if argument_end == text.len() {
+                earliest = Some(earliest.map_or(start, |current| current.min(start)));
+                break;
+            }
+            offset = argument_end.max(after_flag);
+        }
+    }
+    earliest
+}
+
+/// Whether any complete credential identifier assignment occurs in `text`.
+/// The held fragment can begin before the identifier when another conservative
+/// lookbehind rule retained the prefix, so candidate recognition cannot assume
+/// the credential itself starts at byte zero.
+fn identifier_assignment_candidate(text: &str) -> bool {
+    if identifier_assignment_unsafe_start(text) == Some(0) {
+        return true;
+    }
+    let base = text.as_ptr() as usize;
+    let mut offset = 0;
+    while let Some(relative) = text[offset..]
+        .bytes()
+        .position(|byte| matches!(byte, b'=' | b':'))
+    {
+        let separator = offset + relative;
+        if let Some((identifier, quote)) = trailing_identifier(&text[..separator])
+            && credential_key(identifier)
+        {
+            let content = identifier.as_ptr() as usize - base;
+            let start = if quote.is_some() {
+                content - 1
+            } else {
+                content
+            };
+            let json_scanner_declined =
+                quote == Some('"') && !json_scanner_claims_credential_key_at(text, start);
+            if start == 0 || json_scanner_declined {
+                return true;
+            }
+        }
+        offset = separator + 1;
+    }
+    false
 }
 
 /// The trailing portion of `text` that could begin a credential extending into
@@ -1788,6 +2172,15 @@ fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
         earliest = Some(earliest.map_or(start, |current| current.min(start)));
     }
     if let Some(start) = spaced_credential_unsafe_start(text) {
+        earliest = Some(earliest.map_or(start, |current| current.min(start)));
+    }
+    if let Some(start) = space_separated_flag_unsafe_start(text) {
+        earliest = Some(earliest.map_or(start, |current| current.min(start)));
+    }
+    if let Some(start) = url_userinfo_unsafe_start(text) {
+        earliest = Some(earliest.map_or(start, |current| current.min(start)));
+    }
+    if let Some(start) = curl_userinfo_unsafe_start(text) {
         earliest = Some(earliest.map_or(start, |current| current.min(start)));
     }
     if let Some(start) = identifier_assignment_unsafe_start(text) {
@@ -1878,16 +2271,12 @@ fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
             continue;
         }
         let separator = index;
-        let is_colon = byte == b':';
-        // The double-quoted-colon exemption mirrors the stateless scanner:
-        // only a position the JSON scanner owns is left to it.
         if let Some((identifier, quote)) = trailing_identifier(&text[..separator])
-            && !(quote == Some('"')
-                && is_colon
-                && json_key_can_start_at(text, identifier.as_ptr() as usize - base - 1))
             && credential_key(identifier)
         {
-            let termination = if credential_key_is_free_form(identifier) {
+            let termination = if quote == Some('"') {
+                ValueTermination::Token
+            } else if credential_key_is_free_form(identifier) {
                 ValueTermination::Line
             } else {
                 ValueTermination::Token
@@ -1918,7 +2307,8 @@ fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
     // recognized rather than emitted with the opener stripped.
     let end_trimmed = text.trim_end_matches([' ', '\t']);
     if let Some((identifier, quote)) = trailing_identifier(end_trimmed)
-        && credential_key(identifier)
+        && (credential_key(identifier)
+            || credential_identifier_could_extend_to_credential(identifier))
     {
         let content = identifier.as_ptr() as usize - base;
         let start = match quote {
@@ -2134,6 +2524,7 @@ mod tests {
     const ESCAPED_QUOTED_SECRET_VALUE: &str = r#"sensitive \"quoted\" value"#;
     const MULTILINE_SECRET_VALUE: &str = "sensitive\nmultiline\nvalue";
     const COMPOSITE_SECRET_VALUE: &str = "sensitive-composite-value";
+    const PLANTED_SYNTHETIC_SECRET: &str = "SYNTHETIC-SECRET-SHAPE-COVERAGE";
 
     fn observation_text(observation: Observation<u8>) -> String {
         match observation.fact {
@@ -2142,6 +2533,39 @@ mod tests {
             _ => String::new(),
         }
     }
+
+    #[track_caller]
+    fn assert_two_delta_split_redacts(first: &str, second: &str) {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: first.to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: second.to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(
+            !emitted.contains(PLANTED_SYNTHETIC_SECRET),
+            "split credential value must not survive stateful redaction: {emitted}"
+        );
+    }
+
     const STRUCTURED_OBJECT_SECRET_VALUE: &str = "sensitive-structured-object-value";
     const STRUCTURED_ARRAY_SECRET_ONE: &str = "sensitive-structured-array-one";
     const STRUCTURED_ARRAY_SECRET_TWO: &str = "sensitive-structured-array-two";
@@ -2670,6 +3094,150 @@ mod tests {
         assert!(client.contains("[redacted]"));
         assert!(!aws.contains("opaque-aws-secret"));
         assert!(aws.contains("[redacted]"));
+    }
+
+    /// INV-035: malformed JSON quote pairing cannot make the JSON member
+    /// scanner and identifier-assignment scanner both decline a covered key.
+    #[test]
+    fn inv_035_malformed_quoted_credential_keys_are_redacted_on_every_surface() {
+        let fixture = format!(r#"{{"x,"client_secret":"{PLANTED_SYNTHETIC_SECRET}"}}"#);
+        let text_output = redact_text(&fixture);
+        let json_output = redact_json(&fixture);
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let sink = RedactingSink::new(&mut observed);
+        let tool_output = sink.redact_tool_arguments("", &fixture);
+
+        assert!(!text_output.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!json_output.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!tool_output.contains(PLANTED_SYNTHETIC_SECRET));
+    }
+
+    /// INV-035: bare `token` and every singular `*_TOKEN` assignment are
+    /// credential-bearing, while plural usage counters remain ordinary data.
+    #[test]
+    fn inv_035_redacts_bare_and_suffix_token_assignments() {
+        let github = redact_text(&format!("GITHUB_TOKEN={PLANTED_SYNTHETIC_SECRET}"));
+        let bare = redact_text(&format!("token={PLANTED_SYNTHETIC_SECRET}"));
+        let member = redact_json(&format!(
+            r#"{{"CI_JOB_TOKEN":"{PLANTED_SYNTHETIC_SECRET}"}}"#
+        ));
+        let usage = r#"{"input_tokens":11,"output_tokens":7}"#;
+
+        assert_eq!(github, "GITHUB_TOKEN=[redacted]");
+        assert_eq!(bare, "token=[redacted]");
+        assert_eq!(member, r#"{"CI_JOB_TOKEN":"[redacted]"}"#);
+        assert_eq!(redact_json(usage), usage);
+    }
+
+    /// INV-035: credential-bearing long options consume a whitespace-separated
+    /// argument exactly as their `=` assignment forms do.
+    #[test]
+    fn inv_035_redacts_space_separated_credential_flags() {
+        let password = redact_text(&format!("codex --password {PLANTED_SYNTHETIC_SECRET}"));
+        let api_key = redact_text(&format!("codex --api-key {PLANTED_SYNTHETIC_SECRET}"));
+        let passphrase = redact_text(&format!("gpg --passphrase {PLANTED_SYNTHETIC_SECRET}"));
+
+        assert_eq!(password, "codex --password [redacted]");
+        assert_eq!(api_key, "codex --api-key [redacted]");
+        assert_eq!(passphrase, "gpg --passphrase [redacted]");
+    }
+
+    /// INV-035: URL userinfo passwords are redacted without rewriting their
+    /// scheme, username, host, or path.
+    #[test]
+    fn inv_035_redacts_scheme_url_userinfo_passwords() {
+        let fixture = format!("psql postgres://admin:{PLANTED_SYNTHETIC_SECRET}@db.internal/app");
+
+        assert_eq!(
+            redact_text(&fixture),
+            "psql postgres://admin:[redacted]@db.internal/app"
+        );
+    }
+
+    /// INV-035: curl's userinfo option redacts the password while retaining
+    /// the option, user name, and destination URL.
+    #[test]
+    fn inv_035_redacts_curl_userinfo_passwords() {
+        let fixture = format!("curl -u admin:{PLANTED_SYNTHETIC_SECRET} https://api.example.test");
+
+        assert_eq!(
+            redact_text(&fixture),
+            "curl -u admin:[redacted] https://api.example.test"
+        );
+    }
+
+    /// Ordinary URLs and curl user arguments without a password remain
+    /// byte-exact; userinfo redaction is not a generic URL rewrite.
+    #[test]
+    fn credential_clean_urls_and_curl_usernames_remain_byte_exact() {
+        let url = "https://example.test/path?q=one";
+        let curl = "curl -u admin https://api.example.test";
+
+        assert_eq!(redact_text(url), url);
+        assert_eq!(redact_text(curl), curl);
+    }
+
+    /// INV-035: adjacent high-confidence password and cryptographic-key names
+    /// use the same assignment policy as the pre-existing credential names.
+    #[test]
+    fn inv_035_redacts_passwd_pwd_passphrase_and_security_key_assignments() {
+        let passwd = redact_text(&format!("passwd={PLANTED_SYNTHETIC_SECRET}"));
+        let mysql_pwd = redact_text(&format!("MYSQL_PWD={PLANTED_SYNTHETIC_SECRET}"));
+        let passphrase = redact_text(&format!("passphrase={PLANTED_SYNTHETIC_SECRET}"));
+        let signing = redact_text(&format!("signing_key={PLANTED_SYNTHETIC_SECRET}"));
+        let encryption = redact_text(&format!("encryption_key={PLANTED_SYNTHETIC_SECRET}"));
+        let ssh = redact_text(&format!("ssh_key={PLANTED_SYNTHETIC_SECRET}"));
+        let hmac = redact_text(&format!("hmac_key={PLANTED_SYNTHETIC_SECRET}"));
+        let license = redact_text(&format!("license_key={PLANTED_SYNTHETIC_SECRET}"));
+
+        assert!(!passwd.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!mysql_pwd.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!passphrase.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!signing.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!encryption.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!ssh.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!hmac.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!license.contains(PLANTED_SYNTHETIC_SECRET));
+    }
+
+    /// INV-035: splitting a credential flag inside its name cannot release the
+    /// later whitespace-separated value.
+    #[test]
+    fn inv_035_stream_redacts_a_flag_split_inside_its_name() {
+        assert_two_delta_split_redacts(
+            "codex --pass",
+            &format!("word {PLANTED_SYNTHETIC_SECRET} tail"),
+        );
+    }
+
+    /// INV-035: splitting URL userinfo immediately before its password cannot
+    /// release that password as a standalone clean-looking delta.
+    #[test]
+    fn inv_035_stream_redacts_a_url_userinfo_password_split() {
+        assert_two_delta_split_redacts(
+            "postgres://admin:",
+            &format!("{PLANTED_SYNTHETIC_SECRET}@db.internal/app"),
+        );
+    }
+
+    /// INV-035: splitting a suffix-token name cannot separate the recognized
+    /// name from the value it marks as a credential.
+    #[test]
+    fn inv_035_stream_redacts_a_suffix_token_assignment_split_inside_its_name() {
+        assert_two_delta_split_redacts(
+            "GITHUB_TO",
+            &format!("KEN={PLANTED_SYNTHETIC_SECRET} tail"),
+        );
+    }
+
+    /// INV-035: malformed quoted-key ownership remains consistent across a
+    /// delta split instead of releasing the value after a conservative hold.
+    #[test]
+    fn inv_035_stream_redacts_a_split_malformed_quoted_credential_key() {
+        assert_two_delta_split_redacts(
+            r#"{"x,"client_sec"#,
+            &format!(r#"ret":"{PLANTED_SYNTHETIC_SECRET}"}}"#),
+        );
     }
 
     /// The trailing credential context is the unsafe suffix; a clean-ending
