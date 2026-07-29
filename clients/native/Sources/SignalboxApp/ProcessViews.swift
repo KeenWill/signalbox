@@ -592,6 +592,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private var serviceGeneration: UInt64 = 0
   private var unresolvedSubmission: SignalboxPreparedInputSubmission?
   private var unresolvedToolDecision: SignalboxPreparedToolRequestDecision?
+  private var unresolvedTurnStop: SignalboxPreparedTurnStop?
   private var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
   private var terminalTurnIDs: Set<SignalboxCanonicalUUID> = []
   private var acceptedInputTimelineOffsets: [SignalboxCanonicalUUID: Int] = [:]
@@ -827,12 +828,28 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         isSubmitting = false
       }
     }
+    var preparedForAttempt: SignalboxPreparedTurnStop?
+    var reusedUnresolvedTurnStop = false
     do {
-      let prepared = try await service.prepareTurnStop(
-        session: session,
-        activeTurnID: activeTurnID,
-        content: content
-      )
+      let prepared: SignalboxPreparedTurnStop
+      if let unresolvedTurnStop,
+        unresolvedTurnStop.sessionID == session.id,
+        hasExactUTF8(unresolvedTurnStop.content, content)
+      {
+        prepared = unresolvedTurnStop
+        reusedUnresolvedTurnStop = true
+      } else {
+        unresolvedTurnStop = nil
+        prepared = try await service.prepareTurnStop(
+          session: session,
+          activeTurnID: activeTurnID,
+          content: content
+        )
+      }
+      preparedForAttempt = prepared
+      guard serviceGeneration == generation else {
+        return
+      }
       let submitted = try await service.stopTurn(prepared)
       guard serviceGeneration == generation else {
         return
@@ -853,6 +870,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           pendingInputs.sort { $0.acceptancePosition.rawValue < $1.acceptancePosition.rawValue }
         }
       }
+      unresolvedTurnStop = nil
       if hasExactUTF8(composerText, prepared.content) {
         composerText = ""
       }
@@ -868,6 +886,20 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       )
       guard serviceGeneration == generation else {
         return
+      }
+      if error is CancellationError {
+        unresolvedTurnStop = preparedForAttempt
+      } else if let serviceError = error as? SignalboxProcessServiceError,
+        case .mutationRetryExhausted = serviceError
+      {
+        unresolvedTurnStop = preparedForAttempt
+      } else if let openError = error as? SignalboxProcessRequestOpenError,
+        case .definitelyUnsent = openError,
+        reusedUnresolvedTurnStop
+      {
+        unresolvedTurnStop = preparedForAttempt
+      } else {
+        unresolvedTurnStop = nil
       }
       errorMessage = error.localizedDescription
     }
