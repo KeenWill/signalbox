@@ -28,13 +28,13 @@ the prepared operation was verified through PR #286
 exact commit-ambiguity comparison were verified through PR #301
 (`agent/token-usage`); the empty-thinking completion rule was verified through
 PR #305 (`agent/sonnet-streamed-tool-use`). The context-summary projection and
-dedicated compaction-call evidence were verified through this PR
-(`agent/context-compaction-core`); the version-twenty-two explicit trigger,
-pre-activation context guard, configured prompt, and provider-native input
-counting were verified against `agent/context-compaction-protocol`. The
-runner-placement rendering and executable session-tool snapshot paragraphs are
-the foundation proposal at the bottom of their implementing stack and become
-verified only with those child pull requests. Invariant tags cite
+dedicated compaction-call evidence were verified through PR #312
+(`agent/context-compaction-core`); the explicit trigger, pre-activation context
+guard, configured prompt, and provider-native input counting were verified
+through PR #314 (`agent/context-compaction-protocol`). The runner-placement
+rendering and executable session-tool snapshot paragraphs are the foundation
+proposal at the bottom of their implementing stack and become verified only with
+those child pull requests. Invariant tags cite
 [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
@@ -268,12 +268,12 @@ attempt. An integrity failure still terminalizes the unsent call. After a
 successful provider result, the daemon retains the summary and its usage in
 memory until the exact completion is durably applied or replayed.
 
-The explicit version-twenty-two `compact_session` request names a session and an
-optional semantic transcript position. Absence selects the latest safe terminal
-or pre-call boundary. The command records no projection preference: once its
-summary result commits, later model inputs in that session follow the projection
-rule. Command replay returns the same compaction identity, call, exact through
-position, summary entry, and result frontier.
+The explicit `compact_session` request names a session and an optional semantic
+transcript position. Absence selects the latest safe terminal or pre-call
+boundary. The command records no projection preference: once its summary result
+commits, later model inputs in that session follow the projection rule. Command
+replay returns the same compaction identity, call, exact through position,
+summary entry, and result frontier.
 
 Preparation also rejects a freshly minted summary-entry, result-frontier, or
 compaction identity that already names a durable record, so the daemon remints

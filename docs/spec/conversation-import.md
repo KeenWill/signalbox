@@ -302,8 +302,8 @@ skipped instead of blocking the scan. Traversal selects only regular files whose
 extension is exactly lowercase `.jsonl`, sorts their full paths, and imposes no
 candidate-count cap. A traversal failure aborts before any request rather than
 hiding an unread subtree. Each candidate is then read and sent through the
-existing version-five `import_conversation` request, one file per request and in
-that sorted order; scan mode adds no protocol request or server-side batching.
+existing `import_conversation` request, one file per request and in that sorted
+order; scan mode adds no protocol request or server-side batching.
 
 For every candidate, the terminal prints an escaped, quoted local path and one
 `imported`, `already_imported`, or `skipped` outcome. Successful outcomes name
@@ -351,13 +351,13 @@ new exact snapshot under the identity model above.
 An import prints only the imported conversation's identity, while
 [later session creation](sessions-and-transcript.md) selects one inclusive
 imported position. `signalbox imported <imported-conversation-uuid>` is the read
-that makes those positions observable: it sends one version-seventeen
-`read_imported_conversation` request and prints one line per normalized entry
-plus a final `entry_count`. Each line names the entry's one-based imported
-position, its imported entry identity, its exact source-speaker attestation, its
-normalized content kind, and — for an entry whose content is attested `Text` —
-that text's exact leading scalars bounded to 256 UTF-8 bytes with an explicit
-truncation marker. The complete message sequence and its bounds are owned by the
+that makes those positions observable: it sends one `read_imported_conversation`
+request and prints one line per normalized entry plus a final `entry_count`.
+Each line names the entry's one-based imported position, its imported entry
+identity, its exact source-speaker attestation, its normalized content kind, and
+— for an entry whose content is attested `Text` — that text's exact leading
+scalars bounded to 256 UTF-8 bytes with an explicit truncation marker. The
+complete message sequence and its bounds are owned by the
 [process protocol](process-protocol.md#server-messages).
 
 The read exposes no imported content a transcript snapshot does not already

@@ -355,12 +355,12 @@ command receipts for the caller-driven process surface.
 
 ## Process and terminal surface
 
-Process protocol version eleven exposes closed requests to create a target,
-start a run and its session-backed pass, activate that pass, record its complete
-finding inventory or one finding disposition, reserve and attach external links,
-and read targets, runs with their pass, individual findings, or an
-identity-ordered run finding list. Exact wire shapes and compatibility are owned
-by [the process protocol](process-protocol.md#client-requests).
+The process protocol exposes closed requests to create a target, start a run and
+its session-backed pass, activate that pass, record its complete finding
+inventory or one finding disposition, reserve and attach external links, and
+read targets, runs with their pass, individual findings, or an identity-ordered
+run finding list. Exact wire shapes and compatibility are owned by
+[the process protocol](process-protocol.md#client-requests).
 
 Starting a run requires an existing target plus an accepted input whose
 canonical session and origin turn agree with the requested pass. Fresh run and
@@ -382,14 +382,14 @@ every committed intermediate point remains a domain-reconstitutable aggregate; a
 process crash cannot expose a state that the store's own loaders classify as
 corruption.
 
-Every version-eleven review mutation carries an owner-global command identity.
-The daemon binds that identity to the digest and closed kind of the validated
-semantic request and records an append-only typed receipt. Aggregate effects may
-commit before the receipt; an equal retry recognizes the exact complete effect,
-records a missing receipt, and returns the stable result. Once recorded, the
-receipt is inspected before mutable aggregate-state validation and carries every
-fact needed to return the original response, so a later aggregate state cannot
-turn an equal retry into a rejection. Distinct reuse fails closed. This
+Every review mutation carries an owner-global command identity. The daemon binds
+that identity to the digest and closed kind of the validated semantic request
+and records an append-only typed receipt. Aggregate effects may commit before
+the receipt; an equal retry recognizes the exact complete effect, records a
+missing receipt, and returns the stable result. Once recorded, the receipt is
+inspected before mutable aggregate-state validation and carries every fact
+needed to return the original response, so a later aggregate state cannot turn
+an equal retry into a rejection. Distinct reuse fails closed. This
 representation is the durable review-command contract.
 
 The terminal client exposes target creation, run admission and activation,

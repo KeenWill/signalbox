@@ -21,10 +21,9 @@ were verified through PR #285 (`agent/dev-instance-code-host-credential`). The
 current command/telemetry identity-generation, command-family, and
 ambiguity-ownership inventory was verified through PR #288
 (`agent/audit-fix-docs-coherence`); the context-compaction command lifecycle was
-verified against `agent/context-compaction-protocol`. The version-seventeen
-runner recovery command families are the foundation proposal at the bottom of
-their implementing stack and become verified only with those child pull
-requests.
+verified through PR #314 (`agent/context-compaction-protocol`). The runner
+recovery command families are the foundation proposal at the bottom of their
+implementing stack and become verified only with those child pull requests.
 
 ## Identity model
 

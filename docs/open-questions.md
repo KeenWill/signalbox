@@ -652,10 +652,10 @@ questions below remain open.
   transport, authentication binding, compatibility negotiation, internet
   backpressure, and cross-host stale-evidence retention remain undecided. Blocks
   remote dispatch, not the local runner. (S12, S16, S30–S32)
-- **Compatibility beyond the retained process-protocol versions.** Versions one
-  through four have their owning [specification](spec/process-protocol.md). A
-  future compatibility window, negotiation scheme, and generated-client policy
-  remain undecided. (S01, S24)
+- **Compatibility after the process-protocol freeze.** The single pre-deployment
+  version and its freeze condition are owned by
+  [process-protocol](spec/process-protocol.md). A future compatibility window,
+  negotiation scheme, and generated-client policy remain undecided. (S01, S24)
 - **Transient model-update relay.** Whether provider token deltas cross the
   process boundary, and the required draft identity, sequencing, replacement,
   backpressure, and redaction rules, remain undecided. The implemented durable

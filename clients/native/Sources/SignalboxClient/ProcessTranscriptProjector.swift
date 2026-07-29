@@ -180,14 +180,14 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     content: String,
     selection: Selection
   ) throws -> SignalboxStoredEvent? {
-    guard textIsSelected(message.entry, selection: selection) else {
+    guard textIsSelected(message, selection: selection) else {
       return nil
     }
     let role: SignalboxMessageRole
     switch message.entry {
     case .user:
       role = .user
-    case .assistant:
+    case .assistant, .contextSummary:
       role = .assistant
     case .imported(_, _, let speaker):
       role = importedRole(speaker)
@@ -380,14 +380,14 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   }
 
   private func textIsSelected(
-    _ entry: SignalboxTranscriptTextEntry,
+    _ message: SignalboxTranscriptTextEntryMessage,
     selection: Selection
   ) -> Bool {
     switch selection {
     case .all:
       return true
     case .trigger(let trigger):
-      switch entry {
+      switch message.entry {
       case .user:
         return false
       case .assistant(let turnID, let modelCallID):
@@ -403,6 +403,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           return false
         }
         return turnID == producingCall.turnID && modelCallID == producingCall.modelCallID
+      case .contextSummary(let modelCallID, _, _, _, _):
+        guard
+          case .contextCompacted(_, let triggerModelCallID, _, let summaryEntryID, _) = trigger
+        else {
+          return false
+        }
+        return message.entryID == summaryEntryID && modelCallID == triggerModelCallID
       case .imported, .unknown:
         return false
       }
@@ -434,7 +441,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .turnReconciliationRequired(let turnID, _, _),
       .turnToolReconciliationRequired(let turnID, _, _):
       return turnID
-    case .sessionCreated, .unknown:
+    case .sessionCreated, .contextCompacted, .unknown:
       return nil
     }
   }
@@ -488,8 +495,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       return entryAttemptID == toolAttemptID && context.turnID == turnID
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .turnRefused,
-      .turnReconciliationRequired, .unknown:
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+      .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
       return false
     }
   }
@@ -565,6 +572,16 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return expectedRequestIDs.isSubset(of: projectedRequestIDs)
       case .recoveryRequired, .unknown:
         return true
+      }
+    case .contextCompacted(_, let modelCallID, _, let summaryEntryID, _):
+      return snapshot.records.contains {
+        guard case .textEntry(let message) = $0,
+          message.entryID == summaryEntryID,
+          case .contextSummary(let entryModelCallID, _, _, _, _) = message.entry
+        else {
+          return false
+        }
+        return entryModelCallID == modelCallID
       }
     case .turnCompleted(let turnID, let modelCallID, let completionEntryID, _):
       let hasAssistantText = snapshot.records.contains {

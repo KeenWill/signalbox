@@ -33,7 +33,7 @@ final class SignalboxNativeUITests: XCTestCase {
     }
 
     @MainActor
-    func testSettingsDescribesVersionTwentyOneTransportGate() throws {
+    func testSettingsDescribesSingleVersionTransportGate() throws {
         let app = launchMockApp()
 
         tapTab(named: "Settings", in: app)
