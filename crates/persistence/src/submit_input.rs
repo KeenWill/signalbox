@@ -434,40 +434,6 @@ impl SubmitInputRepository {
                 signalbox_domain::ContextFrontierId,
             ) + Send,
     {
-        self.handle_with_candidates_and_alias_resolver(
-            command,
-            accepted_input,
-            turn,
-            cancellation_identities,
-            next_reclassified_turn,
-            next_tool_cancellation,
-            |_| None,
-        )
-        .await
-    }
-
-    /// Handles one command using hub-minted cancellation/reclassification
-    /// candidates and the deployment's immutable alias definitions.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn handle_with_candidates_and_alias_resolver<NextTurn, NextToolCancellation>(
-        &self,
-        command: SubmitInput,
-        accepted_input: AcceptedInputId,
-        turn: Option<TurnId>,
-        cancellation_identities: CancelledModelCallTurnIdentities,
-        next_reclassified_turn: NextTurn,
-        next_tool_cancellation: NextToolCancellation,
-        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
-    ) -> Result<SubmitInputHandlingOutcome, SubmitInputRepositoryError>
-    where
-        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
-        NextToolCancellation: FnMut(
-                &[signalbox_domain::ToolRequestId],
-            ) -> (
-                Vec<signalbox_domain::SemanticTranscriptEntryId>,
-                signalbox_domain::ContextFrontierId,
-            ) + Send,
-    {
         self.handle_with_candidates_alias_resolver(
             command,
             accepted_input,
@@ -475,7 +441,7 @@ impl SubmitInputRepository {
             cancellation_identities,
             next_reclassified_turn,
             next_tool_cancellation,
-            select_definition,
+            |_| None,
         )
         .await
     }

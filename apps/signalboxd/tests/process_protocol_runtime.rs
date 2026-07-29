@@ -2561,15 +2561,15 @@ async fn s28_read_streams_conservative_imported_seed_snapshot() -> Result<(), Bo
     let runtime = RunningRuntime::start().await?;
     let session_id = create_imported_session(&runtime.pool).await?;
 
-    let mut upgraded_read = Connection::connect(runtime.socket()).await?;
-    upgraded_read
+    let mut read_connection = Connection::connect(runtime.socket()).await?;
+    read_connection
         .request_version(
             ProtocolVersion::One,
             2,
             ClientRequest::ReadTranscript { session_id },
         )
         .await?;
-    let start = response_within(&mut upgraded_read).await?;
+    let start = response_within(&mut read_connection).await?;
     assert_eq!(start.version(), ProtocolVersion::One);
     let ServerMessage::TranscriptSnapshotStart {
         session_id: selected,
@@ -2582,9 +2582,9 @@ async fn s28_read_streams_conservative_imported_seed_snapshot() -> Result<(), Bo
         );
     };
     assert_eq!(*selected, session_id);
-    let model_calls_end = response_within(&mut upgraded_read).await?;
+    let model_calls_end = response_within(&mut read_connection).await?;
     assert_eq!(transcript_model_call_count(model_calls_end.message()), 0);
-    let imported_text = response_within(&mut upgraded_read).await?;
+    let imported_text = response_within(&mut read_connection).await?;
     assert_eq!(imported_text.version(), ProtocolVersion::One);
     let ServerMessage::TranscriptTextEntry {
         entry_index,
@@ -2605,7 +2605,7 @@ async fn s28_read_streams_conservative_imported_seed_snapshot() -> Result<(), Bo
         );
     };
     assert_eq!(entry_index.value(), 0);
-    let content = response_within(&mut upgraded_read).await?;
+    let content = response_within(&mut read_connection).await?;
     let ServerMessage::TranscriptContent {
         entry_index,
         fragment_index,
@@ -2621,7 +2621,7 @@ async fn s28_read_streams_conservative_imported_seed_snapshot() -> Result<(), Bo
     assert_eq!(entry_index.value(), 0);
     assert_eq!(fragment_index.value(), 0);
     assert_eq!(content_fragment.as_str(), IMPORTED_USER_CONTENT);
-    let conservative = response_within(&mut upgraded_read).await?;
+    let conservative = response_within(&mut read_connection).await?;
     let ServerMessage::TranscriptEntry {
         entry_index,
         entry:
@@ -2642,7 +2642,7 @@ async fn s28_read_streams_conservative_imported_seed_snapshot() -> Result<(), Bo
         );
     };
     assert_eq!(entry_index.value(), 1);
-    let end = response_within(&mut upgraded_read).await?;
+    let end = response_within(&mut read_connection).await?;
     assert_eq!(end.version(), ProtocolVersion::One);
     let ServerMessage::TranscriptSnapshotEnd {
         turn_count,
@@ -2655,7 +2655,7 @@ async fn s28_read_streams_conservative_imported_seed_snapshot() -> Result<(), Bo
     assert_eq!(turn_count.value(), 0);
     assert_eq!(entry_count.value(), 2);
 
-    drop(upgraded_read);
+    drop(read_connection);
     runtime.stop().await
 }
 
@@ -2665,8 +2665,8 @@ async fn s28_submit_accepts_imported_session_continuation() -> Result<(), Box<dy
     let runtime = RunningRuntime::start().await?;
     let session_id = create_imported_session(&runtime.pool).await?;
 
-    let mut upgraded_submit = Connection::connect(runtime.socket()).await?;
-    upgraded_submit
+    let mut submit_connection = Connection::connect(runtime.socket()).await?;
+    submit_connection
         .request_version(
             ProtocolVersion::One,
             4,
@@ -2679,11 +2679,11 @@ async fn s28_submit_accepts_imported_session_continuation() -> Result<(), Box<dy
             },
         )
         .await?;
-    let accepted = response_within(&mut upgraded_submit).await?;
+    let accepted = response_within(&mut submit_connection).await?;
     assert_eq!(accepted.version(), ProtocolVersion::One);
     assert_eq!(submitted_session(accepted.message()), session_id);
 
-    drop(upgraded_submit);
+    drop(submit_connection);
     runtime.stop().await
 }
 

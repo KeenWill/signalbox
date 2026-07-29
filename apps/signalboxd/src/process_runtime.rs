@@ -5833,6 +5833,8 @@ where
             };
             write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
         }
+        // Frame validation rejects an absent system-prompt member, so this
+        // repository outcome cannot be client-triggered.
         Ok(ReplaceSessionDefaultsOutcome::PromptRequiresStatedMember) => {
             write_error(
                 writer,

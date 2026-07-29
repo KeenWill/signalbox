@@ -1302,47 +1302,6 @@ impl ProcessReadRepository {
         Ok(row.map(SessionId::from_uuid))
     }
 
-    /// Returns whether the selected session has a model-identity boundary.
-    #[allow(dead_code)]
-    pub async fn session_has_model_identity_history(
-        &self,
-        requested_session: SessionId,
-    ) -> Result<bool, ProcessReadError> {
-        sqlx::query_scalar(
-            "SELECT EXISTS (
-                 SELECT 1
-                   FROM semantic_transcript_entry
-                  WHERE source_session_id = $1
-                    AND payload_kind = 'model_identity_changed'
-             )",
-        )
-        .bind(session_id_to_uuid(requested_session))
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Into::into)
-    }
-
-    /// Returns whether the selected session has a context-summary entry.
-    ///
-    /// This narrow read reports whether context-summary transcript evidence exists.
-    pub async fn session_has_context_summary_history(
-        &self,
-        requested_session: SessionId,
-    ) -> Result<bool, ProcessReadError> {
-        sqlx::query_scalar(
-            "SELECT EXISTS (
-                 SELECT 1
-                   FROM semantic_transcript_entry
-                  WHERE source_session_id = $1
-                    AND payload_kind = 'context_summary'
-             )",
-        )
-        .bind(session_id_to_uuid(requested_session))
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Into::into)
-    }
-
     /// Reads whether the session exists and, when it does, whether its active
     /// turn is parked on the model-call recovery wait.
     ///
