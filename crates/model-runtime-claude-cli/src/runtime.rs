@@ -1599,7 +1599,7 @@ mod tests {
             .1
     }
 
-    /// INV-035: a proxy URL embedding authority userinfo is refused as such.
+    /// Credential boundary: a proxy URL embedding authority userinfo is refused as such.
     #[test]
     fn credential_bearing_proxy_url_is_rejected() {
         let rejection = rejection_for(
@@ -1611,7 +1611,7 @@ mod tests {
         assert_eq!(rejection.reason, EnvironmentRejectionReason::EmbedsUserinfo);
     }
 
-    /// INV-035: username-only userinfo is still an inherited secret shape.
+    /// Credential boundary: username-only userinfo is still an inherited secret shape.
     #[test]
     fn password_less_proxy_userinfo_is_rejected() {
         let rejection = rejection_for("HTTPS_PROXY", "https://alice@proxy.internal".into());
@@ -1619,7 +1619,7 @@ mod tests {
         assert_eq!(rejection.reason, EnvironmentRejectionReason::EmbedsUserinfo);
     }
 
-    /// INV-035: a schemeless proxy value with userinfo is refused too.
+    /// Credential boundary: a schemeless proxy value with userinfo is refused too.
     #[test]
     fn schemeless_proxy_userinfo_is_rejected() {
         let rejection = rejection_for(
@@ -1630,7 +1630,7 @@ mod tests {
         assert_eq!(rejection.reason, EnvironmentRejectionReason::EmbedsUserinfo);
     }
 
-    /// INV-035: the lowercase variable spellings share the refusal.
+    /// Credential boundary: the lowercase variable spellings share the refusal.
     #[test]
     fn lowercase_proxy_userinfo_is_rejected() {
         let rejection = rejection_for(
@@ -1718,7 +1718,7 @@ mod tests {
         );
     }
 
-    /// INV-035: a relative credential home the parent cannot absolutize — its
+    /// Credential boundary: a relative credential home the parent cannot absolutize — its
     /// own current directory deleted, so there is nothing to resolve against —
     /// yields no child value, which is what makes `environment_rejection`
     /// refuse it before spawn instead of forwarding the relative path for the

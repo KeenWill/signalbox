@@ -2,10 +2,12 @@
 
 This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime`, `crates/model-runtime-anthropic`,
-`crates/model-runtime-openai`, and `crates/model-runtime-codex-cli`, verified
-against the implementing stack through PR #183
-(`agent/provider-call-security-parser`). The Codex CLI adapter stack comprises
-PR #264 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
+`crates/model-runtime-openai`, `crates/model-runtime-codex-cli`, and
+`crates/model-runtime-claude-cli`, verified against the implementing stack
+through PR #183 (`agent/provider-call-security-parser`). The Claude Code CLI
+adapter implementation was verified against `2e967a40` on
+`agent/claude-cli-adapter`. The Codex CLI adapter stack comprises PR #264
+(`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
 escalation closeout is PR #317 (`agent/escalation-closeout`). The `signalboxd`
 names this page states for the composition root, its telemetry, and the
 production `FileCredentialAccess` were verified through PR #258
@@ -18,7 +20,7 @@ text-delta projection were verified through PR #300
 (`agent/token-level-streaming`); the Claude 5-family thinking-signature stream
 shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). It covers
 the provider-neutral operation, observation, and evidence vocabulary; SSE
-framing; structured-output and tool decode; `ScriptedModel`; the three provider
+framing; structured-output and tool decode; `ScriptedModel`; the four provider
 adapters; and their credential boundaries. Layer-2 authorization and evidence
 classification ([model-call-execution](model-call-execution.md)), credential
 channels, delivery, and rotation discipline
@@ -31,25 +33,25 @@ companion pages. This page also owns the shared
 
 ## Boundary and crate layout
 
-The runtime layer is four library crates, hand-rolled per the 2026-07-20
+The runtime layer is five library crates, hand-rolled per the 2026-07-20
 [decision-ledger entry](../decisions.md) that closed the substrate's
 vendor-versus-hand-roll question: one provider-neutral core crate plus
 separately named provider adapters, with SerdesAI as a design reference only.
 `signalbox-model-runtime` is the shared vocabulary; the Anthropic and OpenAI
-adapters additionally own their HTTP, TLS, and serde dependencies, while the
-Codex CLI adapter owns only its subprocess, temporary-schema-file, signal, and
-serde dependencies. Test helpers ship in no built library artifact.
-`crates/domain`, `crates/application`, and `crates/persistence` declare no
-dependency on any runtime crate, and no runtime type appears in a domain or
-application signature (INV-002, INV-005); the approved runtime consumers are the
-adapter crates, the `crates/model-provider-runtime` bridge — whose
-`RuntimeModelCallProvider` implements the application's `ModelCallProvider` port
-over any `ModelRuntime<ModelCallId>`, depending on both crates so the dependency
-arrow points from the bridge into application, never from application into the
-runtime — and the daemon composition root (see Open edges). The Cargo manifest
-is the enforcement mechanism: an undeclared dependency fails the workspace
-build. Why: manifest-visible boundaries make a boundary violation a reviewable
-diff instead of a silent import.
+adapters additionally own their HTTP, TLS, and serde dependencies, while the CLI
+adapters own only focused subprocess, temporary-file, signal, and serde
+dependencies. Test helpers ship in no built library artifact. `crates/domain`,
+`crates/application`, and `crates/persistence` declare no dependency on any
+runtime crate, and no runtime type appears in a domain or application signature
+(INV-002, INV-005); the approved runtime consumers are the adapter crates, the
+`crates/model-provider-runtime` bridge — whose `RuntimeModelCallProvider`
+implements the application's `ModelCallProvider` port over any
+`ModelRuntime<ModelCallId>`, depending on both crates so the dependency arrow
+points from the bridge into application, never from application into the runtime
+— and the daemon composition root (see Open edges). The Cargo manifest is the
+enforcement mechanism: an undeclared dependency fails the workspace build. Why:
+manifest-visible boundaries make a boundary violation a reviewable diff instead
+of a silent import.
 
 Caller identity crosses the boundary as an opaque correlation parameter `C`
 threaded through `ModelOperation<C>`, every `Observation<C>`, and the final
@@ -610,6 +612,73 @@ that is an API-key login rather than a subscription one, the smoke proves the
 process, event-protocol, and envelope compatibility that a version bump breaks;
 it does not exercise subscription login itself, which the CLI offers no durable
 unattended path for.
+
+## Claude Code CLI provider adapter
+
+`signalbox-model-runtime-claude-cli` wraps the Claude Code print-mode JSONL
+protocol at the exact crate-local npm pin `2.1.220`. Preparation validates and
+renders the full `ModelOperation`, creates a private temporary MCP catalog and
+isolated settings files, and returns a one-shot capability without spawning
+Claude. Execution consumes it as one fresh Unix process using
+`--print --verbose --output-format=stream-json --no-session-persistence`; it
+passes the rendered frontier on stdin, selects the resolved model, and never
+resumes a CLI session. `SendCommenced` immediately precedes spawn and no
+execution path respawns. The existing CLI-process supervision contract above
+applies: the adapter owns the created process group, bounds stdout events and
+retained stderr, and treats cancellation, timeout, incomplete upload, child
+exit, and group cleanup as typed evidence rather than logging them.
+
+Caller tools are MCP tools, not prompt-embedded schema arrays. The adapter-owned
+stdio bridge publishes exactly the operation's tool definitions plus any
+structured-output contract under the private `signalbox_tools` server. It never
+executes a caller tool. For each `tools/call` it returns the fixed
+acknowledgement that Signalbox recorded the proposal; Claude consequently emits
+a typed assistant `tool_use` followed by a user `tool_result`, and the adapter
+returns the proposal for external authorization and execution. A controlled
+`SessionStart` hook waits for a private readiness marker written only after the
+bridge has answered `tools/list`. This closes the print-mode discovery race: the
+accepted `system/init` must report that server `connected` and its `tools` set
+must equal the qualified declared MCP surface before any assistant content is
+admitted.
+
+The invocation excludes ambient settings, sessions, slash commands, browser
+integration, plugins, and built-in tools. `--tools` selects an empty built-in
+surface; `--disallowedTools` also names every built-in reported by isolated
+2.1.220 (`Task`, `Bash`, the `Cron*` tools, `DesignSync`, `Edit`, worktree,
+monitoring, notebook, notification, read/remote/report/scheduling/messaging,
+`Task*`, `ToolSearch`, web, workflow, and write); and `--allowedTools` contains
+only the qualified declared MCP names. `dontAsk` is used because no undeclared
+capability may become an interactive permission question. The initial event must
+also report no slash commands, skills, or plugins and must identify Claude Code
+`2.1.220`; any mismatch is stream-protocol boundary loss, not a relaxed
+invocation.
+
+The pinned stream establishes correlation and reported-model evidence through
+`system/init`. Assistant `text`, `thinking`, `redacted_thinking`, and `tool_use`
+blocks become typed observations and assistant parts. A tool proposal must name
+the private MCP namespace, match a declared schema name, carry a unique nonempty
+id and object arguments, and receive exactly one matching fixed acknowledgement.
+Only a terminal `result` event can establish success or refusal; an error
+`result` and a nonzero process exit produce typed provider-error evidence. Exit
+zero without it is `BoundaryLoss(StreamEndedWithoutTerminalMarker)`; malformed
+or contradictory JSONL is `BoundaryLoss(StreamProtocolViolation)`; and prose
+alone never becomes terminal evidence. A success must satisfy the operation's
+any/named tool choice, with a structured-output contract represented as the
+required named MCP tool. Provider usage is retained only where the CLI reports
+it.
+
+The adapter accepts only its configured non-secret `CredentialReference` and
+leaves subscription-login resolution inside Claude Code. It clears the child
+environment and forwards only home/Claude-config, executable and temporary path,
+XDG, locale/terminal, certificate, and credential-free proxy values; proxy
+userinfo and unusable credential-home paths fail before spawn. It never locates,
+reads, copies, or logs a credential store. Provider-controlled text,
+identifiers, errors, reasoning, and tool JSON pass through the same
+credential-shape and cross-fragment redaction discipline as the Codex CLI
+adapter before observations or terminal evidence leave the crate.
+
+The adapter crate does not compose itself into signalboxd and defines no
+provider-selection or configuration mapping.
 
 ## Credential-access boundary
 
