@@ -54,15 +54,21 @@ retroactively admit `transcript_model_call_usage` frames under those versions,
 so it takes version nineteen instead, verified through this PR
 (`agent/token-usage`). The interactive terminal chat surface adds no protocol
 version and was verified through this PR (`agent/interactive-terminal-chat`).
-Every earlier admitted version retains its closed vocabulary. This
-implementation speaks versions one through thirteen and sixteen through
-nineteen, with fourteen and fifteen unsupported, and its terminal client selects
-version nineteen. Its `search` verb over version four's metadata list was
-verified through PR #283 (`agent/session-search-cli`; terminal client surface
-only). This page's version-four last-writer member spelling was verified through
-PR #288 (`agent/audit-fix-docs-coherence`). This page is the normative boundary
-between a local client process and `signalboxd`; domain values, PostgreSQL
-records, and wire messages remain distinct representations.
+The native client wiring stack adds version twenty-one for the deployment
+model-alias read, verified through this PR (`agent/native-live-process-wiring`);
+this surface reserved eighteen, but the session-template surface shipped that
+number first while this one was still in flight, and the concurrent
+context-compaction protocol stack separately claimed twenty, also still in
+flight, so this surface sits above both instead. Every earlier admitted version
+retains its closed vocabulary. This implementation speaks versions one through
+thirteen, sixteen through nineteen, and twenty-one, with fourteen, fifteen, and
+twenty unsupported; the terminal client selects version nineteen and the native
+client selects version twenty-one. Its `search` verb over version four's
+metadata list was verified through PR #283 (`agent/session-search-cli`; terminal
+client surface only). This page's version-four last-writer member spelling was
+verified through PR #288 (`agent/audit-fix-docs-coherence`). This page is the
+normative boundary between a local client process and `signalboxd`; domain
+values, PostgreSQL records, and wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -174,7 +180,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1` through `13`, or `16` through `19`;
+- `version`: JSON integer `1` through `13`, `16` through `19`, or `21`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -186,22 +192,25 @@ and members with the wrong JSON type fail explicitly (INV-033). A frame may
 contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
-spellings decode to the same name. A version other than one through thirteen, or
-sixteen through nineteen, produces an `unsupported_version` error naming the
-supported versions, then the server closes the connection. Versions fourteen and
-fifteen are retired and unsupported here, so the admitted set has one gap: each
-was reserved by protocol work that had not yet shipped when a higher number
-shipped first, and admitting either now would retroactively widen an
-already-closed vocabulary underneath a version already in use, so neither is
-ever admitted. Every response uses the request's admitted version; when no
-version can be admitted, the server error uses version one as the pre-admission
-fallback. A client speaking a version above one admits that version-one fallback
-only for `malformed_frame` or `unsupported_version`, then applies the ordinary
-request-identity check; every other response-version mismatch fails locally. A
-server error uses `request_id = "0"` only when the incoming frame prevents
-recovery of a valid nonzero identity; zero is never a valid client identity or
-success-response identity. Leading zeroes, a plus sign, whitespace, and any
-spelling other than the shortest ASCII decimal form are invalid.
+spellings decode to the same name. A version other than one through thirteen,
+sixteen through nineteen, or twenty-one produces an `unsupported_version` error
+naming the supported versions, then the server closes the connection. Versions
+fourteen and fifteen are retired and unsupported here, so the admitted set has a
+permanent gap: each was reserved by protocol work that had not yet shipped when
+a higher number shipped first, and admitting either now would retroactively
+widen an already-closed vocabulary underneath a version already in use, so
+neither is ever admitted. Version twenty is a second, temporary gap: it is
+reserved by the concurrent context-compaction protocol stack, still in flight,
+and becomes admitted once that stack ships rather than retired. Every response
+uses the request's admitted version; when no version can be admitted, the server
+error uses version one as the pre-admission fallback. A client speaking a
+version above one admits that version-one fallback only for `malformed_frame` or
+`unsupported_version`, then applies the ordinary request-identity check; every
+other response-version mismatch fails locally. A server error uses
+`request_id = "0"` only when the incoming frame prevents recovery of a valid
+nonzero identity; zero is never a valid client identity or success-response
+identity. Leading zeroes, a plus sign, whitespace, and any spelling other than
+the shortest ASCII decimal form are invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -235,6 +244,7 @@ that variant.
 | `read_session_defaults`                 | 9               | `session_id` (canonical UUID string), `defaults_version` (canonical decimal string or null)                                                                                                                                                                          | Read one complete immutable defaults epoch: the current one for null, otherwise exactly the named one.                                                                                                                                            |
 | `list_conversations`                    | 16              | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                  | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                    |
 | `read_imported_conversation`            | 17              | `imported_conversation_id` (canonical UUID string)                                                                                                                                                                                                                   | Read one immutable imported conversation's complete entry inventory, including the positions `create_session_from_imported_frontier` consumes.                                                                                                    |
+| `list_model_aliases`                    | 21              | none                                                                                                                                                                                                                                                                 | Read the deployment's complete configured alias-to-direct-selection catalog.                                                                                                                                                                      |
 
 Version eighteen's `template_name` uses the same 1-through-128-byte lowercase
 ASCII grammar as the configuration catalog. The daemon resolves it before domain
@@ -531,22 +541,26 @@ retains every request admitted by version seventeen and adds only
 `create_session_from_template` and `list_templates`. Version nineteen retains
 every request admitted by version eighteen and adds no request variant, only the
 follow-stream and snapshot `transcript_model_call_usage` vocabulary described
-above; versions fourteen and fifteen remain retired and unsupported here. A
-metadata request carried under version one, two, or three, an import request
-carried under version one through four, a defaults-replacement request carried
-under version one through five, a reconciliation request carried under version
-one through six, a turn-control request carried under version one through seven,
-a defaults read carried under version one through eight, an imported-frontier
+above. Version twenty-one retains every request admitted by version nineteen and
+adds only the read-only `list_model_aliases`; versions fourteen and fifteen
+remain permanently retired and unsupported here, and twenty remains a temporary
+gap reserved by the concurrent context-compaction protocol stack. A metadata
+request carried under version one, two, or three, an import request carried
+under version one through four, a defaults-replacement request carried under
+version one through five, a reconciliation request carried under version one
+through six, a turn-control request carried under version one through seven, a
+defaults read carried under version one through eight, an imported-frontier
 creation request carried under any version one through nine, a review request
 carried under any version one through ten, a delivery-bearing submit carried
 under any version before thirteen, a unified-listing request carried under any
 version one through twelve, an imported-conversation read carried under any
-version one through sixteen, or a template request carried under any version
-before eighteen is classified as `malformed_frame` because its supported version
-does not admit that request variant; it never reaches application construction.
-A version-one `submit_input`, `read_transcript`, or `follow_session` request
-that selects imported ancestry returns a version-one `unsupported_version` error
-naming version two before mutation or snapshot construction.
+version one through sixteen, a template request carried under any version before
+eighteen, or an alias request carried under any version before twenty-one is
+classified as `malformed_frame` because its supported version does not admit
+that request variant; it never reaches application construction. A version-one
+`submit_input`, `read_transcript`, or `follow_session` request that selects
+imported ancestry returns a version-one `unsupported_version` error naming
+version two before mutation or snapshot construction.
 
 Every admitted version four and above also inherits every transcript,
 turn-state, entry, and event shape admitted by version three, including the
@@ -679,6 +693,11 @@ not a `session_event`, transcript entry, or terminal-evidence fact. Versions one
 through eleven never receive this message; every admitted version at or above
 twelve inherits it, exactly as they inherit every earlier follow shape.
 
+The native client retains at most 8 MiB of concatenated provider text for one
+active turn and model call. Crossing that presentation-only bound discards the
+ephemeral overlay and requests authoritative synchronization recovery; it does
+not alter durable transcript state.
+
 A replayed metadata receipt remains the exact snapshot installed by its original
 handling even if a later command has replaced the current metadata. A caller
 that needs current state issues `read_session_metadata`.
@@ -741,6 +760,25 @@ cursor is null when no later match existed in the page snapshot; otherwise it
 names the last emitted summary's origin and identity. The page sequence is
 spooled before output and becomes authoritative only after its count, ordering,
 and cursor validate.
+
+Version twenty-one's deployment model-alias catalog is one ordered sequence:
+
+1. `model_aliases_start`;
+2. zero through 10,000 `model_alias_summary { alias_id, selection_id }` messages
+   in strictly increasing alias-identity order; and
+3. `model_aliases_end { alias_count }`.
+
+Both identities are canonical UUID strings. The catalog is a current
+deployment-configuration read, not durable session state: an alias summary
+states the direct selection that accepting a new alias request would freeze at
+that moment. The read exposes no provider credential, provider-native model
+identifier, or mutable configuration operation. Existing sessions and accepted
+inputs retain their previously frozen model-selection semantics when the
+deployment later changes an alias.
+
+The daemon rejects a deployment configuration containing more than 10,000
+aliases, and the native client enforces that same terminal catalog bound before
+presenting it.
 
 `session_metadata` is the successful single-session read and
 `session_metadata_replaced` is the successful write receipt. Both carry
@@ -1280,7 +1318,7 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack uses version eighteen; version four's
+The `signalbox` binary in this stack uses version nineteen; version four's
 single-session metadata read and metadata replacement remain core protocol and
 daemon capabilities without terminal-client UX, while its paginated metadata
 list is the `search` verb below. Older clients remain supported for
@@ -1548,7 +1586,7 @@ silently substitutes a new command identity for an ambiguous attempt. It uses a
 fresh nonzero request identity per connection, validates that a defaults receipt
 is the exact successor carrying the requested selection, copied posture, and
 exact replacement prompt, validates that a decision receipt echoes the exact
-request and decision it sent, renders only known version-eighteen messages, and
+request and decision it sent, renders only known version-nineteen messages, and
 exits nonzero on protocol or application errors other than the follow-specific
 `resync_required` control case, which reconnects for a fresh snapshot.
 

@@ -207,6 +207,7 @@ public enum SignalboxSessionSynchronizationEffect: Equatable, Sendable {
   case cancelDeadline(SignalboxSynchronizationDeadlineToken)
   case publishSnapshot(SignalboxSynchronizationSnapshot)
   case publishEvent(SignalboxFollowedSessionEvent)
+  case publishProviderTextDelta(SignalboxProviderTextDelta)
   case requestSideSnapshot(
     sessionID: SignalboxCanonicalUUID,
     generation: UInt64,
@@ -246,7 +247,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
   private var generation: UInt64 = 0
   private var failureCount = 0
   private var accumulator: SignalboxSnapshotAccumulator?
-  private var replayBuffer: [UInt64: SignalboxBufferedFollowedEvent] = [:]
+  private var replayBuffer: [UInt64: SignalboxBufferedFollowMessage] = [:]
   private var replayBufferNextInsertionID: UInt64 = 0
   private var replayBufferNextRemovalID: UInt64 = 0
   private var replayBufferLastCursor: SignalboxCanonicalUInt64?
@@ -483,6 +484,14 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         stage: .replay,
         reportDiagnostics: true
       )
+    case .providerTextDelta(let delta):
+      guard delta.sessionID == sessionID else {
+        return protocolFailure(
+          stage: .replay,
+          message: "A replayed provider delta named a different session."
+        )
+      }
+      return buffer(delta, stage: .replay)
     case .protocolError(let remote):
       return remoteFailure(remote, stage: .replay)
     case .unknown(let kind, _, let decodingDiagnostic):
@@ -528,6 +537,8 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     switch message {
     case .sessionEvent(let followed):
       return receiveFollowedEvent(followed, generation: currentGeneration)
+    case .providerTextDelta(let delta):
+      return receiveProviderTextDelta(delta)
     case .protocolError(let remote):
       return remoteFailure(remote, stage: .steady)
     case .unknown(let kind, _, let decodingDiagnostic):
@@ -542,6 +553,21 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         message: "A non-event process frame arrived after synchronization."
       )
     }
+  }
+
+  private mutating func receiveProviderTextDelta(
+    _ delta: SignalboxProviderTextDelta
+  ) -> [SignalboxSessionSynchronizationEffect] {
+    guard delta.sessionID == sessionID else {
+      return protocolFailure(
+        stage: .steady,
+        message: "A provider delta named a different session."
+      )
+    }
+    guard activeRefresh == nil else {
+      return buffer(delta, stage: .steady)
+    }
+    return [.publishProviderTextDelta(delta)]
   }
 
   private mutating func receiveFollowedEvent(
@@ -739,7 +765,30 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     stage currentStage: SignalboxSynchronizationStage,
     reportDiagnostics: Bool
   ) -> [SignalboxSessionSynchronizationEffect] {
-    let retainedBytes = followed.event.retainedUTF8Bytes
+    let effects = buffer(
+      .event(followed),
+      stage: currentStage
+    )
+    if case .recovery = phase {
+      return effects
+    }
+    return reportDiagnostics
+      ? effects + diagnosticEffects(for: followed, stage: currentStage)
+      : effects
+  }
+
+  private mutating func buffer(
+    _ delta: SignalboxProviderTextDelta,
+    stage currentStage: SignalboxSynchronizationStage
+  ) -> [SignalboxSessionSynchronizationEffect] {
+    buffer(.providerTextDelta(delta), stage: currentStage)
+  }
+
+  private mutating func buffer(
+    _ message: SignalboxBufferedFollowMessage,
+    stage currentStage: SignalboxSynchronizationStage
+  ) -> [SignalboxSessionSynchronizationEffect] {
+    let retainedBytes = message.retainedUTF8Bytes
     let (nextBytes, overflowed) = replayBufferUTF8Bytes.addingReportingOverflow(
       retainedBytes
     )
@@ -763,13 +812,13 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         message: "Buffered followed events exceeded the configured native-client capacity."
       )
     }
-    replayBuffer[replayBufferNextInsertionID] = SignalboxBufferedFollowedEvent(
-      followed: followed
-    )
+    replayBuffer[replayBufferNextInsertionID] = message
     replayBufferNextInsertionID = nextInsertionID
-    replayBufferLastCursor = followed.cursor
+    if case .event(let followed) = message {
+      replayBufferLastCursor = followed.cursor
+    }
     replayBufferUTF8Bytes = nextBytes
-    return reportDiagnostics ? diagnosticEffects(for: followed, stage: currentStage) : []
+    return []
   }
 
   private mutating func drainReplayBuffer(
@@ -790,11 +839,17 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         )
       }
       replayBufferNextRemovalID += 1
-      replayBufferUTF8Bytes -= buffered.followed.event.retainedUTF8Bytes
-      let nextEffects = publishBufferedEvent(
-        buffered.followed,
-        generation: currentGeneration
-      )
+      replayBufferUTF8Bytes -= buffered.retainedUTF8Bytes
+      let nextEffects: [SignalboxSessionSynchronizationEffect]
+      switch buffered {
+      case .event(let followed):
+        nextEffects = publishBufferedEvent(
+          followed,
+          generation: currentGeneration
+        )
+      case .providerTextDelta(let delta):
+        nextEffects = [.publishProviderTextDelta(delta)]
+      }
       effects.append(contentsOf: nextEffects)
     }
     if replayBuffer.isEmpty {
@@ -1270,8 +1325,18 @@ private struct SignalboxSideSnapshotRefresh: Sendable {
   var accumulator: SignalboxSnapshotAccumulator?
 }
 
-private struct SignalboxBufferedFollowedEvent: Sendable {
-  let followed: SignalboxFollowedSessionEvent
+private enum SignalboxBufferedFollowMessage: Sendable {
+  case event(SignalboxFollowedSessionEvent)
+  case providerTextDelta(SignalboxProviderTextDelta)
+
+  var retainedUTF8Bytes: UInt {
+    switch self {
+    case .event(let followed):
+      return followed.event.retainedUTF8Bytes
+    case .providerTextDelta(let delta):
+      return UInt(delta.content.utf8.count)
+    }
+  }
 }
 
 private enum SignalboxSnapshotAccumulatorOutcome {

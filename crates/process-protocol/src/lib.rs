@@ -95,6 +95,19 @@ pub const SESSION_TEMPLATE_PROTOCOL_VERSION: u64 = 18;
 /// fifteen and is never admitted.
 pub const MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION: u64 = 19;
 
+/// The deployment model-alias catalog read protocol version.
+///
+/// This surface originally reserved eighteen, but the session-template surface
+/// shipped that number first while this one was still in flight. Version
+/// twenty is separately allocated to the concurrent context-compaction
+/// protocol stack, also still in flight. Numbering this request under either
+/// already-spoken-for number would collide with a sibling stack's closed
+/// vocabulary rather than the version-sixteen-style retroactive widening the
+/// retirement convention above guards against, but the same rule of taking
+/// the next genuinely free number applies, so this version sits above both
+/// instead.
+pub const MODEL_ALIAS_CATALOG_PROTOCOL_VERSION: u64 = 21;
+
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProtocolVersion {
@@ -132,6 +145,8 @@ pub enum ProtocolVersion {
     Eighteen,
     /// Provider-reported model-call token-usage vocabulary.
     Nineteen,
+    /// Deployment model-alias catalog vocabulary.
+    TwentyOne,
 }
 
 impl ProtocolVersion {
@@ -155,6 +170,7 @@ impl ProtocolVersion {
             Self::Seventeen => IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
             Self::Eighteen => SESSION_TEMPLATE_PROTOCOL_VERSION,
             Self::Nineteen => MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
+            Self::TwentyOne => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
         }
     }
 
@@ -177,6 +193,7 @@ impl ProtocolVersion {
             IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION => Some(Self::Seventeen),
             SESSION_TEMPLATE_PROTOCOL_VERSION => Some(Self::Eighteen),
             MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION => Some(Self::Nineteen),
+            MODEL_ALIAS_CATALOG_PROTOCOL_VERSION => Some(Self::TwentyOne),
             _ => None,
         }
     }
@@ -238,6 +255,9 @@ pub const MAX_SYSTEM_PROMPT_UTF8_BYTES: usize = 1_048_576;
 /// the transcript snapshot already carries attested imported text in full, and
 /// the immutable aggregate remains the authority for everything else.
 pub const MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES: usize = 256;
+
+/// Maximum entries in one deployment model-alias catalog.
+pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
 
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1684,6 +1704,8 @@ pub enum ClientRequest {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         after: Option<ConversationCursor>,
     },
+    /// Read the deployment's complete configured model-alias catalog.
+    ListModelAliases {},
     /// Read one complete current metadata snapshot.
     ReadSessionMetadata {
         /// Target session.
@@ -1923,6 +1945,7 @@ impl ClientRequest {
                 SESSION_TEMPLATE_PROTOCOL_VERSION
             }
             Self::ListConversations { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
+            Self::ListModelAliases {} => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
             Self::ReadSessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::CreateSessionFromImportedFrontier { .. } => {
                 IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION
@@ -3309,6 +3332,20 @@ pub enum ServerMessage {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         next_after: Option<ConversationCursor>,
     },
+    /// Begins the configured model-alias sequence.
+    ModelAliasesStart {},
+    /// One configured alias and the direct selection it currently names.
+    ModelAliasSummary {
+        /// Stable alias identity selectable by creation commands.
+        alias_id: CanonicalUuid,
+        /// Current deployment-owned direct selection target.
+        selection_id: CanonicalUuid,
+    },
+    /// Completes the configured model-alias sequence.
+    ModelAliasesEnd {
+        /// Number of preceding alias summaries.
+        alias_count: CanonicalU64,
+    },
     /// One complete current metadata read.
     SessionMetadata {
         /// Selected session.
@@ -3644,6 +3681,9 @@ impl ServerMessage {
             Self::ConversationPageStart {}
             | Self::ConversationSummary { .. }
             | Self::ConversationPageEnd { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
+            Self::ModelAliasesStart {}
+            | Self::ModelAliasSummary { .. }
+            | Self::ModelAliasesEnd { .. } => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
             Self::SessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::SteeringSubmitted { .. } => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::Error { detail, .. } => detail.minimum_protocol_version(),
@@ -4000,7 +4040,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1 through 13 and 16 through 19",
+                "process-protocol version is unsupported; supported versions are 1 through 13, 16 through 19, and 21",
             ),
         }
     }
@@ -4227,6 +4267,7 @@ fn probe_header(
             | "17"
             | "18"
             | "19"
+            | "21"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -4347,6 +4388,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "17" => Some(ProtocolVersion::Seventeen),
         "18" => Some(ProtocolVersion::Eighteen),
         "19" => Some(ProtocolVersion::Nineteen),
+        "21" => Some(ProtocolVersion::TwentyOne),
         _ => None,
     }
 }
@@ -4400,13 +4442,13 @@ mod tests {
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
         MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
-        MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION, MetadataActor, MetadataLastWriter,
-        ModelCallDisposition, ModelCallState, ModelCallTokenUsage, ModelSelection,
-        PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId, ReviewTargetSubject,
-        SESSION_METADATA_PROTOCOL_VERSION, SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
-        SESSION_TEMPLATE_PROTOCOL_VERSION, ServerFrame, ServerMessage, SessionEvent,
-        SessionMetadata, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TurnState,
+        MODEL_ALIAS_CATALOG_PROTOCOL_VERSION, MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
+        MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState,
+        ModelCallTokenUsage, ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail,
+        RequestId, ReviewTargetSubject, SESSION_METADATA_PROTOCOL_VERSION,
+        SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, SESSION_TEMPLATE_PROTOCOL_VERSION, ServerFrame,
+        ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
         UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION, decode_client_line, decode_server_line,
         encode_client_line, encode_server_line,
     };
@@ -4490,7 +4532,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1 through 13 and 16 through 19")
+                .contains("supported versions are 1 through 13, 16 through 19, and 21")
         );
     }
 
@@ -6711,10 +6753,11 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the admitted set is one through thirteen and sixteen through
-    /// nineteen; fourteen and fifteen remain retired and unsupported.
+    /// INV-033: the admitted set is one through thirteen, sixteen through
+    /// nineteen, and twenty-one; fourteen, fifteen, and twenty remain retired
+    /// or reserved and unsupported here.
     #[test]
-    fn inv033_version_nineteen_completes_the_admitted_set() {
+    fn inv033_version_twenty_one_completes_the_admitted_set() {
         assert_eq!(
             ProtocolVersion::Nine.as_u64(),
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
@@ -6763,6 +6806,63 @@ mod tests {
             Some(ProtocolVersion::Nineteen)
         );
         assert_eq!(ProtocolVersion::from_u64(20), None);
+        assert_eq!(
+            ProtocolVersion::TwentyOne.as_u64(),
+            MODEL_ALIAS_CATALOG_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            ProtocolVersion::from_u64(21),
+            Some(ProtocolVersion::TwentyOne)
+        );
+        assert_eq!(ProtocolVersion::from_u64(22), None);
+    }
+
+    /// INV-033: version twenty-one's alias-catalog request and messages have
+    /// exact closed shapes.
+    #[test]
+    fn inv033_version_twenty_one_model_alias_catalog_has_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::TwentyOne,
+            request_id,
+            ClientRequest::ListModelAliases {},
+        )?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":21,\"request_id\":\"1\",\"request\":{\"type\":\"list_model_aliases\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Sixteen,
+                request_id,
+                ClientRequest::ListModelAliases {},
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::ModelAliasesStart {},
+            r#"{"type":"model_aliases_start"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::ModelAliasSummary {
+                alias_id: uuid(4),
+                selection_id: uuid(5),
+            },
+            r#"{"type":"model_alias_summary","alias_id":"00000000-0000-0000-0000-000000000004","selection_id":"00000000-0000-0000-0000-000000000005"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(6)?,
+            ServerMessage::ModelAliasesEnd {
+                alias_count: CanonicalU64::new(1),
+            },
+            r#"{"type":"model_aliases_end","alias_count":"1"}"#,
+        )?;
+        Ok(())
     }
 
     #[test]

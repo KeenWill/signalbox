@@ -10,6 +10,60 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-28 — Bound the native ephemeral provider-text overlay
+
+**Context.** Each provider-text delta is frame-bounded, but a native client
+following a long-running model call concatenated an unbounded number of those
+fragments into one presentation string. The overlay is ephemeral: durable
+transcript synchronization remains the authority.
+
+**Decision.** Retain at most 8 MiB of concatenated provider text for one active
+turn and model call. Crossing that bound drops the overlay and invokes the
+existing authoritative projection-recovery path, without changing durable state.
+The cap matches one maximum wire frame and is independent of the one-fragment
+protocol bound.
+
+**Rejected alternatives.** Unbounded concatenation lets remote output determine
+client memory retention. Silently truncating while continuing to display the
+prefix makes a partial answer look complete. Persisting the overlay would give
+ephemeral deltas authority they do not have.
+
+**Affects.** The native process presentation model and session detail view
+model, and [process protocol](spec/process-protocol.md)'s native-client
+behavior.
+
+## 2026-07-28 — Expose the deployment model-alias catalog to local clients
+
+**Context.** Session creation already accepts an alias UUID, but the process
+boundary offered no read that let a native client discover the aliases the
+running daemon would accept. Bundling UUIDs in the app or deriving them from
+existing sessions would drift from deployment configuration and could submit an
+unknown or retired alias. This surface originally reserved protocol version
+eighteen; the session-template surface shipped that number first while this one
+was still in flight, and the concurrent context-compaction protocol stack
+separately claimed twenty, also still in flight.
+
+**Decision.** Protocol version twenty-one adds the read-only
+`list_model_aliases` sequence, the next number free of both already-shipped and
+concurrently in-flight claims. The daemon emits every configured alias and its
+current direct-selection target in alias-identity order with an exact terminal
+count. This is current deployment configuration, not durable session state and
+not a provider catalog: creation still records an alias request and the existing
+acceptance path freezes its meaning. Deployment configuration and the protocol
+sequence admit at most 10,000 aliases; the native app enforces that same bound
+and offers only returned aliases in its creation picker.
+
+**Rejected alternatives.** Shipping app-owned alias UUIDs would create a second,
+stale configuration authority. Accepting arbitrary UUID text would expose
+avoidable runtime rejection instead of a picker. Returning provider-native names
+would cross the configuration boundary and risk exposing deployment details
+irrelevant to the selection identity. Leaving the catalog unbounded would let
+deployment configuration impose unbounded client retention.
+
+**Affects.** `crates/process-protocol`, `apps/signalboxd` configuration and
+process serving, [process protocol](spec/process-protocol.md), and the native
+session-creation client.
+
 ## 2026-07-28 — Expose the dev-instance client from every shell directory
 
 **Context.** The first hands-on use of
