@@ -20,6 +20,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         emit(b"{not-json\n")?;
         return Ok(());
     }
+    if scenario == "duplicate_stream_member" {
+        emit(br#"{"type":"system","type":"result","subtype":"success","is_error":false}\n"#)?;
+        return Ok(());
+    }
     system_init(&arguments)?;
     match scenario.as_str() {
         "normal_completion" => {

@@ -135,6 +135,18 @@ async fn malformed_stream_line_is_protocol_boundary_loss() {
 }
 
 #[tokio::test]
+async fn duplicate_stream_member_is_protocol_boundary_loss() {
+    let result = execute_scenario("duplicate_stream_member", OperationShape::Text).await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn process_spawn_failure_is_proven_unsent() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let runtime = runtime(temporary.path(), Path::new("/synthetic/missing/claude"));

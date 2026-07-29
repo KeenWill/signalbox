@@ -17,6 +17,7 @@ pub(crate) const SERVER_NAME: &str = "signalbox_tools";
 pub(crate) const TOOL_PREFIX: &str = "mcp__signalbox_tools__";
 pub(crate) const TOOL_ACKNOWLEDGEMENT: &str =
     "Signalbox recorded this tool proposal for external execution.";
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const BRIDGE_LINE_LIMIT: usize = 8 * 1024 * 1024;
 const READY_WAIT_LIMIT: Duration = Duration::from_secs(10);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -159,14 +160,17 @@ fn initialize_response(
     id: Option<serde_json::Value>,
     params: &serde_json::Value,
 ) -> serde_json::Value {
-    let protocol_version = params
+    if params
         .get("protocolVersion")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or("2025-11-25");
+        != Some(MCP_PROTOCOL_VERSION)
+    {
+        return error_response(id, -32602, "unsupported MCP protocol version");
+    }
     result_response(
         id,
         serde_json::json!({
-            "protocolVersion": protocol_version,
+            "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {
                 "name": "signalbox-claude-cli-bridge",
@@ -232,7 +236,7 @@ fn create_ready_marker(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_mcp_tool_name;
+    use super::{MCP_PROTOCOL_VERSION, initialize_response, valid_mcp_tool_name};
 
     #[test]
     fn mcp_tool_name_accepts_the_supported_punctuation() {
@@ -247,5 +251,15 @@ mod tests {
     #[test]
     fn mcp_tool_name_rejects_an_empty_name() {
         assert!(!valid_mcp_tool_name(""));
+    }
+
+    #[test]
+    fn initialize_accepts_the_observed_protocol_version() {
+        let response = initialize_response(
+            Some(serde_json::json!(1)),
+            &serde_json::json!({"protocolVersion": MCP_PROTOCOL_VERSION}),
+        );
+
+        assert_eq!(response["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
     }
 }

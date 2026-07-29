@@ -1,7 +1,10 @@
 //! Stateful decoding of one Claude Code streamed-JSON event stream.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
+use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, CompletionFinish, DeliveryMode,
@@ -17,6 +20,132 @@ use crate::redaction::{RedactingSink, redact_json, redact_text};
 use crate::status::classify_error;
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{AssistantContent, AssistantEvent, ResultEvent, SystemInit, UserEvent};
+
+/// A validation-only JSON walk that rejects repeated object members at every
+/// nesting depth before serde projects the event into its last-value-wins
+/// [`Value`] representation.
+struct DuplicateFreeJson<'a> {
+    duplicate_found: &'a Cell<bool>,
+}
+
+impl<'de> DeserializeSeed<'de> for DuplicateFreeJson<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DuplicateFreeVisitor {
+            duplicate_found: self.duplicate_found,
+        })
+    }
+}
+
+struct DuplicateFreeVisitor<'a> {
+    duplicate_found: &'a Cell<bool>,
+}
+
+impl<'de> Visitor<'de> for DuplicateFreeVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JSON without repeated object members")
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(())
+    }
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+        Ok(())
+    }
+    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
+        Ok(())
+    }
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        DuplicateFreeJson {
+            duplicate_found: self.duplicate_found,
+        }
+        .deserialize(deserializer)
+    }
+
+    fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        DuplicateFreeJson {
+            duplicate_found: self.duplicate_found,
+        }
+        .deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence
+            .next_element_seed(DuplicateFreeJson {
+                duplicate_found: self.duplicate_found,
+            })?
+            .is_some()
+        {}
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut members = HashSet::new();
+        while let Some(member) = object.next_key::<String>()? {
+            if !members.insert(member) {
+                self.duplicate_found.set(true);
+                return Err(serde::de::Error::custom("duplicate JSON member"));
+            }
+            object.next_value_seed(DuplicateFreeJson {
+                duplicate_found: self.duplicate_found,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+fn reject_duplicate_json_members(line: &str) -> Result<(), DecodeFailure> {
+    let duplicate_found = Cell::new(false);
+    let mut deserializer = serde_json::Deserializer::from_str(line);
+    let result = DuplicateFreeJson {
+        duplicate_found: &duplicate_found,
+    }
+    .deserialize(&mut deserializer)
+    .and_then(|()| deserializer.end());
+    match result {
+        Ok(()) => Ok(()),
+        Err(_) if duplicate_found.get() => Err(DecodeFailure::stream_protocol(
+            "JSON input has duplicate object members",
+        )),
+        // The ordinary decoder below owns every other JSON-shape failure and
+        // preserves its established protocol-failure detail.
+        Err(_) => Ok(()),
+    }
+}
 
 pub(crate) struct EventDecoder<C> {
     correlation: C,
@@ -90,6 +219,7 @@ impl<C: Clone> EventDecoder<C> {
         })?;
         validate_provider_json_nesting(line)
             .map_err(|error| DecodeFailure::stream_protocol(error.to_string()))?;
+        reject_duplicate_json_members(text)?;
         let value: Value = serde_json::from_str(text).map_err(|error| {
             DecodeFailure::stream_protocol(format!("event is not JSON: {error}"))
         })?;
@@ -595,7 +725,14 @@ impl<C: Clone> EventDecoder<C> {
 }
 
 fn tool_result_text(value: &Value) -> Option<&str> {
-    value.as_array()?.first()?.get("text")?.as_str()
+    let blocks = value.as_array()?;
+    let [block] = blocks.as_slice() else {
+        return None;
+    };
+    if block.get("type")?.as_str()? != "text" {
+        return None;
+    }
+    block.get("text")?.as_str()
 }
 
 fn message_usage(value: crate::wire::MessageUsage) -> TokenUsage {
