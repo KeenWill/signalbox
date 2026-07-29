@@ -123,7 +123,7 @@ fn parse_container_attributes(attributes: &[Attribute]) -> syn::Result<Container
                 return Ok(());
             }
             if meta.path.is_ident("rename_all") {
-                parsed.rename_all = Some(parse_serde_name_value(&meta, "rename_all")?);
+                parsed.rename_all = parse_serde_name_value(&meta, "rename_all")?;
                 return Ok(());
             }
             if meta.path.is_ident("default") {
@@ -223,12 +223,17 @@ fn derive_field(
 
     let property_name = LitStr::new(&effective_name, ident.span());
     let schema_type = schema.with.as_ref().unwrap_or(&field.ty);
-    let field_schema = format_ident!("__signalbox_schema_for_field_{ident}");
+    let field_schema = format_ident!(
+        "__signalbox_schema_for_field_{}",
+        rust_name,
+        span = ident.span()
+    );
     let field_span = field.ty.span();
     let property = quote_spanned! {field_span=>
         (
             #property_name,
             {
+                #[allow(non_snake_case)]
                 fn #field_schema<Schema: ::signalbox_tool_contract::ToolSchema>()
                     -> ::signalbox_tool_contract::__private::serde_json::Value
                 {
@@ -292,7 +297,7 @@ fn parse_field_serde_attributes(
                 return Ok(());
             }
             if meta.path.is_ident("rename") {
-                parsed.rename = Some(parse_serde_name_value(&meta, "rename")?);
+                parsed.rename = parse_serde_name_value(&meta, "rename")?;
                 return Ok(());
             }
             if meta.path.is_ident("with") || meta.path.is_ident("deserialize_with") {
@@ -392,9 +397,9 @@ fn set_once<Value>(
 fn parse_serde_name_value(
     meta: &syn::meta::ParseNestedMeta<'_>,
     attribute_name: &str,
-) -> syn::Result<String> {
+) -> syn::Result<Option<String>> {
     if meta.input.peek(Token![=]) {
-        return Ok(meta.value()?.parse::<LitStr>()?.value());
+        return Ok(Some(meta.value()?.parse::<LitStr>()?.value()));
     }
     let mut deserialize = None;
     meta.parse_nested_meta(|direction| {
@@ -408,11 +413,7 @@ fn parse_serde_name_value(
         }
         Err(direction.error(format!("unsupported serde {attribute_name} direction")))
     })?;
-    deserialize.ok_or_else(|| {
-        meta.error(format!(
-            "serde {attribute_name} must declare its deserialize name"
-        ))
-    })
+    Ok(deserialize)
 }
 
 fn option_inner(ty: &Type) -> Option<&Type> {
@@ -453,7 +454,7 @@ fn apply_rename_rule(field_name: &str, rule: Option<&str>) -> syn::Result<String
     };
     validate_rename_rule(rule, Span::call_site())?;
     Ok(match rule {
-        "lowercase" => field_name.to_ascii_lowercase(),
+        "lowercase" => String::from(field_name),
         "UPPERCASE" => field_name.to_ascii_uppercase(),
         "PascalCase" => pascal_case(field_name),
         "camelCase" => lower_first(&pascal_case(field_name)),

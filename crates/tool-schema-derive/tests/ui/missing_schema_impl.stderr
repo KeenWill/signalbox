@@ -22,8 +22,5 @@ help: the trait `ToolSchema` is not implemented for `Timestamp`
 note: required by a bound in `__signalbox_schema_for_field_timestamp`
  --> tests/ui/missing_schema_impl.rs:8:16
   |
-5 | #[derive(ToolSchema)]
-  |          ---------- required by a bound in this function
-...
 8 |     timestamp: Timestamp,
   |                ^^^^^^^^^ required by this bound in `__signalbox_schema_for_field_timestamp`

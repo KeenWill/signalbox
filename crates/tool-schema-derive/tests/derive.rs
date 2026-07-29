@@ -62,6 +62,34 @@ struct NonAsciiRenamedField {
 }
 
 #[derive(serde::Deserialize, ToolSchema)]
+#[serde(rename_all(serialize = "camelCase"))]
+#[expect(dead_code, reason = "schema fixture renders only")]
+struct SerializationOnlyRenamedField {
+    #[serde(rename(serialize = "wire"))]
+    #[tool_schema(description = "Deserialize-name field.")]
+    original_name: String,
+}
+
+#[derive(serde::Deserialize, ToolSchema)]
+#[serde(rename_all = "lowercase")]
+#[allow(
+    non_snake_case,
+    reason = "fixture distinguishes serde lowercase from lowercasing"
+)]
+#[expect(dead_code, reason = "schema fixture renders only")]
+struct LowercaseRenamedField {
+    #[tool_schema(description = "Unchanged mixed-case field.")]
+    camelCase: String,
+}
+
+#[derive(serde::Deserialize, ToolSchema)]
+#[expect(dead_code, reason = "schema fixture renders only")]
+struct RawIdentifierField {
+    #[tool_schema(description = "Keyword-named field.")]
+    r#type: String,
+}
+
+#[derive(serde::Deserialize, ToolSchema)]
 #[serde(deny_unknown_fields)]
 #[expect(dead_code, reason = "schema fixture renders only")]
 struct DefaultAndSkippedFields {
@@ -139,6 +167,21 @@ struct BooleanSchemaField {
 struct RecursiveNode {
     #[tool_schema(description = "Next node.")]
     child: Option<Box<RecursiveNode>>,
+}
+
+struct ManualRecursiveRoot;
+
+impl signalbox_tool_contract::ToolSchema for ManualRecursiveRoot {
+    fn schema() -> serde_json::Value {
+        signalbox_tool_contract::__private::root_schema(|| {
+            serde_json::json!({
+                "properties": {
+                    "node": RecursiveNode::schema(),
+                },
+                "type": "object",
+            })
+        })
+    }
 }
 
 #[test]
@@ -291,6 +334,66 @@ fn serde_non_ascii_rename_uses_ascii_case_conversion() {
 }
 
 #[test]
+fn serde_serialization_only_renames_leave_deserialize_names_unchanged() {
+    let schema = SerializationOnlyRenamedField::schema();
+
+    expect![[r#"
+        {
+          "properties": {
+            "original_name": {
+              "description": "Deserialize-name field.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "original_name"
+          ],
+          "type": "object"
+        }"#]]
+    .assert_eq(&format!("{schema:#}"));
+}
+
+#[test]
+fn serde_lowercase_rule_leaves_struct_field_spelling_unchanged() {
+    let schema = LowercaseRenamedField::schema();
+
+    expect![[r#"
+        {
+          "properties": {
+            "camelCase": {
+              "description": "Unchanged mixed-case field.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "camelCase"
+          ],
+          "type": "object"
+        }"#]]
+    .assert_eq(&format!("{schema:#}"));
+}
+
+#[test]
+fn raw_identifier_uses_its_unraw_serde_and_helper_name() {
+    let schema = RawIdentifierField::schema();
+
+    expect![[r#"
+        {
+          "properties": {
+            "type": {
+              "description": "Keyword-named field.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }"#]]
+    .assert_eq(&format!("{schema:#}"));
+}
+
+#[test]
 fn serde_default_and_skip_control_property_presence() {
     let schema = DefaultAndSkippedFields::schema();
 
@@ -436,6 +539,102 @@ fn recursive_structures_render_finite_definitions_and_references() {
                 }
               ],
               "description": "Next node."
+            }
+          },
+          "type": "object"
+        }"##]]
+    .assert_eq(&format!("{schema:#}"));
+}
+
+#[test]
+fn recursive_composite_root_hoists_definitions() {
+    let schema = <Vec<RecursiveNode>>::schema();
+
+    expect![[r##"
+        {
+          "$defs": {
+            "derive::RecursiveNode": {
+              "additionalProperties": false,
+              "properties": {
+                "child": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/derive::RecursiveNode"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Next node."
+                }
+              },
+              "type": "object"
+            }
+          },
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "child": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/derive::RecursiveNode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Next node."
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        }"##]]
+    .assert_eq(&format!("{schema:#}"));
+}
+
+#[test]
+fn manual_recursive_composition_hoists_definitions() {
+    let schema = ManualRecursiveRoot::schema();
+
+    expect![[r##"
+        {
+          "$defs": {
+            "derive::RecursiveNode": {
+              "additionalProperties": false,
+              "properties": {
+                "child": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/derive::RecursiveNode"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Next node."
+                }
+              },
+              "type": "object"
+            }
+          },
+          "properties": {
+            "node": {
+              "additionalProperties": false,
+              "properties": {
+                "child": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/derive::RecursiveNode"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Next node."
+                }
+              },
+              "type": "object"
             }
           },
           "type": "object"

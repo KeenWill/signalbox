@@ -14,6 +14,10 @@ use signalbox_domain::{ToolEffectClass, ToolName, ToolPermissionDefault};
 /// A Rust type that owns its model-facing JSON Schema declaration.
 pub trait ToolSchema {
     /// Renders the complete JSON Schema for this type.
+    ///
+    /// A manual implementation that composes other [`ToolSchema`] values wraps
+    /// its complete assembly expression in [`__private::root_schema`] so any
+    /// recursive definitions attach to the public schema root.
     fn schema() -> serde_json::Value;
 }
 
@@ -127,35 +131,41 @@ impl_integer_schema! {
 
 impl<Value: ToolSchema> ToolSchema for Option<Value> {
     fn schema() -> serde_json::Value {
-        serde_json::json!({
-            "anyOf": [
-                Value::schema(),
-                { "type": "null" },
-            ],
+        __private::root_schema(|| {
+            serde_json::json!({
+                "anyOf": [
+                    Value::schema(),
+                    { "type": "null" },
+                ],
+            })
         })
     }
 }
 
 impl<Value: ToolSchema> ToolSchema for Box<Value> {
     fn schema() -> serde_json::Value {
-        Value::schema()
+        __private::root_schema(Value::schema)
     }
 }
 
 impl<Value: ToolSchema> ToolSchema for Vec<Value> {
     fn schema() -> serde_json::Value {
-        serde_json::json!({
-            "items": Value::schema(),
-            "type": "array",
+        __private::root_schema(|| {
+            serde_json::json!({
+                "items": Value::schema(),
+                "type": "array",
+            })
         })
     }
 }
 
 impl<Value: ToolSchema> ToolSchema for std::collections::BTreeMap<String, Value> {
     fn schema() -> serde_json::Value {
-        serde_json::json!({
-            "additionalProperties": Value::schema(),
-            "type": "object",
+        __private::root_schema(|| {
+            serde_json::json!({
+                "additionalProperties": Value::schema(),
+                "type": "object",
+            })
         })
     }
 }
@@ -180,47 +190,72 @@ pub mod __private {
         stack: Vec<&'static str>,
     }
 
+    struct RenderRootGuard {
+        finished: bool,
+    }
+
+    impl RenderRootGuard {
+        #[expect(
+            clippy::expect_used,
+            reason = "root schema rendering establishes state before constructing its guard"
+        )]
+        fn finish(mut self) -> RenderState {
+            let state = RENDER_STATE.with(|slot| {
+                slot.borrow_mut()
+                    .take()
+                    .expect("root schema rendering state must exist")
+            });
+            assert!(
+                state.stack.is_empty(),
+                "schema rendering stack must be empty at the public root"
+            );
+            self.finished = true;
+            state
+        }
+    }
+
+    impl Drop for RenderRootGuard {
+        fn drop(&mut self) {
+            if !self.finished {
+                clear_render_state();
+            }
+        }
+    }
+
     struct NamedSchemaGuard {
         finished: bool,
         name: &'static str,
-        root: bool,
     }
 
     impl NamedSchemaGuard {
         #[expect(
             clippy::expect_used,
-            reason = "named schema rendering establishes state before constructing its guard"
+            reason = "named schemas render only inside an established root context"
         )]
-        fn finish(
-            mut self,
-            schema: &serde_json::Value,
-        ) -> Option<BTreeMap<&'static str, serde_json::Value>> {
-            let definitions = RENDER_STATE.with(|slot| {
+        fn finish(mut self, schema: &serde_json::Value) {
+            RENDER_STATE.with(|slot| {
                 let mut slot = slot.borrow_mut();
-                if self.root {
-                    let mut state = slot.take().expect("root schema rendering state must exist");
-                    complete_named_schema(&mut state, self.name, schema);
-                    return Some(state.definitions);
-                }
                 let state = slot
                     .as_mut()
-                    .expect("nested schema rendering state must exist");
+                    .expect("named schema rendering state must exist");
                 complete_named_schema(state, self.name, schema);
-                None
             });
             self.finished = true;
-            definitions
         }
     }
 
     impl Drop for NamedSchemaGuard {
         fn drop(&mut self) {
             if !self.finished {
-                RENDER_STATE.with(|slot| {
-                    *slot.borrow_mut() = None;
-                });
+                clear_render_state();
             }
         }
+    }
+
+    fn clear_render_state() {
+        RENDER_STATE.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
     }
 
     #[expect(
@@ -245,42 +280,33 @@ pub mod __private {
         }
     }
 
-    /// Renders a derived named schema with cycle-aware `$defs` references.
+    /// Owns a complete schema render so recursive definitions attach at its root.
+    ///
+    /// Manual [`crate::ToolSchema`] implementations that compose other schemas
+    /// call this once around their complete assembly expression.
     #[expect(
         clippy::expect_used,
-        reason = "the derive always supplies an object-valued root schema"
+        reason = "recursive definitions require an object-valued public root"
     )]
-    pub fn named_schema<Schema, Build>(build: Build) -> serde_json::Value
+    pub fn root_schema<Build>(build: Build) -> serde_json::Value
     where
         Build: FnOnce() -> serde_json::Value,
     {
-        let name = std::any::type_name::<Schema>();
-        let (recursive, root) = RENDER_STATE.with(|slot| {
+        let root = RENDER_STATE.with(|slot| {
             let mut slot = slot.borrow_mut();
-            let root = slot.is_none();
-            let state = slot.get_or_insert_default();
-            if state.stack.contains(&name) {
-                state.referenced.insert(name);
-                return (true, root);
+            if slot.is_some() {
+                return false;
             }
-            state.stack.push(name);
-            (false, root)
+            *slot = Some(RenderState::default());
+            true
         });
-        if recursive {
-            return serde_json::json!({
-                "$ref": format!("#/$defs/{}", json_pointer_segment(name)),
-            });
+        if !root {
+            return build();
         }
 
-        let guard = NamedSchemaGuard {
-            finished: false,
-            name,
-            root,
-        };
+        let guard = RenderRootGuard { finished: false };
         let mut schema = build();
-        let Some(definitions) = guard.finish(&schema) else {
-            return schema;
-        };
+        let definitions = guard.finish().definitions;
         if definitions.is_empty() {
             return schema;
         }
@@ -290,12 +316,51 @@ pub mod __private {
             .collect::<serde_json::Map<String, serde_json::Value>>();
         schema
             .as_object_mut()
-            .expect("ToolSchema derive must render an object schema")
+            .expect("a recursive public schema root must be an object")
             .insert(
                 String::from("$defs"),
                 serde_json::Value::Object(definitions),
             );
         schema
+    }
+
+    /// Renders a derived named schema with cycle-aware `$defs` references.
+    #[expect(
+        clippy::expect_used,
+        reason = "named schemas render only inside root_schema"
+    )]
+    pub fn named_schema<Schema, Build>(build: Build) -> serde_json::Value
+    where
+        Build: FnOnce() -> serde_json::Value,
+    {
+        root_schema(|| {
+            let name = std::any::type_name::<Schema>();
+            let recursive = RENDER_STATE.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                let state = slot
+                    .as_mut()
+                    .expect("named schema rendering state must exist");
+                if state.stack.contains(&name) {
+                    state.referenced.insert(name);
+                    return true;
+                }
+                state.stack.push(name);
+                false
+            });
+            if recursive {
+                return serde_json::json!({
+                    "$ref": format!("#/$defs/{}", json_pointer_segment(name)),
+                });
+            }
+
+            let guard = NamedSchemaGuard {
+                finished: false,
+                name,
+            };
+            let schema = build();
+            guard.finish(&schema);
+            schema
+        })
     }
 
     fn json_pointer_segment(value: &str) -> String {
