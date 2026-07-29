@@ -154,6 +154,8 @@ pub(crate) struct EventDecoder<C> {
     tool_requirement: ToolRequirement,
     exchange: ExchangeFacts,
     reported_model: Option<ProviderReportedModel>,
+    native_session_id: Option<String>,
+    native_model: Option<String>,
     message_id: Option<ProviderMessageId>,
     native_message_id: Option<String>,
     content: Vec<AssistantPart>,
@@ -195,6 +197,8 @@ impl<C: Clone> EventDecoder<C> {
             tool_requirement: translated.tool_requirement.clone(),
             exchange: ExchangeFacts::default(),
             reported_model: None,
+            native_session_id: None,
+            native_model: None,
             message_id: None,
             native_message_id: None,
             content: Vec::new(),
@@ -294,6 +298,8 @@ impl<C: Clone> EventDecoder<C> {
         }
         let request_id = sink.redact_provider_id("", &event.session_id);
         let model = sink.redact_provider_id(&request_id, &event.model);
+        self.native_session_id = Some(event.session_id);
+        self.native_model = Some(event.model);
         self.exchange.provider_request_id = Some(ProviderRequestId::new(request_id.clone()));
         self.reported_model = Some(ProviderReportedModel::new(model.clone()));
         self.initialized = true;
@@ -340,12 +346,7 @@ impl<C: Clone> EventDecoder<C> {
             ));
             self.native_message_id = Some(event.message.id.clone());
         }
-        if self
-            .reported_model
-            .as_ref()
-            .map(ProviderReportedModel::as_str)
-            != Some(event.message.model.as_str())
-        {
+        if self.native_model.as_deref() != Some(event.message.model.as_str()) {
             return Err(DecodeFailure::stream_protocol(
                 "Claude assistant model contradicts system init",
             ));
@@ -482,13 +483,7 @@ impl<C: Clone> EventDecoder<C> {
     ) -> Result<(), DecodeFailure> {
         self.require_initialized()?;
         let event: ResultEvent = decode(value)?;
-        if self
-            .exchange
-            .provider_request_id
-            .as_ref()
-            .map(ProviderRequestId::as_str)
-            != Some(event.session_id.as_str())
-        {
+        if self.native_session_id.as_deref() != Some(event.session_id.as_str()) {
             return Err(DecodeFailure::stream_protocol(
                 "Claude result session contradicts system init",
             ));

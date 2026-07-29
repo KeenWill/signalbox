@@ -59,6 +59,9 @@ const PEM_DASHES: &str = "-----";
 const PEM_PRIVATE_KEY_LABEL: &str = "PRIVATE KEY";
 
 pub(crate) fn redact_text(text: &str) -> String {
+    if contains_untrusted_control(text) {
+        return REDACTED.to_string();
+    }
     let sanitized = redact_text_literal(text);
     // Detection also runs on the form a JSON consumer would reconstruct, so a
     // credential spelled with `\uXXXX` escapes cannot ride escaped bytes past
@@ -74,6 +77,9 @@ pub(crate) fn redact_text(text: &str) -> String {
     };
     if decoded == text {
         return sanitized;
+    }
+    if contains_untrusted_control(&decoded) {
+        return REDACTED.to_string();
     }
     let sanitized_decoded = redact_text_literal(&decoded);
     if sanitized_decoded == decoded {
@@ -132,6 +138,9 @@ const CREDENTIAL_INDICATORS: &[&str] = &[
 ];
 
 fn text_might_contain_credential(text: &str) -> bool {
+    if contains_untrusted_control(text) {
+        return true;
+    }
     // A quote can begin a bare credential member the JSON-value scanner reads
     // without an enclosing object; an escape can hide any indicator.
     if text.contains('"') || text.contains("\\u") {
@@ -140,6 +149,16 @@ fn text_might_contain_credential(text: &str) -> bool {
     CREDENTIAL_INDICATORS
         .iter()
         .any(|indicator| find_ascii_case_insensitive(text, indicator).is_some())
+}
+
+/// Non-text controls can split an otherwise contiguous credential marker.
+///
+/// Line, carriage-return, and tab retain their ordinary text semantics. Every
+/// other Unicode control fails closed, including ESC/BEL bytes used by ANSI
+/// CSI/OSC sequences and their JSON `\uXXXX` spellings after decoding.
+fn contains_untrusted_control(text: &str) -> bool {
+    text.chars()
+        .any(|character| character.is_control() && !matches!(character as u32, 0x09 | 0x0a | 0x0d))
 }
 
 fn redact_text_literal(text: &str) -> String {
@@ -1645,15 +1664,16 @@ impl<C: Clone> ObservationSink<C> for RedactingSink<'_, C> {
 }
 
 fn stream_candidate_starts_at_zero(text: &str) -> bool {
-    LINE_CREDENTIAL_MARKERS
-        .iter()
-        .chain(VALUE_CREDENTIAL_MARKERS)
-        .any(|marker| {
-            (text.len() <= marker.len()
-                && marker.as_bytes()[..text.len()].eq_ignore_ascii_case(text.as_bytes()))
-                || (text.len() > marker.len()
-                    && text.as_bytes()[..marker.len()].eq_ignore_ascii_case(marker.as_bytes()))
-        })
+    contains_untrusted_control(text)
+        || LINE_CREDENTIAL_MARKERS
+            .iter()
+            .chain(VALUE_CREDENTIAL_MARKERS)
+            .any(|marker| {
+                (text.len() <= marker.len()
+                    && marker.as_bytes()[..text.len()].eq_ignore_ascii_case(text.as_bytes()))
+                    || (text.len() > marker.len()
+                        && text.as_bytes()[..marker.len()].eq_ignore_ascii_case(marker.as_bytes()))
+            })
         || TOKEN_PREFIXES.iter().any(|prefix| {
             (text.len() <= prefix.len() && prefix.as_bytes()[..text.len()] == *text.as_bytes())
                 || text.starts_with(prefix)
@@ -1708,6 +1728,9 @@ pub(crate) fn trailing_credential_context(text: &str) -> &str {
 }
 
 fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
+    if contains_untrusted_control(text) {
+        return Some(0);
+    }
     let mut earliest = None;
     for marker in LINE_CREDENTIAL_MARKERS
         .iter()
@@ -1916,6 +1939,9 @@ fn escaped_unsafe_suffix_start(text: &str) -> Option<usize> {
         // whole fragment so a credential hidden behind them cannot be emitted.
         return Some(0);
     };
+    if contains_untrusted_control(&decoded) {
+        return Some(0);
+    }
     if decoded == text {
         return None;
     }

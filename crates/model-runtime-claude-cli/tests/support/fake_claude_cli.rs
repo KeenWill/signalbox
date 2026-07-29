@@ -21,7 +21,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if scenario == "duplicate_stream_member" {
-        emit(br#"{"type":"system","type":"result","subtype":"success","is_error":false}\n"#)?;
+        emit(b"{\"type\":\"system\",\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}\n")?;
+        return Ok(());
+    }
+    if scenario == "redacted_native_identity" {
+        system_init_with_identity(
+            &arguments,
+            fixtures::CREDENTIAL_SHAPED_SESSION_ID,
+            fixtures::CREDENTIAL_SHAPED_MODEL,
+        )?;
+        assistant_text_with_identity(
+            fixtures::MESSAGE_ID,
+            fixtures::CREDENTIAL_SHAPED_MODEL,
+            fixtures::ANSWER,
+        )?;
+        success_with_session(
+            fixtures::CREDENTIAL_SHAPED_SESSION_ID,
+            "end_turn",
+            Some(fixtures::ANSWER),
+        )?;
         return Ok(());
     }
     system_init(&arguments)?;
@@ -61,6 +79,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_text(fixtures::FRAGMENTED_SECRET_CONTINUATION)?;
             success("end_turn", Some(fixtures::FRAGMENTED_SECRET))?;
         }
+        "control_sequence_credential_redaction" => {
+            assistant_text(fixtures::FRAGMENTED_SECRET_PREFIX)?;
+            assistant_text(fixtures::CONTROL_SEQUENCE)?;
+            assistant_text(fixtures::CONTROL_SEQUENCE_SECRET_CONTINUATION)?;
+            success("end_turn", Some(fixtures::CONTROL_OBFUSCATED_SECRET))?;
+        }
         "named_choice_extra_tool" => {
             assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
             assistant_tool(fixtures::OTHER_TOOL_ID, fixtures::OTHER_TOOL_NAME)?;
@@ -76,15 +100,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn system_init(arguments: &[String]) -> std::io::Result<()> {
+    system_init_with_identity(arguments, fixtures::SESSION_ID, fixtures::MODEL)
+}
+
+fn system_init_with_identity(
+    arguments: &[String],
+    session_id: &str,
+    reported_model: &str,
+) -> std::io::Result<()> {
     let allowed = argument_after(arguments, "--allowedTools").unwrap_or_default();
     let tools = if allowed.is_empty() {
         Vec::new()
     } else {
         allowed.split(',').collect::<Vec<_>>()
     };
-    let model = argument_after(arguments, "--model").unwrap_or(fixtures::MODEL);
+    let model = if reported_model == fixtures::MODEL {
+        argument_after(arguments, "--model").unwrap_or(reported_model)
+    } else {
+        reported_model
+    };
     emit_json(&serde_json::json!({
-        "type": "system", "subtype": "init", "session_id": fixtures::SESSION_ID,
+        "type": "system", "subtype": "init", "session_id": session_id,
         "tools": tools, "mcp_servers": [{"name": "signalbox_tools", "status": "connected"}],
         "model": model, "slash_commands": [], "skills": [], "plugins": [],
         "claude_code_version": "2.1.220"
@@ -96,9 +132,13 @@ fn assistant_text(text: &str) -> std::io::Result<()> {
 }
 
 fn assistant_text_with_id(id: &str, text: &str) -> std::io::Result<()> {
+    assistant_text_with_identity(id, fixtures::MODEL, text)
+}
+
+fn assistant_text_with_identity(id: &str, model: &str, text: &str) -> std::io::Result<()> {
     emit_json(&serde_json::json!({
         "type": "assistant", "parent_tool_use_id": null,
-        "message": {"model": fixtures::MODEL, "id": id, "role": "assistant",
+        "message": {"model": model, "id": id, "role": "assistant",
             "content": [{"type": "text", "text": text}],
             "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}}
     }))
@@ -144,9 +184,17 @@ fn success_without_stop_reason() -> std::io::Result<()> {
 }
 
 fn success(stop_reason: &str, result: Option<&str>) -> std::io::Result<()> {
+    success_with_session(fixtures::SESSION_ID, stop_reason, result)
+}
+
+fn success_with_session(
+    session_id: &str,
+    stop_reason: &str,
+    result: Option<&str>,
+) -> std::io::Result<()> {
     emit_json(&serde_json::json!({
         "type": "result", "subtype": "success", "is_error": false,
-        "session_id": fixtures::SESSION_ID, "stop_reason": stop_reason,
+        "session_id": session_id, "stop_reason": stop_reason,
         "terminal_reason": "completed", "result": result, "errors": [],
         "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS,
             "cache_creation_input_tokens": fixtures::CACHE_CREATION_TOKENS,

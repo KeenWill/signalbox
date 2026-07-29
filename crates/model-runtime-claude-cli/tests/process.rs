@@ -17,7 +17,6 @@ use signalbox_model_runtime_claude_cli::{
     ClaudeCliConfig, ClaudeCliPreparedRequest, ClaudeCliRuntime, DISABLED_CLAUDE_CLI_BUILTIN_TOOLS,
 };
 
-#[allow(dead_code)]
 #[path = "support/fixtures.rs"]
 mod fixtures;
 
@@ -143,6 +142,35 @@ async fn fragmented_credential_is_redacted_from_observations_and_terminal_conten
 }
 
 #[tokio::test]
+async fn control_sequence_cannot_obfuscate_a_streamed_credential() {
+    let result = execute_scenario(
+        "control_sequence_credential_redaction",
+        OperationShape::Text,
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::CONTROL_SEQUENCE_SECRET));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn redacted_provider_identities_still_compare_by_native_value() {
+    let result = execute_scenario("redacted_native_identity", OperationShape::Text).await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert_eq!(
+        completed(&result.evidence).finish,
+        CompletionFinish::EndTurn
+    );
+    assert!(!diagnostic.contains(fixtures::CREDENTIAL_SHAPED_SESSION_ID));
+    assert!(!diagnostic.contains(fixtures::CREDENTIAL_SHAPED_MODEL));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn nonzero_exit_is_a_typed_provider_failure() {
     let result = execute_scenario("process_nonzero", OperationShape::Text).await;
     let failure = provider_error(&result.evidence);
@@ -213,10 +241,7 @@ async fn duplicate_stream_member_is_protocol_boundary_loss() {
     let result = execute_scenario("duplicate_stream_member", OperationShape::Text).await;
     let loss = boundary_loss(&result.evidence);
 
-    assert!(matches!(
-        loss.cause,
-        LossCause::StreamProtocolViolation { .. }
-    ));
+    assert!(stream_protocol_detail(&loss.cause).contains(fixtures::DUPLICATE_MEMBER_DETAIL));
     assert_eq!(result.spawns, 1);
 }
 
@@ -402,6 +427,13 @@ fn boundary_loss(evidence: &TerminalEvidence) -> &signalbox_model_runtime::Bound
 fn response_unintelligible(cause: &LossCause) -> &str {
     let LossCause::ResponseUnintelligible { detail } = cause else {
         panic!("expected unintelligible response, got {cause:?}")
+    };
+    detail
+}
+
+fn stream_protocol_detail(cause: &LossCause) -> &str {
+    let LossCause::StreamProtocolViolation { detail } = cause else {
+        panic!("expected stream protocol violation, got {cause:?}")
     };
     detail
 }
