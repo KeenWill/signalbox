@@ -30,7 +30,7 @@ forward-only predecessor chain. Continuing from a pre-compaction boundary
 creates a new session through the existing continuation machinery; an existing
 session has no per-turn projection switch.
 
-Version twenty adds explicit session compaction with an optional through
+Version twenty-two adds explicit session compaction with an optional through
 position and an automatic pre-call guard. Each catalog selection declares a
 nonzero context-window token limit; the daemon never guesses one. The guard
 reserves the selection's complete configured maximum output in addition to the
@@ -84,7 +84,10 @@ existing sessions would drift from deployment configuration and could submit an
 unknown or retired alias. This surface originally reserved protocol version
 eighteen; the session-template surface shipped that number first while this one
 was still in flight, and the concurrent context-compaction protocol stack
-separately claimed twenty, also still in flight.
+separately claimed twenty, also still in flight at the time. This surface
+reached main first, out of the two stacks' originally planned order; twenty is
+now permanently retired rather than reallocated beneath this already-shipped
+vocabulary, and the compaction stack claims twenty-two instead.
 
 **Decision.** Protocol version twenty-one adds the read-only
 `list_model_aliases` sequence, the next number free of both already-shipped and
