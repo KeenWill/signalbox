@@ -366,6 +366,107 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_ci_executed_ignored_test_registers_invariant_enforcement(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text(
+            "mod ignored;\nmod tests;\n", encoding="utf-8"
+        )
+        ignored = self.root / "src/ignored.rs"
+        ignored.write_text(
+            "#[test]\n"
+            '#[ignore = "requires an external service"]\n'
+            "fn inv_001_ignored_test() {}\n",
+            encoding="utf-8",
+        )
+        workflow = self.root / ".github/workflows/rust.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text(
+            "jobs:\n"
+            "  integration:\n"
+            "    strategy:\n"
+            "      matrix:\n"
+            "        include:\n"
+            "          - suite: fixture\n"
+            "            command: >-\n"
+            "              cargo test --no-fail-fast -p fixture\n"
+            "              --tests -- --ignored\n",
+            encoding="utf-8",
+        )
+
+        self.assertIn(
+            ignored.relative_to(self.root).as_posix(),
+            render_invariant_index(self.root),
+        )
+
+    def test_ci_ignored_test_filters_select_only_matching_enforcement(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        selected = self.root / "tests/selected.rs"
+        selected.parent.mkdir()
+        selected.write_text(
+            "#[test]\n"
+            "#[ignore]\n"
+            "fn inv_001_selected_by_ci_filter() {}\n"
+            "#[test]\n"
+            "#[ignore]\n"
+            "fn inv_002_not_selected_by_ci_filter() {}\n",
+            encoding="utf-8",
+        )
+        workflow = self.root / ".github/workflows/rust.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text(
+            "jobs:\n"
+            "  integration:\n"
+            "    strategy:\n"
+            "      matrix:\n"
+            "        include:\n"
+            "          - suite: fixture\n"
+            "            command: >-\n"
+            "              cargo test -p fixture --test selected\n"
+            "              inv_001 -- --ignored\n",
+            encoding="utf-8",
+        )
+
+        rendered = render_invariant_index(self.root)
+
+        self.assertIn("| INV-001", rendered)
+        self.assertNotIn("| INV-002", rendered)
+
+    def test_windows_only_test_does_not_register_invariant_enforcement(self) -> None:
+        disabled = self.root / "src/windows.rs"
+        disabled.write_text(
+            "#[cfg(windows)]\n"
+            "#[test]\n"
+            "fn inv_001_windows_only_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+        self.assertNotIn(
+            disabled.relative_to(self.root).as_posix(),
+            render_invariant_index(self.root),
+        )
+
+    def test_linux_only_test_registers_invariant_enforcement(self) -> None:
+        enabled = self.root / "src/linux.rs"
+        enabled.write_text(
+            '#[cfg(target_os = "linux")]\n'
+            "#[test]\n"
+            "fn inv_001_linux_only_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["invariant-registration"])
+        self.assertIn(enabled.relative_to(self.root).as_posix(), failures[0].message)
+
     def test_unrelated_test_attribute_does_not_register_invariant(self) -> None:
         (self.root / "src/ignored.rs").write_text(
             '#[ignore = "INV-001 is temporarily flaky"]\n'

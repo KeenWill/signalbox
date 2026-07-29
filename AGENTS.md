@@ -103,10 +103,11 @@ one finished and awaiting owner merge:
     no stated behavior leaves the reference alone, since the reference records
     verification against code and not the fact of an edit.
 - External reviews are re-requested only after a semantically meaningful diff
-  that could alter what a reviewer approved: code, tests, normative contracts,
-  or claims in the description. Never re-request after a clean merge-forward, a
-  rename, or a comment-only edit. Codex runs only on an explicit `@codex review`
-  comment.
+  that could alter what a reviewer approved: code, tests, normative documents,
+  or claims in the description. A source-comment-only diff does not trigger a
+  re-request even when the comment describes a contract. Never re-request after
+  a clean merge-forward, a rename, or any comment-only edit. Codex runs only on
+  an explicit `@codex review` comment.
 - The description is at most 350 words, states the count of meaningfully changed
   lines (excluding lockfiles), and claims only what the code enforces — a
   contract binding future implementors is described as a contract, not an
