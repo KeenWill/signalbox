@@ -4,17 +4,14 @@ use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, quote_spanned};
 use syn::spanned::Spanned;
-use syn::{
-    Attribute, Data, DeriveInput, Field, Fields, GenericArgument, LitStr, PathArguments, Token,
-    Type, parse_macro_input,
-};
+use syn::{Attribute, Data, DeriveInput, Field, Fields, LitStr, Token, Type, parse_macro_input};
 
 /// Derives an owned JSON Schema from one serde-decoded named-field struct.
 ///
 /// Every admitted field requires `#[tool_schema(description = "...")]`.
 /// Property names follow serde's `rename` and `rename_all` declarations. A
 /// checked `name = "..."` may repeat the effective serde name, but cannot
-/// contradict it. Plain `Option<T>` fields, fields carrying `#[serde(default)]`,
+/// contradict it. Fields whose type resolves to `Option<T>`, fields carrying `#[serde(default)]`,
 /// and fields in a struct carrying `#[serde(default)]` are omitted from
 /// `required`; a custom-decoded `Option<T>` remains required without a default.
 /// `skip` and `skip_deserializing` omit a property. A `with = Type` override
@@ -63,9 +60,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
             continue;
         };
         properties.push(derived.property);
-        if let Some(name) = derived.required_name {
-            required.push(name);
-        }
+        required.push(derived.required_name);
     }
 
     let ident = &input.ident;
@@ -90,10 +85,11 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
             }
 
             fn json_schema(
-                _generator: &mut ::signalbox_tool_contract::__private::schemars::SchemaGenerator,
+                generator: &mut ::signalbox_tool_contract::__private::schemars::SchemaGenerator,
             ) -> ::signalbox_tool_contract::__private::schemars::Schema {
                 ::signalbox_tool_contract::__private::into_schemars_schema(
                     <Self as ::signalbox_tool_contract::ToolSchema>::schema(),
+                    generator,
                 )
             }
 
@@ -147,7 +143,7 @@ fn parse_container_attributes(attributes: &[Attribute]) -> syn::Result<Container
 
 struct DerivedField {
     property: TokenStream2,
-    required_name: Option<LitStr>,
+    required_name: TokenStream2,
 }
 
 fn derive_field(
@@ -254,11 +250,20 @@ fn derive_field(
             },
         )
     };
-    let implicit_option = option_inner(&field.ty).is_some() && !serde.custom_decoder;
-    let optional = container_default || serde.default || implicit_option;
+    let required_name = if container_default || serde.default {
+        quote!(::std::option::Option::None)
+    } else if serde.custom_decoder {
+        quote!(::std::option::Option::Some(#property_name))
+    } else {
+        let field_type = &field.ty;
+        quote_spanned! {field_span=>
+            (!<#field_type as ::signalbox_tool_contract::ToolSchema>::is_optional())
+                .then_some(#property_name)
+        }
+    };
     Ok(Some(DerivedField {
         property,
-        required_name: (!optional).then_some(property_name),
+        required_name,
     }))
 }
 
@@ -422,26 +427,6 @@ fn parse_serde_name_value(
         Err(direction.error(format!("unsupported serde {attribute_name} direction")))
     })?;
     Ok(deserialize)
-}
-
-fn option_inner(ty: &Type) -> Option<&Type> {
-    let Type::Path(path) = ty else {
-        return None;
-    };
-    let segment = path.path.segments.last()?;
-    if segment.ident != "Option" {
-        return None;
-    }
-    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        return None;
-    };
-    if arguments.args.len() != 1 {
-        return None;
-    }
-    match arguments.args.first()? {
-        GenericArgument::Type(inner) => Some(inner),
-        _ => None,
-    }
 }
 
 fn ensure_supported_type(ty: &Type, field_name: &str) -> syn::Result<()> {

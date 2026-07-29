@@ -19,6 +19,11 @@ pub trait ToolSchema {
     /// its complete assembly expression in [`__private::root_schema`] so any
     /// recursive definitions attach to the public schema root.
     fn schema() -> serde_json::Value;
+
+    #[doc(hidden)]
+    fn is_optional() -> bool {
+        false
+    }
 }
 
 /// One daemon tool's model-facing contract: registry name, description, and
@@ -139,6 +144,10 @@ impl<Value: ToolSchema> ToolSchema for Option<Value> {
                 ],
             })
         })
+    }
+
+    fn is_optional() -> bool {
+        true
     }
 }
 
@@ -306,21 +315,21 @@ pub mod __private {
 
         let guard = RenderRootGuard { finished: false };
         let mut schema = build();
-        let definitions = guard.finish().definitions;
-        if definitions.is_empty() {
+        let generated_definitions = guard.finish().definitions;
+        if generated_definitions.is_empty() {
             return schema;
         }
-        let definitions = definitions
-            .into_iter()
-            .map(|(name, schema)| (String::from(name), schema))
-            .collect::<serde_json::Map<String, serde_json::Value>>();
-        schema
+        let object = schema
             .as_object_mut()
-            .expect("a recursive public schema root must be an object")
-            .insert(
-                String::from("$defs"),
-                serde_json::Value::Object(definitions),
-            );
+            .expect("a recursive public schema root must be an object");
+        let definitions = object
+            .entry(String::from("$defs"))
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .expect("a public schema root $defs value must be an object");
+        for (name, definition) in generated_definitions {
+            insert_definition(definitions, String::from(name), definition);
+        }
         schema
     }
 
@@ -363,6 +372,21 @@ pub mod __private {
         })
     }
 
+    fn insert_definition(
+        definitions: &mut serde_json::Map<String, serde_json::Value>,
+        name: String,
+        definition: serde_json::Value,
+    ) {
+        if let Some(existing) = definitions.get(&name) {
+            assert_eq!(
+                existing, &definition,
+                "schema definition collision for `{name}`"
+            );
+            return;
+        }
+        definitions.insert(name, definition);
+    }
+
     fn json_pointer_segment(value: &str) -> String {
         value.replace('~', "~0").replace('/', "~1")
     }
@@ -390,9 +414,10 @@ pub mod __private {
     /// Builds one object schema from derive-checked property declarations.
     pub fn object_schema(
         properties: Vec<(&'static str, serde_json::Value)>,
-        required: Vec<&'static str>,
+        required: Vec<Option<&'static str>>,
         deny_unknown_fields: bool,
     ) -> serde_json::Value {
+        let required = required.into_iter().flatten().collect::<Vec<_>>();
         let properties = properties
             .into_iter()
             .map(|(name, schema)| (String::from(name), schema))
@@ -426,12 +451,54 @@ pub mod __private {
         serde_json::Value::Object(schema)
     }
 
+    fn rewrite_definition_references(value: &mut serde_json::Value, definitions_path: &str) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(serde_json::Value::String(reference)) = object.get_mut("$ref")
+                    && let Some(suffix) = reference.strip_prefix("#/$defs/")
+                {
+                    *reference = format!("#{definitions_path}/{suffix}");
+                }
+                for nested in object.values_mut() {
+                    rewrite_definition_references(nested, definitions_path);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for nested in values {
+                    rewrite_definition_references(nested, definitions_path);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Converts an owned schema object into the legacy schemars bridge.
-    pub fn into_schemars_schema(value: serde_json::Value) -> schemars::Schema {
-        #[expect(
-            clippy::expect_used,
-            reason = "ToolSchema implementations produce object-valued JSON Schema fragments"
-        )]
+    #[expect(
+        clippy::expect_used,
+        reason = "ToolSchema implementations produce object-valued JSON Schema fragments"
+    )]
+    pub fn into_schemars_schema(
+        mut value: serde_json::Value,
+        generator: &mut schemars::SchemaGenerator,
+    ) -> schemars::Schema {
+        let definitions_path = String::from(generator.settings().definitions_path.as_ref());
+        rewrite_definition_references(&mut value, &definitions_path);
+        if let Some(definitions) = value
+            .as_object_mut()
+            .and_then(|object| object.remove("$defs"))
+        {
+            let definitions = definitions
+                .as_object()
+                .expect("ToolSchema $defs must be an object");
+            for (name, definition) in definitions {
+                insert_definition(
+                    generator.definitions_mut(),
+                    name.clone(),
+                    definition.clone(),
+                );
+            }
+        }
+
         schemars::Schema::try_from(value).expect("ToolSchema must produce a JSON Schema object")
     }
 }

@@ -27,6 +27,15 @@ struct OptionalField {
     value: Option<String>,
 }
 
+type MaybeString = Option<String>;
+
+#[derive(serde::Deserialize, ToolSchema)]
+#[expect(dead_code, reason = "schema fixture renders only")]
+struct AliasedOptionalField {
+    #[tool_schema(description = "An aliased optional field.")]
+    value: MaybeString,
+}
+
 #[derive(serde::Deserialize, ToolSchema)]
 #[serde(deny_unknown_fields)]
 #[expect(dead_code, reason = "schema fixture renders only")]
@@ -174,12 +183,79 @@ struct RecursiveNode {
     child: Option<Box<RecursiveNode>>,
 }
 
+struct LegacyRecursiveOuter;
+
+impl signalbox_tool_contract::__private::schemars::JsonSchema for LegacyRecursiveOuter {
+    fn schema_name() -> ::std::borrow::Cow<'static, str> {
+        ::std::borrow::Cow::Borrowed("LegacyRecursiveOuter")
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "fixture schema is statically object-valued"
+    )]
+    fn json_schema(
+        generator: &mut signalbox_tool_contract::__private::schemars::SchemaGenerator,
+    ) -> signalbox_tool_contract::__private::schemars::Schema {
+        let node = generator.subschema_for::<RecursiveNode>().to_value();
+        signalbox_tool_contract::__private::schemars::Schema::try_from(serde_json::json!({
+            "properties": {
+                "node": node,
+            },
+            "required": ["node"],
+            "type": "object",
+        }))
+        .expect("legacy fixture schema is object-valued")
+    }
+}
+
 struct ManualRecursiveRoot;
 
 impl signalbox_tool_contract::ToolSchema for ManualRecursiveRoot {
     fn schema() -> serde_json::Value {
         signalbox_tool_contract::__private::root_schema(|| {
             serde_json::json!({
+                "properties": {
+                    "node": RecursiveNode::schema(),
+                },
+                "type": "object",
+            })
+        })
+    }
+}
+
+fn manual_leaf_schema() -> serde_json::Value {
+    serde_json::json!({ "type": "string" })
+}
+
+struct ManualDefinitionsRoot;
+
+impl signalbox_tool_contract::ToolSchema for ManualDefinitionsRoot {
+    fn schema() -> serde_json::Value {
+        signalbox_tool_contract::__private::root_schema(|| {
+            serde_json::json!({
+                "$defs": {
+                    "ManualLeaf": manual_leaf_schema(),
+                },
+                "properties": {
+                    "manual": { "$ref": "#/$defs/ManualLeaf" },
+                    "node": RecursiveNode::schema(),
+                },
+                "type": "object",
+            })
+        })
+    }
+}
+
+struct ConflictingDefinitionsRoot;
+
+impl signalbox_tool_contract::ToolSchema for ConflictingDefinitionsRoot {
+    fn schema() -> serde_json::Value {
+        signalbox_tool_contract::__private::root_schema(|| {
+            serde_json::json!({
+                "$defs": {
+                    "derive::RecursiveNode": { "type": "string" },
+                },
                 "properties": {
                     "node": RecursiveNode::schema(),
                 },
@@ -263,6 +339,13 @@ fn option_field_renders_nullable_shape() {
 #[test]
 fn option_field_is_not_required() {
     let schema = OptionalField::schema();
+
+    assert!(schema.get("required").is_none());
+}
+
+#[test]
+fn option_alias_field_is_not_required() {
+    let schema = AliasedOptionalField::schema();
 
     assert!(schema.get("required").is_none());
 }
@@ -667,4 +750,46 @@ fn manual_recursive_composition_hoists_definitions() {
           "type": "object"
         }"##]]
     .assert_eq(&format!("{schema:#}"));
+}
+
+#[test]
+fn schemars_bridge_hoists_recursive_definitions() {
+    let schema = signalbox_tool_contract::__private::schemars::SchemaGenerator::default()
+        .into_root_schema_for::<LegacyRecursiveOuter>()
+        .to_value();
+
+    assert!(schema["$defs"].get("derive::RecursiveNode").is_some());
+    assert_eq!(
+        schema["properties"]["node"]["properties"]["child"]["anyOf"][0]["$ref"],
+        "#/$defs/derive::RecursiveNode"
+    );
+}
+
+#[test]
+fn schemars_bridge_rewrites_recursive_references_for_draft07() {
+    let mut generator =
+        signalbox_tool_contract::__private::schemars::generate::SchemaSettings::draft07()
+            .into_generator();
+    let schema = generator
+        .root_schema_for::<LegacyRecursiveOuter>()
+        .to_value();
+
+    assert!(schema["definitions"].get("derive::RecursiveNode").is_some());
+    assert_eq!(
+        schema["properties"]["node"]["properties"]["child"]["anyOf"][0]["$ref"],
+        "#/definitions/derive::RecursiveNode"
+    );
+}
+
+#[test]
+fn manual_definitions_survive_recursive_composition() {
+    let schema = ManualDefinitionsRoot::schema();
+
+    assert_eq!(schema["$defs"]["ManualLeaf"], manual_leaf_schema());
+}
+
+#[test]
+#[should_panic(expected = "schema definition collision for `derive::RecursiveNode`")]
+fn conflicting_manual_definition_is_rejected() {
+    let _schema = ConflictingDefinitionsRoot::schema();
 }
