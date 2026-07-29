@@ -23,37 +23,97 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// The match is exact in both directions. A split that appears and is not
 /// listed is a regression. A listed split that stops leaking is progress, and
 /// it must shrink this ledger rather than let it overstate the damage.
-const KNOWN_FAILING_SPLITS: [(usize, usize); 30] = [
-    (79, 2),
-    (79, 3),
-    (79, 4),
-    (79, 5),
-    (79, 7),
-    (83, 2),
-    (83, 3),
-    (83, 5),
-    (83, 7),
-    (83, 8),
-    (83, 12),
-    (83, 15),
-    (83, 17),
-    (83, 18),
-    (83, 19),
-    (139, 2),
-    (139, 3),
-    (139, 4),
-    (139, 5),
-    (139, 7),
-    (143, 2),
-    (143, 3),
-    (143, 5),
-    (143, 7),
-    (143, 8),
-    (143, 12),
-    (143, 15),
-    (143, 17),
-    (143, 18),
-    (143, 19),
+const KNOWN_FAILING_SPLITS: [DivergentSplit; 30] = [
+    DivergentSplit { line: 79, split: 2 },
+    DivergentSplit { line: 79, split: 3 },
+    DivergentSplit { line: 79, split: 4 },
+    DivergentSplit { line: 79, split: 5 },
+    DivergentSplit { line: 79, split: 7 },
+    DivergentSplit { line: 83, split: 2 },
+    DivergentSplit { line: 83, split: 3 },
+    DivergentSplit { line: 83, split: 5 },
+    DivergentSplit { line: 83, split: 7 },
+    DivergentSplit { line: 83, split: 8 },
+    DivergentSplit {
+        line: 83,
+        split: 12,
+    },
+    DivergentSplit {
+        line: 83,
+        split: 15,
+    },
+    DivergentSplit {
+        line: 83,
+        split: 17,
+    },
+    DivergentSplit {
+        line: 83,
+        split: 18,
+    },
+    DivergentSplit {
+        line: 83,
+        split: 19,
+    },
+    DivergentSplit {
+        line: 139,
+        split: 2,
+    },
+    DivergentSplit {
+        line: 139,
+        split: 3,
+    },
+    DivergentSplit {
+        line: 139,
+        split: 4,
+    },
+    DivergentSplit {
+        line: 139,
+        split: 5,
+    },
+    DivergentSplit {
+        line: 139,
+        split: 7,
+    },
+    DivergentSplit {
+        line: 143,
+        split: 2,
+    },
+    DivergentSplit {
+        line: 143,
+        split: 3,
+    },
+    DivergentSplit {
+        line: 143,
+        split: 5,
+    },
+    DivergentSplit {
+        line: 143,
+        split: 7,
+    },
+    DivergentSplit {
+        line: 143,
+        split: 8,
+    },
+    DivergentSplit {
+        line: 143,
+        split: 12,
+    },
+    DivergentSplit {
+        line: 143,
+        split: 15,
+    },
+    DivergentSplit {
+        line: 143,
+        split: 17,
+    },
+    DivergentSplit {
+        line: 143,
+        split: 18,
+    },
+    DivergentSplit {
+        line: 143,
+        split: 19,
+    },
 ];
 const CORRELATION: u8 = 7;
 const BOUNDARY_FRAGMENT: &str = "{}";
@@ -161,6 +221,15 @@ struct KnownFailure {
     surviving_channels: Vec<&'static str>,
 }
 
+/// One divergent fragmentation. Named fields rather than a positional pair:
+/// the two values are the same type with different meanings, so a
+/// transposition would compile and a failure would print unlabelled numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DivergentSplit {
+    line: usize,
+    split: usize,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct SplitLeak {
     line: usize,
@@ -179,13 +248,16 @@ struct SplitSummary {
 
 impl SplitSummary {
     /// The exact divergent fragmentations, canonically ordered.
-    fn divergent_splits(&self) -> Vec<(usize, usize)> {
+    fn divergent_splits(&self) -> Vec<DivergentSplit> {
         let mut inventory = self
             .leaks
             .iter()
-            .map(|leak| (leak.line, leak.splits[0]))
+            .map(|leak| DivergentSplit {
+                line: leak.line,
+                split: leak.splits[0],
+            })
             .collect::<Vec<_>>();
-        inventory.sort_unstable();
+        inventory.sort_unstable_by_key(|entry| (entry.line, entry.split));
         inventory
     }
 

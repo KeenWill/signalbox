@@ -3058,7 +3058,11 @@ fn trailing_single_quoted_key_opener(text: &str) -> Option<usize> {
         .chars()
         .next_back()
         .is_none_or(|character| {
-            character.is_whitespace() || matches!(character, '{' | '[' | '(' | ',')
+            // Assignment separators count as openers too: the raw scanner
+            // accepts `detail:'client_secret'` in the completed text, so the
+            // quote after a colon or equals is as much a key opener as one
+            // after whitespace or a structural bracket.
+            character.is_whitespace() || matches!(character, '{' | '[' | '(' | ',' | ':' | '=')
         })
         .then_some(start)
 }
@@ -4294,6 +4298,16 @@ mod tests {
 
         assert!(!mysql.contains(PLANTED_SYNTHETIC_SECRET));
         assert!(!bare.contains(PLANTED_SYNTHETIC_SECRET));
+    }
+
+    /// INV-035: a single-quoted key opened straight after an assignment
+    /// separator stays held, since the completed text is an assignment.
+    #[test]
+    fn inv_035_stream_redacts_a_single_quoted_key_after_a_separator() {
+        assert_two_delta_split_redacts(
+            "detail:'c",
+            &format!("lient_secret': '{PLANTED_SYNTHETIC_SECRET}'"),
+        );
     }
 
     /// The trailing credential context is the unsafe suffix; a clean-ending
