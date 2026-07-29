@@ -81,9 +81,17 @@ enum CorpusStatus {
     Redacted,
     AcceptedUncovered,
     /// The shape is covered by the contract and the implementation leaks it.
-    /// A known failure is never a passing classification: it is carried here
-    /// only so the ledger names it, and the corpus test fails while any
-    /// remains.
+    ///
+    /// This is a defect ledger, categorically not `AcceptedUncovered`: that
+    /// status records what the contract openly declines to cover, while this
+    /// one records a covered shape the sink fails. Nothing here is fine.
+    ///
+    /// The ledger is matched exactly rather than required to be empty. A
+    /// covered shape that starts leaking fails as a regression, and a listed
+    /// one that stops leaking also fails, forcing the ledger to shrink instead
+    /// of overstating the damage. Requiring emptiness instead would make the
+    /// suite permanently red, which cannot ship the reduction it measures and
+    /// teaches readers to ignore the signal.
     KnownFailing,
 }
 
