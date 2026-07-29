@@ -87,9 +87,9 @@ use signalbox_persistence::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
         ProcessImportedContentKind, ProcessImportedSourceSpeaker,
         ProcessModelCallRecoveryPrecondition, ProcessModelSelection, ProcessReadError,
-        ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionAncestry,
-        ProcessSessionDefaultsRead, ProcessTranscriptEntry, ProcessTranscriptItem,
-        ProcessTranscriptModelCallUsage, ProcessTranscriptTurn, ProcessTurnState,
+        ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionDefaultsRead,
+        ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptModelCallUsage,
+        ProcessTranscriptTurn, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
@@ -105,26 +105,22 @@ use signalbox_process_protocol::{
     ConversationOriginFilter as WireConversationOriginFilter,
     ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
     ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
-    FrameDecodeErrorKind, FrameEncodeError, IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
-    IMPORTED_TRANSCRIPT_PROTOCOL_VERSION, ImportedContentKind,
+    FrameDecodeErrorKind, FrameEncodeError, ImportedContentKind,
     ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
-    MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION, MetadataActor, MetadataLastWriter,
-    ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
-    ModelSelection as WireModelSelection, PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
-    ProtocolVersion, RejectionDetail, RequestId, ReviewDiffSide as WireReviewDiffSide,
-    ReviewExternalObjectKind as WireReviewExternalObjectKind,
+    MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
+    ModelSelection as WireModelSelection, ProtocolVersion, RejectionDetail, RequestId,
+    ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingDisposition as WireReviewFindingDisposition, ReviewFindingInput,
     ReviewFindingSnapshot, ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle,
     ReviewPassSnapshot, ReviewRunLifecycle, ReviewRunSnapshot,
     ReviewSeverity as WireReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
-    SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, ServerFrame, ServerMessage, SessionEvent,
-    SessionMetadata as WireSessionMetadata, SystemPromptMember, SystemPromptText, ToolBatchState,
-    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, content_fragments,
-    decode_client_line, encode_server_line, recover_bounded_client_protocol_version,
-    recover_bounded_client_request_id,
+    ServerFrame, ServerMessage, SessionEvent, SessionMetadata as WireSessionMetadata,
+    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TranscriptEntry,
+    TranscriptTextEntry, TurnState, content_fragments, decode_client_line, encode_server_line,
+    recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
 use sqlx::{PgPool, Row};
 use tokio::{
@@ -443,9 +439,6 @@ fn inspect_connection_completion(
             Err(ProcessRuntimeError::Encode(error))
         }
         Some(Ok(Err(ProcessConnectionError::EncodeInvariant))) => {
-            Err(ProcessRuntimeError::EncodeInvariant)
-        }
-        Some(Ok(Err(ProcessConnectionError::MessageRequiresVersion(_)))) => {
             Err(ProcessRuntimeError::EncodeInvariant)
         }
         Some(Ok(Err(ProcessConnectionError::InboundFrameBudgetClosed))) => {
@@ -3207,7 +3200,7 @@ where
                 writer,
                 version,
                 request_id,
-                imported_conversation_not_found(version, wire_request.conversation),
+                imported_conversation_not_found(wire_request.conversation),
             )
             .await;
         }
@@ -3242,7 +3235,6 @@ where
             version,
             request_id,
             imported_position_out_of_range(
-                version,
                 wire_request.conversation,
                 through_position,
                 last_imported_position(&conversation),
@@ -3287,7 +3279,7 @@ where
                 writer,
                 version,
                 request_id,
-                imported_conversation_not_found(version, wire_request.conversation),
+                imported_conversation_not_found(wire_request.conversation),
             )
             .await
         }
@@ -3297,7 +3289,6 @@ where
                 version,
                 request_id,
                 imported_position_out_of_range(
-                    version,
                     wire_request.conversation,
                     through_position,
                     last_position,
@@ -4401,17 +4392,7 @@ fn last_imported_position(conversation: &ImportedConversation) -> u64 {
 }
 
 /// Names the absent target as an imported conversation rather than a session.
-///
-/// Versions below the inspection version have no typed detail for this
-/// rejection, so they keep the undetailed `not_found` their closed message
-/// vocabulary already admits; only its non-normative message sharpens.
-fn imported_conversation_not_found(
-    version: ProtocolVersion,
-    imported_conversation_id: CanonicalUuid,
-) -> ProtocolError {
-    if version.as_u64() < IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION {
-        return ProtocolError::imported_conversation_absent();
-    }
+fn imported_conversation_not_found(imported_conversation_id: CanonicalUuid) -> ProtocolError {
     ProtocolError::rejected(RejectionDetail::ImportedConversationNotFound {
         imported_conversation_id,
     })
@@ -4420,14 +4401,10 @@ fn imported_conversation_not_found(
 /// Distinguishes a valid identity carrying an out-of-range position from an
 /// absent identity, naming the conversation's selectable range.
 fn imported_position_out_of_range(
-    version: ProtocolVersion,
     imported_conversation_id: CanonicalUuid,
     requested_position: CanonicalU64,
     last_position: u64,
 ) -> ProtocolError {
-    if version.as_u64() < IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION {
-        return ProtocolError::imported_position_absent();
-    }
     // Imported positions are the contiguous sequence `1..=last_position`, so a
     // position this handler could not resolve is always beyond a positive
     // bound. A loaded aggregate that contradicts that is corrupt, and the
@@ -4465,7 +4442,9 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::imported_conversation_absent(),
+                ProtocolError::rejected(RejectionDetail::ImportedConversationNotFound {
+                    imported_conversation_id,
+                }),
             )
             .await;
         }
@@ -4975,7 +4954,6 @@ enum SessionListSpoolError {
 #[derive(Debug)]
 enum SnapshotSpoolError {
     Io(io::Error),
-    MessageRequiresVersion(u64),
     Encode(FrameEncodeError),
     EncodeInvariant,
 }
@@ -4985,9 +4963,6 @@ impl SnapshotSpoolError {
         match error {
             ProcessConnectionError::PeerIo(error) | ProcessConnectionError::SpoolIo(error) => {
                 Self::Io(error)
-            }
-            ProcessConnectionError::MessageRequiresVersion(required) => {
-                Self::MessageRequiresVersion(required)
             }
             ProcessConnectionError::Encode(error) => Self::Encode(error),
             ProcessConnectionError::EncodeInvariant
@@ -5016,15 +4991,6 @@ where
                 version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::Unavailable),
-            )
-            .await
-        }
-        SnapshotSpoolError::MessageRequiresVersion(required) => {
-            write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::unsupported_version(required),
             )
             .await
         }
@@ -5823,14 +5789,10 @@ where
             applied,
         ))) => {
             let installed = applied.installed();
-            let system_prompt = if version.as_u64() < SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION {
-                SystemPromptMember::absent()
-            } else {
-                SystemPromptMember::present(
-                    wire_system_prompt(installed.defaults().system_prompt())
-                        .ok_or(ProcessConnectionError::EncodeInvariant)?,
-                )
-            };
+            let system_prompt = SystemPromptMember::present(
+                wire_system_prompt(installed.defaults().system_prompt())
+                    .ok_or(ProcessConnectionError::EncodeInvariant)?,
+            );
             write_mutation_receipt_via_spool(
                 writer,
                 version,
@@ -5878,7 +5840,7 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::unsupported_version(SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION),
+                ProtocolError::without_detail(ErrorCode::Internal),
             )
             .await
         }
@@ -5961,7 +5923,6 @@ where
 struct ConfiguredSubmitInputTransaction<'configuration> {
     repository: SubmitInputRepository,
     model_configuration: &'configuration HubModelConfiguration,
-    reject_context_summary_history: bool,
 }
 
 impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
@@ -5987,7 +5948,7 @@ impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
     {
         let outcome = self
             .repository
-            .handle_with_candidates_alias_resolver_and_summary_guard(
+            .handle_with_candidates_alias_resolver(
                 command,
                 accepted_input,
                 turn,
@@ -5995,7 +5956,6 @@ impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
                 next_reclassified_turn,
                 next_tool_cancellation,
                 |alias| self.model_configuration.resolve_alias(alias),
-                self.reject_context_summary_history,
             )
             .await?;
 
@@ -6041,30 +6001,6 @@ where
     let session = SessionId::from_uuid(session_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
     let repository = SubmitInputRepository::new(pool.clone());
-    let command_is_claimed = match repository.load(command_id).await {
-        Ok(Some(_)) | Err(SubmitInputRepositoryError::DifferentCommandKind { .. }) => true,
-        Ok(None) => false,
-        Err(error) => {
-            return write_submit_input_repository_error(writer, version, request_id, error).await;
-        }
-    };
-    if !command_is_claimed {
-        match selected_session_required_protocol_version(version, pool, session).await {
-            Ok(Some(required_version)) => {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::unsupported_version(required_version),
-                )
-                .await;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                return write_process_read_error(writer, version, request_id, error).await;
-            }
-        }
-    }
     let expected_version = expected_defaults_version
         .and_then(|version| SessionConfigurationDefaultsVersion::try_from_u64(version.value()));
     let configuration = || {
@@ -6192,7 +6128,7 @@ where
             .await
         {
             // An absent session is left to the authoritative transaction, whose
-            // recorded `SessionNotFound` the version-seven contract promises.
+            // recorded `SessionNotFound` the wire contract promises.
             Ok(ProcessModelCallRecoveryPrecondition::SessionAbsent) => {}
             Ok(ProcessModelCallRecoveryPrecondition::Parked { turn })
                 if turn == expected_active_turn => {}
@@ -6303,10 +6239,6 @@ where
     let expected_active_turn = TurnId::from_uuid(expected_active_turn_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
     let repository = SubmitInputRepository::new(pool.clone());
-    // The quick selected-session read is not repeated here: every
-    // representation gate below version twenty-two sits below version eight,
-    // which this verb already requires. The context-summary gate does not, so
-    // `run_submit_input` applies it authoritatively under the session lock.
     let Some(expected_version) =
         SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
     else {
@@ -6385,14 +6317,6 @@ where
         ConfiguredSubmitInputTransaction {
             repository,
             model_configuration,
-            // Every request this helper runs — ordinary input and both
-            // interrupt mutations — durably accepts an input into the
-            // session's history, so none of them may hand a peer a successor
-            // in history it cannot decode. The negotiated version already
-            // decides that, so it is derived here instead of restated per call
-            // site, where a caller could pass — and two callers did pass —
-            // `false`.
-            reject_context_summary_history: version.as_u64() < ProtocolVersion::TwentyTwo.as_u64(),
         },
         eligibility_nudge.clone(),
         tool_dispatch_gate.clone(),
@@ -6464,9 +6388,6 @@ where
     let protocol_error = match error {
         SubmitInputRepositoryError::Database(_) => ProtocolError::mutation_unavailable(false),
         SubmitInputRepositoryError::CommitAmbiguous(_) => ProtocolError::mutation_unavailable(true),
-        SubmitInputRepositoryError::ContextSummaryRequiresProtocolVersion22 => {
-            ProtocolError::unsupported_version(ProtocolVersion::TwentyTwo.as_u64())
-        }
         SubmitInputRepositoryError::ModelExecution(error) => match error.as_ref() {
             signalbox_persistence::model_execution::ModelCallRepositoryError::Database {
                 commit_ambiguous,
@@ -6552,7 +6473,7 @@ where
             .await
         {
             // An absent request is left to the authoritative transaction,
-            // whose recorded `request_not_found` rejection the version-eight
+            // whose recorded `request_not_found` rejection the wire
             // contract promises.
             Ok(None) => {}
             Ok(Some(owning_session)) if owning_session == session => {}
@@ -6642,7 +6563,7 @@ fn wire_tool_decision(
         } => Ok(ToolDecision::Deny {
             reason: reason.as_str().to_owned(),
         }),
-        // The version-eight wire surface requires a denial reason, so every
+        // The wire surface requires a denial reason, so every
         // decision it records carries one; a reason-free denial cannot be
         // projected as this receipt.
         ToolApprovalDecision::Deny { reason: None } => Err(ProcessConnectionError::EncodeInvariant),
@@ -6686,76 +6607,6 @@ fn admitted_user_content(content: InputContent) -> Result<UserContent, ()> {
     UserContent::try_text(content).map_err(|_| ())
 }
 
-async fn selected_session_required_protocol_version(
-    version: ProtocolVersion,
-    pool: &PgPool,
-    session: SessionId,
-) -> Result<Option<u64>, ProcessReadError> {
-    if version.as_u64() >= ProtocolVersion::TwentyTwo.as_u64() {
-        return Ok(None);
-    }
-    let repository = ProcessReadRepository::new(pool.clone());
-    let has_context_summary_history = repository
-        .session_has_context_summary_history(session)
-        .await?;
-    let has_model_identity_history = if version.as_u64() < ProtocolVersion::Six.as_u64() {
-        repository
-            .session_has_model_identity_history(session)
-            .await?
-    } else {
-        false
-    };
-    let has_tool_history = if version.as_u64() < ProtocolVersion::Three.as_u64() {
-        repository.session_has_tool_history(session).await?
-    } else {
-        false
-    };
-    let ancestry = if version.as_u64() < IMPORTED_TRANSCRIPT_PROTOCOL_VERSION {
-        repository.session_ancestry(session).await?
-    } else {
-        None
-    };
-    Ok(required_protocol_version_for_selected_session(
-        version,
-        SelectedSessionRepresentationFacts {
-            has_context_summary_history,
-            has_model_identity_history,
-            has_tool_history,
-            ancestry,
-        },
-    ))
-}
-
-fn required_protocol_version_for_selected_session(
-    version: ProtocolVersion,
-    facts: SelectedSessionRepresentationFacts,
-) -> Option<u64> {
-    if facts.has_context_summary_history && version.as_u64() < ProtocolVersion::TwentyTwo.as_u64() {
-        Some(ProtocolVersion::TwentyTwo.as_u64())
-    } else if facts.has_model_identity_history && version.as_u64() < ProtocolVersion::Six.as_u64() {
-        Some(ProtocolVersion::Six.as_u64())
-    } else if facts.has_tool_history && version.as_u64() < ProtocolVersion::Three.as_u64() {
-        Some(ProtocolVersion::Three.as_u64())
-    } else if version == ProtocolVersion::One
-        && matches!(
-            facts.ancestry,
-            Some(ProcessSessionAncestry::ImportedConversation)
-        )
-    {
-        Some(IMPORTED_TRANSCRIPT_PROTOCOL_VERSION)
-    } else {
-        None
-    }
-}
-
-#[derive(Clone, Copy)]
-struct SelectedSessionRepresentationFacts {
-    has_context_summary_history: bool,
-    has_model_identity_history: bool,
-    has_tool_history: bool,
-    ancestry: Option<ProcessSessionAncestry>,
-}
-
 async fn handle_read_transcript<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -6768,21 +6619,6 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let selected_session = SessionId::from_uuid(session_id.into_uuid());
-    match selected_session_required_protocol_version(version, pool, selected_session).await {
-        Ok(Some(required_version)) => {
-            return write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::unsupported_version(required_version),
-            )
-            .await;
-        }
-        Ok(None) => {}
-        Err(error) => {
-            return write_process_read_error(writer, version, request_id, error).await;
-        }
-    }
     let spool_result = spool_transcript(
         ProcessReadRepository::new(pool.clone()),
         selected_session,
@@ -6830,26 +6666,7 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let selected_session = SessionId::from_uuid(session_id.into_uuid());
-    match selected_session_required_protocol_version(version, pool, selected_session).await {
-        Ok(Some(required_version)) => {
-            return write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::unsupported_version(required_version),
-            )
-            .await;
-        }
-        Ok(None) => {}
-        Err(error) => {
-            return write_process_read_error(writer, version, request_id, error).await;
-        }
-    }
-    let mut subscription = if admits_provider_text_deltas(version) {
-        fanouts.streaming.subscribe()
-    } else {
-        fanouts.durable.subscribe()
-    };
+    let mut subscription = fanouts.streaming.subscribe();
     let snapshot_result = run_until_shutdown(
         &mut shutdown,
         spool_transcript(
@@ -6891,11 +6708,7 @@ where
             return write_snapshot_spool_error(writer, version, request_id, error).await;
         }
     };
-    let mut updates_queued_at_snapshot = if admits_provider_text_deltas(version) {
-        subscription.len()
-    } else {
-        0
-    };
+    let mut updates_queued_at_snapshot = subscription.len();
     let Some(snapshot_write) =
         run_until_shutdown(&mut shutdown, write_spooled_transcript(writer, spool)).await
     else {
@@ -6944,19 +6757,6 @@ where
                     session_id,
                     event: event.wire(),
                 };
-                if version.as_u64() < message.minimum_protocol_version() {
-                    return run_until_shutdown(
-                        &mut shutdown,
-                        write_error(
-                            writer,
-                            version,
-                            request_id,
-                            ProtocolError::unsupported_version(message.minimum_protocol_version()),
-                        ),
-                    )
-                    .await
-                    .unwrap_or(Ok(()));
-                }
                 let Some(event_write) = run_until_shutdown(
                     &mut shutdown,
                     write_message(writer, version, request_id, message),
@@ -6968,10 +6768,7 @@ where
                 event_write?;
             }
             ProcessUpdate::ProviderTextDelta(delta) => {
-                if queued_at_snapshot
-                    || !admits_provider_text_deltas(version)
-                    || delta.session() != selected_session
-                {
+                if queued_at_snapshot || delta.session() != selected_session {
                     continue;
                 }
                 for content in content_fragments(delta.text()) {
@@ -7022,14 +6819,7 @@ async fn spool_transcript(
     version: ProtocolVersion,
     request_id: RequestId,
 ) -> Result<Option<TranscriptSpool>, TranscriptSpoolError> {
-    let carries_model_call_usage = version.as_u64() >= MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION;
-    let reader = if carries_model_call_usage {
-        repository.open_transcript(session).await
-    } else {
-        repository
-            .open_transcript_without_model_call_usage(session)
-            .await
-    };
+    let reader = repository.open_transcript(session).await;
     let Some(mut reader) = reader.map_err(TranscriptSpoolError::Read)? else {
         return Ok(None);
     };
@@ -7062,25 +6852,17 @@ async fn spool_transcript(
                     .map_err(TranscriptSpoolError::Spool)?;
             }
             ProcessTranscriptItem::ModelCallUsage(usage) => {
-                if carries_model_call_usage {
-                    write_model_call_usage(
-                        &mut file,
-                        version,
-                        request_id,
-                        model_call_count,
-                        &usage,
-                    )
+                write_model_call_usage(&mut file, version, request_id, model_call_count, &usage)
                     .await
                     .map_err(SnapshotSpoolError::from_connection)
                     .map_err(TranscriptSpoolError::Spool)?;
-                }
                 model_call_count = model_call_count
                     .checked_add(1)
                     .ok_or(SnapshotSpoolError::EncodeInvariant)
                     .map_err(TranscriptSpoolError::Spool)?;
             }
             ProcessTranscriptItem::Entry(entry) => {
-                if carries_model_call_usage && !model_calls_ended {
+                if !model_calls_ended {
                     write_model_calls_end(&mut file, version, request_id, model_call_count)
                         .await
                         .map_err(SnapshotSpoolError::from_connection)
@@ -7098,7 +6880,7 @@ async fn spool_transcript(
         .summary()
         .ok_or(SnapshotSpoolError::EncodeInvariant)
         .map_err(TranscriptSpoolError::Spool)?;
-    if carries_model_call_usage && !model_calls_ended {
+    if !model_calls_ended {
         write_model_calls_end(&mut file, version, request_id, model_call_count)
             .await
             .map_err(SnapshotSpoolError::from_connection)
@@ -8002,12 +7784,6 @@ async fn write_message<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    let minimum_protocol_version = message.minimum_protocol_version();
-    if version.as_u64() < minimum_protocol_version {
-        return Err(ProcessConnectionError::MessageRequiresVersion(
-            minimum_protocol_version,
-        ));
-    }
     let frame = ServerFrame::try_new_for_version(version, request_id, message)
         .map_err(FrameEncodeError::Validation)?;
     let encoded = encode_server_line(&frame)?;
@@ -8082,9 +7858,6 @@ where
 fn spool_error_display(error: &SnapshotSpoolError) -> String {
     match error {
         SnapshotSpoolError::Io(error) => error.to_string(),
-        SnapshotSpoolError::MessageRequiresVersion(required) => {
-            format!("message requires protocol version {required}")
-        }
         SnapshotSpoolError::Encode(error) => error.to_string(),
         SnapshotSpoolError::EncodeInvariant => String::from("encode invariant violated"),
     }
@@ -8204,13 +7977,6 @@ where
     }
 }
 
-/// Returns whether the admitted version's closed vocabulary contains the
-/// ephemeral `provider_text_delta` message: version twelve introduced it and
-/// every later admitted version retains it.
-const fn admits_provider_text_deltas(version: ProtocolVersion) -> bool {
-    version.as_u64() >= PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION
-}
-
 fn wire_uuid(value: uuid::Uuid) -> CanonicalUuid {
     CanonicalUuid::from_uuid(value)
 }
@@ -8222,21 +7988,6 @@ struct ProtocolError {
 }
 
 impl ProtocolError {
-    const fn unsupported_version(required_version: u64) -> Self {
-        Self {
-            code: ErrorCode::UnsupportedVersion,
-            message: match required_version {
-                2 => "the selected session requires protocol version 2",
-                3 => "the selected session requires protocol version 3",
-                6 => "the selected session requires protocol version 6",
-                9 => "the selected session requires protocol version 9",
-                22 => "the selected session requires protocol version 22",
-                _ => "the protocol version is unsupported",
-            },
-            detail: ErrorDetail::none(),
-        }
-    }
-
     /// The selected session exists but the named immutable defaults epoch
     /// was never installed; the wire code remains the shared `not_found`.
     const fn defaults_epoch_not_found() -> Self {
@@ -8247,34 +7998,13 @@ impl ProtocolError {
         }
     }
 
-    /// No imported conversation has the named identity. The absent read target
-    /// is never a session; the wire code remains the shared `not_found`.
-    const fn imported_conversation_absent() -> Self {
-        Self {
-            code: ErrorCode::NotFound,
-            message: "the requested imported conversation was not found",
-            detail: ErrorDetail::none(),
-        }
-    }
-
-    /// The named imported conversation exists and only its position was out of
-    /// range. Versions below the inspection version carry no typed detail
-    /// naming the range, so they get this message alone.
-    const fn imported_position_absent() -> Self {
-        Self {
-            code: ErrorCode::NotFound,
-            message: "the requested position is outside the imported conversation's positions",
-            detail: ErrorDetail::none(),
-        }
-    }
-
     const fn without_detail(code: ErrorCode) -> Self {
         Self {
             code,
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1 through 13, 16, 17, 18, 19, 21, and 22"
+                    "the protocol version is unsupported; supported version: 1"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
@@ -8638,7 +8368,6 @@ const fn wire_model_call_state(state: DispatchedModelCallState) -> ModelCallStat
 enum ProcessConnectionError {
     PeerIo(io::Error),
     SpoolIo(io::Error),
-    MessageRequiresVersion(u64),
     Encode(FrameEncodeError),
     EncodeInvariant,
     InboundFrameBudgetClosed,
@@ -8664,9 +8393,6 @@ impl fmt::Display for ProcessConnectionError {
         formatter.write_str(match self {
             Self::PeerIo(_) => "the local process peer I/O failed",
             Self::SpoolIo(_) => "the local process snapshot spool I/O failed",
-            Self::MessageRequiresVersion(_) => {
-                "the local process message requires a newer protocol version"
-            }
             Self::Encode(_) => "the local process connection could not encode a frame",
             Self::EncodeInvariant => {
                 "the local process connection could not represent an internal value"
@@ -8692,8 +8418,7 @@ impl Error for ProcessConnectionError {
         match self {
             Self::PeerIo(error) | Self::SpoolIo(error) => Some(error),
             Self::Encode(error) => Some(error),
-            Self::MessageRequiresVersion(_)
-            | Self::EncodeInvariant
+            Self::EncodeInvariant
             | Self::InboundFrameBudgetClosed
             | Self::ImportBudgetClosed
             | Self::ReviewCommandBudgetClosed
@@ -8829,17 +8554,15 @@ mod tests {
         MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
         OperationalImportError, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
         ProtocolError, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId,
-        ReviewCommandAdmission, SelectedSessionRepresentationFacts, SnapshotSpoolError,
-        acquire_import_permit, acquire_inbound_frame_permit,
-        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
-        acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
-        admits_provider_text_deltas, admitted_user_content, canonical_review_request_digest,
+        ReviewCommandAdmission, SnapshotSpoolError, acquire_import_permit,
+        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
+        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
+        acquire_snapshot_reader_permit, admitted_user_content, canonical_review_request_digest,
         consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
         inspect_connection_completion, map_rejection, read_frame_line,
-        replacement_model_is_admitted, required_protocol_version_for_selected_session,
-        retry_context_compaction_range_database_reads, run_until_shutdown,
-        snapshot_reader_capacity, wire_model_call_state, wire_tool_decision, wire_turn_state,
-        wire_uuid, write_content, write_context_compaction_repository_error,
+        replacement_model_is_admitted, retry_context_compaction_range_database_reads,
+        run_until_shutdown, snapshot_reader_capacity, wire_model_call_state, wire_tool_decision,
+        wire_turn_state, wire_uuid, write_content, write_context_compaction_repository_error,
         write_snapshot_spool_error, write_transcript_entry,
     };
     use crate::FatalExecutionSupervisor;
@@ -8854,8 +8577,7 @@ mod tests {
         },
         process_read::{
             ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessReadError,
-            ProcessReconciliationOperation, ProcessSessionAncestry, ProcessTranscriptEntry,
-            ProcessTurnState,
+            ProcessReconciliationOperation, ProcessTranscriptEntry, ProcessTurnState,
         },
     };
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
@@ -8944,13 +8666,6 @@ mod tests {
             _context: &mut std::task::Context<'_>,
         ) -> std::task::Poll<io::Result<()>> {
             std::task::Poll::Ready(Ok(()))
-        }
-    }
-
-    fn server_error_code_and_message(message: &ServerMessage) -> (ErrorCode, &str) {
-        match message {
-            ServerMessage::Error { code, message, .. } => (*code, message),
-            other => panic!("expected server error, observed {other:?}"),
         }
     }
 
@@ -9055,7 +8770,7 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the receipt projection is exact — the version-eight wire
+    /// INV-033: the receipt projection is exact — the wire
     /// surface records only reason-bearing denials, so a reason-free denial
     /// fails closed instead of fabricating an empty reason.
     #[test]
@@ -9082,17 +8797,6 @@ mod tests {
             Err(ProcessConnectionError::EncodeInvariant)
         ));
         Ok(())
-    }
-
-    /// INV-033: provider-text streaming remains additive when versions thirteen and
-    /// sixteen extend request vocabularies introduced after streaming.
-    #[test]
-    fn inv033_provider_text_streaming_is_admitted_by_every_later_version() {
-        assert!(!admits_provider_text_deltas(ProtocolVersion::Eleven));
-        assert!(admits_provider_text_deltas(ProtocolVersion::Twelve));
-        assert!(admits_provider_text_deltas(ProtocolVersion::Thirteen));
-        assert!(admits_provider_text_deltas(ProtocolVersion::Sixteen));
-        assert!(admits_provider_text_deltas(ProtocolVersion::Eighteen));
     }
 
     /// S03 / INV-034: an explicit compaction whose commit outcome cannot be
@@ -9179,166 +8883,9 @@ mod tests {
             ErrorCode::CommitAmbiguous
         );
         assert!(
-            ProtocolError::unsupported_version(2)
-                .message
-                .contains("version 2")
-        );
-        assert!(
-            ProtocolError::unsupported_version(3)
-                .message
-                .contains("version 3")
-        );
-        assert!(
-            ProtocolError::unsupported_version(6)
-                .message
-                .contains("version 6")
-        );
-        assert!(
             ProtocolError::without_detail(ErrorCode::UnsupportedVersion)
                 .message
-                .contains("1 through 13, 16, 17, 18, 19, 21, and 22")
-        );
-    }
-
-    /// INV-033 / INV-046: each retained protocol is gated by the first version
-    /// that can represent the selected session's durable history.
-    #[test]
-    fn inv033_inv046_legacy_session_compatibility_requires_first_representable_version() {
-        assert_eq!(
-            required_protocol_version_for_selected_session(
-                ProtocolVersion::Sixteen,
-                SelectedSessionRepresentationFacts {
-                    has_context_summary_history: true,
-                    has_model_identity_history: true,
-                    has_tool_history: true,
-                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
-                },
-            ),
-            Some(22),
-            "summary history requires the newest retained representation"
-        );
-        assert_eq!(
-            required_protocol_version_for_selected_session(
-                ProtocolVersion::TwentyTwo,
-                SelectedSessionRepresentationFacts {
-                    has_context_summary_history: true,
-                    has_model_identity_history: true,
-                    has_tool_history: true,
-                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
-                },
-            ),
-            None
-        );
-        assert_eq!(
-            required_protocol_version_for_selected_session(
-                ProtocolVersion::One,
-                SelectedSessionRepresentationFacts {
-                    has_context_summary_history: false,
-                    has_model_identity_history: false,
-                    has_tool_history: false,
-                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
-                },
-            ),
-            Some(2)
-        );
-        assert_eq!(
-            required_protocol_version_for_selected_session(
-                ProtocolVersion::One,
-                SelectedSessionRepresentationFacts {
-                    has_context_summary_history: false,
-                    has_model_identity_history: false,
-                    has_tool_history: true,
-                    ancestry: Some(ProcessSessionAncestry::OwnerInitiated),
-                },
-            ),
-            Some(3),
-            "tool history takes precedence over retained-version ancestry"
-        );
-        assert_eq!(
-            required_protocol_version_for_selected_session(
-                ProtocolVersion::Two,
-                SelectedSessionRepresentationFacts {
-                    has_context_summary_history: false,
-                    has_model_identity_history: false,
-                    has_tool_history: true,
-                    ancestry: Some(ProcessSessionAncestry::OwnerInitiated),
-                },
-            ),
-            Some(3),
-            "tool history takes precedence over retained-version ancestry"
-        );
-        assert_eq!(
-            required_protocol_version_for_selected_session(
-                ProtocolVersion::Three,
-                SelectedSessionRepresentationFacts {
-                    has_context_summary_history: false,
-                    has_model_identity_history: false,
-                    has_tool_history: true,
-                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
-                },
-            ),
-            None
-        );
-        assert_eq!(
-            required_protocol_version_for_selected_session(
-                ProtocolVersion::Four,
-                SelectedSessionRepresentationFacts {
-                    has_context_summary_history: false,
-                    has_model_identity_history: false,
-                    has_tool_history: true,
-                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
-                },
-            ),
-            None
-        );
-        assert_eq!(
-            required_protocol_version_for_selected_session(
-                ProtocolVersion::Two,
-                SelectedSessionRepresentationFacts {
-                    has_context_summary_history: false,
-                    has_model_identity_history: false,
-                    has_tool_history: false,
-                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
-                },
-            ),
-            None
-        );
-        assert_eq!(
-            required_protocol_version_for_selected_session(
-                ProtocolVersion::Five,
-                SelectedSessionRepresentationFacts {
-                    has_context_summary_history: false,
-                    has_model_identity_history: true,
-                    has_tool_history: false,
-                    ancestry: Some(ProcessSessionAncestry::OwnerInitiated),
-                },
-            ),
-            Some(6)
-        );
-        assert_eq!(
-            required_protocol_version_for_selected_session(
-                ProtocolVersion::One,
-                SelectedSessionRepresentationFacts {
-                    has_context_summary_history: false,
-                    has_model_identity_history: true,
-                    has_tool_history: true,
-                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
-                },
-            ),
-            Some(6),
-            "model-identity history requires the newest retained representation"
-        );
-        assert_eq!(
-            required_protocol_version_for_selected_session(
-                ProtocolVersion::Six,
-                SelectedSessionRepresentationFacts {
-                    has_context_summary_history: false,
-                    has_model_identity_history: true,
-                    has_tool_history: true,
-                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
-                },
-            ),
-            None
+                .contains("supported version: 1")
         );
     }
 
@@ -9421,10 +8968,10 @@ context_window_tokens = 200000
         };
         *final_byte = b'\n';
         let mut exact_reader = BufReader::new(exact.as_slice());
-        assert!(matches!(
-            read_frame_line(&mut exact_reader).await?,
-            Some(IncomingLine::Complete(line)) if line.len() == MAX_FRAME_BYTES
-        ));
+        let Some(IncomingLine::Complete(line)) = read_frame_line(&mut exact_reader).await? else {
+            panic!("fixture expected one complete frame at the exact cap");
+        };
+        assert_eq!(line.len(), MAX_FRAME_BYTES);
 
         let mut oversized = vec![b'x'; MAX_FRAME_BYTES + 1];
         let Some(final_byte) = oversized.last_mut() else {
@@ -9432,15 +8979,17 @@ context_window_tokens = 200000
         };
         *final_byte = b'\n';
         let mut oversized_reader = BufReader::new(oversized.as_slice());
-        assert!(matches!(
-            read_frame_line(&mut oversized_reader).await?,
-            Some(IncomingLine::Oversized {
-                request_id,
-                admitted_version: None,
-            }) if request_id.value() == 0
-        ));
+        let Some(IncomingLine::Oversized {
+            request_id,
+            admitted_version: None,
+        }) = read_frame_line(&mut oversized_reader).await?
+        else {
+            panic!("fixture expected an uncorrelated oversized frame");
+        };
+        assert_eq!(request_id.value(), 0);
 
-        let request_members = r#""request_id":"9""#;
+        let correlated_request_id = 9;
+        let request_members = format!(r#""request_id":"{correlated_request_id}""#);
         let mut correlated = format!(
             r#"{{"version":1,{request_members},"request":{{"type":"list_sessions","padding":""#
         )
@@ -9450,13 +8999,14 @@ context_window_tokens = 200000
         correlated.extend_from_slice(suffix);
         correlated.push(b'\n');
         let mut correlated_reader = BufReader::new(correlated.as_slice());
-        assert!(matches!(
-            read_frame_line(&mut correlated_reader).await?,
-            Some(IncomingLine::Oversized {
-                request_id,
-                admitted_version: Some(ProtocolVersion::One),
-            }) if request_id.value() == 9
-        ));
+        let Some(IncomingLine::Oversized {
+            request_id,
+            admitted_version: Some(ProtocolVersion::One),
+        }) = read_frame_line(&mut correlated_reader).await?
+        else {
+            panic!("fixture expected a correlated oversized frame");
+        };
+        assert_eq!(request_id.value(), correlated_request_id);
         Ok(())
     }
 
@@ -9931,48 +9481,6 @@ context_window_tokens = 200000
     }
 
     #[tokio::test]
-    async fn spool_version_race_reports_the_exact_required_version() -> Result<(), Box<dyn Error>> {
-        let request_id = RequestId::try_new(10)?;
-        let (mut writer, mut reader) = duplex(1_024);
-        let source_session = SessionId::from_uuid(Uuid::from_u128(1));
-        let model_identity = ProcessTranscriptEntry::ModelIdentityChanged {
-            entry_index: 0,
-            source_session,
-            entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(2)),
-            turn: TurnId::from_uuid(Uuid::from_u128(3)),
-            defaults_version: 2,
-            selected: DirectModelSelection::from_uuid(Uuid::from_u128(4)),
-        };
-
-        let spool_error = write_transcript_entry(
-            &mut writer,
-            ProtocolVersion::Five,
-            request_id,
-            &model_identity,
-        )
-        .await
-        .expect_err("a version-five spool cannot encode a model-identity boundary");
-        write_snapshot_spool_error(
-            &mut writer,
-            ProtocolVersion::Five,
-            request_id,
-            SnapshotSpoolError::from_connection(spool_error),
-        )
-        .await?;
-        drop(writer);
-        let mut encoded = Vec::new();
-        reader.read_to_end(&mut encoded).await?;
-
-        let frame = decode_server_line(&encoded)?;
-        let expected = ProtocolError::unsupported_version(6);
-        assert_eq!(
-            server_error_code_and_message(frame.message()),
-            (expected.code, expected.message)
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn blocked_follow_write_is_cancelled_by_shutdown() -> Result<(), Box<dyn Error>> {
         let (mut writer, _reader) = duplex(1);
         writer.write_all(b"x").await?;
@@ -10052,8 +9560,7 @@ context_window_tokens = 200000
     }
 
     #[tokio::test]
-    async fn s28_imported_entries_map_only_to_version_two_conservative_shapes()
-    -> Result<(), Box<dyn Error>> {
+    async fn s28_imported_entries_map_only_to_conservative_shapes() -> Result<(), Box<dyn Error>> {
         let request_id = RequestId::try_new(11)?;
         let source_session = SessionId::from_uuid(Uuid::from_u128(1));
         let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(2));
@@ -10061,9 +9568,10 @@ context_window_tokens = 200000
         let semantic_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(4));
         let (mut writer, mut reader) = duplex(4_096);
 
+        let source_attested = "source-attested";
         write_transcript_entry(
             &mut writer,
-            ProtocolVersion::Two,
+            ProtocolVersion::One,
             request_id,
             &ProcessTranscriptEntry::ImportedText {
                 entry_index: 0,
@@ -10072,13 +9580,13 @@ context_window_tokens = 200000
                 imported_conversation: conversation,
                 imported_entry,
                 source_speaker: ProcessImportedSourceSpeaker::User,
-                content: String::from("source-attested"),
+                content: String::from(source_attested),
             },
         )
         .await?;
         write_transcript_entry(
             &mut writer,
-            ProtocolVersion::Two,
+            ProtocolVersion::One,
             request_id,
             &ProcessTranscriptEntry::Imported {
                 entry_index: 1,
@@ -10101,33 +9609,46 @@ context_window_tokens = 200000
                 .next()
                 .ok_or_else(|| io::Error::other("missing imported text metadata"))?,
         )?;
-        assert!(matches!(
-            text.message(),
-            ServerMessage::TranscriptTextEntry {
-                entry: TranscriptTextEntry::Imported {
+        let ServerMessage::TranscriptTextEntry {
+            entry:
+                TranscriptTextEntry::Imported {
                     imported_conversation_id,
                     imported_entry_id,
-                    source_speaker: ImportedSourceSpeaker::Attested {
-                        speaker: ImportedSpeaker::User,
-                    },
+                    source_speaker:
+                        ImportedSourceSpeaker::Attested {
+                            speaker: ImportedSpeaker::User,
+                        },
                 },
-                ..
-            } if imported_conversation_id.into_uuid() == conversation.into_uuid()
-                && imported_entry_id.into_uuid() == imported_entry.into_uuid()
-        ));
-        assert!(matches!(
-            decode_server_line(
-                lines
-                    .next()
-                    .ok_or_else(|| io::Error::other("missing imported text content"))?
-            )?
-            .message(),
-            ServerMessage::TranscriptContent {
-                final_fragment: true,
-                content_fragment,
-                ..
-            } if content_fragment.as_str() == "source-attested"
-        ));
+            ..
+        } = text.message()
+        else {
+            panic!(
+                "fixture expected imported text metadata, got {:?}",
+                text.message()
+            );
+        };
+        assert_eq!(
+            imported_conversation_id.into_uuid(),
+            conversation.into_uuid()
+        );
+        assert_eq!(imported_entry_id.into_uuid(), imported_entry.into_uuid());
+        let content = decode_server_line(
+            lines
+                .next()
+                .ok_or_else(|| io::Error::other("missing imported text content"))?,
+        )?;
+        let ServerMessage::TranscriptContent {
+            final_fragment: true,
+            content_fragment,
+            ..
+        } = content.message()
+        else {
+            panic!(
+                "fixture expected imported text content, got {:?}",
+                content.message()
+            );
+        };
+        assert_eq!(content_fragment.as_str(), source_attested);
         assert!(matches!(
             decode_server_line(
                 lines

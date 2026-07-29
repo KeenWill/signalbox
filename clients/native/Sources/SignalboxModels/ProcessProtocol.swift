@@ -1,7 +1,7 @@
 import Foundation
 
 public enum SignalboxProcessProtocol {
-  public static let currentVersion = SignalboxProcessProtocolVersion.twentyOne
+  public static let currentVersion = SignalboxProcessProtocolVersion.one
   public static let maximumFrameBytes = 8 * 1024 * 1024
   public static let maximumContentFragmentUTF8Bytes = 1024 * 1024
   // docs/spec/process-protocol.md owns the metadata and conversation-list bounds.
@@ -19,25 +19,6 @@ public enum SignalboxProcessProtocol {
 
 public enum SignalboxProcessProtocolVersion: UInt64, Codable, CaseIterable, Sendable {
   case one = 1
-  case two = 2
-  case three = 3
-  case four = 4
-  case five = 5
-  case six = 6
-  case seven = 7
-  case eight = 8
-  case nine = 9
-  case ten = 10
-  case eleven = 11
-  case twelve = 12
-  case thirteen = 13
-  case sixteen = 16
-  case seventeen = 17
-  case eighteen = 18
-  case nineteen = 19
-  // Twenty is allocated by the concurrent context-compaction protocol stack,
-  // in flight alongside this one; it is not admitted here.
-  case twentyOne = 21
 }
 
 public enum SignalboxCanonicalValueError: LocalizedError, Equatable {

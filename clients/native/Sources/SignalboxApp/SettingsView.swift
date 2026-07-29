@@ -20,7 +20,7 @@ struct SettingsScreen: View {
           Text("Process protocol")
         } footer: {
           Text(
-            "signalboxd serves version 18 JSONL over a local Unix socket. It defines no authentication field."
+            "signalboxd serves the single-version JSONL protocol over a local Unix socket. It defines no authentication field."
           )
         }
 

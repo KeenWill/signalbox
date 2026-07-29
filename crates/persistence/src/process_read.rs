@@ -1126,12 +1126,6 @@ pub struct ProcessReadRepository {
     pool: PgPool,
 }
 
-#[derive(Clone, Copy)]
-enum ModelCallUsageRead {
-    Included,
-    Omitted,
-}
-
 impl ProcessReadRepository {
     /// Uses the supplied pool for independent repeatable-read snapshots.
     pub const fn new(pool: PgPool) -> Self {
@@ -1268,9 +1262,7 @@ impl ProcessReadRepository {
 
     /// Returns whether the selected session has durable tool-only history.
     ///
-    /// This narrow read lets a process adapter reject a retained protocol
-    /// version before mutating a session whose transcript that version cannot
-    /// represent.
+    /// This narrow read reports whether tool-only transcript evidence exists.
     pub async fn session_has_tool_history(
         &self,
         requested_session: SessionId,
@@ -1311,6 +1303,7 @@ impl ProcessReadRepository {
     }
 
     /// Returns whether the selected session has a model-identity boundary.
+    #[allow(dead_code)]
     pub async fn session_has_model_identity_history(
         &self,
         requested_session: SessionId,
@@ -1331,9 +1324,7 @@ impl ProcessReadRepository {
 
     /// Returns whether the selected session has a context-summary entry.
     ///
-    /// This narrow read lets a process adapter reject a retained protocol
-    /// version before constructing or mutating history whose summary shape
-    /// that version cannot represent.
+    /// This narrow read reports whether context-summary transcript evidence exists.
     pub async fn session_has_context_summary_history(
         &self,
         requested_session: SessionId,
@@ -1572,28 +1563,6 @@ impl ProcessReadRepository {
         &self,
         requested_session: SessionId,
     ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
-        self.open_transcript_with_model_call_usage(requested_session, ModelCallUsageRead::Included)
-            .await
-    }
-
-    /// Opens one repeatable-read transcript cursor without loading terminal
-    /// model-call usage.
-    ///
-    /// This keeps protocol versions whose closed vocabulary cannot carry usage
-    /// from traversing evidence that they must omit.
-    pub async fn open_transcript_without_model_call_usage(
-        &self,
-        requested_session: SessionId,
-    ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
-        self.open_transcript_with_model_call_usage(requested_session, ModelCallUsageRead::Omitted)
-            .await
-    }
-
-    async fn open_transcript_with_model_call_usage(
-        &self,
-        requested_session: SessionId,
-        model_call_usage: ModelCallUsageRead,
-    ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(REPEATABLE_READ_ONLY)
             .execute(&mut *transaction)
@@ -1626,13 +1595,8 @@ impl ProcessReadRepository {
             load_checked_imported_seed_frontier(&mut transaction, requested_session).await?;
         let expected_turn_count =
             load_transcript_turn_count(&mut transaction, requested_session).await?;
-        let (expected_model_call_count, model_calls_complete) = match model_call_usage {
-            ModelCallUsageRead::Included => (
-                load_terminal_model_call_count(&mut transaction, requested_session).await?,
-                false,
-            ),
-            ModelCallUsageRead::Omitted => (0, true),
-        };
+        let expected_model_call_count =
+            load_terminal_model_call_count(&mut transaction, requested_session).await?;
         Ok(Some(ProcessTranscriptReader {
             transaction: Some(transaction),
             session: requested_session,
@@ -1650,7 +1614,7 @@ impl ProcessReadRepository {
             expected_model_call_count,
             model_call_count: 0,
             next_model_call_after: None,
-            model_calls_complete,
+            model_calls_complete: false,
             entry_count: None,
             next_entry_index: 0,
             summary: None,

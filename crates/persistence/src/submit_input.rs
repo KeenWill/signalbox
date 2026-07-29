@@ -296,8 +296,6 @@ pub enum SubmitInputRepositoryError {
     Database(sqlx::Error),
     /// PostgreSQL obscured whether the requested commit succeeded.
     CommitAmbiguous(sqlx::Error),
-    /// The selected history requires process protocol version seventeen.
-    ContextSummaryRequiresProtocolVersion22,
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
         /// The owner-global identifier that names another kind.
@@ -329,9 +327,6 @@ impl fmt::Display for SubmitInputRepositoryError {
                     "SubmitInput commit outcome is ambiguous: {error}"
                 )
             }
-            Self::ContextSummaryRequiresProtocolVersion22 => {
-                formatter.write_str("SubmitInput history requires protocol version seventeen")
-            }
             Self::DifferentCommandKind { command_id } => {
                 write!(
                     formatter,
@@ -358,9 +353,7 @@ impl Error for SubmitInputRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::ContextSummaryRequiresProtocolVersion22
-            | Self::DifferentCommandKind { .. }
-            | Self::AcceptedInputIdentityCollision { .. } => None,
+            Self::DifferentCommandKind { .. } | Self::AcceptedInputIdentityCollision { .. } => None,
             Self::Corruption(error) => Some(error),
             Self::ModelExecution(error) => Some(error),
         }
@@ -475,7 +468,7 @@ impl SubmitInputRepository {
                 signalbox_domain::ContextFrontierId,
             ) + Send,
     {
-        self.handle_with_candidates_alias_resolver_and_summary_guard(
+        self.handle_with_candidates_alias_resolver(
             command,
             accepted_input,
             turn,
@@ -483,18 +476,13 @@ impl SubmitInputRepository {
             next_reclassified_turn,
             next_tool_cancellation,
             select_definition,
-            false,
         )
         .await
     }
 
-    /// Handles one command while optionally rejecting context-summary history
-    /// under the same session lock that serializes the mutation.
+    /// Handles one command with deployment model-alias resolution.
     #[allow(clippy::too_many_arguments)]
-    pub async fn handle_with_candidates_alias_resolver_and_summary_guard<
-        NextTurn,
-        NextToolCancellation,
-    >(
+    pub async fn handle_with_candidates_alias_resolver<NextTurn, NextToolCancellation>(
         &self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
@@ -503,7 +491,6 @@ impl SubmitInputRepository {
         next_reclassified_turn: NextTurn,
         next_tool_cancellation: NextToolCancellation,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
-        reject_context_summary_history: bool,
     ) -> Result<SubmitInputHandlingOutcome, SubmitInputRepositoryError>
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
@@ -524,7 +511,6 @@ impl SubmitInputRepository {
             next_reclassified_turn,
             next_tool_cancellation,
             select_definition,
-            reject_context_summary_history,
         )
         .await;
 
@@ -627,7 +613,6 @@ async fn handle_in_transaction<NextTurn, NextToolCancellation>(
     mut next_reclassified_turn: NextTurn,
     mut next_tool_cancellation: NextToolCancellation,
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
-    reject_context_summary_history: bool,
 ) -> Result<TransactionDecision, SubmitInputRepositoryError>
 where
     NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
@@ -698,15 +683,8 @@ where
     let PreparedAgainstLockedState {
         prepared,
         scheduling,
-    } = prepare_against_locked_state(
-        connection,
-        command,
-        accepted_input,
-        turn,
-        select_definition,
-        reject_context_summary_history,
-    )
-    .await?;
+    } = prepare_against_locked_state(connection, command, accepted_input, turn, select_definition)
+        .await?;
     let recorded = prepared.result().clone();
     let interrupt = match prepared.result() {
         SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) => {
@@ -1066,7 +1044,6 @@ async fn prepare_against_locked_state(
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
-    reject_context_summary_history: bool,
 ) -> Result<PreparedAgainstLockedState, SubmitInputRepositoryError> {
     // Lock-mode constraint: this session-row lock must use the no-key-update
     // mode, not PostgreSQL's strongest row-lock mode. Submit orders the session row before the
@@ -1090,22 +1067,6 @@ async fn prepare_against_locked_state(
         });
     }
 
-    if reject_context_summary_history {
-        let has_context_summary: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                 SELECT 1
-                   FROM semantic_transcript_entry
-                  WHERE source_session_id = $1
-                    AND payload_kind = 'context_summary'
-             )",
-        )
-        .bind(session_id_to_uuid(command.session()))
-        .fetch_one(&mut *connection)
-        .await?;
-        if has_context_summary {
-            return Err(SubmitInputRepositoryError::ContextSummaryRequiresProtocolVersion22);
-        }
-    }
     let scheduler_exists =
         sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SCHEDULER)
             .bind(session_id_to_uuid(command.session()))

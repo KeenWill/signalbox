@@ -591,7 +591,7 @@ private actor MockProcessProtocolState {
     default:
       return (
         "Show the native client speaking the real process protocol.",
-        "The view is projected from a version 5 JSONL snapshot over the transport abstraction."
+        "The view is projected from a process-protocol JSONL snapshot over the transport abstraction."
       )
     }
   }

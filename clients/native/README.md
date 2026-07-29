@@ -5,9 +5,9 @@
 
 Native SwiftUI client for the Signalbox process protocol.
 
-The production path encodes and decodes the version 21 session and transcript
-vocabulary as newline-delimited JSON. It does not use the earlier REST,
-WebSocket, or OpenAI-compatible surfaces.
+The production path encodes and decodes the single-version session and
+transcript vocabulary as newline-delimited JSON. It does not use the earlier
+REST, WebSocket, or OpenAI-compatible surfaces.
 
 ## Live macOS surface
 
@@ -30,14 +30,14 @@ WebSocket, or OpenAI-compatible surfaces.
   its required successor input.
 - Create a session by selecting a model alias read from the running daemon and
   optionally supplying a system prompt.
-- Exercise the real v18 encoder, decoder, request identity, and JSONL framing in
+- Exercise the real encoder, decoder, request identity, and JSONL framing in
   deterministic mock UI flows.
 
 The process protocol exposes no runner, template, monitor, or artifact catalog;
 those views remain explicit capability gates rather than fabricated client
 behavior. Imported conversations appear in the unified list, while transcript
 inspection and continuation remain deferred to a separate native UI slice over
-the landed version-seventeen read.
+the landed imported-conversation read.
 
 ## Transport gate
 
@@ -51,8 +51,9 @@ export SIGNALBOX_SOCKET_PATH='/absolute/path/to/signalbox.sock'
 ```
 
 There is no owner-approved network transport reachable by a remote or mobile
-client. iPhone and iPad builds run against the in-memory v18 harness; real
-remote/mobile connectivity remains an owner design gate recorded in
+client. iPhone and iPad builds run against the in-memory process-protocol
+harness; real remote/mobile connectivity remains an owner design gate recorded
+in
 [Protocols and persistence](../../docs/open-questions.md#protocols-and-persistence);
 the non-authoritative backlog tracks Tailscale as near-local direction and
 iOS/iPad follow-on.
@@ -126,7 +127,7 @@ The following work remains:
 - Remote/mobile transport, authentication, authorization, and revocation await
   an owner-approved server design.
 - Imported transcript inspection and continuation await their native UI slice
-  over the version-seventeen read.
+  over the imported-conversation read.
 - Runners, templates, monitor summaries, and artifacts await real
   process-protocol operations.
 - Compact-width navigation omits Templates until its information architecture is
