@@ -1508,6 +1508,13 @@ public struct SignalboxTranscriptTextEntryMessage: Decodable, Equatable, Sendabl
 public enum SignalboxTranscriptTextEntry: Decodable, Equatable, Sendable {
   case user(acceptedInputID: SignalboxCanonicalUUID, turnID: SignalboxCanonicalUUID)
   case assistant(turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID)
+  case contextSummary(
+    modelCallID: SignalboxCanonicalUUID,
+    firstSourceSessionID: SignalboxCanonicalUUID,
+    firstEntryID: SignalboxCanonicalUUID,
+    throughSourceSessionID: SignalboxCanonicalUUID,
+    throughEntryID: SignalboxCanonicalUUID
+  )
   case imported(
     importedConversationID: SignalboxCanonicalUUID,
     importedEntryID: SignalboxCanonicalUUID,
@@ -1536,6 +1543,21 @@ public enum SignalboxTranscriptTextEntry: Decodable, Equatable, Sendable {
         )
         self = .assistant(
           turnID: try decoder.decode("turn_id"), modelCallID: try decoder.decode("model_call_id"))
+      case "context_summary":
+        try tagged.rejectUnadmittedFields(
+          [
+            "type", "model_call_id", "first_source_session_id", "first_entry_id",
+            "through_source_session_id", "through_entry_id",
+          ],
+          decoder: decoder
+        )
+        self = .contextSummary(
+          modelCallID: try decoder.decode("model_call_id"),
+          firstSourceSessionID: try decoder.decode("first_source_session_id"),
+          firstEntryID: try decoder.decode("first_entry_id"),
+          throughSourceSessionID: try decoder.decode("through_source_session_id"),
+          throughEntryID: try decoder.decode("through_entry_id")
+        )
       case "imported":
         try tagged.rejectUnadmittedFields(
           ["type", "imported_conversation_id", "imported_entry_id", "source_speaker"],
@@ -1597,6 +1619,13 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
   case toolBatchTransition(
     turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID,
     state: SignalboxToolBatchState)
+  case contextCompacted(
+    contextCompactionID: SignalboxCanonicalUUID,
+    modelCallID: SignalboxCanonicalUUID,
+    throughPosition: SignalboxCanonicalUInt64,
+    summaryEntryID: SignalboxCanonicalUUID,
+    resultFrontierID: SignalboxCanonicalUUID
+  )
   case turnCompleted(
     turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID,
     completionEntryID: SignalboxCanonicalUUID, terminalFrontierID: SignalboxCanonicalUUID)
@@ -1664,6 +1693,21 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
           turnID: try decoder.decode("turn_id"),
           modelCallID: try decoder.decode("model_call_id"),
           state: try decoder.decode("state")
+        )
+      case "context_compacted":
+        try tagged.rejectUnadmittedFields(
+          [
+            "type", "context_compaction_id", "model_call_id", "through_position",
+            "summary_entry_id", "result_frontier_id",
+          ],
+          decoder: decoder
+        )
+        self = .contextCompacted(
+          contextCompactionID: try decoder.decode("context_compaction_id"),
+          modelCallID: try decoder.decode("model_call_id"),
+          throughPosition: try decoder.decode("through_position"),
+          summaryEntryID: try decoder.decode("summary_entry_id"),
+          resultFrontierID: try decoder.decode("result_frontier_id")
         )
       case "turn_completed":
         try tagged.rejectUnadmittedFields(

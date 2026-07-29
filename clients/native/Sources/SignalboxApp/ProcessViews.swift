@@ -1174,7 +1174,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         turnID: turnID,
         terminalActivity: .init(state: .recoveryRequired, label: "Recovery required")
       )
-    case .sessionCreated, .unknown:
+    case .sessionCreated, .contextCompacted, .unknown:
       break
     }
   }
