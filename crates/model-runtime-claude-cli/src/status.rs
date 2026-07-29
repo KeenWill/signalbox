@@ -2,9 +2,13 @@
 
 use signalbox_model_runtime::ProviderErrorKind;
 
-pub(crate) fn classify_error(subtype: &str, message: &str) -> ProviderErrorKind {
+pub(crate) fn classify_error(
+    status: Option<u16>,
+    subtype: &str,
+    message: &str,
+) -> ProviderErrorKind {
     let normalized = format!("{subtype} {message}").to_ascii_lowercase();
-    match () {
+    let text_kind = match () {
         _ if contains_any(
             &normalized,
             &[
@@ -85,9 +89,49 @@ pub(crate) fn classify_error(subtype: &str, message: &str) -> ProviderErrorKind 
             ProviderErrorKind::InvalidRequest
         }
         _ => ProviderErrorKind::Unrecognized,
+    };
+    if status == Some(401) {
+        return ProviderErrorKind::CredentialRejected;
+    }
+    if text_kind != ProviderErrorKind::Unrecognized {
+        return text_kind;
+    }
+    match status {
+        Some(400) => ProviderErrorKind::InvalidRequest,
+        Some(401) => ProviderErrorKind::CredentialRejected,
+        Some(403) => ProviderErrorKind::PermissionDenied,
+        Some(404) => ProviderErrorKind::TargetNotFound,
+        Some(413) => ProviderErrorKind::RequestTooLarge,
+        Some(429) => ProviderErrorKind::RateLimited,
+        Some(500) => ProviderErrorKind::ProviderInternal,
+        Some(529) => ProviderErrorKind::Overloaded,
+        _ => ProviderErrorKind::Unrecognized,
     }
 }
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use signalbox_model_runtime::ProviderErrorKind;
+
+    use super::classify_error;
+
+    #[test]
+    fn definitive_status_classifies_an_otherwise_generic_error() {
+        assert_eq!(
+            classify_error(Some(401), "error_during_execution", ""),
+            ProviderErrorKind::CredentialRejected
+        );
+        assert_eq!(
+            classify_error(Some(429), "error_during_execution", ""),
+            ProviderErrorKind::RateLimited
+        );
+        assert_eq!(
+            classify_error(Some(529), "error_during_execution", ""),
+            ProviderErrorKind::Overloaded
+        );
+    }
 }

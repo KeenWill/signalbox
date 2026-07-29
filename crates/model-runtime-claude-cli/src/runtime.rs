@@ -380,6 +380,15 @@ fn create_support_files(
     let ready = directory.path().join("mcp-ready");
     let mcp_config = directory.path().join("mcp.json");
     let settings = directory.path().join("settings.json");
+    let bridge_text = bridge
+        .to_str()
+        .ok_or_else(|| "MCP bridge path is not valid UTF-8".to_string())?;
+    let catalog_text = catalog
+        .to_str()
+        .ok_or_else(|| "MCP catalog path is not valid UTF-8".to_string())?;
+    let ready_text = ready
+        .to_str()
+        .ok_or_else(|| "MCP readiness path is not valid UTF-8".to_string())?;
     let catalog_bytes = serde_json::to_vec(&translated.catalog)
         .map_err(|error| format!("could not serialize MCP catalog: {error}"))?;
     std::fs::write(&catalog, catalog_bytes)
@@ -387,8 +396,8 @@ fn create_support_files(
     let mcp = serde_json::json!({
         "mcpServers": { SERVER_NAME: {
             "type": "stdio",
-            "command": bridge,
-            "args": ["--serve", catalog, ready],
+            "command": bridge_text,
+            "args": ["--serve", catalog_text, ready_text],
         }}
     });
     std::fs::write(
@@ -398,8 +407,8 @@ fn create_support_files(
     .map_err(|error| format!("could not write MCP config: {error}"))?;
     let hook_command = format!(
         "{} --wait-ready {}",
-        shell_quote(bridge),
-        shell_quote(&ready)
+        shell_quote(bridge_text),
+        shell_quote(ready_text)
     );
     let isolated_settings = serde_json::json!({
         "hooks": {"SessionStart": [{"hooks": [{
@@ -418,8 +427,7 @@ fn create_support_files(
     })
 }
 
-fn shell_quote(path: &Path) -> String {
-    let value = path.as_os_str().to_string_lossy();
+fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
@@ -569,6 +577,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         &prepared.translated,
     );
     let mut redacting_sink = RedactingSink::new(sink);
+    redacting_sink.begin_terminal_text_capture(prepared.delivery == DeliveryMode::Streamed);
     let input_step = {
         let send_prompt = async {
             stdin.write_all(&prepared.prompt).await?;

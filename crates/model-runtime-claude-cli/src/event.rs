@@ -16,7 +16,7 @@ use signalbox_model_runtime::{
 
 use crate::SUPPORTED_CLAUDE_CLI_VERSION;
 use crate::bridge::{SERVER_NAME, TOOL_ACKNOWLEDGEMENT, TOOL_PREFIX};
-use crate::redaction::{RedactingSink, redact_json, redact_text};
+use crate::redaction::{REDACTED, RedactingSink, TerminalTextCapture, redact_json, redact_text};
 use crate::status::classify_error;
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{AssistantContent, AssistantEvent, ResultEvent, SystemInit, UserEvent};
@@ -160,6 +160,7 @@ pub(crate) struct EventDecoder<C> {
     result_ids: HashSet<String>,
     next_part_index: u32,
     usage: TokenUsage,
+    finish_reported: Option<FinishReason>,
     initialized: bool,
     terminal: Option<CliTerminal>,
 }
@@ -199,6 +200,7 @@ impl<C: Clone> EventDecoder<C> {
             result_ids: HashSet::new(),
             next_part_index: 0,
             usage: TokenUsage::unreported(),
+            finish_reported: None,
             initialized: false,
             terminal: None,
         }
@@ -354,15 +356,13 @@ impl<C: Clone> EventDecoder<C> {
             AssistantContent::Text { text } => {
                 if self.result_ids.is_empty() {
                     let index = self.take_part_index()?;
-                    if self.delivery == DeliveryMode::Streamed {
-                        sink.observe(Observation {
-                            correlation: self.correlation.clone(),
-                            fact: ObservationFact::TextDelta {
-                                index,
-                                text: text.clone(),
-                            },
-                        });
-                    }
+                    sink.observe(Observation {
+                        correlation: self.correlation.clone(),
+                        fact: ObservationFact::TextDelta {
+                            index,
+                            text: text.clone(),
+                        },
+                    });
                     self.content.push(AssistantPart::Text(text));
                 } else {
                     sink.extend_dropped_context(&text);
@@ -373,17 +373,13 @@ impl<C: Clone> EventDecoder<C> {
                 signature,
             } => {
                 let index = self.take_part_index()?;
-                if self.delivery == DeliveryMode::Streamed {
-                    sink.observe(Observation {
-                        correlation: self.correlation.clone(),
-                        fact: ObservationFact::ThinkingDelta {
-                            index,
-                            text: thinking.clone(),
-                        },
-                    });
-                } else {
-                    sink.extend_dropped_context(&thinking);
-                }
+                sink.observe(Observation {
+                    correlation: self.correlation.clone(),
+                    fact: ObservationFact::ThinkingDelta {
+                        index,
+                        text: thinking.clone(),
+                    },
+                });
                 self.content.push(AssistantPart::Thinking {
                     text: thinking,
                     signature,
@@ -488,10 +484,6 @@ impl<C: Clone> EventDecoder<C> {
         if let Some(usage) = event.usage {
             self.usage.absorb(result_usage(usage));
         }
-        sink.observe(Observation {
-            correlation: self.correlation.clone(),
-            fact: ObservationFact::UsageReported(self.usage),
-        });
         if event.subtype == "success" && !event.is_error {
             let stop_reason = event.stop_reason.unwrap_or_else(|| "end_turn".to_string());
             if event.terminal_reason.as_deref() != Some("completed") {
@@ -500,13 +492,11 @@ impl<C: Clone> EventDecoder<C> {
                 ));
             }
             let finish = finish_reason(&stop_reason);
+            self.finish_reported = Some(finish.clone());
             sink.observe(Observation {
                 correlation: self.correlation.clone(),
                 fact: ObservationFact::FinishReported(finish),
             });
-            if let Some(result) = event.result {
-                sink.extend_dropped_context(&result);
-            }
             self.terminal = Some(CliTerminal::Success { stop_reason });
         } else if event.is_error {
             let message = event.errors.join("; ");
@@ -543,14 +533,20 @@ impl<C: Clone> EventDecoder<C> {
                 status,
                 message,
             } => {
+                let kind = classify_error(status, &subtype, &message);
+                let message = sink.redact_terminal_failure_text(&message);
+                sink.observe(Observation {
+                    correlation: self.correlation.clone(),
+                    fact: ObservationFact::UsageReported(self.usage),
+                });
                 return TerminalEvidence::ProviderError(ProviderErrorEvidence {
                     exchange: self.exchange,
                     reported_model: self.reported_model,
-                    kind: classify_error(&subtype, &message),
+                    kind,
                     native: NativeErrorFacts {
                         error_token: Some(subtype),
                         error_code: status.map(|value| value.to_string()),
-                        message: Some(sink.redact_terminal_failure_text(&message)),
+                        message: Some(message),
                     },
                     usage: self.usage,
                 });
@@ -558,15 +554,28 @@ impl<C: Clone> EventDecoder<C> {
             CliTerminal::Success { stop_reason } => stop_reason,
         };
         if self.proposal_indexes.len() != self.result_ids.len() {
+            sink.observe(Observation {
+                correlation: self.correlation.clone(),
+                fact: ObservationFact::UsageReported(self.usage),
+            });
             return self.loss(LossCause::ResponseUnintelligible {
                 detail: "Claude terminal success did not include a tool_result for every tool_use"
                     .to_string(),
             });
         }
         if let Err(detail) = self.validate_tool_requirement() {
+            sink.observe(Observation {
+                correlation: self.correlation.clone(),
+                fact: ObservationFact::UsageReported(self.usage),
+            });
             return self.loss(LossCause::ResponseUnintelligible { detail });
         }
-        let content = self.redacted_content(sink);
+        let mut capture = sink.take_terminal_text_capture();
+        let content = self.redacted_content(&mut capture);
+        sink.observe(Observation {
+            correlation: self.correlation.clone(),
+            fact: ObservationFact::UsageReported(self.usage),
+        });
         if stop_reason == "refusal" {
             if !self.proposal_indexes.is_empty() {
                 return self.loss(LossCause::ResponseUnintelligible {
@@ -616,7 +625,7 @@ impl<C: Clone> EventDecoder<C> {
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: self.exchange,
                 reported_model: self.reported_model,
-                kind: classify_error(&subtype, &message),
+                kind: classify_error(status, &subtype, &message),
                 native: NativeErrorFacts {
                     error_token: Some(subtype),
                     error_code: status.map(|value| value.to_string()),
@@ -628,7 +637,7 @@ impl<C: Clone> EventDecoder<C> {
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: self.exchange,
                 reported_model: self.reported_model,
-                kind: classify_error("process_exit", classification),
+                kind: classify_error(None, "process_exit", classification),
                 native: NativeErrorFacts {
                     error_token: Some("claude_cli_exit".to_string()),
                     error_code: None,
@@ -686,28 +695,52 @@ impl<C: Clone> EventDecoder<C> {
             ToolRequirement::Optional => Ok(()),
             ToolRequirement::Any if self.proposal_indexes.is_empty() => Err("Claude did not satisfy the required any-tool choice".to_string()),
             ToolRequirement::Any => Ok(()),
-            ToolRequirement::Named(name) if self.content.iter().any(|part| matches!(part, AssistantPart::ToolCall(call) if call.name.as_str() == name)) => Ok(()),
-            ToolRequirement::Named(name) => Err(format!("Claude did not call required tool `{name}`")),
+            ToolRequirement::Named(name)
+                if self.proposal_indexes.is_empty()
+                    || self.content.iter().any(|part| {
+                        matches!(part, AssistantPart::ToolCall(call) if call.name.as_str() != name)
+                    }) =>
+            {
+                Err(format!("Claude tool choice permits only `{name}`"))
+            }
+            ToolRequirement::Named(_) => Ok(()),
         }
     }
 
-    fn redacted_content(&mut self, sink: &mut RedactingSink<'_, C>) -> Vec<AssistantPart> {
+    fn redacted_content(&mut self, capture: &mut TerminalTextCapture) -> Vec<AssistantPart> {
         self.content
             .drain(..)
-            .map(|part| match part {
+            .zip(0_u32..)
+            .filter_map(|(part, index)| match part {
                 AssistantPart::Text(text) => {
-                    AssistantPart::Text(sink.redact_final_envelope_text(&text))
+                    let text = capture.take_text(index).unwrap_or_else(|| {
+                        if text.is_empty() {
+                            String::new()
+                        } else {
+                            REDACTED.to_string()
+                        }
+                    });
+                    (!text.is_empty()).then_some(AssistantPart::Text(text))
                 }
-                AssistantPart::Thinking { text, signature } => AssistantPart::Thinking {
-                    text: redact_text(&text),
-                    signature: signature.map(|value| redact_text(&value)),
-                },
-                AssistantPart::RedactedThinking { data } => AssistantPart::RedactedThinking {
+                AssistantPart::Thinking { text, signature } => {
+                    let text = capture.take_thinking(index).unwrap_or_else(|| {
+                        if text.is_empty() {
+                            text
+                        } else {
+                            REDACTED.to_string()
+                        }
+                    });
+                    Some(AssistantPart::Thinking {
+                        text,
+                        signature: signature.map(|value| redact_text(&value)),
+                    })
+                }
+                AssistantPart::RedactedThinking { data } => Some(AssistantPart::RedactedThinking {
                     data: redact_text(&data),
-                },
+                }),
                 AssistantPart::ToolCall(mut call) => {
                     call.arguments_json = redact_json(&call.arguments_json);
-                    AssistantPart::ToolCall(call)
+                    Some(AssistantPart::ToolCall(call))
                 }
             })
             .collect()
@@ -718,7 +751,7 @@ impl<C: Clone> EventDecoder<C> {
             cause,
             exchange: self.exchange,
             reported_model: self.reported_model,
-            finish_reported: None,
+            finish_reported: self.finish_reported,
             usage: self.usage,
         })
     }

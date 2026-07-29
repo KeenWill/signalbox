@@ -93,6 +93,7 @@ fn serve(catalog_path: PathBuf, ready_path: PathBuf) -> ExitCode {
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
     let mut line = Vec::new();
+    let mut ready_published = false;
     loop {
         line.clear();
         let Ok(read) = input.read_until(b'\n', &mut line) else {
@@ -119,9 +120,10 @@ fn serve(catalog_path: PathBuf, ready_path: PathBuf) -> ExitCode {
                         "tools": &catalog.tools,
                     }),
                 );
-                if write_response(&mut output, &response).is_err()
-                    || create_ready_marker(&ready_path).is_err()
-                {
+                if write_response(&mut output, &response).is_err() {
+                    return ExitCode::FAILURE;
+                }
+                if publish_ready_once(&ready_path, &mut ready_published).is_err() {
                     return ExitCode::FAILURE;
                 }
                 continue;
@@ -225,6 +227,14 @@ fn write_response(output: &mut impl Write, response: &serde_json::Value) -> std:
     output.flush()
 }
 
+fn publish_ready_once(path: &Path, published: &mut bool) -> std::io::Result<()> {
+    if !*published {
+        create_ready_marker(path)?;
+        *published = true;
+    }
+    Ok(())
+}
+
 fn create_ready_marker(path: &Path) -> std::io::Result<()> {
     let mut marker = std::fs::OpenOptions::new()
         .create_new(true)
@@ -236,7 +246,9 @@ fn create_ready_marker(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MCP_PROTOCOL_VERSION, initialize_response, valid_mcp_tool_name};
+    use super::{
+        MCP_PROTOCOL_VERSION, initialize_response, publish_ready_once, valid_mcp_tool_name,
+    };
 
     #[test]
     fn mcp_tool_name_accepts_the_supported_punctuation() {
@@ -251,6 +263,21 @@ mod tests {
     #[test]
     fn mcp_tool_name_rejects_an_empty_name() {
         assert!(!valid_mcp_tool_name(""));
+    }
+
+    #[test]
+    fn readiness_publication_accepts_repeated_tool_lists() {
+        let temporary = tempfile::tempdir().expect("temporary bridge directory is created");
+        let marker = temporary.path().join("ready");
+        let mut published = false;
+
+        publish_ready_once(&marker, &mut published).expect("first tool list publishes readiness");
+        publish_ready_once(&marker, &mut published).expect("repeated tool list remains usable");
+
+        assert_eq!(
+            std::fs::read_to_string(marker).expect("readiness marker remains readable"),
+            "ready\n"
+        );
     }
 
     #[test]

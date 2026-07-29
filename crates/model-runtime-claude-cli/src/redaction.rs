@@ -1,5 +1,7 @@
 //! Credential-shape redaction for CLI-controlled output.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink};
 
@@ -1011,12 +1013,29 @@ struct PendingStreamText<C> {
     text: String,
 }
 
+#[derive(Default)]
+pub(crate) struct TerminalTextCapture {
+    text: BTreeMap<u32, String>,
+    thinking: BTreeMap<u32, String>,
+}
+
+impl TerminalTextCapture {
+    pub(crate) fn take_text(&mut self, index: u32) -> Option<String> {
+        self.text.remove(&index)
+    }
+
+    pub(crate) fn take_thinking(&mut self, index: u32) -> Option<String> {
+        self.thinking.remove(&index)
+    }
+}
+
 /// Holds an incomplete credential shape between streamed facts.
 pub(crate) struct RedactingSink<'a, C> {
     inner: &'a mut (dyn ObservationSink<C> + Send),
     pending: Option<PendingStreamText<C>>,
     suppressing: bool,
-    terminal_text_capture: Option<String>,
+    terminal_text_capture: Option<TerminalTextCapture>,
+    forward_stream_observations: bool,
     /// The unsafe trailing suffix of a provider-controlled field already
     /// emitted in an out-of-band record (the thread id in
     /// `ExchangeEstablished`). Later provider text sits beside that record in
@@ -1043,9 +1062,22 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             pending: None,
             suppressing: false,
             terminal_text_capture: None,
+            forward_stream_observations: true,
             emitted_context: String::new(),
             dropped_context: String::new(),
         }
+    }
+
+    /// Starts recording statefully redacted text and thinking by content-part
+    /// index. Buffered delivery captures without forwarding delta
+    /// observations; streamed delivery captures the same bytes it forwards.
+    pub(crate) fn begin_terminal_text_capture(&mut self, forward_stream_observations: bool) {
+        self.terminal_text_capture = Some(TerminalTextCapture::default());
+        self.forward_stream_observations = forward_stream_observations;
+    }
+
+    pub(crate) fn take_terminal_text_capture(&mut self) -> TerminalTextCapture {
+        self.terminal_text_capture.take().unwrap_or_default()
     }
 
     /// Seeds the lookbehind with the unsafe trailing context of a field value
@@ -1190,54 +1222,6 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             return REDACTED.to_string();
         }
         redact_text(detail)
-    }
-
-    /// Redacts the final envelope text like a terminal failure message, then
-    /// resolves the dropped-reasoning chain through it: after this text, a
-    /// dropped-marker candidate has either completed inside it (and was
-    /// suppressed just now), been broken by it, or — only when the candidate
-    /// is still in progress at the text's end — remains live. Consuming the
-    /// resolved chain keeps it from misfiring on the clean provider ids that
-    /// follow: with the broken chain still live, an id beginning `key=` would
-    /// be reassembled as `api_key=` despite the intervening text.
-    pub(crate) fn redact_final_envelope_text(&mut self, text: &str) -> String {
-        let redacted = self.redact_terminal_failure_text(text);
-        if !self.suppressing {
-            // Both chains resolve through the final text: the emitted
-            // thread-id chain because the text's bytes now sit between the id
-            // record and every later field (a clean text breaks that
-            // adjacency), and the dropped chain because its marker either
-            // completed inside the text or was broken by it.
-            let emitted = std::mem::take(&mut self.emitted_context);
-            self.emitted_context = self.resolve_context_through(emitted, text);
-            let dropped = std::mem::take(&mut self.dropped_context);
-            self.dropped_context = self.resolve_context_through(dropped, text);
-        }
-        redacted
-    }
-
-    /// Resolves one lookbehind chain through the final envelope text: a
-    /// candidate the text completed was suppressed with it, a candidate the
-    /// text broke cannot be continued by later fields, and only a candidate
-    /// still in progress at the text's end stays live (its updated suffix is
-    /// returned). An unsafe suffix past the pending byte cap is an unresolved
-    /// oversized candidate and fails closed into suppression.
-    fn resolve_context_through(&mut self, context: String, text: &str) -> String {
-        if context.is_empty() {
-            return context;
-        }
-        let context_length = context.len();
-        let mut joined = context;
-        joined.push_str(text);
-        if unsafe_stream_suffix_start(&joined).is_some_and(|start| start < context_length) {
-            let live = trailing_credential_context(&joined);
-            if live.len() > MAX_PENDING_STREAM_BYTES {
-                self.suppressing = true;
-                return String::new();
-            }
-            return live.to_string();
-        }
-        String::new()
     }
 
     /// Redacts tool-argument JSON against the held lookbehind state:
@@ -1406,10 +1390,15 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         if text.is_empty() {
             return;
         }
-        if field == StreamField::Text
-            && let Some(capture) = &mut self.terminal_text_capture
-        {
-            capture.push_str(&text);
+        if let Some(capture) = &mut self.terminal_text_capture {
+            let parts = match field {
+                StreamField::Text => &mut capture.text,
+                StreamField::Thinking => &mut capture.thinking,
+            };
+            parts.entry(index).or_default().push_str(&text);
+        }
+        if !self.forward_stream_observations {
+            return;
         }
         let fact = match field {
             StreamField::Text => ObservationFact::TextDelta { index, text },

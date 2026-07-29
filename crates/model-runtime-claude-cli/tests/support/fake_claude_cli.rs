@@ -31,8 +31,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             success("end_turn", Some(fixtures::ANSWER))?;
         }
         "tool_round_trip" => {
-            assistant_tool()?;
-            tool_result()?;
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
             success("end_turn", Some(fixtures::TOOL_ARGUMENTS))?;
         }
         "refusal" => {
@@ -43,6 +43,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_text(fixtures::SENSITIVE_TEXT)?;
             success("end_turn", Some(fixtures::SENSITIVE_TEXT))?;
         }
+        "fragmented_credential_redaction" => {
+            assistant_text(fixtures::FRAGMENTED_SECRET_PREFIX)?;
+            assistant_text(fixtures::FRAGMENTED_SECRET_CONTINUATION)?;
+            success("end_turn", Some(fixtures::FRAGMENTED_SECRET))?;
+        }
+        "named_choice_extra_tool" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            assistant_tool(fixtures::OTHER_TOOL_ID, fixtures::OTHER_TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
+            tool_result(fixtures::OTHER_TOOL_ID)?;
+            success("end_turn", None)?;
+        }
+        "api_status_error" => api_status_error()?,
         "truncated_stream" => assistant_text(fixtures::ANSWER)?,
         other => return Err(format!("unsupported synthetic scenario `{other}`").into()),
     }
@@ -74,23 +87,33 @@ fn assistant_text(text: &str) -> std::io::Result<()> {
     }))
 }
 
-fn assistant_tool() -> std::io::Result<()> {
+fn assistant_tool(id: &str, name: &str) -> std::io::Result<()> {
     emit_json(&serde_json::json!({
         "type": "assistant", "parent_tool_use_id": null,
         "message": {"model": fixtures::MODEL, "id": fixtures::MESSAGE_ID, "role": "assistant",
-            "content": [{"type": "tool_use", "id": fixtures::TOOL_ID,
-                "name": format!("mcp__signalbox_tools__{}", fixtures::TOOL_NAME),
+            "content": [{"type": "tool_use", "id": id,
+                "name": format!("mcp__signalbox_tools__{name}"),
                 "input": {"subject": "synthetic"}, "caller": {"type": "direct"}}]}
     }))
 }
 
-fn tool_result() -> std::io::Result<()> {
+fn tool_result(id: &str) -> std::io::Result<()> {
     emit_json(&serde_json::json!({
         "type": "user", "message": {"role": "user", "content": [{
-            "tool_use_id": fixtures::TOOL_ID, "type": "tool_result",
+            "tool_use_id": id, "type": "tool_result",
             "content": [{"type": "text", "text": "Signalbox recorded this tool proposal for external execution."}]
         }]},
         "tool_use_result": [{"type": "text", "text": "Signalbox recorded this tool proposal for external execution."}]
+    }))
+}
+
+fn api_status_error() -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "result", "subtype": "error_during_execution", "is_error": true,
+        "session_id": fixtures::SESSION_ID, "stop_reason": null,
+        "terminal_reason": null, "result": "synthetic provider error",
+        "errors": [], "api_error_status": 429,
+        "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}
     }))
 }
 

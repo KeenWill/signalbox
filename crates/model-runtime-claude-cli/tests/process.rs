@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, CredentialReference, DeliveryMode,
-    LossCause, ModelOperation, ModelRuntime, PreparationOutcome, ProviderErrorKind,
-    RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage, ToolDefinition,
+    FinishReason, LossCause, ModelOperation, ModelRuntime, PreparationDefect, PreparationOutcome,
+    ProviderErrorKind, RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage, ToolChoice,
+    ToolDefinition, ToolName,
 };
 use signalbox_model_runtime_claude_cli::{
     ClaudeCliConfig, ClaudeCliPreparedRequest, ClaudeCliRuntime, DISABLED_CLAUDE_CLI_BUILTIN_TOOLS,
@@ -23,9 +24,11 @@ mod fixtures;
 const CREDENTIAL_REFERENCE: &str = "claude-subscription-synthetic";
 const OFFLINE_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Copy)]
 enum OperationShape {
     Text,
     Tool,
+    NamedTool,
 }
 
 struct ExecutionResult {
@@ -80,6 +83,16 @@ async fn tool_call_and_mcp_result_round_trip_returns_typed_proposal() {
 }
 
 #[tokio::test]
+async fn named_tool_choice_rejects_an_extra_declared_proposal() {
+    let result = execute_scenario("named_choice_extra_tool", OperationShape::NamedTool).await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(response_unintelligible(&loss.cause).contains(fixtures::TOOL_NAME));
+    assert_eq!(loss.finish_reported, Some(FinishReason::EndTurn));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn refusal_requires_the_typed_refusal_stop_reason() {
     let result = execute_scenario("refusal", OperationShape::Text).await;
     let refusal = refused(&result.evidence);
@@ -102,11 +115,33 @@ async fn credential_shaped_cli_text_is_redacted_from_all_evidence() {
 }
 
 #[tokio::test]
+async fn fragmented_credential_is_redacted_from_observations_and_terminal_content() {
+    let result = execute_scenario("fragmented_credential_redaction", OperationShape::Text).await;
+    let observed = observation_text(&result.observations);
+    let terminal = completion_text(&result.evidence);
+
+    assert!(!observed.contains(fixtures::FRAGMENTED_SECRET));
+    assert!(!terminal.contains(fixtures::FRAGMENTED_SECRET));
+    assert!(observed.contains("[redacted]"));
+    assert!(terminal.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn nonzero_exit_is_a_typed_provider_failure() {
     let result = execute_scenario("process_nonzero", OperationShape::Text).await;
     let failure = provider_error(&result.evidence);
 
     assert_eq!(failure.kind, ProviderErrorKind::CredentialRejected);
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn api_error_status_classifies_a_generic_terminal_error() {
+    let result = execute_scenario("api_status_error", OperationShape::Text).await;
+    let failure = provider_error(&result.evidence);
+
+    assert_eq!(failure.kind, ProviderErrorKind::RateLimited);
     assert_eq!(result.spawns, 1);
 }
 
@@ -163,6 +198,33 @@ async fn process_spawn_failure_is_proven_unsent() {
     assert_eq!(spawn_count(temporary.path()), 0);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn non_utf8_bridge_path_is_a_preparation_defect_before_spawn() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let bridge = temporary
+        .path()
+        .join(std::ffi::OsString::from_vec(vec![b'm', b'c', b'p', 0xff]));
+    let config = ClaudeCliConfig::new(
+        fake_cli(),
+        bridge,
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+    let runtime = ClaudeCliRuntime::new(config).expect("runtime accepts an absolute bridge path");
+    let outcome = runtime
+        .prepare(
+            operation("normal_completion", OperationShape::Text),
+            CancellationSignal::never(),
+        )
+        .await;
+
+    assert!(request_construction_defect(outcome).contains("UTF-8"));
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
 async fn execute_scenario(scenario: &str, shape: OperationShape) -> ExecutionResult {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let runtime = runtime(temporary.path(), &fake_cli());
@@ -204,7 +266,7 @@ fn operation(scenario: &str, shape: OperationShape) -> ModelOperation<String> {
         signalbox_model_runtime::ModelSettings::new(256),
     );
     operation.delivery = DeliveryMode::Streamed;
-    if matches!(shape, OperationShape::Tool) {
+    if matches!(shape, OperationShape::Tool | OperationShape::NamedTool) {
         operation.tools = vec![ToolDefinition::with_schema(
             fixtures::TOOL_NAME,
             "Synthetic lookup",
@@ -214,6 +276,18 @@ fn operation(scenario: &str, shape: OperationShape) -> ModelOperation<String> {
                 "required": ["subject"]
             }),
         )];
+    }
+    if matches!(shape, OperationShape::NamedTool) {
+        operation.tools.push(ToolDefinition::with_schema(
+            fixtures::OTHER_TOOL_NAME,
+            "Synthetic other tool",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"subject": {"type": "string"}},
+                "required": ["subject"]
+            }),
+        ));
+        operation.tool_choice = ToolChoice::Named(ToolName::new(fixtures::TOOL_NAME));
     }
     operation
 }
@@ -234,6 +308,18 @@ async fn prepare(
         PreparationOutcome::Defect { defect, .. } => {
             panic!("offline preparation found a defect: {defect:?}")
         }
+    }
+}
+
+fn request_construction_defect(
+    outcome: PreparationOutcome<String, ClaudeCliPreparedRequest<String>>,
+) -> String {
+    match outcome {
+        PreparationOutcome::Defect {
+            defect: PreparationDefect::RequestConstructionFailed { detail },
+            ..
+        } => detail,
+        _ => panic!("expected request-construction defect"),
     }
 }
 
@@ -272,6 +358,34 @@ fn boundary_loss(evidence: &TerminalEvidence) -> &signalbox_model_runtime::Bound
         panic!("expected boundary loss, got {evidence:?}")
     };
     value
+}
+
+fn response_unintelligible(cause: &LossCause) -> &str {
+    let LossCause::ResponseUnintelligible { detail } = cause else {
+        panic!("expected unintelligible response, got {cause:?}")
+    };
+    detail
+}
+
+fn observation_text(observations: &[signalbox_model_runtime::Observation<String>]) -> String {
+    observations
+        .iter()
+        .filter_map(|observation| match &observation.fact {
+            signalbox_model_runtime::ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn completion_text(evidence: &TerminalEvidence) -> String {
+    completed(evidence)
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            AssistantPart::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn tool_call(content: &[AssistantPart]) -> &signalbox_model_runtime::ToolCallProposal {
