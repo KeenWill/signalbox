@@ -10,6 +10,54 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-28 — Bound Codex stream-redaction work and name its shape limit
+
+**Context.** The Codex adapter retains up to 64 KiB of an incomplete credential
+candidate so provider-chosen delta boundaries cannot expose its value. Repeating
+the full held-buffer classification after each one-byte delta made that bounded
+memory state an unbounded quadratic-work path. The shape contract also omitted
+common reflected forms — singular `token`, passphrase/password abbreviations,
+selected operational key names, credential-valued long options, and URL userinfo
+— while leaving unclear whether it correlated credential names and values stored
+in separate structural positions.
+
+**Decision.** Keep the 64-KiB hold. One initial unsafe-suffix classification
+decides whether a prefix is held; it is not charged as reclassification. After a
+hold at length L, reclassify only when the held length reaches at least twice L;
+crossing the cap forces one final reclassification. Each post-hold round invokes
+the two top-level whole-buffer classifiers. Before invocation, the sink charges
+both classifiers for the full joined input, including emitted or dropped
+lookbehind context. A per-continuously-unresolved-candidate budget fails closed
+before a round would make cumulative reclassification input exceed 393,216 bytes
+(six times 64 KiB), independent of delta count. Without external context, the
+geometric held lengths presented to each classifier sum to at most 196,608 bytes
+(three times 64 KiB). The 66,000 one-byte continuation shape performs its
+initial unsafe-suffix classification once, then thirteen reclassification
+rounds: 188,387 aggregate held bytes and 376,774 charged rescanned bytes. Once
+fail-closed suppression begins, it is absorbing for the sink's lifetime; usage,
+boundary, and finish events cannot re-enable provider bytes. Extend
+normalized-name coverage to the `token`, passphrase/`passwd`/`pwd`, and
+explicitly named signing, encryption, SSH, HMAC, and license-key families — not
+arbitrary names ending in `key` — together with the option and userinfo shapes
+specified in
+[runtime-substrate](spec/runtime-substrate.md#codex-cli-shape-redaction-scope),
+while explicitly accepting that the text scanner does not correlate a credential
+name with a value stored in a separate structural position.
+
+**Rejected alternatives.** Retaining the existing per-delta whole-buffer scan
+keeps quadratic work below the memory cap. A wall-clock cutoff is load-dependent
+and makes ordinary tests nondeterministic. Truncating the held candidate or
+re-enabling output after a usage event can release the same credential the sink
+had already decided it could not classify safely. Promising cross-field semantic
+correlation would overstate a text-shaped scanner; those formats need a
+format-aware boundary instead. Treating every name ending in `key` as a
+credential would suppress ordinary non-secret values without adding a specific
+credential meaning, so coverage stays with the enumerated key families.
+
+**Affects.** INV-035, the Codex CLI credential contract in
+[runtime-substrate](spec/runtime-substrate.md), and
+`crates/model-runtime-codex-cli/src/redaction.rs`.
+
 ## 2026-07-28 — Bound the native ephemeral provider-text overlay
 
 **Context.** Each provider-text delta is frame-bounded, but a native client

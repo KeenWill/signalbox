@@ -1,0 +1,147 @@
+GITHUB_TOKEN=SYNTHETIC-SECRET-01
+export SLACK_BOT_TOKEN=SYNTHETIC-SECRET-02
+token=SYNTHETIC-SECRET-03
+passwd=SYNTHETIC-SECRET-04
+MYSQL_PWD=SYNTHETIC-SECRET-05
+signing_key=SYNTHETIC-SECRET-06
+encryption_key: SYNTHETIC-SECRET-07
+{"X-Amz-Security-Token":"SYNTHETIC-SECRET-08"}
+Authentication: SYNTHETIC-SECRET-09
+ssh_key=SYNTHETIC-SECRET-10
+//registry.npmjs.org/:_authToken=SYNTHETIC-SECRET-11
+{"client_secret":"SYNTHETIC-SECRET-12"}
+AWS_SECRET_ACCESS_KEY=SYNTHETIC-SECRET-13
+passphrase=SYNTHETIC-SECRET-14
+totp_seed=SYNTHETIC-SECRET-15
+hmac_key=SYNTHETIC-SECRET-16
+license_key=SYNTHETIC-SECRET-17
+PGPASSWORD=SYNTHETIC-SECRET-18
+{"jwt":"SYNTHETIC-SECRET-19"}
+NPM_TOKEN=SYNTHETIC-SECRET-20
+CI_JOB_TOKEN=SYNTHETIC-SECRET-21
+HUGGINGFACE_HUB_TOKEN=SYNTHETIC-SECRET-22
+{"data":{"tls.key":"SYNTHETIC-SECRET-23"}}
+{"bearerToken":"SYNTHETIC-SECRET-24"}
+Set-Cookie: sid=SYNTHETIC-SECRET-25
+x-api-key: SYNTHETIC-SECRET-26
+Proxy-Authorization: SYNTHETIC-SECRET-27
+SLACK_SIGNING_SECRET=SYNTHETIC-SECRET-28
+codex --password SYNTHETIC-SECRET-29
+codex --api-key SYNTHETIC-SECRET-30
+codex --api-key=SYNTHETIC-SECRET-31
+mysql -u root -pSYNTHETIC-SECRET-32
+psql postgres://admin:SYNTHETIC-SECRET-33@db.internal/app
+Basic SYNTHETIC-SECRET-34
+Bearer SYNTHETIC-SECRET-35
+curl -u admin:SYNTHETIC-SECRET-36 https://api.example.com
+[creds]<|NL|>api_key = SYNTHETIC-SECRET-37
+env:<|NL|>  - name: API_KEY<|NL|>    value: SYNTHETIC-SECRET-38
+API_KEY=SYNTHETIC-SECRET-39
+"api_key" = "SYNTHETIC-SECRET-40"
+```sh<|NL|>export API_KEY=SYNTHETIC-SECRET-41<|NL|>```
+# api_key=SYNTHETIC-SECRET-42
+machine api.example.com login bob password SYNTHETIC-SECRET-43
+https://bob:SYNTHETIC-SECRET-44@github.com
+{"headers":[["authorization","SYNTHETIC-SECRET-45"]]}
+your api key is<|NL|>SYNTHETIC-SECRET-46
+Authorization:<|NL|>SYNTHETIC-SECRET-47
+DATABASE_URL=postgres://u:SYNTHETIC-SECRET-48@h/db
+gpg --passphrase SYNTHETIC-SECRET-49
+security add-generic-password -w SYNTHETIC-SECRET-50
+grant_type=client_credentials&client_secret=SYNTHETIC-SECRET-51
+name,client_secret<|NL|>prod,SYNTHETIC-SECRET-52
+INSERT INTO creds VALUES ('prod', 'SYNTHETIC-SECRET-53')
+<clientSecret>SYNTHETIC-SECRET-54</clientSecret>
+{'client_secret': 'SYNTHETIC-SECRET-55'}
+Config { client_secret: "SYNTHETIC-SECRET-56" }
+GET /v1 HTTP/1.1<|CR|><|NL|>X-Api-Key: SYNTHETIC-SECRET-57<|CR|><|NL|>
+Authorization:<|CR|><|NL|> Bearer SYNTHETIC-SECRET-58
+service.api.key=SYNTHETIC-SECRET-59
+oauth.client.secret=SYNTHETIC-SECRET-60
+api<|ZWSP|>key=SYNTHETIC-SECRET-61
+api<|SHY|>key=SYNTHETIC-SECRET-62
+api<|NBHY|>key=SYNTHETIC-SECRET-63
+api<|RLO|>key=SYNTHETIC-SECRET-64
+api<|MIDDOT|>key=SYNTHETIC-SECRET-65
+cli<|ZWSP|>ent_secret=SYNTHETIC-SECRET-66
+credentials[api_key]=SYNTHETIC-SECRET-67
+api/key=SYNTHETIC-SECRET-68
+api_<|ZWSP|>key=SYNTHETIC-SECRET-69
+api&#95;key=SYNTHETIC-SECRET-70
+api%5Fkey=SYNTHETIC-SECRET-71
+{"x,"client_secret":"SYNTHETIC-SECRET-72"}
+{"a,"bedrock_api_key":"SYNTHETIC-SECRET-73"}
+{"api<|SOH|>key":"SYNTHETIC-SECRET-74"}
+{"api<|TAB|>key":"SYNTHETIC-SECRET-75"}
+{"client_secret\q":"SYNTHETIC-SECRET-76"}
+{"a"b,"client_secret":"SYNTHETIC-SECRET-77"}
+{"detail":"{\"client_secret\":\"SYNTHETIC-SECRET-78\"}"}
+detail: "client_secret":"SYNTHETIC-SECRET-79"
+{"api_key":"benign","api_key":"SYNTHETIC-SECRET-80"}
+{"api_key":"SYNTHETIC-SECRET-81","api_key":"benign"}
+{"x,"api_key":"SYNTHETIC-SECRET-82","z":1}
+warn: bad value ", "client_secret":"SYNTHETIC-SECRET-83"
+{"log":"...truncated,"client_secret":"SYNTHETIC-SECRET-84"}
+{"GITHUB_TOKEN":"SYNTHETIC-SECRET-85"}
+{"\u0061pi_key":"SYNTHETIC-SECRET-86"}
+\u0061pi_key=SYNTHETIC-SECRET-87
+api\u005fkey=SYNTHETIC-SECRET-88
+SK-SYNTHETIC-SECRET-89
+eyjSYNTHETIC-SECRET-90
+sk-SYNTHETIC-SECRET-91
+eyJSYNTHETIC-SECRET-92
+😀 api_key=SYNTHETIC-SECRET-93
+sk\u005cu005cu005cu005cu005cu005cu005cu005cu005cu005cu005cu005cu005cu005cu005cu002dSYNTHETIC-SECRET-94
+{"secret":{"a":1},"api_key":"SYNTHETIC-SECRET-95"}
+secret=[] api_key=SYNTHETIC-SECRET-96
+{"password":{"a":1}} password=SYNTHETIC-SECRET-97
+api_key={"a":1} secret=SYNTHETIC-SECRET-98
+{"api_key":["a"],"client_secret":"SYNTHETIC-SECRET-99"}
+secret="""body""" api_key=SYNTHETIC-SECRET-A0
+api_key="x" password=SYNTHETIC-SECRET-A1
+-----BEGIN PRIVATE KEY-----<|NL|>body<|NL|>-----END PRIVATE KEY-----<|NL|>api_key=SYNTHETIC-SECRET-A2
+note \u0061pi_key=<|D|>AAAA-SYNTHETIC-SECRET-A3-BBBB.
+note api_key=\u0041<|D|>AAAA-SYNTHETIC-SECRET-A4-BBBB.
+path a\u002fb and api_key=<|D|>AAAA-SYNTHETIC-SECRET-A5-BBBB.
+x\u0020y<|NL|>Authorization: <|D|>AAAA-SYNTHETIC-SECRET-A6-BBBB.
+x\u0020y secret = <|D|>AAAA-SYNTHETIC-SECRET-A7-BBBB.
+x\u0020y<|NL|>-----BEGIN PRIVATE KEY-----<|NL|><|D|>AAAA-SYNTHETIC-SECRET-A8-BBBB.
+x\u0020y AWS_SECRET_ACCESS_KEY=<|D|>AAAA-SYNTHETIC-SECRET-A9-BBBB.
+note \u0061pi_key=<|D|>AAAA<|D|>-<|D|>SYNTHETIC-SECRET-B0<|D|>-BBBB.
+note \u0061pi_key=<|D|><|D|>AAAA-SYNTHETIC-SECRET-B1-BBBB.
+thinking about \u0063afé and api_key=<|D|>AAAA-SYNTHETIC-SECRET-B2-BBBB and more prose.
+{"path":"a\u002fb","api_key":"<|D|>SYNTHETIC-SECRET-B3"}
+ap<|D|>i_k<|D|>ey<|D|>=<|D|>SYNTHETIC-SECRET-B4.
+ap<|D|><|D|>i_key<|D|><|D|>=<|D|><|D|>SYNTHETIC-SECRET-B5.
+{"client<|D|>_sec<|D|>ret":<|D|>"SYNTHETIC-SECRET-B6"}
+{"x,"client_sec<|D|>ret":"SYNTHETIC-SECRET-B7"}
+-----BEGIN PRIVATE<|D|> KEY-----<|NL|>MIIB<|D|>SYNTHETIC-SECRET-B8<|NL|>-----END PRIVATE KEY-----<|NL|>
+api_key=<|D|>SYNTHETIC-SECRET<|D|>-B9.
+Authorization: <|D|>SYNTHETIC-SECRET<|D|>-C0.
+api_key=<|B|>SYNTHETIC-SECRET-C1.
+Authorization: <|B|>SYNTHETIC-SECRET-C2.
+{"client_secret":<|B|>"SYNTHETIC-SECRET-C3"}
+-----BEGIN PRIVATE KEY-----<|NL|><|B|>MIIB-SYNTHETIC-SECRET-C4<|NL|>-----END PRIVATE KEY-----
+api_key=<|U|>SYNTHETIC-SECRET-C5.
+<|SUPPRESS|><|U|>SYNTHETIC-SECRET-C6-after-failclosed.
+thread_api_key=<|SEED|>SYNTHETIC-SECRET-C7.
+note \u0061pi_key=<|SEED|>SYNTHETIC-SECRET-C8.
+note \u0061pi_key=<|DROP|>SYNTHETIC-SECRET-C9.
+dropped api_key=<|DROP|>SYNTHETIC-SECRET-D0.
+{"client_secret":"SYNTHETIC-SECRET-12"<|D|>}
+{"bearerToken":"SYNTHETIC-SECRET-24"<|D|>}
+"<|D|>api_key" = "SYNTHETIC-SECRET-40"
+{'<|D|>client_secret': 'SYNTHETIC-SECRET-55'}
+Config { client_secret<|D|>: "SYNTHETIC-SECRET-56" }
+GET /v1 HTTP/1.1<|CR|><|NL|>X-Api-Key<|D|>: SYNTHETIC-SECRET-57<|CR|><|NL|>
+{"a<|D|>"b,"client_secret":"SYNTHETIC-SECRET-77"}
+{"detail":<|D|>"{\"client_secret\":\"SYNTHETIC-SECRET-78\"}"}
+detail: "<|D|>client_secret":"SYNTHETIC-SECRET-79"
+{"api_key":"benign","api_key":"SYNTHETIC-SECRET-80"<|D|>}
+{"api_key":"SYNTHETIC-SECRET-81"<|D|>,"api_key":"benign"}
+{"x,"api_key":"SYNTHETIC-SECRET-82"<|D|>,"z":1}
+warn: bad value<|D|> ", "client_secret":"SYNTHETIC-SECRET-83"
+{"log":<|D|>"...truncated,"client_secret":"SYNTHETIC-SECRET-84"}
+{"\u0061<|D|>pi_key":"SYNTHETIC-SECRET-86"}
+{"secret":{"a":1},"api_key":"SYNTHETIC-SECRET-95"<|D|>}
+{"api_key":["a"],"client_secret":"SYNTHETIC-SECRET-99"<|D|>}
