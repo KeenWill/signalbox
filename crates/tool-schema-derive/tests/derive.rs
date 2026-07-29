@@ -18,8 +18,13 @@ struct ScalarFields {
     unsigned_value: u64,
     #[tool_schema(description = "A number field.")]
     number_value: f64,
+}
+
+#[derive(serde::Deserialize, ToolSchema)]
+#[expect(dead_code, reason = "schema fixture renders only")]
+struct OptionalField {
     #[tool_schema(description = "An optional field.")]
-    optional_value: Option<String>,
+    value: Option<String>,
 }
 
 #[derive(serde::Deserialize, ToolSchema)]
@@ -185,59 +190,81 @@ impl signalbox_tool_contract::ToolSchema for ManualRecursiveRoot {
 }
 
 #[test]
-fn scalar_shapes_and_option_requiredness_render_exactly() {
+fn scalar_shapes_render_exactly() {
     let schema = ScalarFields::schema();
+    let properties = &schema["properties"];
 
     expect![[r#"
         {
-          "additionalProperties": false,
-          "properties": {
-            "bool_value": {
-              "description": "A boolean field.",
-              "type": "boolean"
-            },
-            "number_value": {
-              "description": "A number field.",
-              "type": "number"
-            },
-            "optional_value": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "An optional field."
-            },
-            "signed_value": {
-              "description": "A signed integer field.",
-              "maximum": 9223372036854775807,
-              "minimum": -9223372036854775808,
-              "type": "integer"
-            },
-            "string_value": {
-              "description": "A string field.",
+          "bool_value": {
+            "description": "A boolean field.",
+            "type": "boolean"
+          },
+          "number_value": {
+            "description": "A number field.",
+            "type": "number"
+          },
+          "signed_value": {
+            "description": "A signed integer field.",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": "integer"
+          },
+          "string_value": {
+            "description": "A string field.",
+            "type": "string"
+          },
+          "unsigned_value": {
+            "description": "An unsigned integer field.",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          }
+        }"#]]
+    .assert_eq(&format!("{properties:#}"));
+}
+
+#[test]
+fn scalar_fields_are_required() {
+    let schema = ScalarFields::schema();
+    let required = &schema["required"];
+
+    expect![[r#"
+        [
+          "string_value",
+          "bool_value",
+          "signed_value",
+          "unsigned_value",
+          "number_value"
+        ]"#]]
+    .assert_eq(&format!("{required:#}"));
+}
+
+#[test]
+fn option_field_renders_nullable_shape() {
+    let schema = OptionalField::schema();
+    let value_schema = &schema["properties"]["value"];
+
+    expect![[r#"
+        {
+          "anyOf": [
+            {
               "type": "string"
             },
-            "unsigned_value": {
-              "description": "An unsigned integer field.",
-              "maximum": 18446744073709551615,
-              "minimum": 0,
-              "type": "integer"
+            {
+              "type": "null"
             }
-          },
-          "required": [
-            "string_value",
-            "bool_value",
-            "signed_value",
-            "unsigned_value",
-            "number_value"
           ],
-          "type": "object"
+          "description": "An optional field."
         }"#]]
-    .assert_eq(&format!("{schema:#}"));
+    .assert_eq(&format!("{value_schema:#}"));
+}
+
+#[test]
+fn option_field_is_not_required() {
+    let schema = OptionalField::schema();
+
+    assert!(schema.get("required").is_none());
 }
 
 #[test]

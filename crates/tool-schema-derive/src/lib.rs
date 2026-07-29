@@ -191,6 +191,14 @@ fn derive_field(
             ),
         ));
     }
+    if !serde.custom_decoder && schema.with.is_some() {
+        return Err(syn::Error::new_spanned(
+            field,
+            format!(
+                "field `{rust_name}`: tool_schema(with = Type) requires serde with/deserialize_with to define a custom wire shape"
+            ),
+        ));
+    }
 
     ensure_supported_type(&field.ty, rust_name)?;
     let description = schema.description.ok_or_else(|| {
