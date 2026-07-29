@@ -12,6 +12,7 @@ public enum SignalboxSessionSynchronizationDriverUpdate: Equatable, Sendable {
     trigger: SignalboxFollowedSessionEvent
   )
   case event(SignalboxFollowedSessionEvent)
+  case providerTextDelta(SignalboxProviderTextDelta)
   case diagnostic(SignalboxSynchronizationDiagnostic)
   case retryLimitReached
   case terminalFailure
@@ -156,6 +157,8 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
       await updates(.authoritativeSnapshot(snapshot))
     case .publishEvent(let event):
       await updates(.event(event))
+    case .publishProviderTextDelta(let delta):
+      await updates(.providerTextDelta(delta))
     case .requestSideSnapshot(_, let generation, let refreshID):
       openSideSnapshot(generation: generation, refreshID: refreshID)
     case .cancelSideSnapshot:
