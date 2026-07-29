@@ -1206,6 +1206,14 @@ fn submitted_input_identity(
     }
 }
 
+#[track_caller]
+fn transcript_model_call_count(message: &ServerMessage) -> u64 {
+    match message {
+        ServerMessage::TranscriptModelCallsEnd { model_call_count } => model_call_count.value(),
+        message => panic!("fixture expected transcript-model-calls end, got {message:?}"),
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct TranscriptSnapshotEndFacts {
     session_id: CanonicalUuid,
@@ -1805,7 +1813,7 @@ async fn metadata_shape_failure_is_a_malformed_frame() -> Result<(), Box<dyn Err
         .map(|index| format!("tag-{index:03}"))
         .collect::<Vec<_>>();
     let frame = format!(
-        "{{\"version\":4,\"request_id\":\"21\",\"request\":{{\"type\":\"list_session_metadata\",\"required_tags\":{},\"title_contains\":null,\"include_archived\":false,\"page_size\":\"50\",\"after_session_id\":null}}}}\n",
+        "{{\"version\":1,\"request_id\":\"21\",\"request\":{{\"type\":\"list_session_metadata\",\"required_tags\":{},\"title_contains\":null,\"include_archived\":false,\"page_size\":\"50\",\"after_session_id\":null}}}}\n",
         serde_json::to_string(&required_tags)?
     );
 
@@ -2574,6 +2582,8 @@ async fn s28_read_streams_conservative_imported_seed_snapshot() -> Result<(), Bo
         );
     };
     assert_eq!(*selected, session_id);
+    let model_calls_end = response_within(&mut upgraded_read).await?;
+    assert_eq!(transcript_model_call_count(model_calls_end.message()), 0);
     let imported_text = response_within(&mut upgraded_read).await?;
     assert_eq!(imported_text.version(), ProtocolVersion::One);
     let ServerMessage::TranscriptTextEntry {
@@ -3191,42 +3201,34 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
         .await?;
 
     let start = response_within(&mut connection).await?;
-    assert!(matches!(
-        start.message(),
-        ServerMessage::TranscriptSnapshotStart {
-            session_id: snapshot_session,
-            cursor,
-        } if *snapshot_session == session_id && cursor.value() == 2
-    ));
+    assert_eq!(
+        transcript_snapshot_start_cursor(start.message(), session_id),
+        2
+    );
     let queued_turn = response_within(&mut connection).await?;
-    assert!(matches!(
-        queued_turn.message(),
-        ServerMessage::TranscriptTurn {
-            turn_id,
-            acceptance_position,
-            state:
-                TurnState::Queued {
-                    accepted_input_id,
-                    content: projected_content,
-                },
-        } if *turn_id == turn
-            && acceptance_position.value() == 1
-            && *accepted_input_id == accepted_input
-            && projected_content.as_str() == content
-    ));
+    let (projected_turn, projected_position, projected_state) =
+        transcript_turn_projection(queued_turn.message());
+    assert_eq!(projected_turn, turn);
+    assert_eq!(projected_position, 1);
+    assert_eq!(
+        projected_state,
+        TurnState::Queued {
+            accepted_input_id: accepted_input,
+            content: InputContent::new(content),
+        }
+    );
+    let model_calls_end = response_within(&mut connection).await?;
+    assert_eq!(transcript_model_call_count(model_calls_end.message()), 0);
     let end = response_within(&mut connection).await?;
-    assert!(matches!(
-        end.message(),
-        ServerMessage::TranscriptSnapshotEnd {
-            session_id: snapshot_session,
-            cursor,
-            turn_count,
-            entry_count,
-        } if *snapshot_session == session_id
-            && cursor.value() == 2
-            && turn_count.value() == 1
-            && entry_count.value() == 0
-    ));
+    assert_eq!(
+        transcript_snapshot_end_facts(end.message()),
+        TranscriptSnapshotEndFacts {
+            session_id,
+            cursor: 2,
+            turn_count: 1,
+            entry_count: 0,
+        }
+    );
 
     drop(connection);
     runtime.stop().await
@@ -3283,6 +3285,8 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
             content: InputContent::new(first_content),
         }
     );
+    let model_calls_end = response_within(&mut follow).await?;
+    assert_eq!(transcript_model_call_count(model_calls_end.message()), 0);
     let snapshot_end = response_within(&mut follow).await?;
     assert_eq!(
         transcript_snapshot_end_facts(snapshot_end.message()),

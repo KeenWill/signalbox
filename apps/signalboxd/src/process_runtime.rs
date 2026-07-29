@@ -4442,9 +4442,7 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::rejected(RejectionDetail::ImportedConversationNotFound {
-                    imported_conversation_id,
-                }),
+                ProtocolError::imported_conversation_absent(),
             )
             .await;
         }
@@ -7994,6 +7992,16 @@ impl ProtocolError {
         Self {
             code: ErrorCode::NotFound,
             message: "the requested defaults epoch was not found on the selected session",
+            detail: ErrorDetail::none(),
+        }
+    }
+
+    /// No imported conversation has the named identity. The absent read target
+    /// is never a session; the wire code remains the shared `not_found`.
+    const fn imported_conversation_absent() -> Self {
+        Self {
+            code: ErrorCode::NotFound,
+            message: "the requested imported conversation was not found",
             detail: ErrorDetail::none(),
         }
     }
