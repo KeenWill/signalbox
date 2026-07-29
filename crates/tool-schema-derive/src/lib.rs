@@ -14,9 +14,10 @@ use syn::{
 /// Every admitted field requires `#[tool_schema(description = "...")]`.
 /// Property names follow serde's `rename` and `rename_all` declarations. A
 /// checked `name = "..."` may repeat the effective serde name, but cannot
-/// contradict it. `Option<T>` and fields carrying `#[serde(default)]` are
-/// omitted from `required`; `skip` and `skip_deserializing` omit a property.
-/// A `with = Type` override declares the schema-bearing type when a custom
+/// contradict it. `Option<T>`, fields carrying `#[serde(default)]`, and fields
+/// in a struct carrying `#[serde(default)]` are omitted from `required`; `skip`
+/// and `skip_deserializing` omit a property. A `with = Type` override declares
+/// the schema-bearing type for a custom
 /// serde decoder changes the field's wire shape.
 #[proc_macro_derive(ToolSchema, attributes(tool_schema, serde))]
 pub fn derive_tool_schema(input: TokenStream) -> TokenStream {
@@ -56,7 +57,9 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
     let mut properties = Vec::new();
     let mut required = Vec::new();
     for field in fields {
-        let Some(derived) = derive_field(field, container.rename_all.as_deref())? else {
+        let Some(derived) =
+            derive_field(field, container.rename_all.as_deref(), container.default)?
+        else {
             continue;
         };
         properties.push(derived.property);
@@ -101,6 +104,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
 
 #[derive(Default)]
 struct ContainerAttributes {
+    default: bool,
     deny_unknown_fields: bool,
     rename_all: Option<String>,
 }
@@ -121,6 +125,10 @@ fn parse_container_attributes(attributes: &[Attribute]) -> syn::Result<Container
                 return Ok(());
             }
             if meta.path.is_ident("default") {
+                if meta.input.peek(Token![=]) {
+                    let _path: LitStr = meta.value()?.parse()?;
+                }
+                parsed.default = true;
                 return Ok(());
             }
             Err(meta.error(format!(
@@ -140,7 +148,11 @@ struct DerivedField {
     required_name: Option<LitStr>,
 }
 
-fn derive_field(field: &Field, rename_all: Option<&str>) -> syn::Result<Option<DerivedField>> {
+fn derive_field(
+    field: &Field,
+    rename_all: Option<&str>,
+    container_default: bool,
+) -> syn::Result<Option<DerivedField>> {
     let ident = field
         .ident
         .as_ref()
@@ -227,7 +239,7 @@ fn derive_field(field: &Field, rename_all: Option<&str>) -> syn::Result<Option<D
             },
         )
     };
-    let optional = serde.default || option_inner(&field.ty).is_some();
+    let optional = container_default || serde.default || option_inner(&field.ty).is_some();
     Ok(Some(DerivedField {
         property,
         required_name: (!optional).then_some(property_name),

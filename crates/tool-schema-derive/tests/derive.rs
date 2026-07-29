@@ -64,6 +64,15 @@ struct DefaultAndSkippedFields {
     skipped: String,
 }
 
+#[derive(Default, serde::Deserialize, ToolSchema)]
+#[serde(default, deny_unknown_fields)]
+struct ContainerDefaultFields {
+    #[tool_schema(description = "Defaulted text.")]
+    text: String,
+    #[tool_schema(description = "Defaulted count.")]
+    count: u64,
+}
+
 fn string_from_number<'de, Deserializer>(
     deserializer: Deserializer,
 ) -> Result<String, Deserializer::Error>
@@ -226,6 +235,28 @@ fn serde_default_and_skip_control_property_presence() {
           "properties": {
             "defaulted": {
               "description": "Defaulted field.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }"#]]
+    .assert_eq(&format!("{schema:#}"));
+}
+
+#[test]
+fn serde_container_default_makes_every_field_optional() {
+    let schema = ContainerDefaultFields::schema();
+
+    expect![[r#"
+        {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "description": "Defaulted count.",
+              "type": "integer"
+            },
+            "text": {
+              "description": "Defaulted text.",
               "type": "string"
             }
           },
