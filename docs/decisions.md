@@ -10,6 +10,46 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-28 — Compact model visibility without rewriting the transcript
+
+**Context.** Long sessions eventually exceed a selected model's context window,
+but the semantic transcript and its complete frontiers are durable evidence.
+Treating compaction as transcript deletion would destroy provenance and make
+continuation from an earlier boundary impossible. Context limits and the prompt
+used to create a summary are deployment facts, not values the hub can infer.
+
+**Decision.** A compaction is append-only: one dedicated model call using the
+session's current direct model selection records its exact source frontier,
+resolved target, terminal disposition, and provider-reported usage; a completed
+call appends one `ContextSummary` semantic entry naming that call and the exact
+inclusive source-qualified range it summarizes, then records a complete result
+frontier equal to the source plus that entry. Later model calls retain the
+complete frontier as their durable context fact but render the latest summary
+first, followed by every entry after its through-boundary. Compactions form a
+forward-only predecessor chain. Continuing from a pre-compaction boundary
+creates a new session through the existing continuation machinery; an existing
+session has no per-turn projection switch.
+
+Version twenty-two adds explicit session compaction with an optional through
+position and an automatic pre-call guard. Each catalog selection declares a
+nonzero context-window token limit; the daemon never guesses one. Summary
+production uses the selection's ordinary provider target in a separate call and
+a required deployment-configured compaction prompt beside the model catalog.
+
+**Rejected alternatives.** Deleting, replacing, or rewriting earlier entries: it
+destroys durable truth. Recording only summary text: it loses producing-call,
+usage, and exact-range provenance. Producing the summary inside the next
+ordinary turn call: it conflates two physical provider interactions. Per-turn
+projection choice: it breaks forward-only behavior. A hardcoded prompt or
+inferred model limit: either makes mutable operator knowledge look like product
+truth.
+
+**Affects.** [sessions-and-transcript](spec/sessions-and-transcript.md),
+[model-call-execution](spec/model-call-execution.md),
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md),
+migration `202607290401_context_compaction.sql`, model-catalog configuration,
+and process protocol version twenty-two.
+
 ## 2026-07-28 — Bound Codex stream-redaction work and name its shape limit
 
 **Context.** The Codex adapter retains up to 64 KiB of an incomplete credential
@@ -89,7 +129,10 @@ existing sessions would drift from deployment configuration and could submit an
 unknown or retired alias. This surface originally reserved protocol version
 eighteen; the session-template surface shipped that number first while this one
 was still in flight, and the concurrent context-compaction protocol stack
-separately claimed twenty, also still in flight.
+separately claimed twenty, also still in flight at the time. This surface
+reached main first, out of the two stacks' originally planned order; twenty is
+now permanently retired rather than reallocated beneath this already-shipped
+vocabulary, and the compaction stack claims twenty-two instead.
 
 **Decision.** Protocol version twenty-one adds the read-only
 `list_model_aliases` sequence, the next number free of both already-shipped and

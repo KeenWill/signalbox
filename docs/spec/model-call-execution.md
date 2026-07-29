@@ -27,21 +27,26 @@ the prepared operation was verified through PR #286
 (`agent/session-system-prompt`). Provider-reported token evidence retention and
 exact commit-ambiguity comparison were verified through PR #301
 (`agent/token-usage`); the empty-thinking completion rule was verified through
-PR #305 (`agent/sonnet-streamed-tool-use`). The runner-placement rendering and
-executable session-tool snapshot paragraphs are the foundation proposal at the
-bottom of their implementing stack and become verified only with those child
-pull requests. Invariant tags cite [docs/invariants.md](../invariants.md).
+PR #305 (`agent/sonnet-streamed-tool-use`). The context-summary projection and
+dedicated compaction-call evidence were verified through this PR
+(`agent/context-compaction-core`). The runner-placement rendering and executable
+session-tool snapshot paragraphs are the foundation proposal at the bottom of
+their implementing stack and become verified only with those child pull
+requests. Invariant tags cite [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
 A model call is one durable daemon authorization to attempt a provider
-interaction (INV-014). Its record (`crates/domain/src/model_call.rs`) fixes at
-creation: `ModelCallId`, owning turn and attempt, the exact frozen model
-selection, the turn-pinned resolved target, and the exact ordered context
-frontier it consumes (INV-015). Nonterminal states are `Prepared`, `InFlight`,
-and `CancellationRequested`; terminal history is a separate `EndedModelCall`
-carrying one of five physical dispositions — `Completed`, `KnownFailed`,
-`Refused`, `Cancelled`, `Ambiguous` — and exposes no transition back (INV-006).
+interaction (INV-014). Ordinary and dedicated compaction calls reserve their
+`ModelCallId` from one append-only global call-identity registry, so the same
+physical identity cannot name both call kinds (INV-001). Its record
+(`crates/domain/src/model_call.rs`) fixes at creation: `ModelCallId`, owning
+turn and attempt, the exact frozen model selection, the turn-pinned resolved
+target, and the exact ordered context frontier it consumes (INV-015).
+Nonterminal states are `Prepared`, `InFlight`, and `CancellationRequested`;
+terminal history is a separate `EndedModelCall` carrying one of five physical
+dispositions — `Completed`, `KnownFailed`, `Refused`, `Cancelled`, `Ambiguous` —
+and exposes no transition back (INV-006).
 
 The predecessor matrix:
 
@@ -135,7 +140,12 @@ already performed the same correlation.
 ## Frontier rendering
 
 `PreparedModelOperation::render` (`crates/application/src/model_execution.rs`)
-projects the exact frontier order into provider-neutral messages:
+first applies the context-compaction projection to the exact complete frontier.
+If summaries exist, the latest summary is first and every entry after its exact
+through-boundary follows; the selected summary is omitted from its later
+physical position. Otherwise the complete order is unchanged. Malformed range or
+append provenance fails closed. The resulting order becomes provider-neutral
+messages:
 
 - `OriginAcceptedInput` renders as a user message with its checked accepted
   input content;
@@ -146,6 +156,9 @@ projects the exact frontier order into provider-neutral messages:
   epoch; the provider bridge later projects it as an injected user-role message
   with the fixed `Signalbox session event: your model identity is now` prefix
   (INV-046);
+- `ContextSummary` renders as a distinct user-role prior-conversation summary,
+  retaining the producing compaction call and exact summarized range in the
+  provider-neutral value;
 - `RunnerPlacementChanged` resolves its complete same-session successor
   placement record and renders as a structured provider-neutral placement change
   retaining the positive placement revision and selected sandbox profile. The
@@ -219,6 +232,42 @@ has no admitted media projection. Skipping affects only model visibility. It
 does not remove, rewrite, summarize, or reorder the semantic entries or their
 addressable imported frontier. A richer projection requires a later foundation
 decision.
+
+## Compaction calls and triggers
+
+Summary production uses a dedicated physical model call with its own durable
+`Prepared`, `InFlight`, and terminal lifecycle. The record pins the session's
+current direct selection, resolved provider target, complete source frontier,
+non-secret credential reference, terminal disposition, and the provider's
+independently optional input, output, cache-creation-input, and cache-read-input
+token fields. Only a completed call may produce a `ContextSummary` and
+compaction result. The compaction prompt is a required bounded deployment value
+in the model-catalog configuration, not a source-code literal; the ordinary
+session system prompt is not substituted for it.
+
+The explicit version-twenty-two `compact_session` request names a session and an
+optional semantic transcript position. Absence selects the latest safe terminal
+or pre-call boundary. The command records no projection preference: once its
+summary result commits, later model inputs in that session follow the projection
+rule. Command replay returns the same compaction identity, call, exact through
+position, summary entry, and result frontier.
+
+Every catalog model selection also declares `context_window_tokens` as a
+required nonzero integer beside `max_output_tokens`. It is operator-declared per
+selection and is never inferred from provider/model names. Before authorizing an
+ordinary model send, the daemon obtains the exact rendered-input token count
+from that selection's provider adapter. When the count exceeds the declared
+window, the ordinary call is not sent; the daemon runs compaction through the
+latest safe boundary, reloads the resulting complete frontier, renders again,
+and proceeds only when the new input fits. A compaction result that still cannot
+fit fails closed rather than looping or guessing a different limit.
+
+Both triggers share the same compaction transaction and provider-call lifecycle.
+Provider interaction remains outside database transactions, and restart treats a
+completed summary boundary as ordinary validated frontier evidence. A
+nonterminal compaction call follows the same no-surviving-task recovery posture
+as an ordinary model call; no summary or result frontier exists unless the
+completed observation and append commit together.
 
 ## Staged execution
 

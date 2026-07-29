@@ -290,6 +290,7 @@ async fn handle_in_transaction(
         Err(error) => {
             let outcome = match error.failure() {
                 AcceptedInputEligibilityFailure::ActiveTurnPresent { .. }
+                | AcceptedInputEligibilityFailure::ContextCompactionInProgress { .. }
                 | AcceptedInputEligibilityFailure::NoQueuedTurn => {
                     return Ok(TransactionDecision::Rollback(
                         StartEligibleTurnOutcome::NoEligibleTurn,
@@ -354,6 +355,7 @@ async fn insert_prepared_activation(
         }
         InitialSemanticTranscriptEntryPayload::Imported { .. }
         | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+        | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
         | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
         | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
         | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
@@ -433,6 +435,7 @@ async fn insert_prepared_activation(
             }
             InitialSemanticTranscriptEntryPayload::Imported { .. }
             | InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
             | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
             | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }

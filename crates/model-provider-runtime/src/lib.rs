@@ -38,6 +38,7 @@ use signalbox_model_runtime::{
 const DIAGNOSTIC_MODEL_IDENTITY_LIMIT: usize = 128;
 
 const MODEL_IDENTITY_CHANGE_MESSAGE: &str = "Signalbox session event: your model identity is now";
+const CONTEXT_SUMMARY_MESSAGE: &str = "Signalbox prior-conversation summary:";
 
 /// One already-redacted provider text fragment for ephemeral presentation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1013,6 +1014,14 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                     "{MODEL_IDENTITY_CHANGE_MESSAGE} {} (session defaults epoch {}).",
                     selected.into_uuid(),
                     defaults_version.as_u64()
+                )));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::ContextSummary { content, .. } => {
+                rendered.push(ConversationMessage::user_text(format!(
+                    "{CONTEXT_SUMMARY_MESSAGE}\n{}",
+                    content.as_str()
                 )));
                 assistant_call = None;
                 collecting_tool_results = false;

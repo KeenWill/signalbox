@@ -17,7 +17,8 @@ const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 32;
 
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
-    AuthorizedModelCall, CompletedModelCallIdentities, ContextFrontierId,
+    AuthorizedModelCall, CompletedModelCallIdentities, ContextCompactionRange, ContextFrontierId,
+    ContextFrontierProjection, ContextFrontierProjectionFailure,
     CorrelatedModelCallTerminalObservation, DangerousToolAutoApproval, DirectModelSelection,
     FailedModelCallTurn, FailedModelCallTurnIdentities, ImportedSourceAttestation, ImportedSpeaker,
     ImportedText, ImportedTranscriptContent, ImportedTranscriptEntryId, InitialToolApproval,
@@ -68,6 +69,17 @@ pub enum ModelConversationMessage {
         defaults_version: SessionConfigurationDefaultsVersion,
         /// The exact direct model identity newly selected.
         selected: DirectModelSelection,
+    },
+    /// Model-produced summary standing in for one exact earlier range.
+    ContextSummary {
+        /// The source-qualified summary entry being rendered.
+        source: SemanticTranscriptEntryRef,
+        /// The dedicated model call that produced the summary.
+        producing_call: ModelCallId,
+        /// The exact inclusive range represented by this summary.
+        summarized: ContextCompactionRange,
+        /// Exact model-produced summary text.
+        content: AssistantText,
     },
     /// Exact accepted-input origin content rendered with the user role.
     User {
@@ -191,6 +203,16 @@ fn render_frontier_messages<'a>(
                 source,
                 defaults_version: *defaults_version,
                 selected: *selected,
+            }),
+            SemanticTranscriptEntryPayload::ContextSummary {
+                producing_call,
+                summarized,
+                value,
+            } => messages.push(ModelConversationMessage::ContextSummary {
+                source,
+                producing_call: *producing_call,
+                summarized: *summarized,
+                content: value.clone(),
             }),
             SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
@@ -379,12 +401,29 @@ impl PreparedModelOperation {
         tools: Box<[ToolDefinition]>,
         tool_entries: &[ResolvedToolConversationEntry],
     ) -> Result<Self, ModelFrontierRenderingError> {
+        let complete_entries = request.frontier_entries().cloned().collect::<Vec<_>>();
+        let projection = ContextFrontierProjection::from_complete_entries(&complete_entries)
+            .map_err(ModelFrontierRenderingError::InvalidContextProjection)?;
+        let entries_by_reference = complete_entries
+            .iter()
+            .map(|entry| (entry.reference(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let projected_references = projection.ordered_entries().collect::<BTreeSet<_>>();
+        let mut projected_entries = Vec::with_capacity(projected_references.len());
+        for reference in projection.ordered_entries() {
+            let Some(entry) = entries_by_reference.get(&reference) else {
+                return Err(ModelFrontierRenderingError::MissingProjectedEntry {
+                    entry: reference,
+                });
+            };
+            projected_entries.push((reference, entry.payload()));
+        }
         let messages = render_frontier_messages(
-            request
-                .frontier_entries()
-                .map(|entry| (entry.reference(), entry.payload())),
+            projected_entries,
             |accepted_input| request.origin_content(accepted_input).cloned(),
-            tool_entries.iter(),
+            tool_entries
+                .iter()
+                .filter(|entry| projected_references.contains(&entry.source())),
         )?;
         Ok(Self {
             request,
@@ -452,6 +491,13 @@ pub enum ModelFrontierRenderingError {
         /// Extra source-qualified entry.
         entry: SemanticTranscriptEntryRef,
     },
+    /// A projection named an entry absent from its complete source frontier.
+    MissingProjectedEntry {
+        /// The absent source-qualified entry.
+        entry: SemanticTranscriptEntryRef,
+    },
+    /// The complete durable frontier carries malformed summary provenance.
+    InvalidContextProjection(ContextFrontierProjectionFailure),
 }
 
 impl fmt::Display for ModelFrontierRenderingError {
@@ -471,6 +517,12 @@ impl fmt::Display for ModelFrontierRenderingError {
             }
             Self::UnexpectedToolEvidence { .. } => {
                 formatter.write_str("model frontier tool evidence is not referenced")
+            }
+            Self::MissingProjectedEntry { .. } => {
+                formatter.write_str("context projection entry is missing from its frontier")
+            }
+            Self::InvalidContextProjection(_) => {
+                formatter.write_str("invalid context-compaction projection")
             }
         }
     }

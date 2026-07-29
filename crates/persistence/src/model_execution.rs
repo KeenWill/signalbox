@@ -2659,6 +2659,7 @@ async fn load_origin_contents(
             }
             SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
@@ -3029,6 +3030,7 @@ async fn load_tool_conversation_entries(
             }
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
@@ -3125,6 +3127,7 @@ async fn load_tool_conversation_entries(
             }
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
@@ -4778,7 +4781,9 @@ fn identity_collision(error: &sqlx::Error) -> Option<ModelCallIdentityCollision>
         .as_database_error()
         .and_then(|database| database.constraint())
     {
-        Some("model_call_pkey") => Some(ModelCallIdentityCollision::ModelCall),
+        Some("model_call_pkey" | "model_call_identity_pkey") => {
+            Some(ModelCallIdentityCollision::ModelCall)
+        }
         Some("semantic_transcript_entry_pk" | "semantic_transcript_entry_id_global") => {
             Some(ModelCallIdentityCollision::SemanticEntry)
         }
