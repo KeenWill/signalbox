@@ -80,6 +80,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tool_result(fixtures::TOOL_ID)?;
             success("tool_use", Some(fixtures::TOOL_ARGUMENTS))?;
         }
+        "noncanonical_tool_arguments" => {
+            assistant_tool_with_raw_arguments(
+                fixtures::TOOL_ID,
+                fixtures::TOOL_NAME,
+                fixtures::NONCANONICAL_TOOL_ARGUMENTS,
+            )?;
+            tool_result(fixtures::TOOL_ID)?;
+            success("tool_use", Some(fixtures::NONCANONICAL_TOOL_ARGUMENTS))?;
+        }
         "refusal" => {
             assistant_text(fixtures::REFUSAL)?;
             success("refusal", Some(fixtures::REFUSAL))?;
@@ -131,6 +140,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             contradictory_success(&[], Some(500))?;
         }
         "api_status_error" => api_status_error()?,
+        "credential_finish_token" => {
+            assistant_text(fixtures::ANSWER)?;
+            success(fixtures::FINISH_TOKEN_SECRET, Some(fixtures::ANSWER))?;
+        }
+        "credential_error_token" => credential_error_token()?,
+        "reasoning_metadata_credential" => reasoning_metadata_credential()?,
+        "redacted_reasoning_metadata_credential" => redacted_reasoning_metadata_credential()?,
         "truncated_stream" => assistant_text(fixtures::ANSWER)?,
         other => return Err(format!("unsupported synthetic scenario `{other}`").into()),
     }
@@ -192,6 +208,43 @@ fn assistant_tool(tool_id: &str, name: &str) -> std::io::Result<()> {
     }))
 }
 
+fn assistant_tool_with_raw_arguments(
+    tool_id: &str,
+    name: &str,
+    arguments: &str,
+) -> std::io::Result<()> {
+    emit(
+        format!(
+            "{{\"type\":\"assistant\",\"parent_tool_use_id\":null,\"message\":{{\"model\":\"{}\",\"id\":\"{}\",\"role\":\"assistant\",\"content\":[{{\"type\":\"tool_use\",\"id\":\"{tool_id}\",\"name\":\"mcp__signalbox_tools__{name}\",\"input\":{arguments},\"caller\":{{\"type\":\"direct\"}}}}]}}}}\n",
+            fixtures::MODEL,
+            fixtures::MESSAGE_ID,
+        )
+        .as_bytes(),
+    )
+}
+
+fn reasoning_metadata_credential() -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "assistant", "parent_tool_use_id": null,
+        "message": {"model": fixtures::MODEL, "id": fixtures::MESSAGE_ID, "role": "assistant",
+            "content": [{"type": "thinking", "thinking": fixtures::REASONING_SECRET_PREFIX,
+                "signature": fixtures::REASONING_SECRET_CONTINUATION}]}
+    }))?;
+    success("end_turn", Some(fixtures::REASONING_SECRET))
+}
+
+fn redacted_reasoning_metadata_credential() -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "assistant", "parent_tool_use_id": null,
+        "message": {"model": fixtures::MODEL, "id": fixtures::MESSAGE_ID, "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": fixtures::REASONING_SECRET_PREFIX},
+                {"type": "redacted_thinking", "data": fixtures::REASONING_SECRET_CONTINUATION}
+            ]}
+    }))?;
+    success("end_turn", Some(fixtures::REASONING_SECRET))
+}
+
 fn tool_result(id: &str) -> std::io::Result<()> {
     emit_json(&serde_json::json!({
         "type": "user", "message": {"role": "user", "content": [{
@@ -208,6 +261,16 @@ fn api_status_error() -> std::io::Result<()> {
         "session_id": fixtures::SESSION_ID, "stop_reason": null,
         "terminal_reason": null, "result": "synthetic provider error",
         "errors": [], "api_error_status": 429,
+        "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}
+    }))
+}
+
+fn credential_error_token() -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "result", "subtype": fixtures::ERROR_TOKEN_SECRET, "is_error": true,
+        "session_id": fixtures::SESSION_ID, "stop_reason": null,
+        "terminal_reason": null, "result": "synthetic provider error",
+        "errors": [], "api_error_status": 500,
         "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}
     }))
 }

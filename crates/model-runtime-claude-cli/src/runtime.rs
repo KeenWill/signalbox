@@ -758,7 +758,7 @@ async fn execute_process<C: Clone + Send + Sync>(
                     let evidence = if let Some(error) = input_error {
                         decoder.boundary_loss_unless_provider_failure(
                             incomplete_upload_cause(&error),
-                            &redacting_sink,
+                            &mut redacting_sink,
                         )
                     } else {
                         decoder.finish(&mut redacting_sink)
@@ -849,7 +849,7 @@ async fn execute_process<C: Clone + Send + Sync>(
                 let evidence = if let Some(error) = input_error {
                     decoder.boundary_loss_unless_provider_failure(
                         incomplete_upload_cause(&error),
-                        &redacting_sink,
+                        &mut redacting_sink,
                     )
                 } else {
                     decoder.finish(&mut redacting_sink)
@@ -932,7 +932,7 @@ async fn execute_process<C: Clone + Send + Sync>(
                                 let evidence = if let Some(error) = input_error {
                                     decoder.boundary_loss_unless_provider_failure(
                                         incomplete_upload_cause(&error),
-                                        &redacting_sink,
+                                        &mut redacting_sink,
                                     )
                                 } else {
                                     decoder.finish(&mut redacting_sink)
@@ -981,7 +981,7 @@ async fn execute_process<C: Clone + Send + Sync>(
             let evidence = if let Some(error) = input_error {
                 decoder.boundary_loss_unless_provider_failure(
                     incomplete_upload_cause(&error),
-                    &redacting_sink,
+                    &mut redacting_sink,
                 )
             } else {
                 decoder.finish(&mut redacting_sink)
@@ -1016,7 +1016,7 @@ async fn execute_process<C: Clone + Send + Sync>(
             // Evidence is built before the sink flushes so the failure
             // message still sees the held cross-fragment redaction state.
             let evidence =
-                decoder.provider_error_after_exit(&message, &classification, &redacting_sink);
+                decoder.provider_error_after_exit(&message, &classification, &mut redacting_sink);
             redacting_sink.finish();
             evidence
         }

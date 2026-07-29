@@ -97,6 +97,19 @@ async fn tool_call_and_mcp_result_round_trip_returns_typed_proposal() {
 }
 
 #[tokio::test]
+async fn tool_arguments_preserve_the_provider_json_lexeme() {
+    let result = execute_scenario("noncanonical_tool_arguments", OperationShape::Tool).await;
+    let completion = completed(&result.evidence);
+    let proposal = tool_call(&completion.content);
+
+    assert_eq!(
+        proposal.arguments_json,
+        fixtures::NONCANONICAL_TOOL_ARGUMENTS
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn named_tool_choice_rejects_an_extra_declared_proposal() {
     let result = execute_scenario("named_choice_extra_tool", OperationShape::NamedTool).await;
     let loss = boundary_loss(&result.evidence);
@@ -264,6 +277,50 @@ async fn api_error_status_classifies_a_generic_terminal_error() {
     let failure = provider_error(&result.evidence);
 
     assert_eq!(failure.kind, ProviderErrorKind::RateLimited);
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn credential_shaped_finish_tokens_are_redacted_from_typed_evidence() {
+    let result = execute_scenario("credential_finish_token", OperationShape::Text).await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::FINISH_TOKEN_SECRET));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn credential_shaped_error_tokens_are_redacted_from_typed_evidence() {
+    let result = execute_scenario("credential_error_token", OperationShape::Text).await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::ERROR_TOKEN_SECRET));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn reasoning_metadata_cannot_complete_a_streamed_credential() {
+    let result = execute_scenario("reasoning_metadata_credential", OperationShape::Text).await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::REASONING_SECRET));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn redacted_reasoning_metadata_cannot_complete_a_streamed_credential() {
+    let result = execute_scenario(
+        "redacted_reasoning_metadata_credential",
+        OperationShape::Text,
+    )
+    .await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::REASONING_SECRET));
+    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 

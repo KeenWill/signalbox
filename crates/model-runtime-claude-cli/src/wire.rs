@@ -31,6 +31,21 @@ pub(crate) struct AssistantEvent {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct AssistantRawEvent {
+    pub(crate) message: AssistantRawMessage,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AssistantRawMessage {
+    pub(crate) content: Vec<Box<serde_json::value::RawValue>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RawToolUse {
+    pub(crate) input: Box<serde_json::value::RawValue>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct AssistantMessage {
     pub(crate) model: String,
     pub(crate) id: String,

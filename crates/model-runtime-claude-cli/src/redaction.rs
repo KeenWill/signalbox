@@ -1303,6 +1303,16 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         redact_text(value)
     }
 
+    /// Sanitizes a retained non-stream field while preserving chronological
+    /// redaction state across the preceding streamed field and the next
+    /// retained or streamed provider field.
+    pub(crate) fn redact_retained_metadata(&mut self, value: &str) -> String {
+        let sanitized = self.redact_provider_id("", value);
+        self.flush_boundary();
+        self.seed_emitted_context(&sanitized);
+        sanitized
+    }
+
     fn flush_boundary(&mut self) {
         if let Some(pending) = self.pending.take() {
             // A live lookbehind chain (emitted thread id, dropped provider
