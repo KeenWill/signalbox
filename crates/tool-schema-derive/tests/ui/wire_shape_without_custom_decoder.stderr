@@ -1,0 +1,6 @@
+error: field `value`: tool_schema(with = Type) requires serde with/deserialize_with to define a custom wire shape
+ --> tests/ui/wire_shape_without_custom_decoder.rs:5:5
+  |
+5 | /     #[tool_schema(description = "Text value.", with = u64)]
+6 | |     value: String,
+  | |_________________^

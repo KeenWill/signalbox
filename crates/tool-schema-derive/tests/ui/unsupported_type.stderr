@@ -1,0 +1,5 @@
+error: field `coordinates`: unsupported schema type; use an owned path type implementing ToolSchema
+ --> tests/ui/unsupported_type.rs:6:18
+  |
+6 |     coordinates: (i64, i64),
+  |                  ^^^^^^^^^^
