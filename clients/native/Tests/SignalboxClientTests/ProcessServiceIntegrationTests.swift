@@ -540,6 +540,38 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testAmbiguousStopRetryReusesPreparedCommandIdentity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingStopProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      service
+    }
+    await viewModel.connect()
+    viewModel.apply(.event(try ProcessProjectionFixture.acceptedEvent()))
+    viewModel.apply(.event(try ProcessProjectionFixture.activatedEvent()))
+    viewModel.composerText = ProcessSubmissionFixture.content
+
+    await viewModel.stopAndSendSuccessor()
+    let submittedCommandIDs = await service.submittedCommandIDs
+    XCTAssertEqual(submittedCommandIDs, [ProcessSubmissionFixture.commandID])
+
+    XCTAssertEqual(viewModel.activeTurnID?.rawValue, ProcessDriverFixture.turn)
+    viewModel.apply(.event(try ProcessProjectionFixture.successorActivatedEvent()))
+    XCTAssertEqual(viewModel.activeTurnID?.rawValue, ProcessSubmissionFixture.acceptedTurnID)
+
+    await viewModel.stopAndSendSuccessor()
+    let finalCommandIDs = await service.submittedCommandIDs
+    let submittedActiveTurnIDs = await service.submittedActiveTurnIDs
+
+    XCTAssertEqual(finalCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
+    XCTAssertEqual(
+      submittedActiveTurnIDs,
+      [ProcessDriverFixture.turn, ProcessDriverFixture.turn]
+    )
+  }
+
+  @MainActor
   func testAmbiguousToolDecisionRetryReusesPreparedCommandIdentity() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -2265,6 +2297,72 @@ private actor AmbiguousThenAcceptingProcessService: SignalboxProcessServiceProto
   }
 }
 
+private actor AmbiguousThenAcceptingStopProcessService: SignalboxProcessServiceProtocol {
+  private(set) var submittedCommandIDs: [String] = []
+  private(set) var submittedActiveTurnIDs: [String] = []
+
+  func testConnection() async throws {}
+
+  func listSessions(includeArchived: Bool) async throws -> [SignalboxProcessSession] {
+    []
+  }
+
+  func setArchived(
+    _ archived: Bool,
+    session: SignalboxProcessSession
+  ) async throws -> SignalboxProcessSession {
+    session
+  }
+
+  func prepareInputSubmission(
+    session: SignalboxProcessSession,
+    content: String
+  ) async throws -> SignalboxPreparedInputSubmission {
+    try ProcessSubmissionFixture.preparedSubmission()
+  }
+
+  func submit(
+    _ submission: SignalboxPreparedInputSubmission
+  ) async throws -> SignalboxInputSubmitted {
+    try ProcessSubmissionFixture.submittedReceipt(sessionID: submission.sessionID)
+  }
+
+  func prepareTurnStop(
+    session: SignalboxProcessSession,
+    activeTurnID: SignalboxCanonicalUUID,
+    content: String
+  ) async throws -> SignalboxPreparedTurnStop {
+    SignalboxPreparedTurnStop(
+      commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
+      sessionID: session.id,
+      activeTurnID: activeTurnID,
+      content: content,
+      expectedDefaultsVersion: session.defaultsVersion
+    )
+  }
+
+  func stopTurn(
+    _ prepared: SignalboxPreparedTurnStop
+  ) async throws -> SignalboxInputSubmitted {
+    submittedCommandIDs.append(prepared.commandID.rawValue.rawValue)
+    submittedActiveTurnIDs.append(prepared.activeTurnID.rawValue)
+    guard submittedCommandIDs.count > 1 else {
+      throw SignalboxProcessServiceError.mutationRetryExhausted(
+        code: .commitAmbiguous,
+        message: ProcessSubmissionFixture.failureMessage
+      )
+    }
+    return try ProcessSubmissionFixture.submittedReceipt(sessionID: prepared.sessionID)
+  }
+
+  func makeSynchronization(
+    sessionID: SignalboxCanonicalUUID,
+    updates: @escaping @Sendable (SignalboxSessionSynchronizationDriverUpdate) async -> Void
+  ) async -> any SignalboxSessionSynchronizing {
+    NoopProcessSynchronization()
+  }
+}
+
 private actor AmbiguousThenAcceptingToolDecisionProcessService:
   SignalboxProcessServiceProtocol
 {
@@ -3947,6 +4045,18 @@ private enum ProcessProjectionFixture {
       {
         "type":"turn_activated",
         "turn_id":"\(ProcessDriverFixture.turn)",
+        "current_attempt_id":"\(ProcessDriverFixture.attempt)"
+      }
+      """
+    )
+  }
+
+  static func successorActivatedEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"turn_activated",
+        "turn_id":"\(ProcessSubmissionFixture.acceptedTurnID)",
         "current_attempt_id":"\(ProcessDriverFixture.attempt)"
       }
       """
