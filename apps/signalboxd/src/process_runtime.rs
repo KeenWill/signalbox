@@ -8967,34 +8967,44 @@ context_window_tokens = 200000
         Ok(())
     }
 
+    #[track_caller]
+    fn complete_frame(line: Option<IncomingLine>) -> Vec<u8> {
+        let Some(IncomingLine::Complete(line)) = line else {
+            panic!("fixture expected one complete frame");
+        };
+        line
+    }
+
+    #[track_caller]
+    fn oversized_frame_identity(
+        line: Option<IncomingLine>,
+    ) -> (RequestId, Option<ProtocolVersion>) {
+        let Some(IncomingLine::Oversized {
+            request_id,
+            admitted_version,
+        }) = line
+        else {
+            panic!("fixture expected one oversized frame");
+        };
+        (request_id, admitted_version)
+    }
+
     #[tokio::test]
     async fn inv033_frame_reader_accepts_the_exact_cap_and_rejects_the_next_byte()
     -> Result<(), Box<dyn Error>> {
         let mut exact = vec![b'x'; MAX_FRAME_BYTES];
-        let Some(final_byte) = exact.last_mut() else {
-            return Err(io::Error::other("the positive frame cap has no final byte").into());
-        };
-        *final_byte = b'\n';
+        exact[MAX_FRAME_BYTES - 1] = b'\n';
         let mut exact_reader = BufReader::new(exact.as_slice());
-        let Some(IncomingLine::Complete(line)) = read_frame_line(&mut exact_reader).await? else {
-            panic!("fixture expected one complete frame at the exact cap");
-        };
+        let line = complete_frame(read_frame_line(&mut exact_reader).await?);
         assert_eq!(line.len(), MAX_FRAME_BYTES);
 
         let mut oversized = vec![b'x'; MAX_FRAME_BYTES + 1];
-        let Some(final_byte) = oversized.last_mut() else {
-            return Err(io::Error::other("the oversized frame has no final byte").into());
-        };
-        *final_byte = b'\n';
+        oversized[MAX_FRAME_BYTES] = b'\n';
         let mut oversized_reader = BufReader::new(oversized.as_slice());
-        let Some(IncomingLine::Oversized {
-            request_id,
-            admitted_version: None,
-        }) = read_frame_line(&mut oversized_reader).await?
-        else {
-            panic!("fixture expected an uncorrelated oversized frame");
-        };
+        let (request_id, admitted_version) =
+            oversized_frame_identity(read_frame_line(&mut oversized_reader).await?);
         assert_eq!(request_id.value(), 0);
+        assert_eq!(admitted_version, None);
 
         let correlated_request_id = 9;
         let request_members = format!(r#""request_id":"{correlated_request_id}""#);
@@ -9007,14 +9017,10 @@ context_window_tokens = 200000
         correlated.extend_from_slice(suffix);
         correlated.push(b'\n');
         let mut correlated_reader = BufReader::new(correlated.as_slice());
-        let Some(IncomingLine::Oversized {
-            request_id,
-            admitted_version: Some(ProtocolVersion::One),
-        }) = read_frame_line(&mut correlated_reader).await?
-        else {
-            panic!("fixture expected a correlated oversized frame");
-        };
+        let (request_id, admitted_version) =
+            oversized_frame_identity(read_frame_line(&mut correlated_reader).await?);
         assert_eq!(request_id.value(), correlated_request_id);
+        assert_eq!(admitted_version, Some(ProtocolVersion::One));
         Ok(())
     }
 

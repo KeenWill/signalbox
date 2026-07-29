@@ -5007,8 +5007,8 @@ mod tests {
         );
     }
 
-    /// INV-033: the three unified page messages exist only from version
-    /// sixteen and keep their exact closed shapes across round trips.
+    /// INV-033: the three unified page messages keep their exact closed
+    /// shapes across round trips.
     #[test]
     fn inv033_conversation_page_messages_have_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {

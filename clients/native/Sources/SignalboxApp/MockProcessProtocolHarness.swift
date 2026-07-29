@@ -7,8 +7,9 @@ import Foundation
   import SignalboxModels
 #endif
 
-/// The app mock exercises the same v18 encoder, decoder, framing, and request
-/// identities as the Unix-socket adapter. Only its byte transport is in memory.
+/// The app mock exercises the same process-protocol encoder, decoder, framing,
+/// and request identities as the Unix-socket adapter. Only its byte transport is
+/// in memory.
 struct MockProcessProtocolConnectionFactory: SignalboxProcessConnectionFactory {
   private let state: MockProcessProtocolState
 

@@ -60,9 +60,9 @@ struct SettingsScreen: View {
         Section("Client") {
           LabeledContent(
             "Mode",
-            value: coordinator.isMockMode ? "v18 JSONL harness" : "Local Unix socket"
+            value: coordinator.isMockMode ? "Single-version JSONL harness" : "Local Unix socket"
           )
-          LabeledContent("Wire", value: "Process protocol v18")
+          LabeledContent("Wire", value: "Process protocol version 1")
             .accessibilityIdentifier("wire-diagnostic")
           LabeledContent("Authentication", value: "Not defined")
           LabeledContent("Remote transport", value: "Owner design gate")

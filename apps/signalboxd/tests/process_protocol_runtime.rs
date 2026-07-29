@@ -3350,9 +3350,9 @@ async fn s24_inv032_inv033_inherits_provider_text_streaming() -> Result<(), Box<
 }
 
 /// S01 / S02 / S24 / INV-032 / INV-035: the provider bridge asks the scripted
-/// runtime for streamed delivery, and already-attached followers on versions
-/// twelve, fourteen, and sixteen each observe the exact already-redacted deltas
-/// before durable terminal entries expose the same complete assistant reply.
+/// runtime for streamed delivery, and three already-attached followers each
+/// observe the exact already-redacted deltas before durable terminal entries
+/// expose the same complete assistant reply.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_three_followers_then_durable_truth()

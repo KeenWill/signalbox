@@ -14,9 +14,9 @@ input-delivery surface and its user-reachable steering boundary were verified
 through PR #302 (`agent/mid-turn-steering`). The copy-on-create session-template
 provenance and creation mode were verified through PR #311
 (`agent/session-templates-spec`). The append-only context-compaction record and
-projection were verified through this PR (`agent/context-compaction-core`); the
-command path and canonical visible-range selection were verified against
-`agent/context-compaction-protocol`. The runner placement-entry paragraphs are
+projection were verified through PR #312 (`agent/context-compaction-core`); the
+command path and canonical visible-range selection were verified through PR #314
+(`agent/context-compaction-protocol`). The runner placement-entry paragraphs are
 the foundation proposal at the bottom of their implementing stack and become
 verified only with those child pull requests. The imported-conversation record
 and converter are owned by [conversation-import](conversation-import.md). Where

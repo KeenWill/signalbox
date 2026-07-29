@@ -28,13 +28,14 @@ the prepared operation was verified through PR #286
 exact commit-ambiguity comparison were verified through PR #301
 (`agent/token-usage`); the empty-thinking completion rule was verified through
 PR #305 (`agent/sonnet-streamed-tool-use`). The context-summary projection and
-dedicated compaction-call evidence were verified through this PR
+dedicated compaction-call evidence were verified through PR #312
 (`agent/context-compaction-core`); the explicit trigger, pre-activation context
 guard, configured prompt, and provider-native input counting were verified
-against `agent/context-compaction-protocol`. The runner-placement rendering and
-executable session-tool snapshot paragraphs are the foundation proposal at the
-bottom of their implementing stack and become verified only with those child
-pull requests. Invariant tags cite [docs/invariants.md](../invariants.md).
+through PR #314 (`agent/context-compaction-protocol`). The runner-placement
+rendering and executable session-tool snapshot paragraphs are the foundation
+proposal at the bottom of their implementing stack and become verified only with
+those child pull requests. Invariant tags cite
+[docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
