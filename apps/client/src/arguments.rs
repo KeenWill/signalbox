@@ -38,18 +38,23 @@ pub(crate) enum SendDeliveryArgument {
 #[derive(Debug)]
 pub(crate) enum Command {
     Create {
-        selection: ModelSelection,
+        selection: Option<ModelSelection>,
+        template: Option<String>,
         command_id: Option<CommandId>,
         system_prompt_file: Option<PathBuf>,
     },
     Continue {
         imported_conversation_id: CanonicalUuid,
-        through_position: CanonicalU64,
+        through_position: ThroughPositionArgument,
         relationship: ImportedSessionRelationship,
         selection: ModelSelection,
         command_id: Option<CommandId>,
     },
+    Imported {
+        imported_conversation_id: CanonicalUuid,
+    },
     List,
+    Templates,
     Search(SessionMetadataPageRequest),
     Conversations(ConversationsPageRequest),
     Send {
@@ -75,6 +80,9 @@ pub(crate) enum Command {
         session_id: CanonicalUuid,
     },
     Follow {
+        session_id: CanonicalUuid,
+    },
+    Chat {
         session_id: CanonicalUuid,
     },
     Import {
@@ -203,8 +211,12 @@ enum CliCommand {
     Create(CreateArguments),
     /// Create a live session from an imported conversation boundary.
     Continue(ContinueArguments),
+    /// Print one imported conversation's selectable entry positions.
+    Imported(ImportedArguments),
     /// List current sessions.
     List,
+    /// List available session templates.
+    Templates,
     /// Read one filtered page of current session metadata.
     Search(SearchArguments),
     /// Read one filtered page listing native sessions and imported
@@ -220,6 +232,8 @@ enum CliCommand {
     Transcript(SessionArguments),
     /// Print a snapshot and follow durable session updates.
     Follow(SessionArguments),
+    /// Live in one session with streamed replies and in-loop control commands.
+    Chat(SessionArguments),
     /// Import Claude Code sessions or Codex rollout JSONL files.
     Import(ImportArguments),
     /// Reconcile a turn parked on an ambiguous model call and continue with
@@ -393,10 +407,10 @@ enum ReviewSeverityArgument {
 
 #[derive(Debug, ClapArgs)]
 #[command(group(
-    ArgGroup::new("selection")
+    ArgGroup::new("creation_source")
         .required(true)
         .multiple(false)
-        .args(["model", "alias"])
+        .args(["model", "alias", "template"])
 ))]
 struct CreateArguments {
     /// Select a model configuration directly.
@@ -405,6 +419,14 @@ struct CreateArguments {
     /// Select a configured model alias.
     #[arg(long, value_name = "UUID", value_parser = canonical_uuid)]
     alias: Option<CanonicalUuid>,
+    /// Copy the named daemon-owned template bundle at creation.
+    #[arg(
+        long,
+        value_name = "NAME",
+        value_parser = template_name,
+        conflicts_with_all = ["model", "alias", "system_prompt_file"]
+    )]
+    template: Option<String>,
     /// Read the exact optional session system prompt from one file.
     #[arg(long, value_name = "PATH")]
     system_prompt_file: Option<PathBuf>,
@@ -424,9 +446,10 @@ struct ContinueArguments {
     /// Imported conversation to continue from.
     #[arg(value_name = "IMPORTED_CONVERSATION", value_parser = canonical_uuid)]
     imported_conversation_id: CanonicalUuid,
-    /// Inclusive positive imported entry position.
-    #[arg(long, value_name = "DECIMAL", value_parser = positive_canonical_u64)]
-    through_position: CanonicalU64,
+    /// Inclusive positive imported entry position, or `latest` for the
+    /// imported conversation's final entry.
+    #[arg(long, value_name = "DECIMAL|latest", value_parser = through_position)]
+    through_position: ThroughPositionArgument,
     /// Record whether this session resumes or forks the imported boundary.
     #[arg(long, value_enum)]
     relationship: ImportedRelationshipArgument,
@@ -441,10 +464,31 @@ struct ContinueArguments {
     command_id: Option<CommandId>,
 }
 
+#[derive(Debug, ClapArgs)]
+struct ImportedArguments {
+    /// Imported conversation to inspect.
+    #[arg(value_name = "IMPORTED_CONVERSATION", value_parser = canonical_uuid)]
+    imported_conversation_id: CanonicalUuid,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ImportedRelationshipArgument {
     Resume,
     Fork,
+}
+
+/// What the required `--through-position` value selects.
+///
+/// The flag stays required: an imported boundary is never guessed. `latest` is
+/// an explicit sentinel the client resolves against the imported conversation's
+/// own entry count before it constructs the durable command, so the wire
+/// request always carries a concrete position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ThroughPositionArgument {
+    /// Continue through this exact inclusive imported position.
+    Exact(CanonicalU64),
+    /// Continue through the imported conversation's final entry.
+    Latest,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -766,15 +810,17 @@ pub(crate) fn parse(
     let command = match parsed.command {
         CliCommand::Create(arguments) => Command::Create {
             selection: match (arguments.model, arguments.alias) {
-                (Some(selection_id), None) => ModelSelection::Direct { selection_id },
-                (None, Some(alias_id)) => ModelSelection::Alias { alias_id },
+                (Some(selection_id), None) => Some(ModelSelection::Direct { selection_id }),
+                (None, Some(alias_id)) => Some(ModelSelection::Alias { alias_id }),
+                (None, None) if arguments.template.is_some() => None,
                 (None, None) | (Some(_), Some(_)) => {
                     return Err(UsageError(Cli::command().error(
                         ErrorKind::ArgumentConflict,
-                        "create requires exactly one of --model or --alias",
+                        "create requires exactly one of --model, --alias, or --template",
                     )));
                 }
             },
+            template: arguments.template,
             command_id: arguments.command_id,
             system_prompt_file: arguments.system_prompt_file,
         },
@@ -797,7 +843,11 @@ pub(crate) fn parse(
             },
             command_id: arguments.command_id,
         },
+        CliCommand::Imported(arguments) => Command::Imported {
+            imported_conversation_id: arguments.imported_conversation_id,
+        },
         CliCommand::List => Command::List,
+        CliCommand::Templates => Command::Templates,
         CliCommand::Search(arguments) => {
             let mut distinct = arguments.tags.clone();
             distinct.sort();
@@ -936,6 +986,9 @@ pub(crate) fn parse(
             session_id: arguments.session_id,
         },
         CliCommand::Follow(arguments) => Command::Follow {
+            session_id: arguments.session_id,
+        },
+        CliCommand::Chat(arguments) => Command::Chat {
             session_id: arguments.session_id,
         },
         CliCommand::Import(arguments) => Command::Import {
@@ -1092,6 +1145,27 @@ fn command_id(value: &str) -> Result<CommandId, String> {
         .map_err(|_| "command UUID uses a reserved value".to_owned())
 }
 
+fn template_name(value: &str) -> Result<String, String> {
+    const MAX_UTF8_BYTES: usize = 128;
+
+    let first_is_admitted = value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+    if value.len() > MAX_UTF8_BYTES
+        || !first_is_admitted
+        || value.bytes().any(|byte| {
+            !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && !b"._-".contains(&byte)
+        })
+    {
+        return Err(
+            "template name must use 1 through 128 bytes of lowercase ASCII letters, digits, dot, dash, or underscore and begin with a letter or digit"
+                .to_owned(),
+        );
+    }
+    Ok(value.to_owned())
+}
+
 fn metadata_filter_text(value: &str) -> Result<String, String> {
     if value.is_empty() {
         return Err("metadata filter text must not be empty".to_owned());
@@ -1148,6 +1222,18 @@ fn positive_canonical_u64(value: &str) -> Result<CanonicalU64, String> {
     Ok(parsed)
 }
 
+/// The exact sentinel selecting an imported conversation's final entry.
+const LATEST_IMPORTED_POSITION: &str = "latest";
+
+fn through_position(value: &str) -> Result<ThroughPositionArgument, String> {
+    if value == LATEST_IMPORTED_POSITION {
+        return Ok(ThroughPositionArgument::Latest);
+    }
+    positive_canonical_u64(value)
+        .map(ThroughPositionArgument::Exact)
+        .map_err(|error| format!("{error}, or the exact text `{LATEST_IMPORTED_POSITION}`"))
+}
+
 fn review_line_number(value: &str) -> Result<CanonicalU64, String> {
     let parsed = positive_canonical_u64(value)?;
     if parsed.value() > u64::from(u32::MAX) {
@@ -1184,7 +1270,7 @@ mod tests {
     use super::{
         Arguments, Command, ConversationsPageRequest, DangerousToolAutoApprovalArgument,
         ImportSourceArgument, ParseOutcome, SendDeliveryArgument, SessionMetadataPageRequest,
-        UsageError, parse,
+        ThroughPositionArgument, UsageError, parse,
     };
 
     #[derive(Clone, Copy)]
@@ -1873,6 +1959,19 @@ mod tests {
     }
 
     #[test]
+    fn chat_binds_one_canonical_session() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let Ok(ParseOutcome::Run(arguments)) = parse(["chat", session].map(Into::into)) else {
+            panic!("the valid chat invocation runs the client");
+        };
+        let Command::Chat { session_id } = arguments.command else {
+            panic!("the chat invocation selects the chat command");
+        };
+
+        assert_eq!(session_id.to_string(), session);
+    }
+
+    #[test]
     fn duplicate_global_options_are_rejected() {
         assert!(parse(["--raw-output", "--raw-output", "list"].map(Into::into)).is_err());
     }
@@ -1927,6 +2026,83 @@ mod tests {
     }
 
     #[test]
+    fn create_template_is_simple_and_excludes_every_explicit_default_flag() {
+        const TEMPLATE_NAME: &str = "reviewer";
+        let parsed = parse(["create", "--template", TEMPLATE_NAME].map(Into::into))
+            .expect("template creation parses");
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("template creation must run");
+        };
+        let Command::Create {
+            selection,
+            template,
+            system_prompt_file,
+            ..
+        } = arguments.command
+        else {
+            panic!("template creation maps to create");
+        };
+
+        assert_eq!(selection, None);
+        assert_eq!(template.as_deref(), Some(TEMPLATE_NAME));
+        assert_eq!(system_prompt_file, None);
+        assert!(
+            parse(
+                [
+                    "create",
+                    "--template",
+                    TEMPLATE_NAME,
+                    "--model",
+                    "00000000-0000-0000-0000-000000000001",
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                [
+                    "create",
+                    "--template",
+                    TEMPLATE_NAME,
+                    "--alias",
+                    "00000000-0000-0000-0000-000000000002",
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                [
+                    "create",
+                    "--template",
+                    TEMPLATE_NAME,
+                    "--system-prompt-file",
+                    "prompt.txt",
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn create_rejects_an_invalid_template_name_at_the_parse_boundary() {
+        assert!(parse(["create", "--template", "Reviewer"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn templates_maps_to_the_read_only_listing_command() {
+        let parsed = parse(["templates"].map(Into::into)).expect("templates parses");
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("templates must run");
+        };
+        let Command::Templates = arguments.command else {
+            panic!("templates maps to its listing command");
+        };
+    }
+    #[test]
     fn continue_maps_an_explicit_imported_frontier_and_relationship() {
         let parsed = parse(
             [
@@ -1942,7 +2118,88 @@ mod tests {
             .map(Into::into),
         );
 
-        assert_continue_parse(parsed, 2);
+        assert_continue_parse(parsed, ThroughPositionArgument::Exact(CanonicalU64::new(2)));
+    }
+
+    #[test]
+    fn continue_maps_the_latest_sentinel_without_naming_a_position() {
+        let parsed = parse(
+            [
+                "continue",
+                "00000000-0000-0000-0000-000000000001",
+                "--through-position",
+                "latest",
+                "--relationship",
+                "resume",
+                "--model",
+                "00000000-0000-0000-0000-000000000002",
+            ]
+            .map(Into::into),
+        );
+
+        assert_continue_parse(parsed, ThroughPositionArgument::Latest);
+    }
+
+    #[test]
+    fn continue_rejects_a_sentinel_spelling_other_than_latest() {
+        let conversation = "00000000-0000-0000-0000-000000000001";
+        let model = "00000000-0000-0000-0000-000000000002";
+        assert!(
+            parse(
+                [
+                    "continue",
+                    conversation,
+                    "--through-position",
+                    "Latest",
+                    "--relationship",
+                    "resume",
+                    "--model",
+                    model,
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn continue_still_requires_an_explicit_through_position() {
+        let conversation = "00000000-0000-0000-0000-000000000001";
+        let model = "00000000-0000-0000-0000-000000000002";
+        assert!(
+            parse(
+                [
+                    "continue",
+                    conversation,
+                    "--relationship",
+                    "resume",
+                    "--model",
+                    model,
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn imported_maps_one_conversation_identity() {
+        let parsed = parse(["imported", "00000000-0000-0000-0000-000000000001"].map(Into::into))
+            .expect("the canonical imported conversation identity parses");
+
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the successful imported parse runs the client");
+        };
+        let Command::Imported {
+            imported_conversation_id,
+        } = arguments.command
+        else {
+            panic!("the successful imported parse selects imported");
+        };
+        assert_eq!(
+            imported_conversation_id,
+            CanonicalUuid::from_uuid(Uuid::from_u128(1))
+        );
     }
 
     #[test]
@@ -2044,7 +2301,10 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_continue_parse(parsed: Result<ParseOutcome, UsageError>, expected_position: u64) {
+    fn assert_continue_parse(
+        parsed: Result<ParseOutcome, UsageError>,
+        expected_position: ThroughPositionArgument,
+    ) {
         let Ok(ParseOutcome::Run(arguments)) = parsed else {
             panic!("the successful continue parse runs the client");
         };
@@ -2056,7 +2316,7 @@ mod tests {
         else {
             panic!("the successful continue parse selects continue");
         };
-        assert_eq!(through_position.value(), expected_position);
+        assert_eq!(through_position, expected_position);
         assert_eq!(relationship, ImportedSessionRelationship::Resume);
     }
 

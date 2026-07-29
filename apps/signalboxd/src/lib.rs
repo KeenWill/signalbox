@@ -28,6 +28,7 @@ mod daemon_tools;
 mod fenced_database;
 mod local_socket;
 mod process_runtime;
+mod session_template_configuration;
 mod single_hub;
 
 pub use configuration::{
@@ -41,6 +42,9 @@ pub use daemon_tools::{
 pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError};
+pub use session_template_configuration::{
+    ResolvedSessionTemplate, SessionTemplateConfiguration, SessionTemplateConfigurationError,
+};
 pub use signalbox_tools_basic::{
     CurrentTimeClock, CurrentTimeExecutor, CurrentTimeExecutorError, CurrentTimeTool,
     CurrentTimeToolConstructionError, EchoExecutor, EchoExecutorError, EchoTool,
@@ -54,21 +58,30 @@ pub use signalbox_tools_basic::{
 };
 pub use signalbox_tools_code_host::{
     CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
-    CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME, CHANGE_REQUEST_FILE_PATCH_NAME,
+    CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME,
+    CHANGE_REQUEST_CONVERGENCE_STATE_NAME, CHANGE_REQUEST_FILE_PATCH_NAME,
     CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME, CHANGE_REQUEST_REVIEW_THREADS_NAME,
-    CHANGE_REQUEST_SUMMARY_NAME, CHANGE_REQUEST_THREAD_REPLY_NAME,
+    CHANGE_REQUEST_STACK_STATE_NAME, CHANGE_REQUEST_SUMMARY_NAME,
+    CHANGE_REQUEST_THREAD_INVENTORY_NAME, CHANGE_REQUEST_THREAD_REPLY_NAME,
     CHANGE_REQUEST_THREAD_RESOLVE_NAME, CODE_HOST_CREDENTIAL_REFERENCE, CODE_HOST_TOOL_NAMES,
     ChangeRequestCommentArguments, ChangeRequestCommentResult, ChangeRequestSummaryArguments,
     ChangeRequestSummaryFields, ChangeRequestSummaryResult, ChangedFile, ChangedFilesArguments,
-    ChangedFilesResult, CheckStatus, ChecksStatusArguments, ChecksStatusResult, CiJobLogArguments,
-    CiJobLogResult, CodeHostChangeRequestNumber, CodeHostCommentBody, CodeHostExecutor,
-    CodeHostExecutorError, CodeHostFilePath, CodeHostOpaqueId, CodeHostOperation,
-    CodeHostRepository, CodeHostResult, CodeHostResultCompleteness, CodeHostRevision,
-    CodeHostTools, CodeHostToolsConstructionError, CodeHostTransport, CodeHostTransportFailure,
-    FilePatchArguments, FilePatchResult, GitHubCodeHostConstructionError, GitHubCodeHostTransport,
-    RerunFailedJobsArguments, RerunFailedJobsResult, ReviewThread, ReviewThreadComment,
-    ReviewThreadFields, ReviewThreadResolution, ReviewThreadsArguments, ReviewThreadsResult,
-    ThreadReplyArguments, ThreadReplyResult, ThreadResolveArguments, ThreadResolveResult,
+    ChangedFilesResult, CheckStatus, ChecksStatusArguments, ChecksStatusResult, ChildStackState,
+    CiJobLogArguments, CiJobLogResult, CodeHostChangeRequestNumber, CodeHostCommentBody,
+    CodeHostCursor, CodeHostExecutor, CodeHostExecutorError, CodeHostFilePath, CodeHostOpaqueId,
+    CodeHostOperation, CodeHostRepository, CodeHostResult, CodeHostResultCompleteness,
+    CodeHostRevision, CodeHostTools, CodeHostToolsConstructionError, CodeHostTransport,
+    CodeHostTransportFailure, ConvergenceStateArguments, ConvergenceStateFields,
+    ConvergenceStateResult, ConvergenceVerdict, FilePatchArguments, FilePatchResult,
+    GitHubCodeHostConstructionError, GitHubCodeHostTransport, REVIEW_GATE_CHECK_NAME,
+    RerunFailedJobsArguments, RerunFailedJobsResult, ReviewAuthorClass, ReviewCheck,
+    ReviewDispositionClass, ReviewGateBlockerCode, ReviewGateCheckArguments, ReviewGateCheckResult,
+    ReviewGatePurpose, ReviewThread, ReviewThreadComment, ReviewThreadFields, ReviewThreadIdentity,
+    ReviewThreadInventoryFields, ReviewThreadInventoryItem, ReviewThreadResolution,
+    ReviewThreadsArguments, ReviewThreadsResult, ReviewerVerdictEvidence, ReviewerVerdictFields,
+    ReviewerVerdictStatus, StackStateArguments, StackStateFields, StackStateResult,
+    ThreadInventoryArguments, ThreadInventoryResult, ThreadReplyArguments, ThreadReplyResult,
+    ThreadResolveArguments, ThreadResolveResult,
 };
 pub use single_hub::{SingleHubGuard, SingleHubGuardError};
 

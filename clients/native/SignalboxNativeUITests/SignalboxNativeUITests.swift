@@ -23,17 +23,17 @@ final class SignalboxNativeUITests: XCTestCase {
     }
 
     @MainActor
-    func testProcessToolDecisionIsGated() throws {
+    func testProcessToolDecisionOffersApproveAndDeny() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--mock-server", "--screenshot-state", "pending-approval"]
         app.launch()
 
-        XCTAssertTrue(app.staticTexts["Decision unavailable in process protocol v5"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["approve-tool-button"].exists)
+        XCTAssertTrue(app.buttons["approve-tool-button"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["deny-tool-button"].exists)
     }
 
     @MainActor
-    func testSettingsDescribesVersionFiveTransportGate() throws {
+    func testSettingsDescribesVersionTwentyOneTransportGate() throws {
         let app = launchMockApp()
 
         tapTab(named: "Settings", in: app)

@@ -30,7 +30,7 @@ forward-only predecessor chain. Continuing from a pre-compaction boundary
 creates a new session through the existing continuation machinery; an existing
 session has no per-turn projection switch.
 
-Version seventeen adds explicit session compaction with an optional through
+Version twenty adds explicit session compaction with an optional through
 position and an automatic pre-call guard. Each catalog selection declares a
 nonzero context-window token limit; the daemon never guesses one. Summary
 production uses the selection's ordinary provider target in a separate call and
@@ -48,7 +48,548 @@ truth.
 [model-call-execution](spec/model-call-execution.md),
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md),
 migration `202607290401_context_compaction.sql`, model-catalog configuration,
-and process protocol version seventeen.
+and process protocol version twenty.
+
+## 2026-07-28 — Bound the native ephemeral provider-text overlay
+
+**Context.** Each provider-text delta is frame-bounded, but a native client
+following a long-running model call concatenated an unbounded number of those
+fragments into one presentation string. The overlay is ephemeral: durable
+transcript synchronization remains the authority.
+
+**Decision.** Retain at most 8 MiB of concatenated provider text for one active
+turn and model call. Crossing that bound drops the overlay and invokes the
+existing authoritative projection-recovery path, without changing durable state.
+The cap matches one maximum wire frame and is independent of the one-fragment
+protocol bound.
+
+**Rejected alternatives.** Unbounded concatenation lets remote output determine
+client memory retention. Silently truncating while continuing to display the
+prefix makes a partial answer look complete. Persisting the overlay would give
+ephemeral deltas authority they do not have.
+
+**Affects.** The native process presentation model and session detail view
+model, and [process protocol](spec/process-protocol.md)'s native-client
+behavior.
+
+## 2026-07-28 — Expose the deployment model-alias catalog to local clients
+
+**Context.** Session creation already accepts an alias UUID, but the process
+boundary offered no read that let a native client discover the aliases the
+running daemon would accept. Bundling UUIDs in the app or deriving them from
+existing sessions would drift from deployment configuration and could submit an
+unknown or retired alias. This surface originally reserved protocol version
+eighteen; the session-template surface shipped that number first while this one
+was still in flight, and the concurrent context-compaction protocol stack
+separately claimed twenty, also still in flight.
+
+**Decision.** Protocol version twenty-one adds the read-only
+`list_model_aliases` sequence, the next number free of both already-shipped and
+concurrently in-flight claims. The daemon emits every configured alias and its
+current direct-selection target in alias-identity order with an exact terminal
+count. This is current deployment configuration, not durable session state and
+not a provider catalog: creation still records an alias request and the existing
+acceptance path freezes its meaning. Deployment configuration and the protocol
+sequence admit at most 10,000 aliases; the native app enforces that same bound
+and offers only returned aliases in its creation picker.
+
+**Rejected alternatives.** Shipping app-owned alias UUIDs would create a second,
+stale configuration authority. Accepting arbitrary UUID text would expose
+avoidable runtime rejection instead of a picker. Returning provider-native names
+would cross the configuration boundary and risk exposing deployment details
+irrelevant to the selection identity. Leaving the catalog unbounded would let
+deployment configuration impose unbounded client retention.
+
+**Affects.** `crates/process-protocol`, `apps/signalboxd` configuration and
+process serving, [process protocol](spec/process-protocol.md), and the native
+session-creation client.
+
+## 2026-07-28 — Expose the dev-instance client from every shell directory
+
+**Context.** The first hands-on use of
+[the recorded dev-instance choice](#2026-07-26--dev-instance-under-devenvs-native-process-manager)
+still required a developer to derive the managed socket path and spell the
+workspace Cargo invocation. Its credential provisioning examples also wrote
+directly to the live files, so a failed producer or editor could truncate a
+previously usable credential.
+
+**Decision.** The devenv shell exports the daemon's shared socket path as
+`SIGNALBOX_SOCKET_PATH` and provides a `signalbox` script that runs the
+working-tree client through the workspace manifest, independent of the caller's
+current directory. Cargo remains responsible for rebuilding changed sources.
+Credential provisioning stages an owner-only temporary beside each destination
+and replaces the live file only after `gh auth token` or the editor succeeds;
+editing begins from the existing Anthropic file when one is present.
+
+**Rejected alternatives.** Requiring `--socket` and a hand-derived runtime path
+keeps routine client use needlessly checkout-specific. Installing a built
+artifact can silently lag working-tree changes. Direct redirection or editing of
+a live credential exposes a partial or empty file when its producer fails.
+
+**Affects.** `devenv.nix` shell ergonomics and the README's dev-instance
+operational guidance only; daemon, domain, persistence, and protocol behavior do
+not change.
+
+## 2026-07-28 — Fail closed at the Codex CLI's declared input and capability boundaries
+
+**Context.** The Codex adapter projected JSONL through serde's last-value-wins
+object representation, so repeated provider members could overwrite evidence
+before classification. Its specification also claimed descendant-lifetime
+supervision beyond the process group the adapter can control. Finally, the
+invocation disabled three CLI features while prompt prose asked the model not to
+use other built-ins; the pinned CLI exposes a larger, evolving feature registry.
+Ambiguous provider input and undeclared capabilities both need mechanical
+boundaries, while a process can deliberately leave its inherited group.
+
+**Decision.** Repeated JSON object members in either the JSONL event or its
+escaped response envelope are stream-protocol violations; additive tolerance
+covers unknown members, never repeated ones. A duplicate is ambiguous by
+construction, and ambiguous provider input is refused rather than resolved by
+choosing a winner, matching the native client's repeated-member rule. Adapter
+supervision contains exactly the process group it creates; host isolation, owned
+by the runner sandbox in build-out, contains a descendant that deliberately
+leaves that group. Every feature in the pinned CLI inventory is classified.
+Features that can add a model-visible tool, external interaction, instruction
+source, or delegated execution outside the declared tools are explicitly
+disabled, with independent agent, ambient skill-instruction, MCP-server, and
+web-search controls. The pre-spend version smoke compares the complete name,
+stage, and default inventory so a version bump cannot add an unclassified
+feature, and verifies the skill control against an isolated synthetic skill that
+the pinned CLI otherwise injects. Prompt prose is not a capability boundary.
+
+**Rejected alternatives.** Keeping serde's last or first occurrence would
+silently choose among contradictory evidence. Claiming process-tree containment
+would promise control the adapter does not possess; adding host isolation inside
+this adapter would cross the runner boundary. Prompt-only restrictions, or
+testing only today's enabled features, would let a CLI default or version bump
+widen the tool surface without review.
+
+**Affects.** `crates/model-runtime-codex-cli/src/event.rs`,
+`crates/model-runtime-codex-cli/src/runtime.rs`, its process and compatibility
+tests, and [runtime-substrate](spec/runtime-substrate.md) (Codex CLI provider
+adapter and version smoke). The runner sandbox remains the owner of stronger
+host containment.
+
+## 2026-07-28 — Bound the Codex compatibility-smoke login
+
+**Context.** The gated compatibility smoke bounded its build, version probe,
+model exchange, and whole job, but its non-interactive CLI login could consume
+the entire twenty-minute job slot if the launcher or a descendant hung.
+
+**Decision.** Give login thirty seconds, then send `TERM` to the command's
+process group and allow five seconds before `KILL`. A managed shell remains live
+through that grace even when the direct CLI launcher exits on `TERM`, so the
+`KILL` phase still reaches surviving group members. The key remains stdin-only,
+absent from the timeout and CLI child environments and never placed in argv.
+
+**Rejected alternatives.** Relying only on the job timeout would hold the sole
+smoke concurrency slot too long. Reusing the four-minute model-exchange bound
+would conflate a local authentication setup command with a billable provider
+turn. Killing only the direct launcher could strand its native descendant.
+
+**Affects.** `.github/workflows/codex-smoke.yml` and the operational duration of
+the non-merge-gating, manually dispatched compatibility smoke.
+
+## 2026-07-28 — Load versioned session templates and copy them at creation
+
+**Context.** Session creation can already set a model selection and one bounded
+system prompt, while the dangerous-tool blanket is part of the same immutable
+defaults epoch. Repeating that bundle at each call site makes long prompts
+awkward and gives clients configuration-file responsibilities. The owner
+commissioned a deliberately narrow first template slice and fixed copy-on-create
+as its provenance law.
+
+**Decision.** `SIGNALBOX_TEMPLATE_CONFIG_FILE` names a separate version-one TOML
+document loaded once beside the model catalog at daemon startup. Each uniquely
+named template carries a positive version, exactly one configured direct model
+or alias, exactly one inline prompt or prompt-file reference, and the complete
+dangerous-tool blanket. Prompt files are resolved and validated at load; paths
+are either relative to the template file or begin `$HOME/`, and every other
+absolute, parent-traversing, or variable-bearing spelling is rejected. The
+content digest is domain-separated SHA-256 over the template version and exact
+resolved bundle, not its source spelling.
+
+Protocol version eighteen adds daemon-side creation by template name and a
+read-only name/version listing. Creation copies the resolved bundle into
+defaults version one and records template name plus content digest on the
+session. Equal replay is keyed by the original command and template name and
+returns the copied result even after configuration changes; a new command sees
+the new bundle. The terminal's `create --template NAME` is mutually exclusive
+with `--model`, `--alias`, and `--system-prompt-file`; explicit overrides are
+excluded so one invocation has one complete source of defaults.
+
+**Rejected alternatives.** Client-side parsing would duplicate daemon validation
+and expose deployment files. Explicit flags overriding a template would create a
+composition algebra and ambiguous digest meaning. Storing a template reference
+for later lookup would let edits rewrite existing sessions. Durable template
+objects and CRUD are deferred rather than hidden behind the static file.
+
+**Affects.** Session configuration and creation provenance, process protocol
+version eighteen, terminal creation and template listing, migration
+`202607300101_session_template_provenance.sql`,
+[configuration and credentials](spec/configuration-and-credentials.md),
+[sessions and transcript](spec/sessions-and-transcript.md), and
+[process protocol](spec/process-protocol.md).
+
+## 2026-07-27 — Retain provider token usage as evidence, not cost
+
+**Context.** Model runtimes already parse independently optional input, output,
+cache-creation input, and cache-read input token counts from provider reports.
+Those facts ended at the runtime boundary, so neither durable model-call history
+nor the transcript client could state the token evidence for a turn or session.
+Currency prices vary over time and by contract, while provider omissions and a
+reported zero have different meanings.
+
+**Decision.** Store each provider-reported token field verbatim on the terminal
+model-call record, preserving null as unreported and zero as reported zero. The
+version-nineteen transcript projection exposes one record for every terminal
+call. The `transcript` client computes labeled per-turn and session token
+subtotals with per-field reported-call coverage for presentation only. Neither
+storage nor the client derives currency cost, fills omissions, or corrects a
+provider value.
+
+**Rejected alternatives.** Persisting only client-computed totals would discard
+per-call evidence and omission coverage. Treating absent fields as zero would
+invent provider claims. Persisting currency cost would turn changing external
+prices into misleading historical evidence. Adding a separate `usage` command
+would duplicate transcript session selection and its validated snapshot path.
+
+**Affects.** Model-call terminal observation mapping and persistence, process
+transcript version nineteen, `signalbox transcript`, and the model-call,
+persistence, and process-protocol specifications.
+
+## 2026-07-27 — Assign deterministic review bookkeeping to code-host tools
+
+**Context.** Review sessions repeatedly spend model context reconstructing the
+same mechanical facts: current-head reviewer coverage, usage-limit starvation,
+thread disposition and resolution, buried escalation markers, CI state, and
+stack ancestry. The owner recorded the direction that language models perform
+judgment while tools perform slog. Existing code-host tools already provide the
+bounded typed transport and external-effect policy for authenticated GitHub
+reads.
+
+**Decision.** Add four read-only `Auto` / `ExternalEffect` tools to that
+boundary. Convergence state, stack state, and thread inventory return exact
+bounded code-host evidence with explicit truncation and continuation cursors;
+the review gate purely composes those evidence shapes into stable blockers for
+requesting a review wave or declaring convergence. Reviewer coverage scans both
+review bodies and issue comments in timestamp order, and a usage-limit response
+is starvation rather than a verdict. Sessions decide how to act on the results;
+this change adds no daemon workflow automation.
+
+**Rejected alternatives.** Keeping the calculations in prompts would continue to
+consume model context and permit session-to-session drift. Automating review
+workflow transitions in the daemon would move policy and owner gates into this
+slice. Returning unbounded or silently capped lists would make a clean verdict
+indistinguishable from incomplete evidence.
+
+**Affects.** The Tier 1 code-host catalog and GitHub adapter, typed tool
+results, golden tool schemas, daemon catalog wiring, and offline tool-loop
+tests.
+
+## 2026-07-27 — Limit runner version one to one same-host workstation
+
+**Context.** The merged runner domain and persistence foundations deliberately
+admit pools, remote transports, and several execution loci. The first executable
+slice needs coding parity on the owner's Ubuntu development host without making
+untested portability or distributed-scheduling claims.
+
+**Decision.** Version one composes one `signalbox-runner` instance on the same
+host and under the same operating-system user as `signalboxd`. Its one compiled
+capability class is `workstation-v1`; its closed tool families are workspace
+file read/write/edit, Git clone/fetch/branch/commit/push, serial shell
+execution, and serial build/test execution. Mac runners, remote transport,
+concurrent tool execution, and MCP placement are outside version one. The wire
+vocabulary remains additive but carries no remote-only design.
+
+**Rejected alternatives.** A cross-platform first slice would multiply sandbox
+and path semantics before one host works. A runner pool would require scheduling
+policy the owner explicitly deferred. MCP and concurrent execution would widen
+the milestone without advancing the coding-parity proof.
+
+**Affects.** The `signalbox-runner` composition, workstation tool catalog,
+runner wire protocol, deployment topology, and
+[runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-27 — Use a runner-initiated dedicated local socket
+
+**Context.** Runner dispatch needs a held bidirectional channel, but the client
+socket carries a different trust boundary and vocabulary. The first deployment
+is one local user and does not need a remote authentication or transport system.
+
+**Decision.** `signalboxd` binds a dedicated Unix domain stream socket for
+runners; `signalbox-runner` always dials it and never accepts inbound
+connections. The socket is distinct from the client socket and uses the same
+owner-private parent, exact `0600` node mode, sidecar `flock`, pinned path
+identity, effective-user peer check, bounded JSON-lines framing, and fail-closed
+version rules. Runner-wire version one uses a fixed 8 MiB frame bound. On the
+first checked same-user connection, the runner sends a durable random request
+identity and the daemon atomically issues the singleton enrollment identities;
+exact replay is idempotent and another request conflicts while that enrollment
+is live. After durable loss, exactly one successor request receives only pending
+provisioning authority until an owner replacement command promotes it. The
+daemon requests a heartbeat every five seconds, fences offers after one miss,
+and marks the connection lost after three consecutive misses. Remote transport
+is deferred; no remote handshake or negotiation is designed here.
+
+**Rejected alternatives.** Reusing the client socket couples independent
+vocabularies and backpressure. Letting runners listen creates an inbound host
+surface and reverses the accepted held-outbound-stream direction. Designing TLS
+or remote authentication now would specify an uncommissioned deployment.
+
+**Affects.** The runner listener and client, local socket construction, runner
+wire version one, heartbeat/loss orchestration, and
+[runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-27 — Make named bubblewrap profiles placement facts
+
+**Context.** An executable runner must state the boundary it actually provides,
+and a session cannot silently move between ambient user power and a confined
+workspace. Dynamic policy would add a policy language before the first two
+reviewable postures are proven.
+
+**Decision.** Every runner-backed session selects and durably records one closed
+profile: `workspace-restricted`, the default, or explicit `ambient`. Every
+restricted execution is wrapped by bubblewrap with writable filesystem access
+limited to the session worktree, declared read-only toolchain/cache paths, and a
+fresh network namespace whose only egress is the runner's checked hostname
+allowlist broker. Version one's initial hostname suffixes are `github.com`,
+`crates.io`, and the exact host `api.anthropic.com`. A suffix matches only the
+exact base or a dot-separated subdomain, never a raw string ending such as
+`evilgithub.com`; configuration may narrow the set but cannot add another suffix
+or host. Ambient execution is also launched through bubblewrap but retains the
+invoking user's filesystem and network powers. Every runner, daemon, protocol,
+client, and evidence surface labels the selected profile; ambient is never
+called sandboxed. Named profiles are upgradeable values. Dynamic policy
+composition is deferred.
+
+**Rejected alternatives.** An unlabelled ambient default violates inspectable
+boundary law. Filesystem-only containment leaves arbitrary network egress.
+Calling a shared-host-network bubblewrap invocation restricted would overstate
+its evidence. A general policy language is premature for two fixed profiles.
+
+**Affects.** Session placement, runner advertisement and evidence, bubblewrap
+invocation, network brokering, client presentation, INV-022 and INV-023, and
+[runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-27 — Scale runner approvals inversely with confinement
+
+**Context.** Prompting on every coding operation inside a deliberately narrow
+sandbox duplicates the owner's merge-everything review boundary, while ambient
+execution can affect the complete user account. The selected boundary must be a
+material approval constraint, not presentation metadata.
+
+**Decision.** `workspace-restricted` supplies `Auto` as the default for every
+version-one workstation tool. `ambient` supplies `Auto` only for pure tools and
+`Confirm` for every idempotent or side-effecting tool. Exact per-tool session
+overrides to `Auto` or `Confirm` sit at the existing reserved override rung;
+profiles supply defaults rather than replacing that mechanism. For runner
+execution this refines the earlier credential-pair catalog decision: the daemon
+still snapshots exact `(tool, credential profile)` posture in each grant, but
+compiles it from the immutable profile and override instead of assigning policy
+by token name. The frozen dangerous blanket remains daemon-local and never
+authorizes runner dispatch. The following costs are accepted verbatim: (a) the
+model can read the runner-held repo-scoped PAT inside the jail and misuse it
+within its scopes — mitigated by fine-grained scoping to the one repository and
+instant revocability; (b) pushes are unguarded — mitigated by branch protection
+on main and owner-merge-everything.
+
+**Rejected alternatives.** Confirming every restricted operation treats prompts
+as the boundary and defeats unattended coding. Making ambient automatic exports
+the restricted profile's trust assumption to the whole account. A second policy
+mechanism would create conflicting authority.
+
+**Affects.** Runner tool policy resolution, session placement snapshots,
+approval provenance, the workstation catalog, and
+[tool-loop specification](spec/tool-loop.md).
+
+## 2026-07-27 — Resolve named runner credentials from one config
+
+**Context.** The daemon already grants credential profiles by checked name while
+credential values remain runner-local. The executable runner needs a generic
+file-to-environment binding without sending values over the control channel or
+hard-coding token-specific readers.
+
+**Decision.** `signalbox-runner` loads exactly one versioned TOML file whose
+path comes from either `SIGNALBOX_RUNNER_CONFIG_FILE` or one `--config`
+argument; supplying both or neither fails startup. Named credential entries map
+a checked profile name to one exact file path and one checked injection
+environment variable. The shipped version-one entry is `github-runner`, backed
+by a fine-grained repository-scoped PAT file and injected as `GH_TOKEN`. The
+file must be a regular effective-user-owned `0600` file. It is reread for each
+dispatch, with trailing `\n` and `\r` removed exactly as for the daemon file
+channel. Unknown granted names fail closed before lease claim. This refines the
+earlier owner-catalog decision for credential names only: checked configured
+names are registration availability, while daemon-owned sandbox and override
+policy supply the grant posture; tools, effects, loci, and sandbox meanings
+remain compiled daemon authority. Adding another token shape is a config entry,
+not a code branch. Model-provider credentials never enter runner config, wire
+state, or injected execution environment; explicit `ambient` retains full
+same-user filesystem access as recorded by the sandbox-profile decision.
+
+**Rejected alternatives.** Sending values from the daemon violates the accepted
+profile boundary. One environment variable per token type hard-codes an
+expanding credential catalog. Reading once at startup prevents rotation, and
+logging paths or values enlarges disclosure.
+
+**Affects.** Runner configuration, credential resolution and injection, lease
+admission, INV-035 and INV-045, and
+[configuration-and-credentials](spec/configuration-and-credentials.md).
+
+## 2026-07-27 — Make runner-loss recovery owner-explicit
+
+**Context.** A lost runner changes filesystem, process, credential, and tool
+availability facts. Even another runner with the same capability class is not
+the session's pinned execution boundary, and an in-flight effect may remain
+ambiguous.
+
+**Decision.** Heartbeat or channel loss marks the exact runner connection lost
+and durably surfaces typed loss on every affected session, including an
+exact-runner request lost before its first pin. No automatic migration,
+class-based re-placement, or replacement occurs. The only runner-loss recovery
+verbs are owner `replace`, naming either a different exact currently registered
+live runner or the one pending replacement enrollment, and owner `abandon`.
+Pinned replacement durably claims its command before staging a fresh workspace
+under the pending candidate and promotes that candidate only in the terminal
+placement transaction; pre-pin replacement updates the exact selector and
+returns to unpinned state without inventing a workspace or semantic boundary.
+Abandon requires the existing turn-control and ambiguity algebra to leave no
+active turn before it terminalizes only the exact lost placement; it mints no
+second cancellation authority and creates no successor turn. Replacement never
+reuses the prior workspace or credential grant.
+
+**Rejected alternatives.** Automatic migration hides a changed execution
+boundary. Waiting indefinitely without an owner verb strands the progressing
+slot. Treating loss as ordinary cancellation could erase an issued
+side-effecting attempt's ambiguity.
+
+**Affects.** Runner connection loss, placement orchestration, owner protocol
+version twenty-two, session/client state, frontier injection, INV-026 and
+INV-044, and [runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-27 — Provision one recoverable clone per runner session
+
+**Context.** The domain fixes runner-owned worktree-per-session capability but
+leaves repository acquisition, naming, cleanup, and crash recovery open. A
+shared Git directory would sit outside the restricted session filesystem and
+make one session's Git metadata writable by another.
+
+**Decision.** Runner config maps checked repository keys to exact HTTPS clone
+URLs and owns one `0700` workspace root under a process-wide exclusive lock.
+Each session is a complete non-shared clone at
+`sessions/<canonical-session-uuid>/<placement-revision>/repo`, including its own
+`.git` directory, acquired with the selected runner PAT under a single-use
+provisioning authorization. Provisioning occurs in a sibling staging directory,
+writes a versioned non-secret manifest binding the SHA-256 identity of the
+canonical configured clone URL, fsyncs the manifest and parents, and atomically
+renames into place before the first atomic pin/grant/lease transition. An
+explicit daemon release, accepted only after the exact placement is retired by
+replacement or abandonment and neither a lease nor unacknowledged result is
+live, atomically renames it below `trash/` before recursive deletion; the
+session may remain usable. Startup resumes manifest-proven trash and
+never-published staging cleanup, reconciles every ready workspace with the
+daemon, and delivers every unknown, retired-but-present, conflicting, or
+otherwise unreconciled workspace through the bounded acknowledged leak-report
+wire; it never silently deletes a reported leak. Workspaces are never shared or
+inherited across placements or runners.
+
+**Rejected alternatives.** One shared bare clone gives sessions shared mutable
+Git authority outside their jail. Random opaque directory names hinder recovery.
+Deleting every unrecognized directory at startup risks destroying evidence
+before daemon reconciliation. Daemon-owned deletion crosses the runner boundary.
+
+**Affects.** Runner workspace configuration and manifests, provisioning, cleanup
+and startup recovery, session placement, INV-022 and INV-044, and
+[runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-27 — Reconcile durable runner evidence before generic recovery
+
+**Context.** A daemon restart can find a claimed lease whose runner retained
+terminal evidence, and replacement of a lost singleton needs workspace evidence
+before the pending runner can become active. A generic startup scan or
+atomic-only command record would discard one of those authorities.
+
+**Decision.** Receipt of `lease_claimed` and `dispatch` is fsynced through the
+closed local phases `waiting_dispatch`, `dispatch_received`, and
+`execution_may_have_started`; reconnect inventories the exact phase, and
+omission of a daemon-recorded claim becomes effect-class loss rather than repeat
+permission. On startup, the runner socket enters recovery-only mode and
+reconciles retained evidence, claimed-lease loss, and nonterminal replacement
+commands before the generic scan touches remaining daemon-owned attempts. A lost
+active runner admits one provisioning-only pending candidate. Repository-backed
+replacement claims an immutable typed command request, stages one workspace
+without holding a database transaction, then promotes the candidate and appends
+its result in one terminal transaction. Every version-twenty-two native-session
+listing uses the same runner projection, and suspect recovery emits `connected`.
+
+**Rejected alternatives.** Scanning first can terminalize an attempt before its
+real result arrives. Keeping claim phase only in memory can strand or repeat an
+effect after runner restart. Granting the candidate leases before owner replace
+would be automatic migration; holding a database transaction across clone I/O
+would make recovery and lock duration unbounded.
+
+**Affects.** Runner enrollment and local journal, daemon startup recovery,
+durable command families, replacement provisioning, owner status/listing
+projections, and [runner protocol](spec/runner-protocol.md),
+[persistence protocol](spec/persistence-protocol.md), and
+[process protocol](spec/process-protocol.md).
+
+## 2026-07-27 — Freeze session-executable runner tools before model calls
+
+**Context.** A process-wide runner catalog can contain tools a particular
+session cannot execute, and runner replacement must be visible to the model
+without copying mutable workspace facts into semantic history.
+
+**Decision.** Model-operation preparation freezes one session-executable tool
+snapshot containing the exact definitions, permissions, effects, and selected
+loci that current placement authority can execute. Lost placement blocks
+preparation, abandonment leaves daemon-executable tools only, and an unpinned
+runner-only selection freezes its exact identity or capability-class selector.
+Only an exact-identity selection binds the current runner before first dispatch;
+a class selection chooses only at the eventual initial pin. A later availability
+change cannot add a tool or move that frozen locus. `RunnerPlacementChanged`
+resolves its referenced successor placement and renders as one injected
+user-role event with the fixed text and canonical revision/profile substitutions
+owned by the model-call specification.
+
+**Rejected alternatives.** Advertising the process catalog lets the model select
+impossible runner-only tools. Looking up locus after the provider returns
+permits a silent policy or runner change. Skipping the placement boundary hides
+that the prior runner-local execution state is unavailable; copying paths,
+credentials, or advertisements into the entry creates a second content
+authority.
+
+**Affects.** Model-operation preparation, provider tool advertisement, runner
+placement recovery, semantic frontier rendering, INV-015 and INV-044, and
+[model-call execution](spec/model-call-execution.md).
+
+## 2026-07-27 — Close runner operational bounds before implementation
+
+**Context.** Availability-only tool names, an unpaged startup leak promise, and
+multiple partial lock orders leave executors and persistence free to implement
+incompatible behavior even when the high-level runner boundary agrees.
+
+**Decision.** The workstation registry compiles the ten exact closed argument,
+result, failure, path, process, Git, and timeout contracts owned by the
+tool-loop specification. Runner startup leak facts cross the runner wire in
+acknowledged, digest-chained pages of at most 64 sorted facts and publish to
+owner status only when the final page commits. Every multi-row runner
+transaction uses the single applicable lock subsequence owned by the persistence
+specification. Workspace manifests bind the SHA-256 identity of the canonical
+configured clone URL, and release keys off a retired placement rather than a
+terminal session.
+
+**Rejected alternatives.** Leaving schemas to executor code makes the daemon
+validator, model definition, tests, and runner disagree. A one-frame leak report
+has no finite workspace-count bound; best-effort notices disappear on reconnect.
+Independent lock orders can deadlock pending-enrollment activation. Trusting the
+writable Git remote or a reused repository key permits configuration drift to
+reinterpret an existing clone.
+
+**Affects.** Workstation tool contracts, runner wire and status projection,
+workspace recovery, runner persistence transactions, and
+[tool-loop](spec/tool-loop.md), [runner-protocol](spec/runner-protocol.md), and
+[persistence-protocol](spec/persistence-protocol.md).
 
 ## 2026-07-27 — Drop empty thinking parts instead of failing completions closed
 
@@ -89,6 +630,56 @@ law beyond what the provider's shape requires.
 [model-call-execution](spec/model-call-execution.md) (observation
 classification), and the wedge-then-reconcile process regression in
 `apps/signalboxd/tests/process_protocol_runtime.rs`.
+
+## 2026-07-27 — Read imported conversations through their own verb
+
+**Context.** `signalbox import` prints an imported conversation identity and
+nothing else, while `signalbox continue --through-position N` requires a valid
+one-based imported position. No client verb could show an imported
+conversation's entries or even its entry count: `transcript` takes session
+identities, and an imported conversation is durable record that creates no
+session. The owner's first hands-on continuation had to guess `N`, and an
+out-of-range guess answered `not_found: the requested session was not found` —
+wrong on both counts, since the identity was valid and named no session.
+
+**Decision.** Add a separate read verb,
+`signalbox imported <imported-conversation-uuid>`, over a new version-seventeen
+`read_imported_conversation` request whose response is a spooled start/entry/end
+sequence. Each entry names its position, imported entry identity, speaker
+attestation, content kind, and a `text_preview` that is null or the entry's
+exact leading scalars bounded to 256 UTF-8 bytes with a truncation marker.
+Version seventeen also adds two typed rejections for
+`create_session_from_imported_frontier`: `imported_conversation_not_found` and
+`imported_frontier_position_out_of_range`, the latter naming the selectable
+range. `continue --through-position` stays required and gains only the exact
+sentinel `latest`, which the client resolves through this read and prints before
+sending the concrete ordinal.
+
+**Rejected alternatives.** Extending `transcript` to accept an imported
+conversation identity would make the two kinds interchangeable on the verb that
+reads live sessions, when the protocol keeps them distinct everywhere else.
+Reusing the undetailed `not_found` for an out-of-range position keeps the
+misdiagnosis the owner hit. Making `--through-position` optional with an
+implicit latest default would silently pick a boundary the recorded decision to
+require it explicitly rejects. Resolving `latest` server-side would put a
+non-concrete position in the durable command and make replay equality depend on
+resolution rather than on the payload. Previewing tool, thinking, or media
+content would widen what the wire exposes about imported content beyond the
+conservative transcript projection, which is a separate foundation-weight
+change. A 256-byte preview is one or two terminal lines: enough to recognize an
+entry, small enough that a several-thousand-entry listing stays scannable. This
+surface first reserved fifteen. Version sixteen then merged while the branch was
+open, and numbering the request below an already-closed vocabulary would
+retroactively admit it in version-sixteen frames — widening a shipped version
+rather than adding a new one — so the surface moved above sixteen to seventeen.
+Fourteen and fifteen stay reserved and unadmitted, and the admitted set carries
+that gap.
+
+**Affects.** [process protocol](spec/process-protocol.md) (version seventeen,
+the read request, its three messages, the two rejection details, and the
+`imported` and `continue` client surfaces),
+[conversation import](spec/conversation-import.md) (the inspection read),
+`crates/process-protocol`, `apps/signalboxd`, and `apps/client`.
 
 ## 2026-07-27 — Expose explicit steering and queued input delivery
 
@@ -984,6 +1575,55 @@ in [model-call-execution](spec/model-call-execution.md), the adapter contract in
 model-identifier-normalization half of the model fallback and provenance
 question.
 
+## 2026-07-26 — Pin the wrapped Codex CLI in npm and gate bumps on a smoke
+
+**Context.** The recorded drift-defense direction is that a wrapped CLI is
+pinned to an exact version, bumped frequently by Renovate, and each bump
+verified by a compatibility smoke on the cheapest model using real credentials
+that fork pull requests can never reach. The adapter landed with a
+supported-version constant and an offline fixture corpus but nothing binding
+either to the executable anyone actually installs. Executing the direction
+required choosing a manifest form Renovate tracks, a bump policy, and an
+authentication path the CLI genuinely supports unattended.
+
+**Decision.** Pin the CLI as an exact npm dependency in
+`tooling/codex-cli/package.json` with a committed lockfile, tracked by
+Renovate's built-in npm manager with no release-age gate and no automerge. Bind
+the pin to the adapter with an offline test asserting that the manifest version
+equals the supported-version constant, so a bump fails the ordinary Rust check
+until the constant and fixtures move with it. Verify bumps against the live CLI
+with a gated smoke — one cheapest-model exchange through the adapter, preceded
+by a fail-closed assertion that the invoked executable reports the pinned
+version — triggered only by manual dispatch and by pushes to `main` that touch
+the pin, never by a pull-request event, with credentials held in a protected
+deployment environment. Authenticate that smoke through the CLI's
+non-interactive API-key login, piped from the secret into the CLI's own
+credential store, and state plainly that it therefore covers protocol
+compatibility and not subscription login. Treat the addressable model set as an
+account-scoped input: keep the cheapest advertised model as a local fallback,
+and let the environment or local caller select another model without changing
+the test when its credential cannot address that fallback.
+
+**Rejected alternatives.** Pinning the Homebrew cask that serves local installs
+has no Renovate manager; a GitHub-release regex manager would hand-roll a
+datasource the npm manager already provides for the same artifact. Probing the
+version inside the adapter would spend a process on every model dispatch and was
+already rejected. Letting the smoke skip on a version mismatch or a missing
+credential would record compatibility evidence for a version that never ran.
+Applying the cargo policy's minimum-release-age gate would delay bumps on
+calendar time while proving nothing. Storing a subscription access token as a
+secret would go stale between the CLI's own token rotations, so automation built
+on it would fail for reasons unrelated to compatibility; weakening the
+fork-exposure rules to reach a subscription session was not considered.
+Hard-coding the model that one subscription account currently addresses would
+make another subscription or API-key credential's model set look like protocol
+drift.
+
+**Affects.** `tooling/codex-cli`, `renovate.json5`,
+`.github/workflows/codex-smoke.yml`, the tests of
+`crates/model-runtime-codex-cli`, and the Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md).
+
 ## 2026-07-26 — Carry credential lineage in runner placement
 
 **Context.** Runner replacement can intentionally move from a credential-bearing
@@ -1090,6 +1730,28 @@ reservation and merged filename differ.
 and interpretation of the earlier review-workflow decision entries' affected
 slice.
 
+## 2026-07-26 — Bound Codex streamed redaction lookbehind
+
+**Context.** Credential-shape redaction must retain an incomplete marker or
+value across streamed observations, but an unterminated value can otherwise grow
+that retained suffix for the lifetime of the process. Per-event bounds do not
+bound accumulation across many valid events.
+
+**Decision.** Retain at most 64 KiB of incomplete Codex credential-shaped stream
+text. When that bound is exceeded, emit redaction markers with the original
+observation metadata and suppress later streamed text through the terminal
+flush. This may redact benign continuation text but never releases the possible
+credential.
+
+**Rejected alternatives.** Retaining through the process deadline leaves memory
+unbounded. Truncating and resuming ordinary output could release the remainder
+of the same credential. Raising the per-event limit does not address cumulative
+growth.
+
+**Affects.** INV-035, the Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md), and the streaming redactor in
+`crates/model-runtime-codex-cli`.
+
 ## 2026-07-26 — Select execution locus before authorization
 
 **Context.** A combined-locus tool can use a runner-resident credential profile
@@ -1145,6 +1807,53 @@ forward narrowing.
 **Affects.** `RunnerToolAttemptAuthorization`, `AuthorizedToolAttempt`,
 `RunnerLease`, placement reconstitution, INV-043 and INV-044, S12, S30, S31, and
 the [runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-26 — Require Unix process-group supervision for Codex
+
+**Context.** Cancellation and timeout evidence is sound only when the adapter
+can terminate the spawned CLI and its descendants. The implemented supervisor
+uses Unix process groups; its non-Unix fallback could kill only the direct
+process and leave a descendant continuing provider work after terminal evidence
+was returned.
+
+**Decision.** Construct the Codex CLI runtime only on Unix hosts. Keep one
+process group per dispatch and signal that group through interrupt and forced
+termination. A later non-Unix implementation must provide equivalent
+process-tree lifetime control before broadening support.
+
+**Rejected alternatives.** Killing only the direct child violates the
+one-dispatch evidence boundary when a descendant survives. Adding a Windows Job
+Object dependency and implementation is outside this adapter slice. Claiming
+portable supervision from a no-op fallback would overstate implemented behavior.
+
+**Affects.** The Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md) and
+`crates/model-runtime-codex-cli`.
+
+## 2026-07-26 — Codex CLI generation settings are advisory
+
+**Context.** `ModelSettings` normally names provider-enforced request controls,
+including a required output-token ceiling. The pinned Codex CLI subscription
+surface exposes no argv, configuration, or request fields for that ceiling,
+temperature, top-p, or stop sequences. Prompt text can communicate intent but
+cannot enforce sampling or budget semantics. Rejecting the required ceiling
+would make every operation unsupported and leave the commissioned wrapper
+unusable.
+
+**Decision.** Record one capability-limited exception for the Codex CLI adapter:
+validate all four settings, render them into the complete model-visible
+operation prompt, and describe them as advisory rather than provider-enforced.
+Callers that require hard generation controls must not select this adapter. No
+other adapter inherits the exception.
+
+**Rejected alternatives.** Claiming prompt instructions as hard controls is
+false. Rejecting every operation preserves the generic rule but defeats the
+wrapped subscription runtime. Reimplementing the provider transport would
+reverse the recorded wrap direction.
+
+**Affects.** `ModelSettings` contract comments, the Codex CLI section of
+[runtime-substrate](spec/runtime-substrate.md), and
+`crates/model-runtime-codex-cli`.
 
 ## 2026-07-26 — Bound native followed-event buffering in memory
 
@@ -1294,6 +2003,88 @@ runtime contract beyond this boundary.
 **Affects.** Semantic transcript entries, turn-start frontier construction,
 provider-neutral conversation rendering, protocol version six, and
 [sessions and transcript](spec/sessions-and-transcript.md).
+
+## 2026-07-25 — Allowlist the Codex subprocess environment
+
+**Context.** A subprocess inherits its parent's complete environment by default.
+The Codex wrapper needs the operator-selected subscription-login location,
+ordinary process paths, locale, certificate, and proxy configuration, but
+passing unrelated service variables would expose ambient capabilities to the
+provider process. Clearing every variable would also make the CLI's own login
+and network configuration unreliable.
+
+**Decision.** Clear the environment for each Codex spawn, then copy only the
+named home and Codex-home paths, executable and temporary paths, XDG paths,
+locale and terminal settings, certificate paths, and proxy settings listed by
+the adapter. Never enumerate, retain, diagnose, or pass any other parent
+variable. Keep filesystem authority separate: this subprocess boundary supplies
+the CLI's documented read-only sandbox and working root, while stronger host
+isolation belongs to later composition.
+
+**Rejected alternatives.** Inheriting the complete service environment exposes
+unrelated secrets and capabilities. An empty environment can disconnect the CLI
+from the subscription login it exclusively owns and from required network
+configuration. Claiming a filesystem allowlist that the wrapped CLI does not
+enforce would overstate the adapter's authority.
+
+**Affects.** The Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md) and
+`crates/model-runtime-codex-cli`.
+
+## 2026-07-25 — Anchor subprocess dispatch at one process spawn
+
+**Context.** INV-025/026 prohibited hidden repeat sends around one authorized
+provider interaction, but named only the direct adapters' physical-request
+shape. A wrapped CLI exposes process control and a JSON event stream, not its
+internal provider requests, so treating each unobservable internal attempt as a
+hub dispatch would make the invariant unenforceable.
+
+**Decision.** Define the adapter-owned unit of irrevocable dispatch by
+transport: one physical request for a direct adapter and one process spawn for a
+subprocess adapter. One prepared call spawns at most once, never respawns after
+ambiguity, and treats provider-client activity inside the process as
+provider-internal. Process death or terminal-marker loss after spawn remains
+typed evidence for the original dispatch.
+
+**Rejected alternatives.** Reimplementing or observing the CLI's internal
+transport would reverse the accepted wrap direction and couple Signalbox to a
+provider implementation boundary. Treating one spawn as proven retry-free would
+claim evidence the adapter cannot observe. Respawning after an ambiguous exit
+would hide accepted duplicate risk.
+
+**Affects.** INV-025, INV-026, the two-stage runtime contract in
+[runtime-substrate](spec/runtime-substrate.md), and every subprocess
+`ModelRuntime` adapter.
+
+## 2026-07-25 — Make Codex CLI calls ephemeral structured subprocesses
+
+**Context.** The Codex wrapper needs exact frontier input, typed completion,
+refusal and tool evidence, bounded supervision, version-drift defense, and
+subscription login without reading the CLI credential store. The CLI's JSONL
+events supply process and turn boundaries, while its final agent message needs a
+stable model-shaped envelope. The adapter cannot spend a model dispatch on a
+separate version-probe process, and composition is outside this pass.
+
+**Decision.** Anchor the event-protocol fixture corpus and exported deployment
+pin at Codex CLI version `0.145.0`; composition must select that executable
+before wiring the adapter. Invoke one fresh `codex exec --json --ephemeral`
+process with user configuration and rule files ignored, read-only sandboxing,
+the resolved model, the complete rendered operation on stdin, and an
+adapter-owned JSON output schema in a private temporary file. Use Tokio process
+I/O, `tempfile` for schema lifetime, and Rustix only for safe Unix process-group
+interrupt before force-kill. Parse the last agent message as the
+completion/refusal/tool envelope and require `turn.completed`; use only offline
+scripted-process tests in CI.
+
+**Rejected alternatives.** Resume-by-default would move required semantic state
+behind an in-memory session pointer. Positional prompt arguments expose large
+frontiers through process listings. Reading Codex auth to seed exact-value
+redaction violates the credential boundary. Treating Codex's own command or MCP
+items as caller tool proposals confuses agent activity with the declared
+`ModelOperation` contract.
+
+**Affects.** `crates/model-runtime-codex-cli`, workspace dependencies, and the
+Codex CLI provider section of [runtime-substrate](spec/runtime-substrate.md).
 
 ## 2026-07-25 — Scoped verification references on specification pages
 

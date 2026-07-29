@@ -4,11 +4,30 @@ import Foundation
   import SignalboxModels
 #endif
 
+func signalboxImportedConversationTitleIsAdmissible(_ title: String?) -> Bool {
+  title.map {
+    !$0.isEmpty
+      && !$0.unicodeScalars.contains(where: {
+        $0 == "\0" || $0 == "\n" || $0 == "\r"
+      })
+      && !$0.hasPrefix(" ")
+      && !$0.hasPrefix("\t")
+      && !$0.hasSuffix(" ")
+      && !$0.hasSuffix("\t")
+      && $0.unicodeScalars.count
+        <= SignalboxProcessProtocol.maximumImportedConversationTitleScalars
+  } ?? true
+}
+
 public enum SignalboxProcessServiceError: LocalizedError, Equatable {
   case unexpectedMessage(String)
   case invalidPage(String)
   case deadlineExceeded(String)
-  case remote(code: SignalboxProcessErrorCode, message: String)
+  case remote(
+    code: SignalboxProcessErrorCode,
+    message: String,
+    detail: SignalboxRejectionDetail?
+  )
   case mutationRetryExhausted(code: SignalboxProcessErrorCode, message: String)
 
   public var errorDescription: String? {
@@ -16,7 +35,7 @@ public enum SignalboxProcessServiceError: LocalizedError, Equatable {
     case .unexpectedMessage(let message), .invalidPage(let message),
       .deadlineExceeded(let message):
       return message
-    case .remote(let code, let message):
+    case .remote(let code, let message, _):
       return "\(code.rawValue): \(message)"
     case .mutationRetryExhausted(let code, let message):
       return "\(code.rawValue): \(message) The exact command can be retried."
@@ -113,9 +132,102 @@ public struct SignalboxPreparedInputSubmission: Equatable, Sendable {
   }
 }
 
+public struct SignalboxPreparedSessionCreation: Equatable, Sendable {
+  public let commandID: SignalboxCommandID
+  public let modelSelection: SignalboxModelSelection
+  public let systemPrompt: String?
+
+  public init(
+    commandID: SignalboxCommandID,
+    modelSelection: SignalboxModelSelection,
+    systemPrompt: String?
+  ) {
+    self.commandID = commandID
+    self.modelSelection = modelSelection
+    self.systemPrompt = systemPrompt
+  }
+
+  fileprivate var request: SignalboxProcessClientRequest {
+    .createSession(
+      commandID: commandID,
+      initialModelSelection: modelSelection,
+      systemPrompt: systemPrompt
+    )
+  }
+}
+
+public struct SignalboxPreparedToolRequestDecision: Equatable, Sendable {
+  public let commandID: SignalboxCommandID
+  public let sessionID: SignalboxCanonicalUUID
+  public let toolRequestID: SignalboxCanonicalUUID
+  public let decision: SignalboxProcessToolDecision
+
+  public init(
+    commandID: SignalboxCommandID,
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID,
+    decision: SignalboxProcessToolDecision
+  ) {
+    self.commandID = commandID
+    self.sessionID = sessionID
+    self.toolRequestID = toolRequestID
+    self.decision = decision
+  }
+
+  fileprivate var request: SignalboxProcessClientRequest {
+    .decideToolRequest(
+      commandID: commandID,
+      sessionID: sessionID,
+      toolRequestID: toolRequestID,
+      decision: decision
+    )
+  }
+}
+
+public struct SignalboxPreparedTurnStop: Equatable, Sendable {
+  public let commandID: SignalboxCommandID
+  public let sessionID: SignalboxCanonicalUUID
+  public let activeTurnID: SignalboxCanonicalUUID
+  public let content: String
+  public let expectedDefaultsVersion: SignalboxCanonicalUInt64
+
+  public init(
+    commandID: SignalboxCommandID,
+    sessionID: SignalboxCanonicalUUID,
+    activeTurnID: SignalboxCanonicalUUID,
+    content: String,
+    expectedDefaultsVersion: SignalboxCanonicalUInt64
+  ) {
+    self.commandID = commandID
+    self.sessionID = sessionID
+    self.activeTurnID = activeTurnID
+    self.content = content
+    self.expectedDefaultsVersion = expectedDefaultsVersion
+  }
+
+  fileprivate var request: SignalboxProcessClientRequest {
+    .stopTurn(
+      commandID: commandID,
+      sessionID: sessionID,
+      expectedActiveTurnID: activeTurnID,
+      content: content,
+      expectedDefaultsVersion: expectedDefaultsVersion
+    )
+  }
+}
+
 public protocol SignalboxProcessServiceProtocol: Sendable {
   func testConnection() async throws
+  func listConversations(includeArchived: Bool) async throws -> [SignalboxProcessConversation]
+  func listModelAliases() async throws -> [SignalboxModelAliasSummary]
   func listSessions(includeArchived: Bool) async throws -> [SignalboxProcessSession]
+  func readSession(
+    conversation: SignalboxProcessConversation
+  ) async throws -> SignalboxProcessSession
+  func setConversationArchived(
+    _ archived: Bool,
+    conversation: SignalboxProcessConversation
+  ) async throws -> SignalboxProcessConversation
   func setArchived(
     _ archived: Bool,
     session: SignalboxProcessSession
@@ -127,10 +239,124 @@ public protocol SignalboxProcessServiceProtocol: Sendable {
   func submit(
     _ submission: SignalboxPreparedInputSubmission
   ) async throws -> SignalboxInputSubmitted
+  func prepareSessionCreation(
+    modelSelection: SignalboxModelSelection,
+    systemPrompt: String?
+  ) async throws -> SignalboxPreparedSessionCreation
+  func createSession(
+    _ creation: SignalboxPreparedSessionCreation
+  ) async throws -> SignalboxCanonicalUUID
+  func prepareToolRequestDecision(
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID,
+    decision: SignalboxProcessToolDecision
+  ) async throws -> SignalboxPreparedToolRequestDecision
+  func decideToolRequest(
+    _ prepared: SignalboxPreparedToolRequestDecision
+  ) async throws -> SignalboxToolRequestDecided
+  func prepareTurnStop(
+    session: SignalboxProcessSession,
+    activeTurnID: SignalboxCanonicalUUID,
+    content: String
+  ) async throws -> SignalboxPreparedTurnStop
+  func stopTurn(
+    _ prepared: SignalboxPreparedTurnStop
+  ) async throws -> SignalboxInputSubmitted
   func makeSynchronization(
     sessionID: SignalboxCanonicalUUID,
     updates: @escaping @Sendable (SignalboxSessionSynchronizationDriverUpdate) async -> Void
   ) async -> any SignalboxSessionSynchronizing
+}
+
+extension SignalboxProcessServiceProtocol {
+  public func listConversations(
+    includeArchived _: Bool
+  ) async throws -> [SignalboxProcessConversation] {
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement unified conversation listing."
+    )
+  }
+
+  public func listModelAliases() async throws -> [SignalboxModelAliasSummary] {
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement the model-alias catalog."
+    )
+  }
+
+  public func readSession(
+    conversation _: SignalboxProcessConversation
+  ) async throws -> SignalboxProcessSession {
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement current session reads."
+    )
+  }
+
+  public func setConversationArchived(
+    _ archived: Bool,
+    conversation: SignalboxProcessConversation
+  ) async throws -> SignalboxProcessConversation {
+    _ = archived
+    _ = conversation
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement unified archive mutations."
+    )
+  }
+
+  public func prepareSessionCreation(
+    modelSelection _: SignalboxModelSelection,
+    systemPrompt _: String?
+  ) async throws -> SignalboxPreparedSessionCreation {
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement session creation."
+    )
+  }
+
+  public func createSession(
+    _ creation: SignalboxPreparedSessionCreation
+  ) async throws -> SignalboxCanonicalUUID {
+    _ = creation
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement session creation."
+    )
+  }
+
+  public func prepareToolRequestDecision(
+    sessionID _: SignalboxCanonicalUUID,
+    toolRequestID _: SignalboxCanonicalUUID,
+    decision _: SignalboxProcessToolDecision
+  ) async throws -> SignalboxPreparedToolRequestDecision {
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement tool decisions."
+    )
+  }
+
+  public func decideToolRequest(
+    _ prepared: SignalboxPreparedToolRequestDecision
+  ) async throws -> SignalboxToolRequestDecided {
+    _ = prepared
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement tool decisions."
+    )
+  }
+
+  public func prepareTurnStop(
+    session _: SignalboxProcessSession,
+    activeTurnID _: SignalboxCanonicalUUID,
+    content _: String
+  ) async throws -> SignalboxPreparedTurnStop {
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement turn stops."
+    )
+  }
+
+  public func stopTurn(
+    _ prepared: SignalboxPreparedTurnStop
+  ) async throws -> SignalboxInputSubmitted {
+    _ = prepared
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement turn stops."
+    )
+  }
 }
 
 public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
@@ -161,6 +387,95 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       after: nil,
       pageSize: SignalboxCanonicalUInt64(rawValue: 1)
     )
+  }
+
+  public func listConversations(
+    includeArchived: Bool
+  ) async throws -> [SignalboxProcessConversation] {
+    var conversations: [SignalboxProcessConversation] = []
+    var cursor: SignalboxConversationCursor?
+    var pageCount: UInt = 0
+    var retainedUTF8Bytes: UInt = 0
+    while true {
+      guard pageCount < policy.maximumMetadataPages else {
+        throw SignalboxProcessServiceError.invalidPage(
+          "The native conversation-list page cap was reached."
+        )
+      }
+      let page = try await conversationPage(
+        includeArchived: includeArchived,
+        after: cursor,
+        pageSize: policy.metadataPageSize
+      )
+      for conversation in page.conversations {
+        let titleBytes = UInt(conversation.title?.utf8.count ?? 0)
+        let (nextBytes, overflowed) =
+          retainedUTF8Bytes.addingReportingOverflow(titleBytes)
+        guard
+          !overflowed,
+          nextBytes <= policy.maximumMetadataListUTF8Bytes
+        else {
+          throw SignalboxProcessServiceError.invalidPage(
+            "The native conversation list exceeded its retained UTF-8 byte limit."
+          )
+        }
+        retainedUTF8Bytes = nextBytes
+      }
+      conversations.append(contentsOf: page.conversations)
+      pageCount += 1
+      guard let next = page.nextAfter else {
+        return conversations
+      }
+      guard cursor.map({ conversationCursorPrecedes($0, next) }) ?? true else {
+        throw SignalboxProcessServiceError.invalidPage(
+          "The conversation page cursor did not advance."
+        )
+      }
+      cursor = next
+    }
+  }
+
+  public func listModelAliases() async throws -> [SignalboxModelAliasSummary] {
+    try await withExchange(request: .listModelAliases) { exchange in
+      var aliases: [SignalboxModelAliasSummary] = []
+      var started = false
+      while let frame = try await nextFrame(from: exchange) {
+        switch frame.message {
+        case .modelAliasesStart where !started:
+          started = true
+        case .modelAliasSummary(let alias) where started:
+          guard
+            aliases.count < SignalboxProcessProtocol.maximumModelAliasCatalogEntries
+          else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "The model-alias catalog exceeded the native retention cap."
+            )
+          }
+          guard aliases.last.map({ $0.aliasID.rawValue < alias.aliasID.rawValue }) ?? true else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "Model aliases were not in strict identity order."
+            )
+          }
+          aliases.append(alias)
+        case .modelAliasesEnd(let aliasCount) where started:
+          guard aliasCount.rawValue == UInt64(aliases.count) else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "The model-alias count did not match the sequence."
+            )
+          }
+          return aliases
+        case .protocolError(let error):
+          throw remote(error)
+        default:
+          throw SignalboxProcessServiceError.unexpectedMessage(
+            "The model-alias sequence was malformed."
+          )
+        }
+      }
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The model-alias sequence ended before its terminator."
+      )
+    }
   }
 
   public func listSessions(
@@ -212,6 +527,50 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       }
       cursor = next
     }
+  }
+
+  public func readSession(
+    conversation: SignalboxProcessConversation
+  ) async throws -> SignalboxProcessSession {
+    guard case .native(let native) = conversation.record else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "Imported conversations do not have live session defaults."
+      )
+    }
+    async let metadata = readMetadata(sessionID: native.sessionID)
+    async let defaults = readDefaults(sessionID: native.sessionID)
+    let currentMetadata = try await metadata
+    let currentDefaults = try await defaults
+    guard currentMetadata.sessionID == native.sessionID,
+      currentDefaults.sessionID == native.sessionID
+    else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The session read named a different session."
+      )
+    }
+    return SignalboxProcessSession(
+      id: native.sessionID,
+      defaults: currentDefaults,
+      metadata: currentMetadata.metadata
+    )
+  }
+
+  public func setConversationArchived(
+    _ archived: Bool,
+    conversation: SignalboxProcessConversation
+  ) async throws -> SignalboxProcessConversation {
+    let session = try await readSession(conversation: conversation)
+    _ = try await setArchived(archived, session: session)
+    guard
+      let refreshed = try await listConversations(includeArchived: true).first(where: {
+        $0.id == conversation.id
+      })
+    else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The archived conversation was absent from the refreshed unified list."
+      )
+    }
+    return refreshed
   }
 
   public func setArchived(
@@ -298,6 +657,100 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     return submitted
   }
 
+  public func prepareSessionCreation(
+    modelSelection: SignalboxModelSelection,
+    systemPrompt: String?
+  ) async throws -> SignalboxPreparedSessionCreation {
+    SignalboxPreparedSessionCreation(
+      commandID: try commandID(),
+      modelSelection: modelSelection,
+      systemPrompt: systemPrompt
+    )
+  }
+
+  public func createSession(
+    _ creation: SignalboxPreparedSessionCreation
+  ) async throws -> SignalboxCanonicalUUID {
+    try await mutation(
+      creation.request,
+      success: { message in
+        guard case .sessionCreated(let sessionID) = message else {
+          return nil
+        }
+        return sessionID
+      }
+    )
+  }
+
+  public func prepareToolRequestDecision(
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID,
+    decision: SignalboxProcessToolDecision
+  ) async throws -> SignalboxPreparedToolRequestDecision {
+    SignalboxPreparedToolRequestDecision(
+      commandID: try commandID(),
+      sessionID: sessionID,
+      toolRequestID: toolRequestID,
+      decision: decision
+    )
+  }
+
+  public func decideToolRequest(
+    _ prepared: SignalboxPreparedToolRequestDecision
+  ) async throws -> SignalboxToolRequestDecided {
+    let decided: SignalboxToolRequestDecided = try await mutation(
+      prepared.request,
+      success: { message in
+        guard case .toolRequestDecided(let decided) = message else {
+          return nil
+        }
+        return decided
+      }
+    )
+    guard decided.toolRequestID == prepared.toolRequestID,
+      decided.decision == prepared.decision
+    else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The tool-decision receipt did not echo the requested decision."
+      )
+    }
+    return decided
+  }
+
+  public func prepareTurnStop(
+    session: SignalboxProcessSession,
+    activeTurnID: SignalboxCanonicalUUID,
+    content: String
+  ) async throws -> SignalboxPreparedTurnStop {
+    SignalboxPreparedTurnStop(
+      commandID: try commandID(),
+      sessionID: session.id,
+      activeTurnID: activeTurnID,
+      content: content,
+      expectedDefaultsVersion: session.defaultsVersion
+    )
+  }
+
+  public func stopTurn(
+    _ prepared: SignalboxPreparedTurnStop
+  ) async throws -> SignalboxInputSubmitted {
+    let submitted: SignalboxInputSubmitted = try await mutation(
+      prepared.request,
+      success: { message in
+        guard case .inputSubmitted(let submitted) = message else {
+          return nil
+        }
+        return submitted
+      }
+    )
+    guard submitted.sessionID == prepared.sessionID else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The stop receipt named a different session."
+      )
+    }
+    return submitted
+  }
+
   public func makeSynchronization(
     sessionID: SignalboxCanonicalUUID,
     updates: @escaping @Sendable (SignalboxSessionSynchronizationDriverUpdate) async -> Void
@@ -313,6 +766,144 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
   private struct MetadataPage {
     let sessions: [SignalboxProcessSession]
     let nextAfterSessionID: SignalboxCanonicalUUID?
+  }
+
+  private struct ConversationPage {
+    let conversations: [SignalboxProcessConversation]
+    let nextAfter: SignalboxConversationCursor?
+  }
+
+  private func conversationPage(
+    includeArchived: Bool,
+    after cursor: SignalboxConversationCursor?,
+    pageSize: SignalboxCanonicalUInt64
+  ) async throws -> ConversationPage {
+    try await withExchange(
+      request: .listConversations(
+        titleContains: nil,
+        origin: .all,
+        includeArchived: includeArchived,
+        pageSize: pageSize,
+        after: cursor
+      )
+    ) { exchange in
+      var conversations: [SignalboxProcessConversation] = []
+      var started = false
+      var priorCursor: SignalboxConversationCursor?
+      while let frame = try await nextFrame(from: exchange) {
+        switch frame.message {
+        case .conversationPageStart where !started:
+          started = true
+        case .conversationSummary(let summary) where started:
+          let conversation = SignalboxProcessConversation(summary: summary)
+          guard conversationIsAdmissible(conversation) else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "A unified conversation summary violated its protocol contract."
+            )
+          }
+          let summaryCursor = conversationCursor(for: conversation)
+          guard cursor.map({ conversationCursorPrecedes($0, summaryCursor) }) ?? true else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "A conversation summary did not advance beyond the request cursor."
+            )
+          }
+          guard priorCursor.map({ conversationCursorPrecedes($0, summaryCursor) }) ?? true else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "Conversation summaries were not in strict unified order."
+            )
+          }
+          guard conversations.count < Int(pageSize.rawValue) else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "The conversation page exceeded its requested row limit."
+            )
+          }
+          priorCursor = summaryCursor
+          conversations.append(conversation)
+        case .conversationPageEnd(let end) where started:
+          guard end.conversationCount.rawValue == UInt64(conversations.count) else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "The conversation page count did not match its summaries."
+            )
+          }
+          if let next = end.nextAfter {
+            guard priorCursor == next else {
+              throw SignalboxProcessServiceError.invalidPage(
+                "The conversation page cursor did not match its last emitted summary."
+              )
+            }
+          } else if conversations.count == Int(pageSize.rawValue) {
+            // A full terminal page is valid: the server proved no later match
+            // existed in the same repeatable-read snapshot.
+          }
+          return ConversationPage(
+            conversations: conversations,
+            nextAfter: end.nextAfter
+          )
+        case .protocolError(let error):
+          throw remote(error)
+        case .unknown(let kind, _, let diagnostic):
+          throw SignalboxProcessServiceError.invalidPage(
+            diagnostic?.message
+              ?? "The conversation page contained an unrecognized \(kind) message."
+          )
+        default:
+          throw SignalboxProcessServiceError.unexpectedMessage(
+            "The conversation page contained an out-of-order message."
+          )
+        }
+      }
+      throw SignalboxProcessServiceError.invalidPage(
+        "The conversation page ended before its terminal boundary."
+      )
+    }
+  }
+
+  private func conversationIsAdmissible(
+    _ conversation: SignalboxProcessConversation
+  ) -> Bool {
+    switch conversation.record {
+    case .native(let native):
+      return native.defaultsVersion.rawValue > 0
+        && metadataTitleIsAdmissible(native.title)
+    case .imported(let imported):
+      return imported.entryCount.rawValue > 0
+        && signalboxImportedConversationTitleIsAdmissible(imported.title)
+    }
+  }
+
+  private func metadataTitleIsAdmissible(_ title: String?) -> Bool {
+    title.map {
+      !$0.isEmpty
+        && !$0.unicodeScalars.contains("\0")
+        && $0.utf8.count <= SignalboxProcessProtocol.maximumConversationTitleUTF8Bytes
+    } ?? true
+  }
+
+  private func conversationCursor(
+    for conversation: SignalboxProcessConversation
+  ) -> SignalboxConversationCursor {
+    switch conversation.record {
+    case .native(let native):
+      return SignalboxConversationCursor(
+        origin: .nativeSession,
+        conversationID: native.sessionID
+      )
+    case .imported(let imported):
+      return SignalboxConversationCursor(
+        origin: .importedConversation,
+        conversationID: imported.importedConversationID
+      )
+    }
+  }
+
+  private func conversationCursorPrecedes(
+    _ earlier: SignalboxConversationCursor,
+    _ later: SignalboxConversationCursor
+  ) -> Bool {
+    if earlier.conversationID.rawValue != later.conversationID.rawValue {
+      return earlier.conversationID.rawValue < later.conversationID.rawValue
+    }
+    return earlier.origin == .nativeSession && later.origin == .importedConversation
   }
 
   private func metadataPage(
@@ -529,6 +1120,43 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     }
   }
 
+  private func readDefaults(
+    sessionID: SignalboxCanonicalUUID
+  ) async throws -> SignalboxSessionDefaultsRead {
+    try await withExchange(
+      request: .readSessionDefaults(
+        sessionID: sessionID,
+        defaultsVersion: nil
+      )
+    ) { exchange in
+      while let frame = try await nextFrame(from: exchange) {
+        switch frame.message {
+        case .sessionDefaults(let defaults):
+          guard defaults.sessionID == sessionID else {
+            throw SignalboxProcessServiceError.unexpectedMessage(
+              "The defaults read named a different session."
+            )
+          }
+          return defaults
+        case .protocolError(let error):
+          throw remote(error)
+        case .unknown(let kind, _, let diagnostic):
+          throw SignalboxProcessServiceError.unexpectedMessage(
+            diagnostic?.message
+              ?? "The defaults read returned an unrecognized \(kind) message."
+          )
+        default:
+          throw SignalboxProcessServiceError.unexpectedMessage(
+            "The defaults read returned an unrelated message."
+          )
+        }
+      }
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The defaults read closed without a current snapshot."
+      )
+    }
+  }
+
   private enum DeadlineResult<Success: Sendable>: Sendable {
     case value(Success)
     case expired
@@ -708,6 +1336,6 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
   private func remote(
     _ error: SignalboxProcessError
   ) -> SignalboxProcessServiceError {
-    .remote(code: error.code, message: error.message)
+    .remote(code: error.code, message: error.message, detail: error.detail)
   }
 }

@@ -1,5 +1,9 @@
 /target/
 
+# The Codex CLI pin manifest under tooling/codex-cli/ is committed; the
+# executable `npm ci` unpacks from it is a build artifact.
+node_modules/
+
 # Python bytecode from running the docs checkers locally; never committed.
 __pycache__/
 *.pyc

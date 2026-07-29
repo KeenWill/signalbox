@@ -26,6 +26,7 @@ mod runner;
 mod semantic_entry;
 mod session;
 mod session_metadata;
+mod session_template;
 mod submit_input;
 mod tool;
 mod tool_attempt;
@@ -108,11 +109,11 @@ pub use model_execution::{
     ModelTargetCatalogError, ModelTargetDefinition, ModelTargetResolutionError,
     PendingSteeringReclassificationIdentity, PhysicalCancellationModelCallTurnIdentities,
     PreparedInitialModelCall, PreparedModelCallRequest, PreparedSteeringConsumption,
-    ReclassifiedPendingSteeringTurn, ReconciliationRequiredModelCallTurn,
-    ReconciliationRequiredToolTurn, RefusedModelCallTurn, RefusedModelCallTurnIdentities,
-    ResolvedModelSelection, StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
-    StoppedToolRoundModelCallIdentities, ToolResponsePartIdentity, ToolResultAttemptCorrelation,
-    ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
+    ProviderReportedTokenUsage, ReclassifiedPendingSteeringTurn,
+    ReconciliationRequiredModelCallTurn, ReconciliationRequiredToolTurn, RefusedModelCallTurn,
+    RefusedModelCallTurnIdentities, ResolvedModelSelection, StopRequestedModelCallTurn,
+    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolResponsePartIdentity,
+    ToolResultAttemptCorrelation, ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
 };
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,
@@ -197,6 +198,10 @@ pub use session_metadata::{
     ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult,
     ReplaceSessionMetadataSessionNotFound, SessionMetadataContent, SessionMetadataContentError,
     SessionMetadataLastWriter, SessionMetadataSnapshot, SessionMetadataUpdatedAt,
+};
+pub use session_template::{
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateNameError,
+    SessionTemplateNameFailure, SessionTemplateProvenance, SessionTemplateVersion,
 };
 pub use submit_input::{
     PreparedSubmitInput, ReconstitutedSubmitInput, SubmitInput, SubmitInputAppliedResult,

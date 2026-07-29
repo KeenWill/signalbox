@@ -583,7 +583,7 @@ struct ToolInvocationCard: View {
                 }
             } else if tool.status == .waitingForApproval {
                 Label(
-                    "Decision unavailable in process protocol v5",
+                    "Decision unavailable for this tool request",
                     systemImage: "lock.fill"
                 )
                 .font(.caption.weight(.semibold))

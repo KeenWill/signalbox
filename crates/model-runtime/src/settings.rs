@@ -3,17 +3,20 @@
 /// Sampling and output-limit settings for one operation.
 ///
 /// The output-token ceiling is required because the smoke-critical provider
-/// contract requires it on every request; optional knobs are sent only when
-/// set, so provider defaults apply otherwise.
+/// contract requires it on every request. Adapters enforce these settings
+/// through provider controls unless their owning specification records a
+/// capability-limited advisory exception; optional knobs are omitted when
+/// unset so provider defaults apply.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelSettings {
-    /// Hard ceiling on generated output tokens.
+    /// Requested ceiling on generated output tokens; hard unless the owning
+    /// adapter specification records an advisory exception.
     pub max_output_tokens: u32,
     /// Sampling temperature, when the caller sets one.
     pub temperature: Option<f64>,
     /// Nucleus-sampling probability mass, when the caller sets one.
     pub top_p: Option<f64>,
-    /// Sequences at which the provider must stop generating.
+    /// Sequences at which the provider is requested to stop generating.
     pub stop_sequences: Vec<String>,
 }
 
