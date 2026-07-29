@@ -277,6 +277,7 @@ max_output_tokens = 64
                 target,
                 String::from(SCRIPTED_PROVIDER),
                 64,
+                200_000,
             )
             .expect("the fixture runtime definition is valid")])
             .expect("the fixture runtime target is unique");

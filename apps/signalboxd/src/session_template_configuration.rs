@@ -404,12 +404,16 @@ mod tests {
             r#"
 version = 1
 
+[compaction]
+prompt = "Summarize the prior conversation faithfully for continuation."
+
 [[models]]
 selection_id = "{SELECTION_ID}"
 target_id = "{TARGET_ID}"
 provider = "anthropic"
 provider_model = "synthetic-model"
 max_output_tokens = 1024
+context_window_tokens = 200000
 
 [[aliases]]
 alias_id = "{ALIAS_ID}"

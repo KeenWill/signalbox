@@ -7,6 +7,7 @@ mod command_registry;
 mod conversation_import_codec;
 mod lock_inventory;
 
+pub mod context_compaction;
 pub mod conversation_import;
 pub mod conversation_listing;
 pub mod create_session;

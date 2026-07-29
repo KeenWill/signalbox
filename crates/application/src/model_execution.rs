@@ -394,7 +394,8 @@ pub struct PreparedModelOperation {
 }
 
 impl PreparedModelOperation {
-    fn render(
+    /// Renders one checked call request through the canonical frontier projection.
+    pub fn render(
         request: PreparedModelCallRequest,
         credential_reference: ModelCallCredentialReference,
         system_prompt: Option<SessionSystemPrompt>,
@@ -788,6 +789,30 @@ pub enum ModelCallCapabilityPreparation<Capability> {
     Cancelled,
     /// A trustworthy ordinary local failure occurred before send authorization.
     KnownFailure,
+}
+
+/// Outcome of one exact provider-native prospective input count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelCallInputTokenCount {
+    /// Exact provider-reported count for the rendered operation.
+    Counted(u64),
+    /// Authority or caller cancellation won before a count completed.
+    Cancelled,
+}
+
+/// Provider adapter boundary for exact prospective input counting.
+pub trait ModelCallInputTokenCounter {
+    /// Sanitized adapter-specific classified failure.
+    type Error: ClassifyOperatorFailure;
+
+    /// Counts the same provider-native operation shape later prepared for send.
+    fn count_input_tokens<Cancellation>(
+        &self,
+        operation: PreparedModelOperation,
+        cancellation: Cancellation,
+    ) -> impl Future<Output = Result<ModelCallInputTokenCount, Self::Error>> + Send
+    where
+        Cancellation: Future<Output = ()> + Send + 'static;
 }
 
 /// Provider adapter boundary surrounding an opaque, one-shot send capability.

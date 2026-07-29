@@ -13,10 +13,11 @@ verified through PR #296 (`agent/continuation-reconstitution-siblings`); the
 version-thirteen delivery surface, queued restart behavior, and protocol-driven
 continuation steering were verified through PR #302 (`agent/mid-turn-steering`);
 the template-specific home requirement and template-catalog startup order were
-verified through PR #311 (`agent/session-templates-spec`); and exact
-start-frontier reconstitution across a validated compaction boundary was
-verified through this PR (`agent/context-compaction-core`). Code homes:
-`crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
+verified through PR #311 (`agent/session-templates-spec`); exact start-frontier
+reconstitution across a validated compaction boundary was verified through this
+PR (`agent/context-compaction-core`); and the corresponding persistent
+final-state gate was verified against `agent/context-compaction-protocol`. Code
+homes: `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,`
@@ -555,10 +556,17 @@ snapshot, exact summarized range, and predecessor link. Every compaction record
 requires its terminal `Completed` call and an exact source-plus-summary result;
 the predecessor chain must be single-rooted, linear, and prefix-preserving. A
 standalone `Completed` call or any standalone summary fails closed. A standalone
-`Prepared` or `InFlight` call remains recoverable and blocks ordinary
-activation; a terminal non-completed call remains historical recovery evidence
-without a summary or result. Unreferenced snapshots and compaction records fail
-closed.
+`Prepared` or `InFlight` call blocks ordinary activation until the finite
+startup scan recovers its exactly correlated pending command: Prepared
+terminalizes `KnownFailed`, InFlight terminalizes `Ambiguous`, the command
+becomes failed, and neither branch creates a summary or result frontier. A
+terminal non-completed call remains historical recovery evidence without a
+summary or result. Live authorization and terminalization serialize on the
+session row and exactly replay an already-landed transition after an ambiguous
+commit. The same lock serializes a pre-version-seventeen `SubmitInput` mutation:
+a summary committed ahead of that waiter makes the authoritative transaction
+return the version-seventeen requirement and roll back its tentative command
+claim. Unreferenced snapshots and compaction records fail closed.
 
 The exact historical start law remains closed. Its prefix is either the
 immediate predecessor's terminal snapshot (or the imported seed for the first

@@ -29,10 +29,13 @@ exact commit-ambiguity comparison were verified through PR #301
 (`agent/token-usage`); the empty-thinking completion rule was verified through
 PR #305 (`agent/sonnet-streamed-tool-use`). The context-summary projection and
 dedicated compaction-call evidence were verified through this PR
-(`agent/context-compaction-core`). The runner-placement rendering and executable
-session-tool snapshot paragraphs are the foundation proposal at the bottom of
-their implementing stack and become verified only with those child pull
-requests. Invariant tags cite [docs/invariants.md](../invariants.md).
+(`agent/context-compaction-core`); the version-twenty-two explicit trigger,
+pre-activation context guard, configured prompt, and provider-native input
+counting were verified against `agent/context-compaction-protocol`. The
+runner-placement rendering and executable session-tool snapshot paragraphs are
+the foundation proposal at the bottom of their implementing stack and become
+verified only with those child pull requests. Invariant tags cite
+[docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
@@ -241,9 +244,29 @@ current direct selection, resolved provider target, complete source frontier,
 non-secret credential reference, terminal disposition, and the provider's
 independently optional input, output, cache-creation-input, and cache-read-input
 token fields. Only a completed call may produce a `ContextSummary` and
-compaction result. The compaction prompt is a required bounded deployment value
-in the model-catalog configuration, not a source-code literal; the ordinary
-session system prompt is not substituted for it.
+compaction result. Its completion content folds into the summary under the same
+content rule the bridge applies to ordinary assistant content
+([provider observation classification](#provider-observation-classification)):
+text parts concatenate in order and an empty thinking block is dropped, while
+thinking with actual text, redacted thinking, and tool calls fail the summary
+closed. The compaction request configures no thinking display, so the empty
+thinking block is a default-path shape rather than an exceptional one. The
+compaction prompt is a required bounded deployment value in the model-catalog
+configuration, not a source-code literal; the ordinary session system prompt is
+not substituted for it.
+
+Authorization, failure, and completion take the same per-session row lock used
+by guarded session mutation. Each transition first rereads its exact call and
+command lifecycle: an equal `InFlight`, failed terminal disposition, or complete
+summary/result is a successful replay, while a different terminal fact fails
+closed. The daemon retries database and ambiguous-commit outcomes at this seam;
+it does not start provider interaction until authorization is resolved. Before
+authorization, an automatic compaction also retries transient database failures
+while loading its selected transcript range, retaining the live `Prepared` call
+as provably unsent rather than consuming that queued turn's sole automatic
+attempt. An integrity failure still terminalizes the unsent call. After a
+successful provider result, the daemon retains the summary and its usage in
+memory until the exact completion is durably applied or replayed.
 
 The explicit version-twenty-two `compact_session` request names a session and an
 optional semantic transcript position. Absence selects the latest safe terminal
@@ -252,22 +275,55 @@ summary result commits, later model inputs in that session follow the projection
 rule. Command replay returns the same compaction identity, call, exact through
 position, summary entry, and result frontier.
 
+Preparation also rejects a freshly minted summary-entry, result-frontier, or
+compaction identity that already names a durable record, so the daemon remints
+and retries before any provider interaction exactly as it does for a colliding
+call identity; the rejected claim rolls back, leaving the owner-global command
+reusable. A uniqueness violation observed later, while applying the completion,
+is a decided fact rather than a retryable database failure: the completion fails
+closed and its in-flight call is left to startup recovery, because the prepared
+identities are pinned by then and every identical retry fails the same way.
+
 Every catalog model selection also declares `context_window_tokens` as a
-required nonzero integer beside `max_output_tokens`. It is operator-declared per
-selection and is never inferred from provider/model names. Before authorizing an
-ordinary model send, the daemon obtains the exact rendered-input token count
-from that selection's provider adapter. When the count exceeds the declared
-window, the ordinary call is not sent; the daemon runs compaction through the
-latest safe boundary, reloads the resulting complete frontier, renders again,
-and proceeds only when the new input fits. A compaction result that still cannot
-fit fails closed rather than looping or guessing a different limit.
+required nonzero integer beside `max_output_tokens`; configuration is invalid
+when the maximum output reservation exceeds the context window. The window is
+operator-declared per selection and is never inferred from provider/model names.
+Before activating an eligible turn, the daemon renders its prospective initial
+ordinary call and obtains the exact input-token count from that selection's
+provider adapter. The call fits only when that input count plus the selection's
+full `max_output_tokens` reservation is at most the declared context window;
+checked addition fails closed on overflow. When the requested total exceeds the
+window, the turn is not activated and the ordinary call is not sent; the daemon
+runs compaction through the latest safe boundary, reloads the resulting complete
+frontier, renders and counts again, and proceeds only when the recounted input
+plus the same output reservation fits. A compaction result that still cannot fit
+fails closed rather than looping or guessing a different limit. The first
+automatic prepare durably and immutably associates its compaction command with
+the queued turn, and at most one automatic command may name that turn in its
+session. A later scheduler pass for the same queued turn therefore fails closed
+without issuing another dedicated compaction call when the already-compacted
+frontier still exceeds the limit.
 
 Both triggers share the same compaction transaction and provider-call lifecycle.
-Provider interaction remains outside database transactions, and restart treats a
-completed summary boundary as ordinary validated frontier evidence. A
-nonterminal compaction call follows the same no-surviving-task recovery posture
-as an ordinary model call; no summary or result frontier exists unless the
-completed observation and append commit together.
+An explicit command first resolves its owner-global replay state; an equal
+applied command returns its original receipt even when the current deployment no
+longer resolves the original selection or compaction credential. Configuration
+and credential resolution occur only for an unseen command.
+
+Provider interaction remains outside database transactions, and the summary
+range loader selects only the exact source-qualified range fixed by the Prepared
+call rather than materializing the complete physical transcript. Restart treats
+a completed summary boundary as ordinary validated frontier evidence. Startup
+atomically terminalizes a standalone Prepared compaction call as `KnownFailed`
+and an InFlight call as `Ambiguous`, marks its exactly correlated pending
+command failed, and produces no summary or result frontier. Any missing,
+duplicate, or mismatched command/call correlation fails closed.
+
+For the automatic guard, the exact call identity used during provider-native
+counting is retained. Once the count fits, one scheduler-locked transaction
+revalidates the activation, commits it, and creates that exact no-steering
+Prepared call. Steering accepted after that transaction remains pending for a
+later call and cannot enter the already-counted operation.
 
 ## Staged execution
 
@@ -605,7 +661,16 @@ fatal signal, the scheduler stops (in-flight work bounded by a shutdown grace
 window), and the process exits nonzero so the next incarnation's startup scan
 regains authority. Why: startup recovery is the one audited path that classifies
 an issued call from durable evidence, so a live process that cannot construct a
-trustworthy result must stop rather than improvise.
+trustworthy result must stop rather than improvise. An eligibility pass raises
+the same signal whenever a durable stage it owns reports
+`Infrastructure { commit_ambiguous: true }` — the guarded counted activation
+commit and automatic compaction preparation alike — since only that next scan
+can decide what committed. The connection runtime raises it through the same
+handle for an explicit compaction command reporting that class, and still
+answers the client `commit_ambiguous`: a connection handler holds no prepared
+record to terminalize, replay of the command finds it pending, and a fresh
+command finds the nonterminal call, so the restart is the only remedy and
+nothing else would ask for it.
 
 Startup recovery (`crates/persistence/src/startup.rs`), inside the same
 per-session locked transaction as the general scan (INV-034):

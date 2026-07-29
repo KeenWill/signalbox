@@ -14,14 +14,15 @@ version-thirteen input-delivery surface and its user-reachable steering boundary
 were verified through PR #302 (`agent/mid-turn-steering`). The copy-on-create
 session-template provenance and creation mode were verified through PR #311
 (`agent/session-templates-spec`). The append-only context-compaction record and
-projection were verified through this PR (`agent/context-compaction-core`). The
-runner placement-entry paragraphs are the foundation proposal at the bottom of
-their implementing stack and become verified only with those child pull
-requests. The imported-conversation record and converter are owned by
-[conversation-import](conversation-import.md). Where a law is cited as
-`INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
-mechanics owned by another decision are summarized, the owning sibling page is
-linked inline.
+projection were verified through this PR (`agent/context-compaction-core`); the
+command path and canonical visible-range selection were verified against
+`agent/context-compaction-protocol`. The runner placement-entry paragraphs are
+the foundation proposal at the bottom of their implementing stack and become
+verified only with those child pull requests. The imported-conversation record
+and converter are owned by [conversation-import](conversation-import.md). Where
+a law is cited as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of
+record; where mechanics owned by another decision are summarized, the owning
+sibling page is linked inline.
 
 ## Session identity and creation provenance
 
@@ -654,10 +655,11 @@ the ordered subset the selected model sees.
 
 Explicit compaction chooses an optional through position, defaulting to the
 latest safe boundary. The daemon also compacts before an ordinary model send
-when that call's rendered input would exceed the current selection's declared
-context window. Both paths use the required deployment-configured compaction
-prompt and the session's current direct selection. Trigger and configuration
-mechanics are owned by [model-call-execution](model-call-execution.md).
+when that call's rendered input plus its full configured output-token
+reservation would exceed the current selection's declared context window. Both
+paths use the required deployment-configured compaction prompt and the session's
+current direct selection. Trigger and configuration mechanics are owned by
+[model-call-execution](model-call-execution.md).
 
 ### When entries come to exist
 

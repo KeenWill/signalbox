@@ -243,6 +243,7 @@ async fn execute(
         } => Some(PreparedImport::Scan(collect_import_paths(path)?)),
         Command::Create { .. }
         | Command::Continue { .. }
+        | Command::Compact { .. }
         | Command::Imported { .. }
         | Command::List
         | Command::Templates
@@ -270,6 +271,7 @@ async fn execute(
             ..
         } => Some(read_system_prompt_file(path).await?),
         Command::Create { .. }
+        | Command::Compact { .. }
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -331,6 +333,20 @@ async fn execute(
                 through_position,
                 relationship,
                 selection,
+                command_id,
+            )
+            .await
+        }
+        Command::Compact {
+            session_id,
+            through_position,
+            command_id,
+        } => {
+            compact(
+                &mut client,
+                &mut output,
+                session_id,
+                through_position,
                 command_id,
             )
             .await
@@ -722,6 +738,52 @@ async fn continue_imported(
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("continue returned an unexpected response").mutation()),
+    }
+}
+
+async fn compact(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+    through_position: Option<CanonicalU64>,
+    command_id: Option<CommandId>,
+) -> Result<(), ClientError> {
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let mut connection = client
+        .mutation_request(ClientRequest::CompactSession {
+            command_id,
+            session_id,
+            through_position,
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::SessionCompacted {
+            session_id: compacted_session,
+            context_compaction_id,
+            model_call_id,
+            through_position,
+            summary_entry_id,
+            result_frontier_id,
+        } if compacted_session == session_id => Ok(output.session_compacted(
+            session_id,
+            context_compaction_id,
+            model_call_id,
+            through_position.value(),
+            summary_entry_id,
+            result_frontier_id,
+        )?),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("compact returned an unexpected response").mutation()),
     }
 }
 
@@ -2249,6 +2311,7 @@ fn terminal_event_state(
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::TurnActivated { .. }
+        | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
         | SessionEvent::TurnCompleted { .. }
@@ -2399,6 +2462,7 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::TurnActivated { .. }
+        | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ModelCallTransition { .. } => None,
     }
 }
@@ -4455,7 +4519,7 @@ mod tests {
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert_eq!(request.version(), ProtocolVersion::Nineteen);
+            assert_eq!(request.version(), ProtocolVersion::TwentyTwo);
             assert_eq!(
                 request.request(),
                 &ClientRequest::SubmitInput {

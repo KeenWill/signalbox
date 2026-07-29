@@ -32,9 +32,11 @@ session has no per-turn projection switch.
 
 Version twenty-two adds explicit session compaction with an optional through
 position and an automatic pre-call guard. Each catalog selection declares a
-nonzero context-window token limit; the daemon never guesses one. Summary
-production uses the selection's ordinary provider target in a separate call and
-a required deployment-configured compaction prompt beside the model catalog.
+nonzero context-window token limit; the daemon never guesses one. The guard
+reserves the selection's complete configured maximum output in addition to the
+provider-counted rendered input. Summary production uses the selection's
+ordinary provider target in a separate call and a required deployment-configured
+compaction prompt beside the model catalog.
 
 **Rejected alternatives.** Deleting, replacing, or rewriting earlier entries: it
 destroys durable truth. Recording only summary text: it loses producing-call,
@@ -47,8 +49,9 @@ truth.
 **Affects.** [sessions-and-transcript](spec/sessions-and-transcript.md),
 [model-call-execution](spec/model-call-execution.md),
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md),
-migration `202607290401_context_compaction.sql`, model-catalog configuration,
-and process protocol version twenty-two.
+migrations `202607290401_context_compaction.sql` and
+`202607300102_context_compaction_command.sql`, model-catalog configuration, and
+process protocol version twenty-two.
 
 ## 2026-07-28 — Bound Codex stream-redaction work and name its shape limit
 
@@ -515,7 +518,7 @@ slot. Treating loss as ordinary cancellation could erase an issued
 side-effecting attempt's ambiguity.
 
 **Affects.** Runner connection loss, placement orchestration, owner protocol
-version twenty-two, session/client state, frontier injection, INV-026 and
+version twenty-three, session/client state, frontier injection, INV-026 and
 INV-044, and [runner-protocol specification](spec/runner-protocol.md).
 
 ## 2026-07-27 — Provision one recoverable clone per runner session
@@ -570,8 +573,9 @@ commands before the generic scan touches remaining daemon-owned attempts. A lost
 active runner admits one provisioning-only pending candidate. Repository-backed
 replacement claims an immutable typed command request, stages one workspace
 without holding a database transaction, then promotes the candidate and appends
-its result in one terminal transaction. Every version-twenty-two native-session
-listing uses the same runner projection, and suspect recovery emits `connected`.
+its result in one terminal transaction. Every version-twenty-three
+native-session listing uses the same runner projection, and suspect recovery
+emits `connected`.
 
 **Rejected alternatives.** Scanning first can terminalize an attempt before its
 real result arrives. Keeping claim phase only in memory can strand or repeat an

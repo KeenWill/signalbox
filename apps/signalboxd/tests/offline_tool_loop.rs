@@ -100,12 +100,16 @@ const OFFLINE_CODE_HOST_TOKEN: &[u8] = b"offline-code-host-token";
 const PROCESS_MODEL_CONFIGURATION: &str = r#"
 version = 1
 
+[compaction]
+prompt = "Summarize the prior conversation faithfully for continuation."
+
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000001"
 target_id = "00000000-0000-0000-0000-000000000002"
 provider = "anthropic"
 provider_model = "fixture-model"
 max_output_tokens = 64
+context_window_tokens = 200000
 "#;
 
 #[derive(Clone, Debug)]
@@ -224,6 +228,7 @@ impl ToolLoopFixture {
                 target,
                 String::from("scripted-tool-loop"),
                 64,
+                200_000,
             )
             .expect("fixture runtime definition is valid")])
             .expect("one fixture runtime target is unique");
