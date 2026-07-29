@@ -155,6 +155,7 @@ pub(crate) struct EventDecoder<C> {
     exchange: ExchangeFacts,
     reported_model: Option<ProviderReportedModel>,
     message_id: Option<ProviderMessageId>,
+    native_message_id: Option<String>,
     content: Vec<AssistantPart>,
     proposal_indexes: HashMap<String, usize>,
     result_ids: HashSet<String>,
@@ -195,6 +196,7 @@ impl<C: Clone> EventDecoder<C> {
             exchange: ExchangeFacts::default(),
             reported_model: None,
             message_id: None,
+            native_message_id: None,
             content: Vec::new(),
             proposal_indexes: HashMap::new(),
             result_ids: HashSet::new(),
@@ -323,10 +325,20 @@ impl<C: Clone> EventDecoder<C> {
                 "Claude assistant event has invalid identity or nesting",
             ));
         }
-        if self.message_id.is_none() {
+        if self
+            .native_message_id
+            .as_ref()
+            .is_some_and(|message_id| message_id != &event.message.id)
+        {
+            return Err(DecodeFailure::stream_protocol(
+                "Claude assistant message id contradicts prior assistant content",
+            ));
+        }
+        if self.native_message_id.is_none() {
             self.message_id = Some(ProviderMessageId::new(
                 sink.redact_provider_id("", &event.message.id),
             ));
+            self.native_message_id = Some(event.message.id.clone());
         }
         if self
             .reported_model
@@ -485,13 +497,16 @@ impl<C: Clone> EventDecoder<C> {
             self.usage.absorb(result_usage(usage));
         }
         if event.subtype == "success" && !event.is_error {
-            let stop_reason = event.stop_reason.unwrap_or_else(|| "end_turn".to_string());
+            let stop_reason = event.stop_reason.ok_or_else(|| {
+                DecodeFailure::stream_protocol("Claude success lacks a stop reason")
+            })?;
             if event.terminal_reason.as_deref() != Some("completed") {
                 return Err(DecodeFailure::stream_protocol(
                     "Claude success lacks the completed terminal reason",
                 ));
             }
             let finish = finish_reason(&stop_reason);
+            sink.finish();
             self.finish_reported = Some(finish.clone());
             sink.observe(Observation {
                 correlation: self.correlation.clone(),

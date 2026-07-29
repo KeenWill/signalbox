@@ -61,6 +61,21 @@ async fn normal_completion_requires_typed_terminal_result() {
 }
 
 #[tokio::test]
+async fn harmless_terminal_credential_prefix_remains_byte_exact() {
+    let result = execute_scenario("safe_terminal_prefix", OperationShape::Text).await;
+
+    assert_eq!(
+        completion_text(&result.evidence),
+        fixtures::SAFE_CREDENTIAL_PREFIX
+    );
+    assert_eq!(
+        observation_text(&result.observations),
+        fixtures::SAFE_CREDENTIAL_PREFIX
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn tool_call_and_mcp_result_round_trip_returns_typed_proposal() {
     let result = execute_scenario("tool_round_trip", OperationShape::Tool).await;
     let completion = completed(&result.evidence);
@@ -160,6 +175,30 @@ async fn truncated_stream_is_boundary_loss() {
 #[tokio::test]
 async fn malformed_stream_line_is_protocol_boundary_loss() {
     let result = execute_scenario("malformed_stream", OperationShape::Text).await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn conflicting_assistant_message_id_is_protocol_boundary_loss() {
+    let result = execute_scenario("conflicting_message_id", OperationShape::Text).await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn success_without_stop_reason_is_protocol_boundary_loss() {
+    let result = execute_scenario("success_without_stop_reason", OperationShape::Text).await;
     let loss = boundary_loss(&result.evidence);
 
     assert!(matches!(

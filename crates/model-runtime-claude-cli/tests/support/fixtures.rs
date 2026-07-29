@@ -2,8 +2,10 @@
 
 pub const SESSION_ID: &str = "session-synthetic-1";
 pub const MESSAGE_ID: &str = "message-synthetic-1";
+pub const OTHER_MESSAGE_ID: &str = "message-synthetic-2";
 pub const MODEL: &str = "claude-synthetic-model";
 pub const ANSWER: &str = "synthetic completion";
+pub const SAFE_CREDENTIAL_PREFIX: &str = "API";
 pub const REFUSAL: &str = "synthetic refusal";
 pub const SENSITIVE_TEXT: &str = "Authorization: synthetic-credential-value";
 pub const FRAGMENTED_SECRET_PREFIX: &str = "api_";

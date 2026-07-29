@@ -30,6 +30,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_text(fixtures::ANSWER)?;
             success("end_turn", Some(fixtures::ANSWER))?;
         }
+        "safe_terminal_prefix" => {
+            assistant_text(fixtures::SAFE_CREDENTIAL_PREFIX)?;
+            success("end_turn", Some(fixtures::SAFE_CREDENTIAL_PREFIX))?;
+        }
+        "conflicting_message_id" => {
+            assistant_text(fixtures::ANSWER)?;
+            assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
+            success("end_turn", Some(fixtures::ANSWER))?;
+        }
+        "success_without_stop_reason" => {
+            assistant_text(fixtures::ANSWER)?;
+            success_without_stop_reason()?;
+        }
         "tool_round_trip" => {
             assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
             tool_result(fixtures::TOOL_ID)?;
@@ -79,19 +92,23 @@ fn system_init(arguments: &[String]) -> std::io::Result<()> {
 }
 
 fn assistant_text(text: &str) -> std::io::Result<()> {
+    assistant_text_with_id(fixtures::MESSAGE_ID, text)
+}
+
+fn assistant_text_with_id(id: &str, text: &str) -> std::io::Result<()> {
     emit_json(&serde_json::json!({
         "type": "assistant", "parent_tool_use_id": null,
-        "message": {"model": fixtures::MODEL, "id": fixtures::MESSAGE_ID, "role": "assistant",
+        "message": {"model": fixtures::MODEL, "id": id, "role": "assistant",
             "content": [{"type": "text", "text": text}],
             "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}}
     }))
 }
 
-fn assistant_tool(id: &str, name: &str) -> std::io::Result<()> {
+fn assistant_tool(tool_id: &str, name: &str) -> std::io::Result<()> {
     emit_json(&serde_json::json!({
         "type": "assistant", "parent_tool_use_id": null,
         "message": {"model": fixtures::MODEL, "id": fixtures::MESSAGE_ID, "role": "assistant",
-            "content": [{"type": "tool_use", "id": id,
+            "content": [{"type": "tool_use", "id": tool_id,
                 "name": format!("mcp__signalbox_tools__{name}"),
                 "input": {"subject": "synthetic"}, "caller": {"type": "direct"}}]}
     }))
@@ -113,6 +130,15 @@ fn api_status_error() -> std::io::Result<()> {
         "session_id": fixtures::SESSION_ID, "stop_reason": null,
         "terminal_reason": null, "result": "synthetic provider error",
         "errors": [], "api_error_status": 429,
+        "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}
+    }))
+}
+
+fn success_without_stop_reason() -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "result", "subtype": "success", "is_error": false,
+        "session_id": fixtures::SESSION_ID, "stop_reason": null,
+        "terminal_reason": "completed", "result": fixtures::ANSWER, "errors": [],
         "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}
     }))
 }

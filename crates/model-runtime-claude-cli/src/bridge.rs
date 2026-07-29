@@ -78,6 +78,33 @@ fn wait_ready(path: PathBuf) -> ExitCode {
     ExitCode::FAILURE
 }
 
+fn read_request_line(input: &mut impl BufRead, line: &mut Vec<u8>) -> std::io::Result<Option<()>> {
+    line.clear();
+    loop {
+        let available = input.fill_buf()?;
+        if available.is_empty() {
+            return Ok((!line.is_empty()).then_some(()));
+        }
+        let delimiter = available.iter().position(|byte| *byte == b'\n');
+        let consumed = delimiter.map_or(available.len(), |index| index + 1);
+        let length = line
+            .len()
+            .checked_add(consumed)
+            .ok_or_else(|| std::io::Error::other("MCP request length overflowed"))?;
+        if length > BRIDGE_LINE_LIMIT {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "MCP request exceeds the bridge line limit",
+            ));
+        }
+        line.extend_from_slice(&available[..consumed]);
+        input.consume(consumed);
+        if delimiter.is_some() {
+            return Ok(Some(()));
+        }
+    }
+}
+
 fn serve(catalog_path: PathBuf, ready_path: PathBuf) -> ExitCode {
     let Ok(catalog_bytes) = std::fs::read(catalog_path) else {
         return ExitCode::FAILURE;
@@ -95,15 +122,10 @@ fn serve(catalog_path: PathBuf, ready_path: PathBuf) -> ExitCode {
     let mut line = Vec::new();
     let mut ready_published = false;
     loop {
-        line.clear();
-        let Ok(read) = input.read_until(b'\n', &mut line) else {
-            return ExitCode::FAILURE;
-        };
-        if read == 0 {
-            return ExitCode::SUCCESS;
-        }
-        if line.len() > BRIDGE_LINE_LIMIT {
-            return ExitCode::FAILURE;
+        match read_request_line(&mut input, &mut line) {
+            Ok(Some(())) => {}
+            Ok(None) => return ExitCode::SUCCESS,
+            Err(_) => return ExitCode::FAILURE,
         }
         while matches!(line.last(), Some(b'\n' | b'\r')) {
             line.pop();
@@ -247,7 +269,8 @@ fn create_ready_marker(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MCP_PROTOCOL_VERSION, initialize_response, publish_ready_once, valid_mcp_tool_name,
+        BRIDGE_LINE_LIMIT, MCP_PROTOCOL_VERSION, initialize_response, publish_ready_once,
+        read_request_line, valid_mcp_tool_name,
     };
 
     #[test]
@@ -263,6 +286,19 @@ mod tests {
     #[test]
     fn mcp_tool_name_rejects_an_empty_name() {
         assert!(!valid_mcp_tool_name(""));
+    }
+
+    #[test]
+    fn oversized_unterminated_request_is_rejected_before_it_is_buffered() {
+        let input = vec![b'x'; BRIDGE_LINE_LIMIT + 1];
+        let mut reader = std::io::BufReader::with_capacity(64, std::io::Cursor::new(input));
+        let mut line = Vec::new();
+
+        let error = read_request_line(&mut reader, &mut line)
+            .expect_err("oversized request must be rejected");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(line.len() <= BRIDGE_LINE_LIMIT);
     }
 
     #[test]
