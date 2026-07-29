@@ -57,19 +57,22 @@ version and was verified through PR #310 (`agent/interactive-terminal-chat`).
 The native client wiring stack adds version twenty-one for the deployment
 model-alias read, verified through this PR (`agent/native-live-process-wiring`);
 this surface reserved eighteen, but the session-template surface shipped that
-number first while this one was still in flight, and the concurrent
-context-compaction protocol stack separately claimed twenty, also still in
-flight, so this surface sits above both instead. Every earlier admitted version
-retains its closed vocabulary. This implementation speaks versions one through
-thirteen, sixteen through nineteen, and twenty-one, with fourteen, fifteen, and
-twenty unsupported; the terminal client selects version nineteen and the native
-client selects version twenty-one. The runner executable stack proposes protocol
-version twenty-two for runner-backed session placement, visible sandbox/loss
-state, and owner replace/abandon verbs, verified through this PR
-(`agent/runner-buildout-spec`) as the foundation proposal at the bottom of its
-implementing stack; earlier versions retain their closed request and message
-vocabularies unchanged, and this proposal becomes verified, with a client
-selection of its own, only with its implementing child pull requests. Its
+number first while this one was still in flight. Version twenty was separately
+allocated to the concurrent context-compaction protocol stack, also still in
+flight at the time, so this surface sits above both instead. The two stacks went
+on to land out of their originally planned order, and this surface reached main
+before twenty did; twenty is retired under the standing retirement convention
+rather than reallocated beneath this already-shipped vocabulary. Every earlier
+admitted version retains its closed vocabulary. This implementation speaks
+versions one through thirteen, sixteen through nineteen, and twenty-one, with
+fourteen, fifteen, and twenty unsupported; the terminal client selects version
+nineteen and the native client selects version twenty-one. The runner executable
+stack proposes protocol version twenty-two for runner-backed session placement,
+visible sandbox/loss state, and owner replace/abandon verbs, verified through
+this PR (`agent/runner-buildout-spec`) as the foundation proposal at the bottom
+of its implementing stack; earlier versions retain their closed request and
+message vocabularies unchanged, and this proposal becomes verified, with a
+client selection of its own, only with its implementing child pull requests. Its
 `search` verb over version four's metadata list was verified through PR #283
 (`agent/session-search-cli`; terminal client surface only). This page's
 version-four last-writer member spelling was verified through PR #288
@@ -208,18 +211,20 @@ closes the connection. Versions fourteen and fifteen are retired and unsupported
 here, so the admitted set has a permanent gap: each was reserved by protocol
 work that had not yet shipped when a higher number shipped first, and admitting
 either now would retroactively widen an already-closed vocabulary underneath a
-version already in use, so neither is ever admitted. Version twenty is a second,
-temporary gap: it is reserved by the concurrent context-compaction protocol
-stack, still in flight, and becomes admitted once that stack ships rather than
-retired. Every response uses the request's admitted version; when no version can
-be admitted, the server error uses version one as the pre-admission fallback. A
-client speaking a version above one admits that version-one fallback only for
-`malformed_frame` or `unsupported_version`, then applies the ordinary
-request-identity check; every other response-version mismatch fails locally. A
-server error uses `request_id = "0"` only when the incoming frame prevents
-recovery of a valid nonzero identity; zero is never a valid client identity or
-success-response identity. Leading zeroes, a plus sign, whitespace, and any
-spelling other than the shortest ASCII decimal form are invalid.
+version already in use, so neither is ever admitted. Version twenty was reserved
+by the concurrent context-compaction protocol stack, but the model-alias-catalog
+stack above shipped twenty-one to main first, out of the two stacks' originally
+planned order, before twenty ever shipped, so twenty is retired under the
+identical rule rather than admitted once that stack ships. Every response uses
+the request's admitted version; when no version can be admitted, the server
+error uses version one as the pre-admission fallback. A client speaking a
+version above one admits that version-one fallback only for `malformed_frame` or
+`unsupported_version`, then applies the ordinary request-identity check; every
+other response-version mismatch fails locally. A server error uses
+`request_id = "0"` only when the incoming frame prevents recovery of a valid
+nonzero identity; zero is never a valid client identity or success-response
+identity. Leading zeroes, a plus sign, whitespace, and any spelling other than
+the shortest ASCII decimal form are invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -587,14 +592,13 @@ above. Version twenty-one retains every request admitted by version nineteen and
 adds only the read-only `list_model_aliases`. Version twenty-two (proposed by
 this PR's foundation stack) retains every request admitted by version
 twenty-one, adds the three runner requests, and requires the explicit nullable
-runner-placement member on both session-creation variants; versions fourteen and
-fifteen remain permanently retired and unsupported here, and twenty remains a
-temporary gap reserved by the concurrent context-compaction protocol stack. A
-metadata request carried under version one, two, or three, an import request
-carried under version one through four, a defaults-replacement request carried
-under version one through five, a reconciliation request carried under version
-one through six, a turn-control request carried under version one through seven,
-a defaults read carried under version one through eight, an imported-frontier
+runner-placement member on both session-creation variants; versions fourteen,
+fifteen, and twenty remain permanently retired and unsupported here. A metadata
+request carried under version one, two, or three, an import request carried
+under version one through four, a defaults-replacement request carried under
+version one through five, a reconciliation request carried under version one
+through six, a turn-control request carried under version one through seven, a
+defaults read carried under version one through eight, an imported-frontier
 creation request carried under any version one through nine, a review request
 carried under any version one through ten, a delivery-bearing submit carried
 under any version before thirteen, a unified-listing request carried under any

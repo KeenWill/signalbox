@@ -245,7 +245,7 @@ compaction result. The compaction prompt is a required bounded deployment value
 in the model-catalog configuration, not a source-code literal; the ordinary
 session system prompt is not substituted for it.
 
-The explicit version-seventeen `compact_session` request names a session and an
+The explicit version-twenty-two `compact_session` request names a session and an
 optional semantic transcript position. Absence selects the latest safe terminal
 or pre-call boundary. The command records no projection preference: once its
 summary result commits, later model inputs in that session follow the projection
