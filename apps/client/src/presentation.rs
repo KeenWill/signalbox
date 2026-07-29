@@ -340,6 +340,24 @@ impl<'a> Output<'a> {
         writeln!(self.stdout, "{session_id}")
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn session_compacted(
+        &mut self,
+        session_id: CanonicalUuid,
+        context_compaction_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        through_position: u64,
+        summary_entry_id: CanonicalUuid,
+        result_frontier_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "session={session_id} compaction={context_compaction_id} call={model_call_id} \
+             through_position={through_position} summary_entry={summary_entry_id} \
+             result_frontier={result_frontier_id}"
+        )
+    }
+
     pub(crate) fn template_summary(&mut self, name: &str, version: u64) -> io::Result<()> {
         writeln!(self.stdout, "name={name} version={version}")
     }
@@ -911,6 +929,20 @@ impl<'a> Output<'a> {
                      tool_attempt={tool_attempt_id}"
                 ),
             },
+            SessionEvent::ContextCompacted {
+                context_compaction_id,
+                model_call_id,
+                through_position,
+                summary_entry_id,
+                result_frontier_id,
+            } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} context_compacted \
+                 compaction={context_compaction_id} call={model_call_id} \
+                 through={} summary_entry={summary_entry_id} \
+                 frontier={result_frontier_id}",
+                through_position.value()
+            ),
             SessionEvent::TurnCompleted {
                 turn_id,
                 model_call_id,
@@ -1165,6 +1197,15 @@ impl<'a> Output<'a> {
                     TranscriptTextEntry::Assistant { turn_id, .. } => {
                         format!("assistant turn={turn_id}")
                     }
+                    TranscriptTextEntry::ContextSummary {
+                        model_call_id,
+                        first_source_session_id,
+                        first_entry_id,
+                        through_source_session_id,
+                        through_entry_id,
+                    } => format!(
+                        "context_summary model_call={model_call_id} range={first_source_session_id}/{first_entry_id}..={through_source_session_id}/{through_entry_id}"
+                    ),
                     TranscriptTextEntry::Imported {
                         imported_conversation_id,
                         imported_entry_id,

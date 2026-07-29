@@ -10,6 +10,97 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-28 — Compact model visibility without rewriting the transcript
+
+**Context.** Long sessions eventually exceed a selected model's context window,
+but the semantic transcript and its complete frontiers are durable evidence.
+Treating compaction as transcript deletion would destroy provenance and make
+continuation from an earlier boundary impossible. Context limits and the prompt
+used to create a summary are deployment facts, not values the hub can infer.
+
+**Decision.** A compaction is append-only: one dedicated model call using the
+session's current direct model selection records its exact source frontier,
+resolved target, terminal disposition, and provider-reported usage; a completed
+call appends one `ContextSummary` semantic entry naming that call and the exact
+inclusive source-qualified range it summarizes, then records a complete result
+frontier equal to the source plus that entry. Later model calls retain the
+complete frontier as their durable context fact but render the latest summary
+first, followed by every entry after its through-boundary. Compactions form a
+forward-only predecessor chain. Continuing from a pre-compaction boundary
+creates a new session through the existing continuation machinery; an existing
+session has no per-turn projection switch.
+
+Version twenty-two adds explicit session compaction with an optional through
+position and an automatic pre-call guard. Each catalog selection declares a
+nonzero context-window token limit; the daemon never guesses one. The guard
+reserves the selection's complete configured maximum output in addition to the
+provider-counted rendered input. Summary production uses the selection's
+ordinary provider target in a separate call and a required deployment-configured
+compaction prompt beside the model catalog.
+
+**Rejected alternatives.** Deleting, replacing, or rewriting earlier entries: it
+destroys durable truth. Recording only summary text: it loses producing-call,
+usage, and exact-range provenance. Producing the summary inside the next
+ordinary turn call: it conflates two physical provider interactions. Per-turn
+projection choice: it breaks forward-only behavior. A hardcoded prompt or
+inferred model limit: either makes mutable operator knowledge look like product
+truth.
+
+**Affects.** [sessions-and-transcript](spec/sessions-and-transcript.md),
+[model-call-execution](spec/model-call-execution.md),
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md),
+migrations `202607290401_context_compaction.sql` and
+`202607300102_context_compaction_command.sql`, model-catalog configuration, and
+process protocol version twenty-two.
+
+## 2026-07-28 — Bound Codex stream-redaction work and name its shape limit
+
+**Context.** The Codex adapter retains up to 64 KiB of an incomplete credential
+candidate so provider-chosen delta boundaries cannot expose its value. Repeating
+the full held-buffer classification after each one-byte delta made that bounded
+memory state an unbounded quadratic-work path. The shape contract also omitted
+common reflected forms — singular `token`, passphrase/password abbreviations,
+selected operational key names, credential-valued long options, and URL userinfo
+— while leaving unclear whether it correlated credential names and values stored
+in separate structural positions.
+
+**Decision.** Keep the 64-KiB hold. One initial unsafe-suffix classification
+decides whether a prefix is held; it is not charged as reclassification. After a
+hold at length L, reclassify only when the held length reaches at least twice L;
+crossing the cap forces one final reclassification. Each post-hold round invokes
+the two top-level whole-buffer classifiers. Before invocation, the sink charges
+both classifiers for the full joined input, including emitted or dropped
+lookbehind context. A per-continuously-unresolved-candidate budget fails closed
+before a round would make cumulative reclassification input exceed 393,216 bytes
+(six times 64 KiB), independent of delta count. Without external context, the
+geometric held lengths presented to each classifier sum to at most 196,608 bytes
+(three times 64 KiB). The 66,000 one-byte continuation shape performs its
+initial unsafe-suffix classification once, then thirteen reclassification
+rounds: 188,387 aggregate held bytes and 376,774 charged rescanned bytes. Once
+fail-closed suppression begins, it is absorbing for the sink's lifetime; usage,
+boundary, and finish events cannot re-enable provider bytes. Extend
+normalized-name coverage to the `token`, passphrase/`passwd`/`pwd`, and
+explicitly named signing, encryption, SSH, HMAC, and license-key families — not
+arbitrary names ending in `key` — together with the option and userinfo shapes
+specified in
+[runtime-substrate](spec/runtime-substrate.md#codex-cli-shape-redaction-scope),
+while explicitly accepting that the text scanner does not correlate a credential
+name with a value stored in a separate structural position.
+
+**Rejected alternatives.** Retaining the existing per-delta whole-buffer scan
+keeps quadratic work below the memory cap. A wall-clock cutoff is load-dependent
+and makes ordinary tests nondeterministic. Truncating the held candidate or
+re-enabling output after a usage event can release the same credential the sink
+had already decided it could not classify safely. Promising cross-field semantic
+correlation would overstate a text-shaped scanner; those formats need a
+format-aware boundary instead. Treating every name ending in `key` as a
+credential would suppress ordinary non-secret values without adding a specific
+credential meaning, so coverage stays with the enumerated key families.
+
+**Affects.** INV-035, the Codex CLI credential contract in
+[runtime-substrate](spec/runtime-substrate.md), and
+`crates/model-runtime-codex-cli/src/redaction.rs`.
+
 ## 2026-07-28 — Bound the native ephemeral provider-text overlay
 
 **Context.** Each provider-text delta is frame-bounded, but a native client
@@ -41,7 +132,10 @@ existing sessions would drift from deployment configuration and could submit an
 unknown or retired alias. This surface originally reserved protocol version
 eighteen; the session-template surface shipped that number first while this one
 was still in flight, and the concurrent context-compaction protocol stack
-separately claimed twenty, also still in flight.
+separately claimed twenty, also still in flight at the time. This surface
+reached main first, out of the two stacks' originally planned order; twenty is
+now permanently retired rather than reallocated beneath this already-shipped
+vocabulary, and the compaction stack claims twenty-two instead.
 
 **Decision.** Protocol version twenty-one adds the read-only
 `list_model_aliases` sequence, the next number free of both already-shipped and
@@ -424,7 +518,7 @@ slot. Treating loss as ordinary cancellation could erase an issued
 side-effecting attempt's ambiguity.
 
 **Affects.** Runner connection loss, placement orchestration, owner protocol
-version twenty-two, session/client state, frontier injection, INV-026 and
+version twenty-three, session/client state, frontier injection, INV-026 and
 INV-044, and [runner-protocol specification](spec/runner-protocol.md).
 
 ## 2026-07-27 — Provision one recoverable clone per runner session
@@ -479,8 +573,9 @@ commands before the generic scan touches remaining daemon-owned attempts. A lost
 active runner admits one provisioning-only pending candidate. Repository-backed
 replacement claims an immutable typed command request, stages one workspace
 without holding a database transaction, then promotes the candidate and appends
-its result in one terminal transaction. Every version-twenty-two native-session
-listing uses the same runner projection, and suspect recovery emits `connected`.
+its result in one terminal transaction. Every version-twenty-three
+native-session listing uses the same runner projection, and suspect recovery
+emits `connected`.
 
 **Rejected alternatives.** Scanning first can terminalize an attempt before its
 real result arrives. Keeping claim phase only in memory can strand or repeat an

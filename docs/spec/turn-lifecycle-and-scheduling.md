@@ -13,8 +13,11 @@ verified through PR #296 (`agent/continuation-reconstitution-siblings`); the
 version-thirteen delivery surface, queued restart behavior, and protocol-driven
 continuation steering were verified through PR #302 (`agent/mid-turn-steering`);
 the template-specific home requirement and template-catalog startup order were
-verified through PR #311 (`agent/session-templates-spec`). Code homes:
-`crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
+verified through PR #311 (`agent/session-templates-spec`); exact start-frontier
+reconstitution across a validated compaction boundary was verified through this
+PR (`agent/context-compaction-core`); and the corresponding persistent
+final-state gate was verified against `agent/context-compaction-protocol`. Code
+homes: `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,`
@@ -547,15 +550,43 @@ the header-plus-prefix-delta representation; a deferred constraint trigger
 resolved membership — exact declared count, positions `1..count` — at commit.
 Reconstitution rejects any stored snapshot whose resolved membership disagrees
 with the complete entry set — one identifier can never resolve differently.
-In-memory append derivation structurally shares the immutable ordered prefix,
-membership index, and lineage index; complete iteration and comparison retain
-the same values and ordering. Imported ancestry resolves only through the
-checked session-creation producer; its separate one-to-one `ImportedSessionSeed`
-must name the exact stored frontier identity whose membership matches the
-selected imported prefix. Substituting an equal-content reminted identity for
-that seed fails reconstitution. `SingleSource` ancestry resolution remains
-unimplemented. `TranscriptFrontier` itself is
-[sessions-and-transcript](sessions-and-transcript.md) scope.
+Before validating any stored turn start, the complete scheduling scan
+reconstructs every dedicated compaction call, summary entry, source and result
+snapshot, exact summarized range, and predecessor link. Every compaction record
+requires its terminal `Completed` call and an exact source-plus-summary result;
+the predecessor chain must be single-rooted, linear, and prefix-preserving. A
+standalone `Completed` call or any standalone summary fails closed. A standalone
+`Prepared` or `InFlight` call blocks ordinary activation until the finite
+startup scan recovers its exactly correlated pending command: Prepared
+terminalizes `KnownFailed`, InFlight terminalizes `Ambiguous`, the command
+becomes failed, and neither branch creates a summary or result frontier. A
+terminal non-completed call remains historical recovery evidence without a
+summary or result. Live authorization and terminalization serialize on the
+session row and exactly replay an already-landed transition after an ambiguous
+commit. The same lock serializes a pre-version-seventeen `SubmitInput` mutation:
+a summary committed ahead of that waiter makes the authoritative transaction
+return the version-seventeen requirement and roll back its tentative command
+claim. Unreferenced snapshots and compaction records fail closed.
+
+The exact historical start law remains closed. Its prefix is either the
+immediate predecessor's terminal snapshot (or the imported seed for the first
+native turn), or the validated chain tip's result when the start follows that
+compaction. A historical start committed before the chain tip remains admissible
+only when its entire stored frontier is an exact semantic prefix of the tip's
+source; this preserves old starts without authorizing a later turn to omit the
+summary. In either shape, the only remaining suffix is the already-required
+model-identity boundary, when applicable, followed by the turn's exact origin. A
+summary entry is never accepted as an arbitrary extra suffix. New eligibility
+uses the unique latest result when it preserves the applicable seed or
+predecessor terminal prefix. In-memory append derivation structurally shares the
+immutable ordered prefix, membership index, and lineage index; complete
+iteration and comparison retain the same values and ordering. Imported ancestry
+resolves only through the checked session-creation producer; its separate
+one-to-one `ImportedSessionSeed` must name the exact stored frontier identity
+whose membership matches the selected imported prefix. Substituting an
+equal-content reminted identity for that seed fails reconstitution.
+`SingleSource` ancestry resolution remains unimplemented. `TranscriptFrontier`
+itself is [sessions-and-transcript](sessions-and-transcript.md) scope.
 
 ## Evidence-bearing reconstitution
 

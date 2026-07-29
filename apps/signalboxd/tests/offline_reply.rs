@@ -199,6 +199,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
             target,
             String::from(CONFIGURED_PROVIDER_MODEL),
             64,
+            200_000,
         )
         .expect("fixture runtime definition is valid")])
         .expect("one fixture runtime target is unique");

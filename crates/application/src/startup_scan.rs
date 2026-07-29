@@ -9,8 +9,8 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnFailureIdentities, ContextFrontierId,
-    FailedAcceptedInputTurn, ModelCallTerminalOutcome, SemanticTranscriptEntryId, SessionId,
-    ToolAttemptCrashOutcome, TurnId,
+    FailedAcceptedInputTurn, ModelCallDisposition, ModelCallId, ModelCallTerminalOutcome,
+    SemanticTranscriptEntryId, SessionId, ToolAttemptCrashOutcome, TurnId,
 };
 
 use crate::{ClassifyOperatorFailure, OperatorFailureClass};
@@ -65,6 +65,14 @@ pub enum StartupScanSessionOutcome {
     Recovered(Box<FailedAcceptedInputTurn>),
     /// A durable model call received its call-aware restart classification.
     RecoveredModelCall(Box<ModelCallTerminalOutcome>),
+    /// A dedicated compaction call and its command received exact restart
+    /// classification without producing a summary.
+    RecoveredContextCompaction {
+        /// Recovered dedicated physical call.
+        call: ModelCallId,
+        /// `KnownFailed` for Prepared or `Ambiguous` for InFlight.
+        disposition: ModelCallDisposition,
+    },
     /// A live tool attempt received crash/effect-aware restart classification.
     RecoveredToolAttempt(Box<ToolAttemptCrashOutcome>),
     /// A crash left only ended tool attempts; ordinary tool orchestration can
@@ -263,6 +271,9 @@ where
                         } else {
                             recovered_turn_count += 1;
                         }
+                        break;
+                    }
+                    Ok(StartupScanSessionOutcome::RecoveredContextCompaction { .. }) => {
                         break;
                     }
                     Ok(StartupScanSessionOutcome::RecoveredToolAttempt(outcome)) => {

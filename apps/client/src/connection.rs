@@ -79,7 +79,7 @@ impl Connection {
         delivery: RequestDelivery,
     ) -> Result<Self, ClientError> {
         let import_request = matches!(&request, ClientRequest::ImportConversation { .. });
-        let version = ProtocolVersion::Nineteen;
+        let version = ProtocolVersion::TwentyTwo;
         let frame = ClientFrame::try_new_for_version(version, request_id, request)
             .map_err(FrameEncodeError::Validation)?;
         let encoded = encode_client_line(&frame).map_err(|error| match error {

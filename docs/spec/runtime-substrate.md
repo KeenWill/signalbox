@@ -18,12 +18,15 @@ families in the operator-failure inventory were verified through PR #288
 (`agent/audit-fix-docs-coherence`). The streamed-delivery bridge and ephemeral
 text-delta projection were verified through PR #300
 (`agent/token-level-streaming`); the Claude 5-family thinking-signature stream
-shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). It covers
-the provider-neutral operation, observation, and evidence vocabulary; SSE
-framing; structured-output and tool decode; `ScriptedModel`; the four provider
-adapters; and their credential boundaries. Layer-2 authorization and evidence
-classification ([model-call-execution](model-call-execution.md)), credential
-channels, delivery, and rotation discipline
+shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
+CLI redaction contract was verified through PR #316
+(`agent/redaction-hardening`; shape coverage, absorbing suppression, enumerated
+single-split parity, and geometric work bound). It covers the provider-neutral
+operation, observation, and evidence vocabulary; SSE framing; structured-output
+and tool decode; `ScriptedModel`; the four provider adapters; and their
+credential boundaries. Layer-2 authorization and evidence classification
+([model-call-execution](model-call-execution.md)), credential channels,
+delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
@@ -734,6 +737,75 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   provider value. Why: subscription authentication remains wholly inside the
   intended CLI control surface while credential-shaped reflection still fails
   closed.
+
+### Codex CLI shape-redaction scope
+
+The singular `token` name and composite names ending in singular `token` are
+credential-bearing while plural usage counters such as `input_tokens` and
+`output_tokens` are not. The additional covered name policies are `passphrase`,
+`passwd`, a normalized name ending in `pwd`, and the exact normalized names
+`signing_key`, `encryption_key`, `ssh_key`, `hmac_key`, and `license_key`;
+arbitrary names ending in `key` are outside this rule. ASCII-case-insensitive
+`--password`, `--api-key`, and `--passphrase` long options at text start or
+after whitespace consume a token argument separated by one or more spaces or
+tabs.
+
+Within any `://` authority-shaped span, without validating its scheme, the
+userinfo password between the first colon before the last `@` and that `@` is
+redacted. The authority-shaped span ends at whitespace, `/`, `?`, `#`, a quote,
+a comma, or a semicolon. The case-sensitive curl options `-u` and `--user`, at
+text start or after whitespace and separated from their possibly quoted argument
+by spaces or tabs, redact the password after that argument's first colon. A
+double-quoted credential key remains subject to the raw assignment scan whenever
+malformed JSON prevents the structural JSON scanner from claiming it.
+
+For a delta fragmentation of one text stream, including Unicode-escaped markers,
+the concatenated streamed output is never less redacted than the stateless scan
+of the concatenated provider text, except for the fragmentations the defect
+ledger names. That exception is not a covered limit: it is one shape — a quoted
+credential key at a position JSON would not admit, reached after an earlier
+delta released a clean prefix — and it is a defect awaiting a fix in the
+emitted-context path. Its reach grows with the number of delta boundaries rather
+than with the number of shapes, so the ledger pins thirty single-split
+fragmentations exactly and 1,095 two-split ones by count and digest. Every
+committed corpus line is cut at every UTF-8 boundary on the default test path,
+and the enumeration matches the leaking splits against a named ledger exactly: a
+new one is a regression and a repaired one must shrink the ledger, so the set
+cannot drift in either direction. A shape the contract covers that the sink
+still leaks is carried as `KNOWN-FAILING`, which is a defect ledger and never an
+`ACCEPTED-UNCOVERED` classification — that status records only what this
+contract openly declines to cover. Fail-closed suppression is absorbing for the
+sink's lifetime: usage reports, other fact boundaries, and terminal flushes
+never re-enable provider-controlled bytes. Streamed lookbehind's 64-KiB memory
+bound is independent of its work bound. One initial unsafe-suffix classification
+decides whether a prefix is held; it is not charged as reclassification. After a
+streamed hold or a live dropped-provider match-only suffix at length L,
+reclassification occurs only when its length reaches at least twice L, while
+crossing the cap forces one final round. Each streamed post-hold round invokes
+the two top-level whole-buffer classifiers; a dropped suffix round invokes its
+suffix classifier but receives the same conservative two-classifier charge.
+Before invocation, the sink charges the full joined input, including emitted or
+dropped lookbehind context, at that rate. A live dropped suffix is extended in
+place between those checkpoints, empty dropped items are no-ops, and obsolete
+prefixes are compacted only at a checkpoint; suffix-copy work therefore follows
+the same geometric linear bound rather than growing with the square of the
+provider-event count. A per-continuously-unresolved-candidate budget fails
+closed before a round would make cumulative reclassification input exceed
+393,216 bytes (six times 64 KiB), independent of delta count. Without external
+context, the geometric held lengths presented to each classifier sum to at most
+196,608 bytes (three times 64 KiB). The 66,000 one-byte continuation shape
+performs its initial unsafe-suffix classification once, then thirteen
+reclassification rounds: 188,387 aggregate held bytes and 376,774 charged
+rescanned bytes.
+
+This is a text-shape contract, not cross-field semantic correlation. It does not
+associate a credential name in one structural position with a value in another:
+examples outside the contract include CSV header/value rows, SQL column/`VALUES`
+positions, XML element content or sibling elements, name/value objects encoded
+as array siblings, and Kubernetes or Actions `name:`/`value:` pairs. A
+format-aware boundary must sanitize those forms before they become independent
+text units. Why: named credential-shaped reflection fails closed without
+claiming general secret detection.
 
 ## Operator failure taxonomy
 
