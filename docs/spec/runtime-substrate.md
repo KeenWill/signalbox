@@ -5,7 +5,7 @@ This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime-openai`, `crates/model-runtime-codex-cli`, and
 `crates/model-runtime-claude-cli`, verified against the implementing stack
 through PR #183 (`agent/provider-call-security-parser`). The Claude Code CLI
-adapter implementation was verified against `a595e665` on
+adapter implementation was verified against `50d177c2` on
 `agent/claude-cli-adapter`. The Codex CLI adapter stack comprises PR #264
 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
 escalation closeout is PR #317 (`agent/escalation-closeout`). The `signalboxd`
