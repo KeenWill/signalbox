@@ -579,7 +579,9 @@ def rust_comment_text(text: str) -> str:
     """Return only Rust comments while preserving source offsets and lines."""
     without_comments = mask_rust_non_code(text, preserve_literals=True)
     comments = ["\n" if character == "\n" else " " for character in text]
-    for index, (character, visible) in enumerate(zip(text, without_comments)):
+    for index, (character, visible) in enumerate(
+        zip(text, without_comments, strict=True)
+    ):
         if character not in " \t\r\n" and visible == " ":
             comments[index] = character
     return "".join(comments)
