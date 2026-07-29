@@ -54,12 +54,59 @@ pub const REVIEW_WORKFLOW_PROTOCOL_VERSION: u64 = 11;
 /// The ephemeral provider-text streaming protocol version.
 pub const PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION: u64 = 12;
 
+/// The client-selectable input-delivery protocol version.
+pub const INPUT_DELIVERY_PROTOCOL_VERSION: u64 = 13;
+
 /// The unified conversation-listing protocol version.
 ///
-/// Versions thirteen and fourteen were reserved by concurrent protocol work,
-/// and fifteen by the imported-conversation inspection stack, when this
-/// version was selected.
+/// Version thirteen is allocated by input delivery; versions fourteen and
+/// fifteen were reserved by concurrent protocol work that had not yet shipped
+/// when this version claimed sixteen. That establishes a standing convention:
+/// once any version ships, every lower number still unshipped is retired
+/// permanently, not merely skipped, because admitting it later would
+/// retroactively widen an already-closed vocabulary underneath a version
+/// already in use (admission is numeric, version >= minimum, and a closed
+/// enum decodes a version's frames against exactly its own vocabulary, never
+/// a gap's). Fourteen and fifteen are retired under this rule and are never
+/// admitted; a later surface always claims the next number above the
+/// highest already shipped, never a lower gap.
 pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
+
+/// The imported-conversation inspection protocol version.
+///
+/// This surface reserved fifteen while sixteen was still unclaimed, but sixteen
+/// shipped first. Numbering the inspection request below an already-closed
+/// vocabulary would retroactively admit it in version-sixteen frames, so this
+/// version sits above sixteen instead, per the retirement convention sixteen's
+/// comment states. Fourteen and fifteen remain retired and unadmitted here.
+pub const IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION: u64 = 17;
+
+/// The daemon-resolved session-template protocol version.
+pub const SESSION_TEMPLATE_PROTOCOL_VERSION: u64 = 18;
+
+/// The provider-reported model-call token-usage protocol version.
+///
+/// This surface originally reserved fourteen, but versions sixteen, seventeen,
+/// and eighteen all shipped first while it was still in flight. Numbering it
+/// below their already-closed vocabularies would retroactively admit
+/// `transcript_model_call_usage` frames under those versions, so this version
+/// sits above eighteen instead, per the retirement convention sixteen's
+/// comment states. Fourteen is retired under that convention alongside
+/// fifteen and is never admitted.
+pub const MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION: u64 = 19;
+
+/// The deployment model-alias catalog read protocol version.
+///
+/// This surface originally reserved eighteen, but the session-template surface
+/// shipped that number first while this one was still in flight. Version
+/// twenty is separately allocated to the concurrent context-compaction
+/// protocol stack, also still in flight. Numbering this request under either
+/// already-spoken-for number would collide with a sibling stack's closed
+/// vocabulary rather than the version-sixteen-style retroactive widening the
+/// retirement convention above guards against, but the same rule of taking
+/// the next genuinely free number applies, so this version sits above both
+/// instead.
+pub const MODEL_ALIAS_CATALOG_PROTOCOL_VERSION: u64 = 21;
 
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -88,8 +135,18 @@ pub enum ProtocolVersion {
     Eleven,
     /// Ephemeral provider-text presentation events on follow streams.
     Twelve,
+    /// Client-selectable input delivery.
+    Thirteen,
     /// Unified conversation-listing vocabulary.
     Sixteen,
+    /// Imported-conversation inspection vocabulary.
+    Seventeen,
+    /// Daemon-resolved session-template creation and listing vocabulary.
+    Eighteen,
+    /// Provider-reported model-call token-usage vocabulary.
+    Nineteen,
+    /// Deployment model-alias catalog vocabulary.
+    TwentyOne,
 }
 
 impl ProtocolVersion {
@@ -108,7 +165,12 @@ impl ProtocolVersion {
             Self::Ten => IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION,
             Self::Eleven => REVIEW_WORKFLOW_PROTOCOL_VERSION,
             Self::Twelve => PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
+            Self::Thirteen => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::Sixteen => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
+            Self::Seventeen => IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
+            Self::Eighteen => SESSION_TEMPLATE_PROTOCOL_VERSION,
+            Self::Nineteen => MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
+            Self::TwentyOne => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
         }
     }
 
@@ -126,7 +188,12 @@ impl ProtocolVersion {
             IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION => Some(Self::Ten),
             REVIEW_WORKFLOW_PROTOCOL_VERSION => Some(Self::Eleven),
             PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION => Some(Self::Twelve),
+            INPUT_DELIVERY_PROTOCOL_VERSION => Some(Self::Thirteen),
             UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION => Some(Self::Sixteen),
+            IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION => Some(Self::Seventeen),
+            SESSION_TEMPLATE_PROTOCOL_VERSION => Some(Self::Eighteen),
+            MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION => Some(Self::Nineteen),
+            MODEL_ALIAS_CATALOG_PROTOCOL_VERSION => Some(Self::TwentyOne),
             _ => None,
         }
     }
@@ -181,6 +248,16 @@ pub const MAX_SESSION_METADATA_REQUIRED_TAGS: usize = 256;
 
 /// Maximum UTF-8 bytes in one session system prompt.
 pub const MAX_SYSTEM_PROMPT_UTF8_BYTES: usize = 1_048_576;
+
+/// Maximum UTF-8 bytes in one imported-entry text preview.
+///
+/// An inspection row is a scannable line, not the entry's content authority:
+/// the transcript snapshot already carries attested imported text in full, and
+/// the immutable aggregate remains the authority for everything else.
+pub const MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES: usize = 256;
+
+/// Maximum entries in one deployment model-alias catalog.
+pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
 
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -679,6 +756,28 @@ impl ContentFragment {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Provider-reported token fields for one terminal model call.
+///
+/// Every field is required on the wire but independently nullable. A null is
+/// unreported evidence; a reported zero is encoded as the canonical string
+/// `"0"`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCallTokenUsage {
+    /// Provider-reported input-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub input_tokens: Option<CanonicalU64>,
+    /// Provider-reported output-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub output_tokens: Option<CanonicalU64>,
+    /// Provider-reported cache-creation input-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub cache_creation_input_tokens: Option<CanonicalU64>,
+    /// Provider-reported cache-read input-token count.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub cache_read_input_tokens: Option<CanonicalU64>,
 }
 
 impl TryFrom<String> for ContentFragment {
@@ -1280,6 +1379,37 @@ pub enum ImportedSessionRelationship {
     Fork,
 }
 
+/// One closed client-selected treatment for submitted input.
+///
+/// Omitting this value from `submit_input` preserves the baseline
+/// start-when-idle treatment. Steering and queueing carry the exact active turn
+/// the client observed so the domain can reject a stale target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum InputDelivery {
+    /// Start new work only while the session slot is idle.
+    StartWhenIdle {},
+    /// Bind the input to the active turn's next safe point.
+    Steer {
+        /// Exact active turn observed by the client.
+        expected_active_turn_id: CanonicalUuid,
+    },
+    /// Queue new work behind the active turn.
+    Queue {
+        /// Exact active turn observed by the client.
+        expected_active_turn_id: CanonicalUuid,
+    },
+}
+
+fn deserialize_present_input_delivery<'de, DeserializerT>(
+    deserializer: DeserializerT,
+) -> Result<Option<InputDelivery>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+{
+    InputDelivery::deserialize(deserializer).map(Some)
+}
+
 impl MetadataLastWriter {
     /// Constructs one exact last-writer stamp.
     pub const fn new(updated_at_unix_micros: CanonicalU64, actor: MetadataActor) -> Self {
@@ -1470,6 +1600,22 @@ fn validate_imported_display_title(title: &str) -> Result<(), FrameValidationErr
     Ok(())
 }
 
+fn validate_session_template_name(value: &str) -> Result<(), FrameValidationError> {
+    let first_is_admitted = value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+    if value.len() > 128
+        || !first_is_admitted
+        || value.bytes().any(|byte| {
+            !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && !b"._-".contains(&byte)
+        })
+    {
+        return Err(FrameValidationError::TemplateShape);
+    }
+    Ok(())
+}
+
 /// Closed versioned request family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -1485,9 +1631,18 @@ pub enum ClientRequest {
         #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
         system_prompt: SystemPromptMember,
     },
+    /// Create an owner-initiated session from one daemon-held template.
+    CreateSessionFromTemplate {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Validated static template name.
+        template_name: String,
+    },
+    /// List available static templates by name and version.
+    ListTemplates {},
     /// List current sessions.
     ListSessions {},
-    /// Submit sequential owner input.
+    /// Submit owner input with an admitted delivery treatment.
     SubmitInput {
         /// Durable mutation identity.
         command_id: CommandId,
@@ -1495,8 +1650,18 @@ pub enum ClientRequest {
         session_id: CanonicalUuid,
         /// Exact owner text.
         content: InputContent,
-        /// Caller-observed defaults version.
-        expected_defaults_version: CanonicalU64,
+        /// Caller-observed defaults version, or null for configuration-free
+        /// steering.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        expected_defaults_version: Option<CanonicalU64>,
+        /// Version-thirteen delivery treatment. Absence is the retained
+        /// start-when-idle default.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_input_delivery",
+            skip_serializing_if = "Option::is_none"
+        )]
+        delivery: Option<InputDelivery>,
     },
     /// Read one durable transcript snapshot.
     ReadTranscript {
@@ -1539,6 +1704,8 @@ pub enum ClientRequest {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         after: Option<ConversationCursor>,
     },
+    /// Read the deployment's complete configured model-alias catalog.
+    ListModelAliases {},
     /// Read one complete current metadata snapshot.
     ReadSessionMetadata {
         /// Target session.
@@ -1584,6 +1751,14 @@ pub enum ClientRequest {
         format: ConversationImportFormat,
         /// Exact complete source bytes.
         source: ConversationImportSource,
+    },
+    /// Read one immutable imported conversation's complete entry inventory.
+    ///
+    /// The read exposes the ordinals `create_session_from_imported_frontier`
+    /// consumes; it creates nothing and seeds nothing.
+    ReadImportedConversation {
+        /// Immutable imported conversation to inspect.
+        imported_conversation_id: CanonicalUuid,
     },
     /// Create a live session from one inclusive imported entry boundary.
     CreateSessionFromImportedFrontier {
@@ -1766,20 +1941,46 @@ impl ClientRequest {
             | Self::ReadReviewFinding { .. }
             | Self::ListReviewFindings { .. } => REVIEW_WORKFLOW_PROTOCOL_VERSION,
             Self::StopTurn { .. } | Self::DecideToolRequest { .. } => TURN_CONTROL_PROTOCOL_VERSION,
+            Self::CreateSessionFromTemplate { .. } | Self::ListTemplates {} => {
+                SESSION_TEMPLATE_PROTOCOL_VERSION
+            }
             Self::ListConversations { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
+            Self::ListModelAliases {} => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
             Self::ReadSessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::CreateSessionFromImportedFrontier { .. } => {
                 IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION
             }
+            Self::ReadImportedConversation { .. } => {
+                IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
+            }
+            Self::SubmitInput {
+                delivery: Some(_), ..
+            } => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::CreateSession { .. }
             | Self::ListSessions {}
-            | Self::SubmitInput { .. }
+            | Self::SubmitInput { delivery: None, .. }
             | Self::ReadTranscript { .. }
             | Self::FollowSession { .. } => PROTOCOL_VERSION,
         }
     }
 
     fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::SubmitInput {
+            expected_defaults_version,
+            delivery,
+            ..
+        } = self
+        {
+            let valid = matches!(
+                (delivery, expected_defaults_version),
+                (None | Some(InputDelivery::StartWhenIdle {}), Some(_))
+                    | (Some(InputDelivery::Steer { .. }), None)
+                    | (Some(InputDelivery::Queue { .. }), Some(_))
+            );
+            if !valid {
+                return Err(FrameValidationError::InputDeliveryShape);
+            }
+        }
         if let Self::CreateSessionFromImportedFrontier {
             through_position, ..
         } = self
@@ -1828,6 +2029,9 @@ impl ClientRequest {
             if !(1..=100).contains(&page_size.value()) {
                 return Err(FrameValidationError::ConversationListShape);
             }
+        }
+        if let Self::CreateSessionFromTemplate { template_name, .. } = self {
+            validate_session_template_name(template_name)?;
         }
         Ok(())
     }
@@ -2036,6 +2240,15 @@ pub enum RejectionDetail {
         /// Authoritative active turn.
         active_turn_id: CanonicalUuid,
     },
+    /// A next-safe-point input targeted a turn that is already stopping.
+    SafePointUnavailableWhileStopping {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Authoritative stopping turn.
+        active_turn_id: CanonicalUuid,
+        /// Command whose applied result already carries the stop proof.
+        existing_command_id: CanonicalUuid,
+    },
     /// No logical tool request had the named identity.
     ToolRequestNotFound {
         /// Absent logical tool request.
@@ -2095,6 +2308,27 @@ pub enum RejectionDetail {
         /// Last representable epoch.
         current: CanonicalU64,
     },
+    /// No imported conversation had the named identity.
+    ///
+    /// The absent target is an imported conversation, never a session: an
+    /// imported conversation is durable record and creates no session.
+    ImportedConversationNotFound {
+        /// Absent imported conversation.
+        imported_conversation_id: CanonicalUuid,
+    },
+    /// The named imported conversation exists but has no such position.
+    ///
+    /// Imported positions are the one-based contiguous sequence
+    /// `1..=last_position`; the identity was valid and only the ordinal was
+    /// outside it.
+    ImportedFrontierPositionOutOfRange {
+        /// Imported conversation whose positions bound the request.
+        imported_conversation_id: CanonicalUuid,
+        /// Exact position the caller named.
+        requested_position: CanonicalU64,
+        /// Greatest selectable position on that conversation.
+        last_position: CanonicalU64,
+    },
 }
 
 impl RejectionDetail {
@@ -2104,12 +2338,17 @@ impl RejectionDetail {
             Self::ActiveTurnMismatch { .. }
             | Self::NoActiveTurn { .. }
             | Self::TurnNotAwaitingReconciliation { .. } => TURN_RECONCILIATION_PROTOCOL_VERSION,
+            Self::SafePointUnavailableWhileStopping { .. } => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::InterruptAlreadyApplied { .. }
             | Self::InterruptUnavailableWhileAwaitingApproval { .. }
             | Self::ToolRequestNotFound { .. }
             | Self::ToolRequestAlreadyResolved { .. }
             | Self::ToolRequestNotEarliestUndecided { .. }
             | Self::ToolRequestNotInSession { .. } => TURN_CONTROL_PROTOCOL_VERSION,
+            Self::ImportedConversationNotFound { .. }
+            | Self::ImportedFrontierPositionOutOfRange { .. } => {
+                IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
+            }
             Self::SessionNotFound { .. }
             | Self::ActiveTurnPresent { .. }
             | Self::DefaultsVersionMismatch { .. }
@@ -2571,7 +2810,14 @@ pub enum ImportedSourceSpeaker {
     },
 }
 
-/// Conservative kind projection for imported content without rendered text.
+/// Closed discriminator naming one imported entry's normalized content
+/// variant.
+///
+/// The transcript snapshot reaches the `Text` arm only for absent or
+/// unattested text, because attested text takes the separate text-entry
+/// message there. An imported-conversation inspection row has no such split
+/// and uses `Text` for every `Text` content, carrying attestation in its
+/// preview member instead.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImportedContentKind {
@@ -2579,7 +2825,7 @@ pub enum ImportedContentKind {
     SourceEvent,
     /// One source-defined message block.
     SourceMessageBlock,
-    /// Text whose value was absent or unattested.
+    /// Imported text content.
     Text,
     /// One imported tool call.
     ToolCall,
@@ -2593,6 +2839,87 @@ pub enum ImportedContentKind {
     Document,
     /// A typed absence for message content.
     MessageContentAbsent,
+}
+
+/// A bounded leading excerpt of one imported entry's exact attested text.
+///
+/// The preview is the entry's exact leading Unicode scalar sequence cut at a
+/// scalar boundary, never a summary, replacement, or re-encoding. It is a
+/// recognition aid for choosing a position; the immutable imported aggregate
+/// remains the authority for complete content.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawImportedTextPreview")]
+pub struct ImportedTextPreview {
+    /// Exact leading scalars, at most
+    /// [`MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES`] of UTF-8.
+    preview: String,
+    /// Whether exact text remains beyond the emitted scalars.
+    truncated: bool,
+}
+
+/// The undecoded wire shape of a preview, before its bound and truncation
+/// marker are checked.
+///
+/// Deserializing through this raw shape keeps the checked type unconstructible
+/// from an invalid frame, so a direct `ImportedTextPreview` deserialization
+/// cannot bypass the validation an embedded one performs.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawImportedTextPreview {
+    preview: String,
+    truncated: bool,
+}
+
+impl TryFrom<RawImportedTextPreview> for ImportedTextPreview {
+    type Error = FrameValidationError;
+
+    fn try_from(raw: RawImportedTextPreview) -> Result<Self, Self::Error> {
+        let preview = Self {
+            preview: raw.preview,
+            truncated: raw.truncated,
+        };
+        preview.validate()?;
+        Ok(preview)
+    }
+}
+
+impl ImportedTextPreview {
+    /// Constructs the bounded preview of one exact attested text.
+    ///
+    /// The cut lands on a Unicode scalar boundary, so the preview is always a
+    /// prefix of the source text rather than a truncated encoding.
+    pub fn of_exact_text(text: &str) -> Self {
+        let mut end = MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self {
+            preview: text[..end].to_owned(),
+            truncated: end < text.len(),
+        }
+    }
+
+    /// Returns the exact emitted leading scalars.
+    pub fn preview(&self) -> &str {
+        &self.preview
+    }
+
+    /// Returns whether exact text remains beyond the emitted scalars.
+    pub const fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    fn validate(&self) -> Result<(), FrameValidationError> {
+        if self.preview.len() > MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES {
+            return Err(FrameValidationError::ImportedTextPreviewShape);
+        }
+        // Every nonempty text yields at least one scalar inside the bound, so
+        // an empty preview cannot be the cut prefix of a longer text.
+        if self.truncated && self.preview.is_empty() {
+            return Err(FrameValidationError::ImportedTextPreviewShape);
+        }
+        Ok(())
+    }
 }
 
 /// Non-text semantic transcript entry.
@@ -2915,6 +3242,17 @@ pub enum ServerMessage {
         /// Created origin turn.
         turn_id: CanonicalUuid,
     },
+    /// Configuration-free steering acceptance receipt.
+    SteeringSubmitted {
+        /// Owning session.
+        session_id: CanonicalUuid,
+        /// Accepted input.
+        accepted_input_id: CanonicalUuid,
+        /// Immutable acceptance position.
+        acceptance_position: CanonicalU64,
+        /// Exact active turn the steering is bound to.
+        source_turn_id: CanonicalUuid,
+    },
     /// Begins a session-summary sequence.
     SessionsStart {},
     /// One current session summary.
@@ -2930,6 +3268,20 @@ pub enum ServerMessage {
     SessionsEnd {
         /// Number of preceding summaries.
         session_count: CanonicalU64,
+    },
+    /// Begins the available-template sequence.
+    TemplatesStart {},
+    /// One available static template summary.
+    TemplateSummary {
+        /// Validated template name.
+        name: String,
+        /// Positive owner-assigned bundle version.
+        version: CanonicalU64,
+    },
+    /// Completes the available-template sequence.
+    TemplatesEnd {
+        /// Number of preceding summaries.
+        template_count: CanonicalU64,
     },
     /// Begins one bounded metadata-summary page.
     SessionMetadataPageStart {},
@@ -2979,6 +3331,20 @@ pub enum ServerMessage {
         /// existed in this page snapshot.
         #[serde(deserialize_with = "deserialize_required_nullable")]
         next_after: Option<ConversationCursor>,
+    },
+    /// Begins the configured model-alias sequence.
+    ModelAliasesStart {},
+    /// One configured alias and the direct selection it currently names.
+    ModelAliasSummary {
+        /// Stable alias identity selectable by creation commands.
+        alias_id: CanonicalUuid,
+        /// Current deployment-owned direct selection target.
+        selection_id: CanonicalUuid,
+    },
+    /// Completes the configured model-alias sequence.
+    ModelAliasesEnd {
+        /// Number of preceding alias summaries.
+        alias_count: CanonicalU64,
     },
     /// One complete current metadata read.
     SessionMetadata {
@@ -3048,6 +3414,35 @@ pub enum ServerMessage {
         /// Existing durable imported-conversation identity.
         imported_conversation_id: CanonicalUuid,
     },
+    /// Begins one imported-conversation entry sequence.
+    ImportedConversationStart {
+        /// Inspected imported conversation.
+        imported_conversation_id: CanonicalUuid,
+    },
+    /// One imported entry as the inspection projection presents it.
+    ImportedConversationEntry {
+        /// One-based imported position, exactly the ordinal
+        /// `create_session_from_imported_frontier` consumes.
+        position: CanonicalU64,
+        /// Immutable imported entry identity.
+        imported_entry_id: CanonicalUuid,
+        /// Exact source-speaker attestation.
+        source_speaker: ImportedSourceSpeaker,
+        /// Normalized content variant.
+        content_kind: ImportedContentKind,
+        /// Bounded preview of exact attested text, or null when this entry
+        /// carries no exact attested text.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        text_preview: Option<ImportedTextPreview>,
+    },
+    /// Completes one imported-conversation entry sequence.
+    ImportedConversationEnd {
+        /// Inspected imported conversation.
+        imported_conversation_id: CanonicalUuid,
+        /// Number of preceding entries, equal to the greatest selectable
+        /// position.
+        entry_count: CanonicalU64,
+    },
     /// Begins one transcript snapshot sequence.
     TranscriptSnapshotStart {
         /// Selected session.
@@ -3063,6 +3458,22 @@ pub enum ServerMessage {
         acceptance_position: CanonicalU64,
         /// Exact lifecycle state.
         state: TurnState,
+    },
+    /// Exact provider-reported token fields for one terminal model call.
+    TranscriptModelCallUsage {
+        /// Zero-based model-call evidence index in this snapshot.
+        model_call_index: CanonicalU64,
+        /// Turn that owns the terminal model call.
+        turn_id: CanonicalUuid,
+        /// Immutable model-call identity.
+        model_call_id: CanonicalUuid,
+        /// Exact independently nullable provider fields.
+        usage: ModelCallTokenUsage,
+    },
+    /// Completes the model-call evidence section of one transcript snapshot.
+    TranscriptModelCallsEnd {
+        /// Number of preceding model-call usage messages.
+        model_call_count: CanonicalU64,
     },
     /// One non-text frontier member.
     TranscriptEntry {
@@ -3228,6 +3639,9 @@ impl ServerMessage {
     pub const fn minimum_protocol_version(&self) -> u64 {
         match self {
             Self::TranscriptTurn { state, .. } => state.minimum_protocol_version(),
+            Self::TranscriptModelCallUsage { .. } | Self::TranscriptModelCallsEnd { .. } => {
+                MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION
+            }
             Self::TranscriptEntry { entry, .. } => entry.minimum_protocol_version(),
             Self::TranscriptTextEntry { entry, .. } => entry.minimum_protocol_version(),
             Self::SessionEvent { event, .. } => event.minimum_protocol_version(),
@@ -3255,11 +3669,23 @@ impl ServerMessage {
             | Self::ReviewFindingsStart { .. }
             | Self::ReviewFindingItem { .. }
             | Self::ReviewFindingsEnd { .. } => REVIEW_WORKFLOW_PROTOCOL_VERSION,
+            Self::ImportedConversationStart { .. }
+            | Self::ImportedConversationEntry { .. }
+            | Self::ImportedConversationEnd { .. } => {
+                IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
+            }
             Self::ToolRequestDecided { .. } => TURN_CONTROL_PROTOCOL_VERSION,
+            Self::TemplatesStart {} | Self::TemplateSummary { .. } | Self::TemplatesEnd { .. } => {
+                SESSION_TEMPLATE_PROTOCOL_VERSION
+            }
             Self::ConversationPageStart {}
             | Self::ConversationSummary { .. }
             | Self::ConversationPageEnd { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
+            Self::ModelAliasesStart {}
+            | Self::ModelAliasSummary { .. }
+            | Self::ModelAliasesEnd { .. } => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
             Self::SessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
+            Self::SteeringSubmitted { .. } => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::Error { detail, .. } => detail.minimum_protocol_version(),
             Self::SessionCreated { .. }
             | Self::InputSubmitted { .. }
@@ -3312,6 +3738,12 @@ impl ServerMessage {
                 }
             }
             Self::ConversationSummary { conversation } => conversation.validate()?,
+            Self::TemplateSummary { name, version } => {
+                validate_session_template_name(name)?;
+                if version.value() == 0 {
+                    return Err(FrameValidationError::TemplateShape);
+                }
+            }
             Self::ConversationPageEnd {
                 conversation_count,
                 next_after,
@@ -3328,6 +3760,25 @@ impl ServerMessage {
                 ..
             } if last_writer.is_none() && !metadata.is_initial() => {
                 return Err(FrameValidationError::MetadataShape);
+            }
+            Self::ImportedConversationEntry {
+                position,
+                content_kind,
+                text_preview,
+                ..
+            } => {
+                if position.value() == 0 {
+                    return Err(FrameValidationError::ImportedConversationEntryShape);
+                }
+                if let Some(preview) = text_preview {
+                    // Only `Text` content has an exact attested text to
+                    // preview, so a preview on any other kind contradicts the
+                    // kind it accompanies.
+                    if *content_kind != ImportedContentKind::Text {
+                        return Err(FrameValidationError::ImportedConversationEntryShape);
+                    }
+                    preview.validate()?;
+                }
             }
             _ => {}
         }
@@ -3418,6 +3869,22 @@ impl ServerFrame {
                 {
                     return Err(FrameValidationError::UncorrelatedApplicationError);
                 }
+                if let Some(RejectionDetail::ImportedFrontierPositionOutOfRange {
+                    requested_position,
+                    last_position,
+                    ..
+                }) = detail.value()
+                {
+                    // An imported conversation's positions are the contiguous
+                    // sequence `1..=last_position`, so a nonpositive bound or a
+                    // requested ordinal inside that range contradicts the
+                    // rejection the detail states.
+                    if last_position.value() == 0
+                        || requested_position.value() <= last_position.value()
+                    {
+                        return Err(FrameValidationError::ImportedFrontierRangeShape);
+                    }
+                }
                 if (*code == ErrorCode::Rejected) != detail.value().is_some() {
                     return Err(FrameValidationError::ErrorDetailShape);
                 }
@@ -3482,6 +3949,18 @@ pub enum FrameValidationError {
     SystemPromptShape,
     /// An imported-frontier request carried a nonpositive position.
     ImportedFrontierShape,
+    /// An imported-conversation entry carried a nonpositive position.
+    ImportedConversationEntryShape,
+    /// An imported text preview exceeded its bound or contradicted its own
+    /// truncation marker.
+    ImportedTextPreviewShape,
+    /// An out-of-range imported rejection stated a range its own requested
+    /// position falls inside, or an empty selectable range.
+    ImportedFrontierRangeShape,
+    /// A submit-input delivery carried forbidden or missing correlated fields.
+    InputDeliveryShape,
+    /// A template name or positive version carried an invalid shape.
+    TemplateShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -3501,6 +3980,13 @@ impl fmt::Display for FrameValidationError {
             }
             Self::SystemPromptShape => "version-nine frame omits its required system-prompt member",
             Self::ImportedFrontierShape => "imported frontier position is not positive",
+            Self::ImportedConversationEntryShape => {
+                "imported conversation entry position is not positive"
+            }
+            Self::ImportedTextPreviewShape => "imported text preview shape is inconsistent",
+            Self::ImportedFrontierRangeShape => "imported frontier rejection range is inconsistent",
+            Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
+            Self::TemplateShape => "session-template frame shape is inconsistent",
         })
     }
 }
@@ -3554,7 +4040,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1 through 12, and 16",
+                "process-protocol version is unsupported; supported versions are 1 through 13, 16 through 19, and 21",
             ),
         }
     }
@@ -3765,7 +4251,23 @@ fn probe_header(
     }
     if !matches!(
         version_spelling,
-        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" | "12" | "16"
+        "1" | "2"
+            | "3"
+            | "4"
+            | "5"
+            | "6"
+            | "7"
+            | "8"
+            | "9"
+            | "10"
+            | "11"
+            | "12"
+            | "13"
+            | "16"
+            | "17"
+            | "18"
+            | "19"
+            | "21"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -3881,7 +4383,12 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "10" => Some(ProtocolVersion::Ten),
         "11" => Some(ProtocolVersion::Eleven),
         "12" => Some(ProtocolVersion::Twelve),
+        "13" => Some(ProtocolVersion::Thirteen),
         "16" => Some(ProtocolVersion::Sixteen),
+        "17" => Some(ProtocolVersion::Seventeen),
+        "18" => Some(ProtocolVersion::Eighteen),
+        "19" => Some(ProtocolVersion::Nineteen),
+        "21" => Some(ProtocolVersion::TwentyOne),
         _ => None,
     }
 }
@@ -3926,16 +4433,20 @@ mod tests {
         ConversationCursor, ConversationImportFormat, ConversationImportSource, ConversationOrigin,
         ConversationOriginFilter, ConversationSummary, CurrentModelCall, CurrentModelCallState,
         ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
-        FrameDecodeErrorKind, FrameEncodeError, FrameValidationError, ImportedContentKind,
+        FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
+        IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION, ImportedContentKind,
         ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
-        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
-        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_JSON_CONTAINER_DEPTH,
+        ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+        MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
+        MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
-        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
-        MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION,
-        ProtocolVersion, RejectionDetail, RequestId, ReviewTargetSubject,
-        SESSION_METADATA_PROTOCOL_VERSION, SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, ServerFrame,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
+        MODEL_ALIAS_CATALOG_PROTOCOL_VERSION, MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
+        MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState,
+        ModelCallTokenUsage, ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail,
+        RequestId, ReviewTargetSubject, SESSION_METADATA_PROTOCOL_VERSION,
+        SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, SESSION_TEMPLATE_PROTOCOL_VERSION, ServerFrame,
         ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
         ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
         UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION, decode_client_line, decode_server_line,
@@ -4021,7 +4532,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1 through 12, and 16")
+                .contains("supported versions are 1 through 13, 16 through 19, and 21")
         );
     }
 
@@ -4031,7 +4542,7 @@ mod tests {
             r#"{"future":"#.repeat(payload_depth),
             "}".repeat(payload_depth)
         );
-        format!("{{\"version\":13,\"request_id\":\"9\",\"request\":{payload}}}")
+        format!("{{\"version\":15,\"request_id\":\"9\",\"request\":{payload}}}")
     }
 
     #[track_caller]
@@ -4083,7 +4594,8 @@ mod tests {
                 command_id: command(1)?,
                 session_id: uuid(2),
                 content: InputContent::new("hello".to_owned()),
-                expected_defaults_version: CanonicalU64::new(u64::MAX),
+                expected_defaults_version: Some(CanonicalU64::new(u64::MAX)),
+                delivery: None,
             },
         )?;
         let encoded = encode_client_line(&frame)?;
@@ -4220,7 +4732,7 @@ mod tests {
     #[test]
     fn inv033_unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
-        assert_unsupported_version("13");
+        assert_unsupported_version("15");
         assert_unsupported_version("18446744073709551616");
         assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
@@ -4741,7 +5253,8 @@ mod tests {
                 command_id: command(5)?,
                 session_id: uuid(6),
                 content: InputContent::new(String::new()),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )?;
         assert_client_request_current_version(
@@ -5138,6 +5651,50 @@ mod tests {
         Ok(())
     }
 
+    /// INV-033: version nineteen adds exact required-nullable token evidence
+    /// without admitting it in the preceding retained vocabulary.
+    #[test]
+    fn inv033_version_nineteen_model_call_usage_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let message = ServerMessage::TranscriptModelCallUsage {
+            model_call_index: CanonicalU64::new(0),
+            turn_id: uuid(2),
+            model_call_id: uuid(3),
+            usage: ModelCallTokenUsage {
+                input_tokens: Some(CanonicalU64::new(10)),
+                output_tokens: Some(CanonicalU64::new(0)),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(CanonicalU64::new(4)),
+            },
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::Twelve, request_id, message.clone()),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+
+        let frame =
+            ServerFrame::try_new_for_version(ProtocolVersion::Nineteen, request_id, message)?;
+        let encoded = encode_server_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            format!(
+                "{{\"version\":{MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION},\"request_id\":\"1\",\"message\":{{\"type\":\"transcript_model_call_usage\",\"model_call_index\":\"0\",\"turn_id\":\"00000000-0000-0000-0000-000000000002\",\"model_call_id\":\"00000000-0000-0000-0000-000000000003\",\"usage\":{{\"input_tokens\":\"10\",\"output_tokens\":\"0\",\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":\"4\"}}}}}}\n"
+            )
+        );
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn version_nineteen_usage_rejects_an_omitted_evidence_field() {
+        let error = decode_server_line(&line(
+            r#"{"version":19,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null}}}"#,
+        ))
+        .expect_err("required-nullable evidence fields cannot be omitted");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
+    }
+
     /// INV-033: a version-ten imported-frontier request rejects position zero.
     #[test]
     fn inv033_version_ten_imported_frontier_rejects_zero_position()
@@ -5160,6 +5717,327 @@ mod tests {
         Ok(())
     }
 
+    /// INV-033: version seventeen admits the imported-conversation read with its
+    /// exact closed request shape, and version eleven does not.
+    #[test]
+    fn inv033_version_seventeen_imported_conversation_read_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let request_value = ClientRequest::ReadImportedConversation {
+            imported_conversation_id: uuid(5),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Eleven,
+                request_id,
+                request_value.clone(),
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request_id,
+            request_value,
+        )?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":17,\"request_id\":\"1\",\"request\":{\"type\":\"read_imported_conversation\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: an imported-conversation entry carries its position, exact
+    /// attestation, content kind, and bounded preview in one closed shape.
+    #[test]
+    fn inv033_version_seventeen_imported_conversation_entry_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::ImportedConversationEntry {
+            position: CanonicalU64::new(2),
+            imported_entry_id: uuid(6),
+            source_speaker: ImportedSourceSpeaker::Attested {
+                speaker: ImportedSpeaker::Assistant,
+            },
+            content_kind: ImportedContentKind::Text,
+            text_preview: Some(ImportedTextPreview::of_exact_text("imported answer")),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::Eleven, request(1)?, message.clone()),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+
+        let frame =
+            ServerFrame::try_new_for_version(ProtocolVersion::Seventeen, request(1)?, message)?;
+        let encoded = encode_server_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":17,\"request_id\":\"1\",\"message\":{\"type\":\"imported_conversation_entry\",\"position\":\"2\",\"imported_entry_id\":\"00000000-0000-0000-0000-000000000006\",\"source_speaker\":{\"type\":\"attested\",\"speaker\":\"assistant\"},\"content_kind\":\"text\",\"text_preview\":{\"preview\":\"imported answer\",\"truncated\":false}}}\n"
+        );
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// An entry whose content carries no exact attested text states that
+    /// absence as an explicit null rather than an empty preview.
+    #[test]
+    fn inv033_imported_conversation_entry_states_an_absent_preview_as_null()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request(1)?,
+            ServerMessage::ImportedConversationEntry {
+                position: CanonicalU64::new(1),
+                imported_entry_id: uuid(6),
+                source_speaker: ImportedSourceSpeaker::NotAttested {},
+                content_kind: ImportedContentKind::SourceEvent,
+                text_preview: None,
+            },
+        )?;
+        let encoded = encode_server_line(&frame)?;
+
+        assert!(String::from_utf8(encoded.clone())?.contains("\"text_preview\":null"));
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// An imported-conversation entry position is one-based, so zero is not a
+    /// selectable ordinal on the wire.
+    #[test]
+    fn inv033_imported_conversation_entry_rejects_zero_position()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request(1)?,
+            ServerMessage::ImportedConversationEntry {
+                position: CanonicalU64::new(0),
+                imported_entry_id: uuid(6),
+                source_speaker: ImportedSourceSpeaker::NotAttested {},
+                content_kind: ImportedContentKind::SourceEvent,
+                text_preview: None,
+            },
+        );
+
+        assert_eq!(
+            frame,
+            Err(FrameValidationError::ImportedConversationEntryShape)
+        );
+        Ok(())
+    }
+
+    /// A preview cuts on a Unicode scalar boundary, so it is always an exact
+    /// prefix of the source text and never a split encoding.
+    #[test]
+    fn imported_text_preview_cuts_on_a_scalar_boundary() {
+        // 86 three-byte scalars are 258 bytes, so the 256-byte bound falls
+        // inside the 86th scalar and the preview keeps only the first 85.
+        let text = "\u{4e00}".repeat(86);
+        let preview = ImportedTextPreview::of_exact_text(&text);
+
+        assert_eq!(preview.preview(), "\u{4e00}".repeat(85));
+        assert!(preview.truncated());
+        assert!(text.starts_with(preview.preview()));
+    }
+
+    /// Text inside the bound is previewed exactly and is not marked truncated.
+    #[test]
+    fn imported_text_preview_retains_exact_text_within_its_bound() {
+        let preview = ImportedTextPreview::of_exact_text("imported question");
+
+        assert_eq!(preview.preview(), "imported question");
+        assert!(!preview.truncated());
+    }
+
+    /// Attested empty text previews as exact empty text, distinguishing it
+    /// from an entry that carries no attested text at all.
+    #[test]
+    fn imported_text_preview_retains_attested_empty_text() {
+        let preview = ImportedTextPreview::of_exact_text("");
+
+        assert_eq!(preview.preview(), "");
+        assert!(!preview.truncated());
+    }
+
+    /// A preview deserialized on its own is checked exactly as an embedded one
+    /// is, so no consumer can hold a bounded preview that violates its bound.
+    #[test]
+    fn imported_text_preview_validates_on_direct_deserialization() {
+        let oversized = format!(
+            "{{\"preview\":\"{}\",\"truncated\":false}}",
+            "a".repeat(MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES + 1)
+        );
+
+        assert!(serde_json::from_str::<ImportedTextPreview>(&oversized).is_err());
+        assert!(
+            serde_json::from_str::<ImportedTextPreview>(r#"{"preview":"","truncated":true}"#)
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::from_str::<ImportedTextPreview>(r#"{"preview":"ab","truncated":true}"#)
+                .expect("a bounded truncated preview decodes"),
+            ImportedTextPreview {
+                preview: String::from("ab"),
+                truncated: true,
+            }
+        );
+    }
+
+    /// A truncation marker over an empty preview contradicts the scalar cut,
+    /// which always keeps at least one scalar of nonempty text.
+    #[test]
+    fn inv033_imported_text_preview_rejects_truncated_empty_text()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request(1)?,
+            ServerMessage::ImportedConversationEntry {
+                position: CanonicalU64::new(1),
+                imported_entry_id: uuid(6),
+                source_speaker: ImportedSourceSpeaker::NotAttested {},
+                content_kind: ImportedContentKind::Text,
+                text_preview: Some(ImportedTextPreview {
+                    preview: String::new(),
+                    truncated: true,
+                }),
+            },
+        );
+
+        assert_eq!(frame, Err(FrameValidationError::ImportedTextPreviewShape));
+        Ok(())
+    }
+
+    /// A preview states an entry's exact attested text, so attaching one to a
+    /// kind that has no such text is a contradictory frame rather than extra
+    /// information the client may present.
+    #[test]
+    fn inv033_imported_conversation_entry_rejects_a_preview_on_nontext_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request(1)?,
+            ServerMessage::ImportedConversationEntry {
+                position: CanonicalU64::new(1),
+                imported_entry_id: uuid(6),
+                source_speaker: ImportedSourceSpeaker::NotAttested {},
+                content_kind: ImportedContentKind::ToolCall,
+                text_preview: Some(ImportedTextPreview::of_exact_text("lookup")),
+            },
+        );
+
+        assert_eq!(
+            frame,
+            Err(FrameValidationError::ImportedConversationEntryShape)
+        );
+        Ok(())
+    }
+
+    /// A requested ordinal inside the stated range contradicts the rejection
+    /// carrying it, so the frame is refused rather than rendered.
+    #[test]
+    fn inv033_imported_range_rejection_refuses_a_selectable_requested_position()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the command was rejected by current durable state"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::ImportedFrontierPositionOutOfRange {
+                        imported_conversation_id: uuid(5),
+                        requested_position: CanonicalU64::new(2),
+                        last_position: CanonicalU64::new(2),
+                    },
+                ),
+            },
+        );
+
+        assert_eq!(frame, Err(FrameValidationError::ImportedFrontierRangeShape));
+        Ok(())
+    }
+
+    /// An imported conversation is nonempty, so a zero selectable bound cannot
+    /// describe one.
+    #[test]
+    fn inv033_imported_range_rejection_refuses_an_empty_selectable_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the command was rejected by current durable state"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::ImportedFrontierPositionOutOfRange {
+                        imported_conversation_id: uuid(5),
+                        requested_position: CanonicalU64::new(1),
+                        last_position: CanonicalU64::new(0),
+                    },
+                ),
+            },
+        );
+
+        assert_eq!(frame, Err(FrameValidationError::ImportedFrontierRangeShape));
+        Ok(())
+    }
+
+    /// INV-033: an out-of-range imported position is a rejection naming the
+    /// conversation's selectable range, never the absent-session `not_found`.
+    #[test]
+    fn inv033_version_seventeen_names_the_imported_position_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::Error {
+            code: ErrorCode::Rejected,
+            message: String::from("the command was rejected by current durable state"),
+            detail: ErrorDetail::rejected(RejectionDetail::ImportedFrontierPositionOutOfRange {
+                imported_conversation_id: uuid(5),
+                requested_position: CanonicalU64::new(999_999),
+                last_position: CanonicalU64::new(2),
+            }),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::Eleven, request(1)?, message.clone()),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+
+        let frame =
+            ServerFrame::try_new_for_version(ProtocolVersion::Seventeen, request(1)?, message)?;
+        let encoded = encode_server_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":17,\"request_id\":\"1\",\"message\":{\"type\":\"error\",\"code\":\"rejected\",\"message\":\"the command was rejected by current durable state\",\"detail\":{\"type\":\"imported_frontier_position_out_of_range\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\",\"requested_position\":\"999999\",\"last_position\":\"2\"}}}\n"
+        );
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: an absent imported conversation names an imported conversation
+    /// as the missing target.
+    #[test]
+    fn inv033_version_seventeen_names_the_absent_imported_conversation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Seventeen,
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the command was rejected by current durable state"),
+                detail: ErrorDetail::rejected(RejectionDetail::ImportedConversationNotFound {
+                    imported_conversation_id: uuid(5),
+                }),
+            },
+        )?;
+        let encoded = encode_server_line(&frame)?;
+
+        assert!(
+            String::from_utf8(encoded.clone())?
+                .contains("\"type\":\"imported_conversation_not_found\"")
+        );
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
     /// INV-033: version ten retains every earlier request unchanged.
     #[test]
     fn inv033_version_ten_retains_the_earlier_request_vocabulary()
@@ -5171,7 +6049,8 @@ mod tests {
                 command_id: command(4)?,
                 session_id: uuid(6),
                 content: InputContent::new(String::from("ordinary work")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )?;
         let encoded = encode_client_line(&frame)?;
@@ -5252,7 +6131,8 @@ mod tests {
                 command_id: command(4)?,
                 session_id: uuid(6),
                 content: InputContent::new(String::from("ordinary work")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )?;
         let encoded = encode_client_line(&frame)?;
@@ -5330,7 +6210,8 @@ mod tests {
                 command_id: command(2)?,
                 session_id: uuid(3),
                 content: InputContent::new(String::from("content")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )?;
         let encoded_request = encode_client_line(&request_frame)?;
@@ -5780,32 +6661,212 @@ mod tests {
         assert!(SystemPromptText::try_new("a\u{0}b".to_owned()).is_err());
     }
 
-    /// INV-033: the admitted version set is closed exactly at one through
-    /// twelve plus sixteen; thirteen, fourteen, and fifteen remain reserved
-    /// by concurrent protocol stacks and are not admitted here.
+    /// INV-033 / INV-047: version eighteen gives template creation and listing
+    /// exact closed request and response shapes.
     #[test]
-    fn inv033_version_sixteen_completes_the_admitted_set() {
+    fn inv033_inv047_version_eighteen_template_frames_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let create = ClientFrame::try_new_for_version(
+            ProtocolVersion::Eighteen,
+            request(1)?,
+            ClientRequest::CreateSessionFromTemplate {
+                command_id: command(2)?,
+                template_name: "reviewer".to_owned(),
+            },
+        )?;
+        let encoded_create = encode_client_line(&create)?;
+        assert_eq!(
+            String::from_utf8(encoded_create.clone())?,
+            r#"{"version":18,"request_id":"1","request":{"type":"create_session_from_template","command_id":"00000000-0000-0000-0000-000000000002","template_name":"reviewer"}}
+"#
+        );
+        assert_eq!(decode_client_line(&encoded_create)?, create);
+
+        let list = ClientFrame::try_new_for_version(
+            ProtocolVersion::Eighteen,
+            request(2)?,
+            ClientRequest::ListTemplates {},
+        )?;
+        let encoded_list = encode_client_line(&list)?;
+        assert_eq!(
+            String::from_utf8(encoded_list.clone())?,
+            r#"{"version":18,"request_id":"2","request":{"type":"list_templates"}}
+"#
+        );
+        assert_eq!(decode_client_line(&encoded_list)?, list);
+
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::TemplatesStart {},
+            r#"{"type":"templates_start"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::TemplateSummary {
+                name: "reviewer".to_owned(),
+                version: CanonicalU64::new(7),
+            },
+            r#"{"type":"template_summary","name":"reviewer","version":"7"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::TemplatesEnd {
+                template_count: CanonicalU64::new(1),
+            },
+            r#"{"type":"templates_end","template_count":"1"}"#,
+        )?;
+        Ok(())
+    }
+
+    /// INV-033: template vocabulary is rejected below eighteen and invalid
+    /// names or versions cannot enter admitted frames.
+    #[test]
+    fn inv033_template_frames_require_version_eighteen_and_valid_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_client_malformed(
+            r#"{"version":16,"request_id":"1","request":{"type":"list_templates"}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":18,"request_id":"1","request":{"type":"create_session_from_template","command_id":"00000000-0000-0000-0000-000000000002","template_name":"Reviewer"}}"#,
+        );
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::Sixteen,
+                request(1)?,
+                ServerMessage::TemplatesStart {},
+            )
+            .expect_err("version sixteen must reject template messages"),
+            FrameValidationError::MessageRequiresNewerVersion
+        );
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::Eighteen,
+                request(1)?,
+                ServerMessage::TemplateSummary {
+                    name: "reviewer".to_owned(),
+                    version: CanonicalU64::new(0),
+                },
+            )
+            .expect_err("zero template version is rejected"),
+            FrameValidationError::TemplateShape
+        );
+        Ok(())
+    }
+
+    /// INV-033: the admitted set is one through thirteen, sixteen through
+    /// nineteen, and twenty-one; fourteen, fifteen, and twenty remain retired
+    /// or reserved and unsupported here.
+    #[test]
+    fn inv033_version_twenty_one_completes_the_admitted_set() {
         assert_eq!(
             ProtocolVersion::Nine.as_u64(),
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
         );
         assert_eq!(
+            ProtocolVersion::Seventeen.as_u64(),
+            IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            ProtocolVersion::Eighteen.as_u64(),
+            MODEL_ALIAS_CATALOG_PROTOCOL_VERSION
+        );
+        assert_eq!(
             ProtocolVersion::Sixteen.as_u64(),
             UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            ProtocolVersion::Eighteen.as_u64(),
+            SESSION_TEMPLATE_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            ProtocolVersion::Nineteen.as_u64(),
+            MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION
         );
         assert_eq!(ProtocolVersion::from_u64(8), Some(ProtocolVersion::Eight));
         assert_eq!(ProtocolVersion::from_u64(9), Some(ProtocolVersion::Nine));
         assert_eq!(ProtocolVersion::from_u64(10), Some(ProtocolVersion::Ten));
         assert_eq!(ProtocolVersion::from_u64(11), Some(ProtocolVersion::Eleven));
         assert_eq!(ProtocolVersion::from_u64(12), Some(ProtocolVersion::Twelve));
-        assert_eq!(ProtocolVersion::from_u64(13), None);
+        assert_eq!(
+            ProtocolVersion::from_u64(13),
+            Some(ProtocolVersion::Thirteen)
+        );
         assert_eq!(ProtocolVersion::from_u64(14), None);
         assert_eq!(ProtocolVersion::from_u64(15), None);
         assert_eq!(
             ProtocolVersion::from_u64(16),
             Some(ProtocolVersion::Sixteen)
         );
-        assert_eq!(ProtocolVersion::from_u64(17), None);
+        assert_eq!(
+            ProtocolVersion::from_u64(17),
+            Some(ProtocolVersion::Seventeen)
+        );
+        assert_eq!(
+            ProtocolVersion::from_u64(18),
+            Some(ProtocolVersion::Eighteen)
+        );
+        assert_eq!(
+            ProtocolVersion::from_u64(19),
+            Some(ProtocolVersion::Nineteen)
+        );
+        assert_eq!(ProtocolVersion::from_u64(20), None);
+        assert_eq!(
+            ProtocolVersion::TwentyOne.as_u64(),
+            MODEL_ALIAS_CATALOG_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            ProtocolVersion::from_u64(21),
+            Some(ProtocolVersion::TwentyOne)
+        );
+        assert_eq!(ProtocolVersion::from_u64(22), None);
+    }
+
+    /// INV-033: version twenty-one's alias-catalog request and messages have
+    /// exact closed shapes.
+    #[test]
+    fn inv033_version_twenty_one_model_alias_catalog_has_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::TwentyOne,
+            request_id,
+            ClientRequest::ListModelAliases {},
+        )?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":21,\"request_id\":\"1\",\"request\":{\"type\":\"list_model_aliases\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Sixteen,
+                request_id,
+                ClientRequest::ListModelAliases {},
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::ModelAliasesStart {},
+            r#"{"type":"model_aliases_start"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::ModelAliasSummary {
+                alias_id: uuid(4),
+                selection_id: uuid(5),
+            },
+            r#"{"type":"model_alias_summary","alias_id":"00000000-0000-0000-0000-000000000004","selection_id":"00000000-0000-0000-0000-000000000005"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(6)?,
+            ServerMessage::ModelAliasesEnd {
+                alias_count: CanonicalU64::new(1),
+            },
+            r#"{"type":"model_aliases_end","alias_count":"1"}"#,
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -5937,7 +6998,8 @@ mod tests {
                 command_id: command(4)?,
                 session_id: uuid(6),
                 content: InputContent::new(String::from("ordinary work")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )?;
         let encoded = encode_client_line(&frame)?;
@@ -6564,6 +7626,264 @@ mod tests {
         Ok(())
     }
 
+    /// INV-033: an explicit null is not a member of the closed delivery
+    /// vocabulary in either a retained or current protocol version.
+    #[test]
+    fn inv033_submit_delivery_rejects_explicit_null_in_retained_and_current_versions() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"1","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","content":"content","expected_defaults_version":"1","delivery":null}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":13,"request_id":"2","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000003","session_id":"00000000-0000-0000-0000-000000000004","content":"content","expected_defaults_version":"1","delivery":null}}"#,
+        );
+    }
+
+    /// INV-033: version thirteen adds steering without widening a retained
+    /// version or carrying independent defaults configuration.
+    #[test]
+    fn inv033_version_thirteen_steering_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let steering_request = ClientRequest::SubmitInput {
+            command_id: command(1)?,
+            session_id: uuid(2),
+            content: InputContent::new(String::from("steering")),
+            expected_defaults_version: None,
+            delivery: Some(InputDelivery::Steer {
+                expected_active_turn_id: uuid(3),
+            }),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Eleven,
+                request(1)?,
+                steering_request.clone(),
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+        let steering_frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(1)?,
+            steering_request,
+        )?;
+        let encoded = encode_client_line(&steering_frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            concat!(
+                "{\"version\":13,\"request_id\":\"1\",\"request\":{",
+                "\"type\":\"submit_input\",",
+                "\"command_id\":\"00000000-0000-0000-0000-000000000001\",",
+                "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
+                "\"content\":\"steering\",\"expected_defaults_version\":null,",
+                "\"delivery\":{\"type\":\"steer\",",
+                "\"expected_active_turn_id\":",
+                "\"00000000-0000-0000-0000-000000000003\"}}}\n"
+            )
+        );
+        assert_eq!(decode_client_line(&encoded)?, steering_frame);
+        Ok(())
+    }
+
+    /// INV-033: version thirteen queueing carries both the exact active target
+    /// and the queued turn's defaults guard.
+    #[test]
+    fn inv033_version_thirteen_queueing_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let queue_frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(2)?,
+            ClientRequest::SubmitInput {
+                command_id: command(4)?,
+                session_id: uuid(2),
+                content: InputContent::new(String::from("queued")),
+                expected_defaults_version: Some(CanonicalU64::new(7)),
+                delivery: Some(InputDelivery::Queue {
+                    expected_active_turn_id: uuid(3),
+                }),
+            },
+        )?;
+        let encoded = encode_client_line(&queue_frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            concat!(
+                "{\"version\":13,\"request_id\":\"2\",\"request\":{",
+                "\"type\":\"submit_input\",",
+                "\"command_id\":\"00000000-0000-0000-0000-000000000004\",",
+                "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
+                "\"content\":\"queued\",\"expected_defaults_version\":\"7\",",
+                "\"delivery\":{\"type\":\"queue\",",
+                "\"expected_active_turn_id\":",
+                "\"00000000-0000-0000-0000-000000000003\"}}}\n"
+            )
+        );
+        assert_eq!(decode_client_line(&encoded)?, queue_frame);
+        Ok(())
+    }
+
+    /// INV-033: version thirteen can spell the retained start-when-idle intent
+    /// explicitly while the absent member remains the legacy default.
+    #[test]
+    fn inv033_version_thirteen_explicit_start_when_idle_has_a_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(3)?,
+            ClientRequest::SubmitInput {
+                command_id: command(5)?,
+                session_id: uuid(2),
+                content: InputContent::new(String::from("start")),
+                expected_defaults_version: Some(CanonicalU64::new(7)),
+                delivery: Some(InputDelivery::StartWhenIdle {}),
+            },
+        )?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            concat!(
+                "{\"version\":13,\"request_id\":\"3\",\"request\":{",
+                "\"type\":\"submit_input\",",
+                "\"command_id\":\"00000000-0000-0000-0000-000000000005\",",
+                "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
+                "\"content\":\"start\",\"expected_defaults_version\":\"7\",",
+                "\"delivery\":{\"type\":\"start_when_idle\"}}}\n"
+            )
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: configured start and queue treatments reject a missing
+    /// defaults guard before encoding.
+    #[test]
+    fn inv033_configured_delivery_rejects_missing_defaults()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let start = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(4)?,
+            ClientRequest::SubmitInput {
+                command_id: command(6)?,
+                session_id: uuid(2),
+                content: InputContent::new(String::from("start without defaults")),
+                expected_defaults_version: None,
+                delivery: Some(InputDelivery::StartWhenIdle {}),
+            },
+        );
+        assert_eq!(start, Err(FrameValidationError::InputDeliveryShape));
+
+        let queue = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(5)?,
+            ClientRequest::SubmitInput {
+                command_id: command(7)?,
+                session_id: uuid(2),
+                content: InputContent::new(String::from("queue without defaults")),
+                expected_defaults_version: None,
+                delivery: Some(InputDelivery::Queue {
+                    expected_active_turn_id: uuid(3),
+                }),
+            },
+        );
+        assert_eq!(queue, Err(FrameValidationError::InputDeliveryShape));
+        Ok(())
+    }
+
+    /// INV-033: configuration-free steering rejects an independently supplied
+    /// defaults version before encoding.
+    #[test]
+    fn inv033_steering_rejects_independent_defaults_configuration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let invalid = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(3)?,
+            ClientRequest::SubmitInput {
+                command_id: command(5)?,
+                session_id: uuid(2),
+                content: InputContent::new(String::from("misconfigured steering")),
+                expected_defaults_version: Some(CanonicalU64::new(7)),
+                delivery: Some(InputDelivery::Steer {
+                    expected_active_turn_id: uuid(3),
+                }),
+            },
+        );
+        assert_eq!(invalid, Err(FrameValidationError::InputDeliveryShape));
+
+        let zero = ClientFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(4)?,
+            ClientRequest::SubmitInput {
+                command_id: command(6)?,
+                session_id: uuid(2),
+                content: InputContent::new(String::from("zero-version steering")),
+                expected_defaults_version: Some(CanonicalU64::new(0)),
+                delivery: Some(InputDelivery::Steer {
+                    expected_active_turn_id: uuid(3),
+                }),
+            },
+        );
+        assert_eq!(zero, Err(FrameValidationError::InputDeliveryShape));
+        Ok(())
+    }
+
+    /// INV-033: steering against an already-stopping turn carries the exact
+    /// stop proof through one closed version-thirteen rejection shape.
+    #[test]
+    fn inv033_version_thirteen_stopping_steering_rejection_has_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the active turn is already stopping"),
+                detail: ErrorDetail::rejected(RejectionDetail::SafePointUnavailableWhileStopping {
+                    session_id: uuid(2),
+                    active_turn_id: uuid(3),
+                    existing_command_id: uuid(5),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"the active turn is already stopping","detail":{"type":"safe_point_unavailable_while_stopping","session_id":"00000000-0000-0000-0000-000000000002","active_turn_id":"00000000-0000-0000-0000-000000000003","existing_command_id":"00000000-0000-0000-0000-000000000005"}}"#,
+        )
+    }
+
+    /// INV-033: pending steering has one version-thirteen typed receipt naming
+    /// its accepted input, position, and exact source turn.
+    #[test]
+    fn inv033_version_thirteen_steering_receipt_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let steering_response = ServerMessage::SteeringSubmitted {
+            session_id: uuid(2),
+            accepted_input_id: uuid(6),
+            acceptance_position: CanonicalU64::new(8),
+            source_turn_id: uuid(3),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::Eleven,
+                request(4)?,
+                steering_response.clone(),
+            ),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+        let response_frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Thirteen,
+            request(4)?,
+            steering_response,
+        )?;
+        let encoded = encode_server_line(&response_frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            concat!(
+                "{\"version\":13,\"request_id\":\"4\",\"message\":{",
+                "\"type\":\"steering_submitted\",",
+                "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
+                "\"accepted_input_id\":",
+                "\"00000000-0000-0000-0000-000000000006\",",
+                "\"acceptance_position\":\"8\",\"source_turn_id\":",
+                "\"00000000-0000-0000-0000-000000000003\"}}\n"
+            )
+        );
+        assert_eq!(decode_server_line(&encoded)?, response_frame);
+        Ok(())
+    }
+
     #[test]
     fn submit_content_is_admitted_by_the_application_not_wire_decoding()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6574,7 +7894,8 @@ mod tests {
                 command_id: command(5)?,
                 session_id: uuid(6),
                 content: InputContent::new(content),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )?;
         let encoded = encode_client_line(&frame)?;

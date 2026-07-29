@@ -1,11 +1,14 @@
 # Model-runtime substrate
 
 This page specifies the Layer-1 typed model-runtime boundary as implemented in
-`crates/model-runtime`, `crates/model-runtime-anthropic`, and
-`crates/model-runtime-openai`, verified against the implementing stack through
-PR #183 (`agent/provider-call-security-parser`); the `signalboxd` names this
-page states for the composition root, its telemetry, and the production
-`FileCredentialAccess` were verified through PR #258
+`crates/model-runtime`, `crates/model-runtime-anthropic`,
+`crates/model-runtime-openai`, and `crates/model-runtime-codex-cli`, verified
+against the implementing stack through PR #183
+(`agent/provider-call-security-parser`). The Codex CLI adapter stack comprises
+PR #264 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
+escalation closeout is PR #317 (`agent/escalation-closeout`). The `signalboxd`
+names this page states for the composition root, its telemetry, and the
+production `FileCredentialAccess` were verified through PR #258
 (`agent/signalboxd-rename`); the Anthropic adapter's server-side
 `fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The five persistence-repository
@@ -15,10 +18,10 @@ text-delta projection were verified through PR #300
 (`agent/token-level-streaming`); the Claude 5-family thinking-signature stream
 shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). It covers
 the provider-neutral operation, observation, and evidence vocabulary; SSE
-framing; structured-output and tool decode; `ScriptedModel`; the two provider
-adapters; and the in-process credential-access boundary. Layer-2 authorization
-and evidence classification ([model-call-execution](model-call-execution.md)),
-credential channels, delivery, and rotation discipline
+framing; structured-output and tool decode; `ScriptedModel`; the three provider
+adapters; and their credential boundaries. Layer-2 authorization and evidence
+classification ([model-call-execution](model-call-execution.md)), credential
+channels, delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
@@ -28,14 +31,14 @@ companion pages. This page also owns the shared
 
 ## Boundary and crate layout
 
-The runtime layer is three library crates, hand-rolled per the 2026-07-20
+The runtime layer is four library crates, hand-rolled per the 2026-07-20
 [decision-ledger entry](../decisions.md) that closed the substrate's
 vendor-versus-hand-roll question: one provider-neutral core crate plus
 separately named provider adapters, with SerdesAI as a design reference only.
 `signalbox-model-runtime` is the shared vocabulary; the Anthropic and OpenAI
-adapter crates' only workspace `[dependencies]` entry is
-`signalbox-model-runtime` (their dev-dependencies add the workspace test helper
-`signalbox-expect-table`, which is test-only and ships in no built artifact).
+adapters additionally own their HTTP, TLS, and serde dependencies, while the
+Codex CLI adapter owns only its subprocess, temporary-schema-file, signal, and
+serde dependencies. Test helpers ship in no built library artifact.
 `crates/domain`, `crates/application`, and `crates/persistence` declare no
 dependency on any runtime crate, and no runtime type appears in a domain or
 application signature (INV-002, INV-005); the approved runtime consumers are the
@@ -63,7 +66,10 @@ no durable state, makes no lifecycle decisions, and performs no logging.
 or redacted thinking parts), `ModelSettings` (required `max_output_tokens`;
 optional temperature, top-p, stop sequences), declared `ToolDefinition`s, a
 `ToolChoice` (automatic/any/named), an optional `StructuredOutputContract`, and
-a `DeliveryMode` (buffered or streamed).
+a `DeliveryMode` (buffered or streamed). Settings are provider-enforced request
+controls unless an adapter's owning section records a capability-limited
+advisory exception; an adapter never silently presents prompt instructions as
+hard transport controls.
 
 The `RuntimeModelCallProvider` bridge sets every operation it prepares to
 `Streamed`. Both HTTP adapters honor that mode by setting the provider-native
@@ -95,9 +101,9 @@ a match or mismatch; comparison is the caller's classification work (INV-014),
 under the provider-target identity rule of
 [model-call-execution](model-call-execution.md#provider-target-identity).
 
-Neither adapter ever requests server-side model fallback, so a provider marker
-announcing that another model continued the turn is evidence that the resolved
-target did not serve it. The Anthropic adapter therefore recognizes the
+Neither HTTP adapter ever requests server-side model fallback, so a provider
+marker announcing that another model continued the turn is evidence that the
+resolved target did not serve it. The Anthropic adapter therefore recognizes the
 `fallback` content block explicitly rather than leaving it in the tolerated
 additive-evolution branch: the buffered decoder reports the model the block
 names as continuing the turn through the ordinary `ProviderModelReported` fact
@@ -129,9 +135,13 @@ provider-interaction boundary whose caller side is
   and always returns a `TerminalReport` — failures are typed evidence, never
   exceptions.
 
-Nothing in this layer retries, falls back, or repeats a request after the
-provider could have accepted it; there is no retry machinery to disable
-(INV-025, INV-026). Why: a hidden second physical request would corrupt the
+Nothing in this layer retries, falls back, or repeats its adapter-owned unit of
+irrevocable dispatch after the provider could have accepted it (INV-025,
+INV-026). That unit is one HTTPS request for a direct adapter and one process
+spawn for a subprocess adapter. A subprocess adapter cannot observe or govern
+the wrapped provider client's internal HTTP attempts; those are
+provider-internal in the same sense as server-side attempts behind one direct
+request. Why: a hidden second adapter dispatch would corrupt the
 acceptance-boundary evidence that failure classification consumes.
 
 `CancellationSignal` wraps any `Future<Output = ()> + Send`. In both stages the
@@ -175,7 +185,9 @@ strings appear only as retained detail inside already-classified variants:
 - `Completed`: complete correlated response, terminal success status, valid
   completion material (`CompletionFinish` excludes refusal by construction).
 - `Refused`: a complete exchange reporting the provider's refusal outcome. See
-  the downgrade note below — no in-repo adapter surfaces this today.
+  the downgrade note below: the direct HTTP adapters do not surface it, while
+  the Codex CLI adapter does because its structured response envelope and
+  terminal process event jointly establish the complete exchange.
 - `ProviderError`: a complete, correlated definitive error response, classified
   into the shared `ProviderErrorKind` vocabulary (credential rejected,
   permission denied, invalid request, target not found, request too large, rate
@@ -205,17 +217,17 @@ strings appear only as retained detail inside already-classified variants:
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion. An unrecognized finish token is boundary loss
-in both adapters, never silently completed. A finish reason observed before a
-stream loss is retained as `finish_reported` but is not refusal or completion
-evidence, because the exchange did not complete.
+in both direct HTTP adapters, never silently completed. A finish reason observed
+before a stream loss is retained as `finish_reported` but is not refusal or
+completion evidence, because the exchange did not complete.
 
-Refusal downgrade: both adapters' decoders construct `Refused` evidence, but
-`execute` unconditionally converts it to `ProviderError { kind: Unrecognized }`
-before returning, because a fully buffered HTTP request exposes no independent
-proof that the response arrived only after the complete upload. Why: without
-full-upload proof a refusal token cannot satisfy the completed-exchange
-precondition for the refusal disposition, so the adapter fails toward known
-failure rather than inventing evidence.
+Refusal downgrade: both direct HTTP adapters' decoders construct `Refused`
+evidence, but `execute` unconditionally converts it to
+`ProviderError { kind: Unrecognized }` before returning, because a fully
+buffered HTTP request exposes no independent proof that the response arrived
+only after the complete upload. Why: without full-upload proof a refusal token
+cannot satisfy the completed-exchange precondition for the refusal disposition,
+so the adapter fails toward known failure rather than inventing evidence.
 
 ## SSE framing
 
@@ -244,13 +256,15 @@ Guarantees:
 ## Structured output and tool decode
 
 `StructuredOutputContract` (name, description, JSON Schema, generated from a
-Rust type via schemars or supplied explicitly) is realized by both adapters as a
-forced tool/function call with parallel tool use disabled. That is a request
-constraint, not a response guarantee: a nonconforming or malformed response can
-still carry zero or several proposals, and the provider-independent decode below
-is what enforces the exactly-one contract. Why: one decode path across adapters
-beats per-provider native output mechanisms that would return content-text
-values and require schema transformation.
+Rust type via schemars or supplied explicitly) is realized as one forced
+tool/function proposal. The direct adapters use their native request tools. The
+Codex CLI adapter renders the contract into the stateless prompt and requires
+the final CLI agent message to satisfy an outer response schema whose one
+contract-named proposal carries the value. That is a request constraint, not a
+response guarantee: a nonconforming or malformed response can still carry zero
+or several proposals, and the provider-independent decode below is what enforces
+the exactly-one contract. Why: one decode path across adapters beats
+provider-specific output values that require caller-side transformation.
 
 `decode_structured` and `decode_structured_json` are pure functions over
 already-delivered response parts: exactly one proposal under the contract name
@@ -283,15 +297,18 @@ is inferred from timing; scripted evidence is declared, never simulated.
 
 ## Provider adapters
 
-Both adapters implement the same shape: at most one `POST` per operation
-(`/v1/messages` for Anthropic with `x-api-key` and `anthropic-version` headers;
-`/v1/chat/completions` for OpenAI with a bearer `Authorization` header),
-hand-rolled serde wire types with no provider SDK dependency, and typed evidence
-out. Construction validates configuration: the base URL must be absolute HTTPS,
-except that plain HTTP is admitted for an IP-literal loopback host used by
-deterministic tests; user information, a query, or a fragment is forbidden; and
-the SSE record limit and whole-exchange timeout must both be positive.
-Construction failure is a configuration defect, not operation evidence.
+### Direct HTTP adapters
+
+The Anthropic and OpenAI adapters implement the same shape: at most one `POST`
+per operation (`/v1/messages` for Anthropic with `x-api-key` and
+`anthropic-version` headers; `/v1/chat/completions` for OpenAI with a bearer
+`Authorization` header), hand-rolled serde wire types with no provider SDK
+dependency, and typed evidence out. Construction validates configuration: the
+base URL must be absolute HTTPS, except that plain HTTP is admitted for an
+IP-literal loopback host used by deterministic tests; user information, a query,
+or a fragment is forbidden; and the SSE record limit and whole-exchange timeout
+must both be positive. Construction failure is a configuration defect, not
+operation evidence.
 
 Provider traffic uses reqwest 0.13 with default features disabled and only its
 providerless rustls-platform-verifier and byte-stream features enabled. Both
@@ -395,6 +412,205 @@ Usage is provider-stated only, never estimated; OpenAI's cache-read count comes
 from `prompt_tokens_details.cached_tokens` and no cache-creation count is
 fabricated.
 
+## Codex CLI provider adapter
+
+`signalbox-model-runtime-codex-cli` wraps the locally installed Codex CLI event
+protocol captured by the offline fixture corpus at version `0.145.0`; its
+exported version constant is the contract a later composition must pin before
+wiring the adapter. The model dispatch itself performs no separate version
+probe. Preparation validates and renders the complete operation, writes the
+non-secret response-envelope schema to a private temporary file, and returns a
+one-shot capability without starting a process. Admitted schemas and replayed
+tool arguments remain raw JSON through prompt serialization; a shallow raw
+member scan still requires each schema to declare an object root. Execution
+consumes the capability as exactly one `codex exec --json --ephemeral` spawn on
+Unix, passes the full rendered frontier on stdin, requires absolute configured
+executable and working-root paths, selects the exact resolved model, ignores
+user configuration and rule files, and explicitly disables every feature in the
+pinned CLI inventory that can add a model-visible tool, external interaction,
+instruction source, or delegated execution surface outside the declared tools.
+It independently disables configured agents, ambient skill-instruction
+injection, MCP servers, and web search, sets the project-instruction byte budget
+to zero, and uses the read-only CLI sandbox; prompt text is never a capability
+boundary. Strict configuration turns an unavailable control into a closed
+failure instead of silently relaxing this invocation boundary. Before spawn it
+clears the parent environment, then copies only its explicit home/Codex-home,
+executable and temporary path, XDG, locale/terminal, certificate, and proxy
+allowlist; unrelated service variables do not reach the CLI. A proxy variable
+whose URL authority embeds userinfo (`scheme://user:secret@host`) is refused
+before `SendCommenced` as `ProvenUnsent(ConnectFailed)` naming only the variable
+— the CLI could reflect its proxy configuration in output the adapter can only
+shape-redact, so an inherited proxy credential never reaches the child; a proxy
+value that is not UTF-8 cannot be verified credential-free and is refused the
+same way. A `HOME` or `CODEX_HOME` the parent cannot resolve to an absolute
+directory — empty, or relative with no resolvable current directory to resolve
+it against — is refused the same way, because the child would otherwise read its
+login store from beneath its own configured working root and select an
+unintended ambient login; a resolvable one is absolutized against the parent's
+directory before spawn. It neither resumes nor persists a Codex thread. Why: a
+fresh ephemeral invocation keeps provider session state out of memory, and the
+caller supplies the complete conversation frontier instead of an in-memory
+resume pointer. The read-only sandbox and working root are the adapter's
+filesystem boundary. Unix supervision contains the process group the adapter
+creates, so construction rejects hosts where process-group control is
+unavailable; a descendant that deliberately leaves that group is outside the
+adapter's boundary. Host isolation owns containment beyond the created group —
+specifically the runner sandbox in build-out — and is not an adapter claim.
+
+`SendCommenced` immediately precedes spawn. Spawn failure is
+`ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.
+The first `thread.started` establishes the exchange and its thread id becomes
+the provider request id. Unknown top-level events and unsupported item kinds are
+additively tolerated within the byte and JSON-depth bounds. Repeated object
+members are ambiguous by construction, never additive: the adapter rejects them
+in both the outer JSONL event and its escaped response envelope before JSON
+projection as `BoundaryLoss(StreamProtocolViolation)`. Known item lifecycle
+events must carry a nonempty item identity and type even when the adapter does
+not otherwise interpret them. Known events with invalid shapes, non-UTF-8 or
+undecodable JSONL, nonzero or signal process exits, and `turn.failed` fail
+closed as provider error evidence; the rendered CLI message classifier gives
+credential rejection first precedence and maps only explicit native phrases,
+with all other material `Unrecognized`. The CLI reports a failed exchange as a
+stream-level `error` event followed by its `turn.failed` lifecycle echo; the
+decoder accepts exactly that one trailer and keeps the stream-level message as
+the typed provider error, while any other post-terminal event — including one
+contradicting the recorded failure — remains a fail-closed protocol violation.
+Exit zero without `turn.completed` is
+`BoundaryLoss(StreamEndedWithoutTerminalMarker)`, never completion.
+
+`turn.completed` is success evidence only when the last completed agent-message
+item decodes as the adapter's response envelope and satisfies the declared-tool
+constraints. A named ordinary-tool choice admits at least one proposal and
+requires every proposal to carry that selected name. For a structured-output
+contract, zero or several contract-named proposals remain definitive completion
+material for the provider-independent structured decoder above to classify. The
+decoded envelope is checked against the shared JSON nesting bound independently
+of the escaped outer event; envelope decode errors are content-silent. The
+envelope distinguishes completion from refusal. Within the envelope each tool
+call carries its argument object as JSON text inside a string: strict
+structured-output validation refuses any schema object that does not supply
+`additionalProperties: false` and require all its properties, so a free-form
+argument object is not expressible in the output schema and the live API rejects
+one as `invalid_json_schema`. The adapter parses the string, requires exactly
+one JSON object within the provider nesting bound, and passes the contained text
+onward, so tool argument JSON still reaches the caller byte-verbatim when it is
+credential-shape clean. Caller JSON remains raw through serialization,
+preserving deep admitted values and their numeric lexemes. Buffered delivery
+retains its content without deltas; streamed delivery feeds raw bounded CLI
+reasoning and final-envelope text through the stateful redactor before emitting
+ordered deltas and the same terminal evidence. A provider failure message
+consults the same held lookbehind state before it enters provider-error
+evidence: a message that extends a held credential candidate, or that arrives
+during oversized-credential suppression, is suppressed whole rather than
+statelessly re-redacted. Usage comes only from `turn.completed`; an omitted
+cache counter remains unreported rather than becoming a reported zero.
+
+The pinned CLI exposes no argv, configuration, or subscription request controls
+for output-token ceiling, temperature, top-p, or stop sequences. This adapter is
+therefore the narrow exception to the provider-enforced settings rule: it
+renders all four values into the model-visible operation prompt as advisory
+context, and neither claims nor supplies hard enforcement. A caller that
+requires provider-enforced generation settings must not select this adapter.
+Preparation still rejects a zero output-token limit, malformed replayed
+tool-call JSON, non-finite sampling values, temperature outside zero through
+two, and top-p outside zero through one as unsupported caller input. The offline
+fake CLI verifies the advisory rendering and applies the same strict-schema
+validation to every spawned exchange, so a schema shape the live API refuses
+cannot pass the fixture corpus.
+
+The adapter bounds every stdout event while copying and drains stderr while
+retaining only a bounded prefix. Streamed credential lookbehind retains at most
+64 KiB; exceeding that bound emits redaction under each held observation's
+original metadata and suppresses later text through the terminal flush. A
+credential-bearing JSON member at the start of CLI-controlled text is recognized
+without requiring an enclosing object delimiter. Construction rejects a zero or
+runtime-clock-unrepresentable process timeout. Cancellation before spawn is
+proven unsent. After spawn it sends an interrupt to the dedicated process group,
+retains the unreaped leader through a positive grace, and kills the group before
+reaping the leader; cancellation is `BoundaryLoss(CancellationRequested)` and
+never causes another spawn. Timeout starts immediately after successful spawn,
+governs stdin transfer, stdout decoding, and process exit, then force-kills the
+original process as typed boundary loss; interrupt grace is capped at the time
+remaining before that deadline. Dropping or aborting execution synchronously
+kills the still-owned original process group before the direct child drops. A
+stdin write failure continues draining and decoding bounded JSONL stdout
+alongside bounded stderr, then observes process status under the same controls,
+preserving definitive CLI evidence instead of discarding it as transport loss or
+blocking on a full stdout pipe. A provider failure remains definitive after such
+a write failure, but a nominal completion is boundary loss because the adapter
+cannot prove the full authorized frontier reached the CLI. Ready stdout is
+polled before simultaneous control signals, then the decoder drains only the
+current bounded reader batch before synchronously rechecking control, so
+continuously ready stdout cannot starve it. Once a provider terminal marker is
+observed, a later cancellation cannot replace that definitive evidence: it
+terminates the group at once and the exchange returns that evidence, while the
+process deadline continues to govern exit and cleanup. The adapter also bounds
+stderr cleanup before reaping the direct child and terminates the original
+process group when an inherited stdout or stderr handle outlives the deadline;
+at that deadline a leader that already exited on its own keeps its definitive
+evidence — an observed terminal marker or its exit status — and a pre-existing
+kill-signal exit is observed on the still-waitable leader before cleanup signals
+the group, so it stays distinguishable from a cleanup kill, while a leader
+cleanup itself must kill remains typed timeout loss. On every ordinary exit it
+likewise keeps the leader waitable until it has killed remaining group
+descendants, then reaps the leader, so cleanup never signals through a reusable
+process identity. The offline test binary exercises all process and evidence
+paths without a live CLI or network.
+
+### Version pin and compatibility smoke
+
+The wrapped CLI is an external program on its own release cadence, so the
+adapter's exported supported-version constant is only a claim until three
+statements agree: the version pinned for installation, the version the adapter
+covers, and the version actually invoked.
+
+`tooling/codex-cli/package.json` is the pin of record — an npm manifest naming
+the CLI's distribution package at an exact `major.minor.patch` version, with a
+committed lockfile so the installed artifact is integrity-checked. It is a
+Renovate-tracked manifest, so a new CLI release arrives as an ordinary pull
+request rather than as silent drift on whatever machine last installed the tool.
+The manifest carries no minimum-release-age gate and never automerges. Why: for
+a dependency that releases this often, calendar age is not evidence, and the two
+gates below are.
+
+An offline test asserts that the pinned version equals the adapter's supported
+version. It runs unconditionally in the ordinary Rust check, so a pin bump fails
+that check until the supported-version constant moves with it — which is what
+forces the fixture corpus to be re-examined against the new release rather than
+inherited.
+
+The compatibility smoke is the second gate: one exchange against the cheapest
+model the smoke credential can address, run through this adapter with the real
+pinned executable. Which models a credential may address is account-scoped, so
+the model is a configured value with the cheapest advertised model as default.
+Before spending anything it asserts that the executable's reported version
+equals the supported version, then compares the CLI's complete feature list —
+including stage and default — with an exact inventory that classifies every
+entry as a hard-disabled capability or as non-capability behavior. A new,
+removed, or changed entry fails the smoke until the version bump classifies it.
+An isolated synthetic ambient skill must appear in the pinned CLI's ordinary
+model-visible prompt input and disappear when the production
+`skills.include_instructions=false` control is applied; an unreadable,
+unparsable, or mismatched version likewise fails rather than skipping. Why:
+evidence recorded against a version that never ran, or whose capability gap
+nobody reviewed, is worse than no evidence. The smoke then asserts only the
+protocol surfaces a version bump moves — the thread identifier reaching the
+exchange facts, the terminal usage counters, and the response envelope decoding
+as a completed or refused terminal outcome — and nothing about answer quality.
+It never runs on a pull-request event, so no fork can reach its credentials; it
+is dispatched manually, including against a pin-bump branch to verify that bump
+before it lands, and runs automatically on `main` only when the pin manifest or
+its committed lockfile changes. The model dispatch itself still performs no
+version probe: this check lives in the smoke, never in the hot path.
+
+The smoke authenticates the CLI through its own non-interactive API-key login,
+piped from an environment-scoped secret into the CLI's credential store, which
+the adapter then never reads — the same ownership split as production. Because
+that is an API-key login rather than a subscription one, the smoke proves the
+process, event-protocol, and envelope compatibility that a version bump breaks;
+it does not exercise subscription login itself, which the CLI offers no durable
+unattended path for.
+
 ## Credential-access boundary
 
 The in-process boundary implements the access-port rules of the credential
@@ -404,11 +620,11 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
 - `CredentialReference` is the non-secret durable name; it is safe in errors and
   configuration. `CredentialValue` is the boundary value: no `Display`, no
   serialization, `Debug` always redacted. `expose_bytes` is the sole read path;
-  the landed adapters call it for exactly two purposes — building request
+  the direct HTTP adapters call it for exactly two purposes — building request
   authentication and seeding the credential-redaction machinery that scrubs
   provider-controlled output.
-- `CredentialAccess::resolve` is called during preparation of each physical
-  request; nothing is cached. Why: per-request resolution makes mounted-secret
+- Direct HTTP adapters call `CredentialAccess::resolve` during preparation of
+  each physical request; nothing is cached. Why: per-request resolution makes
   rotation visible without a daemon restart. Resolution races the cancellation
   signal so a blocked read cannot hold a cancelled operation. Failures are
   reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and never contain
@@ -426,6 +642,26 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   so a secret split across provider chunks can never be emitted piecewise; when
   ordering forces a held prefix out, it is replaced with `[redacted]`. Why: fail
   closed — a possible secret prefix is destroyed rather than delivered.
+- The Codex CLI adapter accepts only the configured non-secret
+  `CredentialReference` and delegates resolution to the CLI's ambient
+  subscription login on every fresh spawn. It never locates, reads, copies,
+  logs, or transports the CLI credential store. Because no credential value
+  crosses the adapter boundary to seed exact-value redaction, CLI-controlled
+  text and JSON are recursively scrubbed by credential-bearing member names and
+  credential token shapes before observations or evidence leave the crate;
+  credential-bearing authorization and cookie header shapes consume their whole
+  line value; quoted credential values consume through their matching unescaped
+  quote; object- or array-shaped credential values consume through their
+  balanced structural close, and a container still open at the end of the
+  controlled text is suppressed through that end rather than released piecewise;
+  a private-key PEM block is consumed through its matching end marker whether or
+  not an assignment introduces it; credential labels are recognized in their
+  space-separated spellings as well as their underscore, hyphenated, and
+  concatenated ones; and JSON identity/session-token members are included.
+  Envelope-decode errors are content-silent rather than embedding a rejected
+  provider value. Why: subscription authentication remains wholly inside the
+  intended CLI control surface while credential-shaped reflection still fails
+  closed.
 
 ## Operator failure taxonomy
 
@@ -463,7 +699,7 @@ failures after staleness handling.
 
 ## Open edges
 
-- `Refused` terminal evidence never leaves either adapter: execute
+- `Refused` terminal evidence never leaves either direct HTTP adapter: execute
   unconditionally downgrades it to a provider error because the buffered HTTP
   transport cannot prove complete request upload; surfacing refusal dispositions
   awaits an upload-proving transport or evidence source.

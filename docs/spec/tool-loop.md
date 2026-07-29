@@ -6,24 +6,26 @@ against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 verified through PR #258 (`agent/signalboxd-rename`), and the Tier 0 catalog
 extension through PR #265 (`agent/tool-batch-tier0`). The Tier 1 code-host
 catalog extension is verified through PR #270 (`agent/tool-batch-tier1`), the
-failed-attempt operator event together with the credential-shaped code-host
+deterministic review-slog extension through PR #306 (`agent/review-slog-tools`),
+the failed-attempt operator event together with the credential-shaped code-host
 detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
 decision surface through PR #291 (`agent/turn-control-verbs`), and
 runner-protocol batch reconstitution through PR #260
-(`agent/runner-protocol-domain`). The runner executable stack rooted at this
-foundation proposal extends the same laws to the runner locus. This page owns
-logical tool requests, approval policy and decisions, physical tool attempts,
-result admission, intra-turn continuation, crash classification, the compiled
-registry, and the daemon-local catalog. Turn and attempt lifecycle law lives in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
-entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
-model-call staging and provider translation in
-[model-call-execution](model-call-execution.md); durable-command identity in
-[identity-and-commands](identity-and-commands.md); and relational mechanics in
-[persistence-protocol](persistence-protocol.md). Invariant tags cite
-[the invariant catalog](../invariants.md). The runner-locus paragraphs in this
-page are the foundation proposal at the bottom of their implementing stack and
-become verified only with those child pull requests.
+(`agent/runner-protocol-domain`). Template-derived blanket creation was verified
+through PR #311 (`agent/session-templates-spec`). The runner executable stack
+rooted at this foundation proposal extends the same laws to the runner locus.
+This page owns logical tool requests, approval policy and decisions, physical
+tool attempts, result admission, intra-turn continuation, crash classification,
+the compiled registry, and the daemon-local catalog. Turn and attempt lifecycle
+law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
+semantic entry vocabulary in
+[sessions-and-transcript](sessions-and-transcript.md); model-call staging and
+provider translation in [model-call-execution](model-call-execution.md);
+durable-command identity in [identity-and-commands](identity-and-commands.md);
+and relational mechanics in [persistence-protocol](persistence-protocol.md).
+Invariant tags cite [the invariant catalog](../invariants.md). The runner-locus
+paragraphs in this page are the foundation proposal at the bottom of their
+implementing stack and become verified only with those child pull requests.
 
 ## Intra-turn rounds and request batches
 
@@ -112,8 +114,9 @@ selected source makes unattended operation inspectable without laundering policy
 as human consent.
 
 The blanket is a field of each immutable `VersionedSessionConfigurationDefaults`
-value and is named `DangerousToolAutoApproval::{Disabled, ApproveAll}`. Safe
-session creation uses `Disabled`. Replacement installs a complete later defaults
+value and is named `DangerousToolAutoApproval::{Disabled, ApproveAll}`. Explicit
+session creation uses `Disabled`; template-derived creation copies the resolved
+template's configured blanket. Replacement installs a complete later defaults
 version through the existing `ReplaceSessionDefaults` command. Origin acceptance
 freezes the posture into `EffectiveConfiguration` alongside model selection;
 steering-derived work inherits the frozen value of its source turn. A later
@@ -699,12 +702,14 @@ tools:
   mechanics remain owned by
   [sessions-and-transcript](sessions-and-transcript.md#session-metadata-and-list-projection).
 
-The Tier 1 catalog adds ten GitHub change-request tools. Every operation is
-`ExternalEffect` because GitHub observes its authenticated request. The six
+The Tier 1 catalog adds fourteen GitHub change-request tools. Every operation is
+`ExternalEffect` because GitHub observes its authenticated request. The ten
 read-only declarations — `change_request_summary`,
 `change_request_changed_files`, `change_request_file_patch`,
-`change_request_checks_status`, `change_request_review_threads`, and
-`change_request_ci_job_log` — default to `Auto`. The four mutations —
+`change_request_checks_status`, `change_request_review_threads`,
+`change_request_ci_job_log`, `change_request_convergence_state`,
+`change_request_stack_state`, `change_request_thread_inventory`, and
+`review_gate_check` — default to `Auto`. The four mutations —
 `change_request_comment`, `change_request_thread_reply`,
 `change_request_thread_resolve`, and `change_request_rerun_failed_jobs` —
 default to `Confirm`. The normal approval transaction therefore authorizes each
@@ -741,14 +746,88 @@ The declarations and compact result objects are:
   returns that id, at most 64 KiB of lossy UTF-8 log text, and `truncated`.
 - `change_request_rerun_failed_jobs` accepts `repository` and a positive
   workflow `run_id`; it returns the acknowledged run id.
+- `change_request_convergence_state` accepts `repository` and `number`. It
+  returns the exact head and mergeable state; the current-head CI rollup and
+  bounded check contexts; unresolved-thread identities; open and buried
+  escalation-marker identities; all resolved or unresolved undispositioned
+  threads; and reviewer-verdict evidence. Reviewer evidence merges review bodies
+  and issue comments in code-host timestamp order. Only the exact
+  `chatgpt-codex-connector` bot can supply a verdict or usage-limit response;
+  the last complete, line-anchored `Reviewed commit:` record is the verdict, and
+  only the complete canonical usage-limit response is starvation evidence. The
+  evidence also reports usage-limit starvation and whether the latest explicit
+  `@codex review` request by an owner, member, or collaborator has no later
+  verdict or starvation response. A request tied with the latest response
+  timestamp is treated as still pending because the code host does not expose a
+  reliable order within that timestamp. Typed construction rejects an open
+  escalation identity absent from the unresolved-thread evidence. Its derived
+  verdict is `converged`, `converged_with_escalations`, `not_converged`, or
+  `indeterminate`. A missing or non-successful CI rollup, conflicting
+  mergeability, any unresolved non-escalation or undispositioned thread,
+  reviewer starvation, or a still-pending request prevents convergence; an
+  additive unknown mergeability state or any truncated evidence required for the
+  verdict makes it indeterminate.
+- `change_request_stack_state` accepts `repository`, `number`, and an optional
+  opaque GraphQL child-page `cursor`. It returns the current immediate-base,
+  head, and default-branch refs and revisions; current-base commits absent from
+  the head; default-branch commits absent from the current base chain; and one
+  projected page of at most 100 immediate child requests whose base names the
+  request's head branch. Each child carries the same merge-forward and
+  default-chain comparison for its level. Children are discovered in the
+  request's head repository. Comparisons use count-only GraphQL projections
+  authenticated against each current base revision, with at most eight child
+  comparisons in flight. The complete stack transaction has the transport's
+  30-second aggregate deadline. The adapter then re-reads the request, current
+  and default branches, and exact projected child page and rejects evidence if
+  any revision, child inventory, or child-page continuation snapshot changed.
+  The child page carries `children_truncated` and `children_next_cursor`.
+- `change_request_thread_inventory` accepts `repository`, `number`, and an
+  optional opaque GraphQL `cursor`. It returns the observed head revision and at
+  most 100 review threads with exact resolution and outdated posture, path and
+  optional line, first-comment author and `bot` / `human` / `unknown` class, the
+  bounded first-comment finding title, and its `fix_named` / `declined` /
+  `escalation_marker` / `undispositioned` class. A thread without a reply is
+  undispositioned. `fix_named` requires a reply beginning with `Fixed in commit`
+  or `Fixed in commits`, followed by exactly one space and an optionally
+  backtick-delimited 7-to-40-hex commit token; `declined` requires a reply
+  beginning `Declined:` and a nonempty reason. Only replies whose code-host
+  association is `OWNER`, `MEMBER`, or `COLLABORATOR` can supply disposition
+  evidence. The latest recognized fix or decline survives later non-disposition
+  replies, while `escalation_marker` requires the trimmed last reply to equal
+  the exact marker. Classification rejects a thread whose comment history
+  exceeds the 100-comment read bound. The page carries `truncated` and
+  `next_cursor`.
+- `review_gate_check` accepts `repository`, `number`, and purpose
+  `request_review_wave` or `declare_convergence`. It reads the same fresh typed
+  evidence as the three slog tools, then re-reads stack ancestry and convergence
+  after inventory. It rejects the composed read if either before-and-after
+  evidence pair differs and uses the final stack and convergence reads for
+  blockers, then purely derives `ready`, the exact head, and stable blocker
+  codes with affected identities within the transport's 30-second aggregate
+  deadline. Both purposes block when the three evidence sources name different
+  heads, a review request is still in flight, evidence is incomplete, CI is not
+  green, threads are undispositioned or unresolved, escalations are buried, or
+  parent, default-chain, or immediate-child ancestry is unhealthy. Declaring
+  convergence additionally requires the exact mergeable posture and an actual
+  current-head reviewer verdict not followed by usage-limit starvation.
+  Requesting a review wave is blocked when a completed reviewer verdict already
+  covers the current head and no later usage-limit response requires a retry,
+  because that quiet or all-declined wave concludes the loop.
 
 Shared typed admission rejects extra object members; repositories are at most
 256 bytes, paths 4 KiB, comment bodies and returned text fields 64 KiB, and
-opaque node ids 512 bytes. A returned node id or head revision is admitted by
-the same predicate its argument counterpart uses, so an identity a result
-carries can always be passed back as an argument, and every returned URL is one
-absolute credential-free HTTPS location. No result has more than 100 collection
-members or more than 512 KiB of encoded JSON.
+opaque node ids and GraphQL cursors are at most 512 bytes. A returned node id,
+head revision, or stack or inventory continuation is admitted by the same
+predicate its argument counterpart uses, so those identities and continuations
+can be passed back as arguments. Convergence-state cursors identify a diagnostic
+truncation boundary; that tool and the gate remain indeterminate rather than
+performing an unbounded continuation scan. Every returned URL is one absolute
+credential-free HTTPS location. Typed construction rejects aggregate convergence
+evidence whose overlapping bounded lists would exceed the shared encoded-result
+limit. No result has more than 100 collection members or more than 512 KiB of
+encoded JSON. Every bounded slog list reports whether it is truncated and the
+matching continuation cursor; a verdict never silently treats a partial evidence
+page as complete.
 
 The production adapter uses fixed GitHub REST and GraphQL endpoints. It disables
 ambient proxies, automatic redirects, protocol retries, and idle reuse; uses
@@ -775,7 +854,7 @@ detail.
 
 The merged catalog sorts declarations by checked tool name and rejects
 duplicates during construction. Its executor dispatches only those same four
-preexisting names and the ten code-host names; disagreement between the
+preexisting names and the fourteen code-host names; disagreement between the
 advertised catalog and executor is classified as a daemon defect.
 
 ## Persistence boundaries
@@ -792,14 +871,17 @@ reconstructing provider history in frontier order; it performs no per-entry
 database round trips while holding the scheduler lock.
 
 `DecideToolRequest` joins the owner-global durable-command registry as its own
-typed record family. Because adding the dangerous posture changes every
-defaults-bearing canonical command payload, new `CreateSession`,
-`CreateSessionFromImportedFrontier`, and `ReplaceSessionDefaults` records use
-kind-scoped storage version 2; their version-1 records reconstitute with
-`DangerousToolAutoApproval::Disabled`. `SubmitInput` remains version 1, and the
-new decision command begins at version 1; registry inspection validates the
-supported version set for the selected kind rather than applying one global
-version constant.
+typed record family. Adding the dangerous posture originally advanced each
+defaults-bearing command family to kind-scoped storage version 2; version-1
+records reconstitute with `DangerousToolAutoApproval::Disabled`. Later
+system-prompt and template provenance migrations advance the affected families
+independently. The current kind-scoped versions and their compatibility gates
+are owned by
+[identity and commands](identity-and-commands.md#durable-command-records) and
+[persistence protocol](persistence-protocol.md#relational-representation).
+`SubmitInput` and `DecideToolRequest` remain version 1; registry inspection
+validates the supported version set for the selected kind rather than applying
+one global version constant.
 
 ## Open edges
 

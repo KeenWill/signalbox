@@ -232,7 +232,7 @@ public enum SignalboxEventNormalizer {
                     statusUpdates: [],
                     decisionReason: nil,
                     childSessionID: nil,
-                    decisionAvailable: false
+                    decisionAvailable: true
                 )
             )
         case .processTurnFailure(let event):

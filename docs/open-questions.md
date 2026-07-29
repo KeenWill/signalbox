@@ -67,10 +67,16 @@ identifiers refer to [scenarios.md](scenarios.md).
 - **Import operational surfaces beyond explicit file and directory scans.** The
   owner terminal's explicit-format, one-file and recursive directory-scan
   operations are implemented in
-  [conversation-import](spec/conversation-import.md#operational-surface). File
-  watching, source-size admission beyond the inherited process-frame bound,
+  [conversation-import](spec/conversation-import.md#operational-surface), and
+  the single-conversation inspection read is implemented in
+  [conversation-import](spec/conversation-import.md#imported-conversation-inspection).
+  File watching, source-size admission beyond the inherited process-frame bound,
   raw-record access, and any authorization beyond the owner-private local socket
-  remain undecided. (S28)
+  remain undecided. Listing across imported conversations is implemented by the
+  unified conversation listing in
+  [process protocol](spec/process-protocol.md#client-requests); filesystem
+  discovery of unimported sources beyond the explicit directory scan is not.
+  (S28)
 
 ## Delegation
 
@@ -146,16 +152,26 @@ identifiers refer to [scenarios.md](scenarios.md).
 ## Configuration categories
 
 - **Additional effective-configuration categories.** Prompt composition and
-  templates, custom parameters, instructions, tool enablement/configuration,
-  placement constraints, per-turn resources, and interpreting-policy selections
-  are unavailable baseline capabilities; a future subsystem decision must extend
-  the request, session-default, override, and effective-value algebras together
-  ([configuration-and-credentials](spec/configuration-and-credentials.md)). The
-  one implemented slice is the optional bounded session-level system prompt
-  inside defaults epochs
-  ([sessions-and-transcript](spec/sessions-and-transcript.md)); everything
-  composed or derived beyond that one string stays blocked here. (S02, S05,
-  S13–S16, S34)
+  custom parameters, instructions, tool enablement/configuration, placement
+  constraints, per-turn resources, and interpreting-policy selections remain
+  unavailable; a future subsystem decision must extend the request,
+  session-default, override, and effective-value algebras together
+  ([configuration-and-credentials](spec/configuration-and-credentials.md)).
+  Static copy-on-create session templates compose only the already-implemented
+  model selection, bounded system prompt, and dangerous-tool blanket; every
+  richer composition or configuration category stays blocked here. (S02, S05,
+  S13–S16, S34, S35)
+
+## Template storage and authoring
+
+- **Durable objects, protocol CRUD, and agent authoring tools.** Static
+  startup-file loading, daemon-side create-by-name resolution, and read-only
+  name/version listing are fixed by
+  [configuration and credentials](spec/configuration-and-credentials.md) and
+  [process protocol](spec/process-protocol.md). Whether templates become durable
+  database objects, the exact protocol CRUD and concurrency contract, and agent
+  tools that read or edit templates remain undecided. Blocks only those storage
+  and authoring surfaces. (S35)
 
 ## Model fallback and provenance
 
@@ -326,10 +342,9 @@ questions below remain open.
   backpressure, and redaction rules, remain undecided. The implemented durable
   transition relay is owned by [process-protocol](spec/process-protocol.md).
   Blocks live-token display. (S02, S24)
-- **Process-protocol operation expansion.** The interrupt treatment now crosses
-  the wire as `stop_turn` and the canonical tool decision as
-  `decide_tool_request` ([process-protocol](spec/process-protocol.md)); the
-  next-safe-point and after-current delivery treatments and administrative
+- **Process-protocol operation expansion.** The interrupt, canonical tool
+  decision, next-safe-point steering, and after-current queue treatments now
+  cross the wire ([process-protocol](spec/process-protocol.md)); administrative
   operations still need their owning product slices and exact wire projections.
   Blocks only those operations. (S01–S10)
 - **Persistence implementation within the accepted relational baseline.**

@@ -26,13 +26,13 @@ struct RootView: View {
                 .tag(AppSection.sessions)
             UnavailableProcessCapabilityView(
                 title: "Monitor unavailable",
-                detail: "The version 5 process protocol exposes session following, not a monitor catalog."
+                detail: "The process protocol exposes session following, not a monitor catalog."
             )
                 .tabItem { Label("Monitor", systemImage: AppSection.monitor.systemImage) }
                 .tag(AppSection.monitor)
             UnavailableProcessCapabilityView(
                 title: "Runners unavailable",
-                detail: "The version 5 process protocol exposes no runner catalog."
+                detail: "The process protocol exposes no runner catalog."
             )
                 .tabItem { Label("Runners", systemImage: AppSection.runners.systemImage) }
                 .tag(AppSection.runners)
@@ -72,17 +72,17 @@ struct RootView: View {
                 case .monitor:
                     UnavailableProcessCapabilityView(
                         title: "Monitor unavailable",
-                        detail: "The version 5 process protocol exposes session following, not a monitor catalog."
+                        detail: "The process protocol exposes session following, not a monitor catalog."
                     )
                 case .runners:
                     UnavailableProcessCapabilityView(
                         title: "Runners unavailable",
-                        detail: "The version 5 process protocol exposes no runner catalog."
+                        detail: "The process protocol exposes no runner catalog."
                     )
                 case .templates:
                     UnavailableProcessCapabilityView(
                         title: "Templates unavailable",
-                        detail: "The version 5 process protocol exposes no template catalog."
+                        detail: "The process protocol exposes no template catalog."
                     )
                 case .settings:
                     SettingsScreen()
@@ -138,17 +138,17 @@ struct RootView: View {
             case .monitor:
                 UnavailableProcessCapabilityView(
                     title: "Monitor unavailable",
-                    detail: "The version 5 process protocol exposes session following, not a monitor catalog."
+                    detail: "The process protocol exposes session following, not a monitor catalog."
                 )
             case .runners:
                 UnavailableProcessCapabilityView(
                     title: "Runners unavailable",
-                    detail: "The version 5 process protocol exposes no runner catalog."
+                    detail: "The process protocol exposes no runner catalog."
                 )
             case .templates:
                 UnavailableProcessCapabilityView(
                     title: "Templates unavailable",
-                    detail: "The version 5 process protocol exposes no template catalog."
+                    detail: "The process protocol exposes no template catalog."
                 )
             case .settings:
                 SettingsScreen()

@@ -55,10 +55,11 @@ use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationImportFormat,
     ConversationImportSource, ConversationOriginFilter, ConversationSummary, CurrentModelCallState,
     ErrorCode, ImportedContentKind, ImportedConversationSourceFormat, ImportedSourceSpeaker,
-    ImportedSpeaker, InputContent, MetadataActor, ModelSelection, ProtocolVersion, RejectionDetail,
-    RequestId, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember,
-    SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-    decode_server_line, encode_client_line,
+    ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+    MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION, MetadataActor, ModelSelection, ProtocolVersion,
+    RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent, SessionMetadata,
+    SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry,
+    TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
@@ -377,6 +378,35 @@ impl RunningRuntime {
         self.socket_directory.socket()
     }
 
+    async fn restart(&mut self) -> Result<usize, Box<dyn Error>> {
+        self.shutdown.send(true)?;
+        timeout(Duration::from_secs(10), &mut self.runtime_task).await???;
+
+        let mut scan = StartupScanService::new(
+            UuidV7StartupScanIdGenerator,
+            PostgresStartupScanRepository::new(self.pool.clone()),
+        );
+        let recovered_turn_count = scan.execute().await?.recovered_turn_count();
+
+        let listener = LocalProcessListener::bind(self.socket())?;
+        let sweep = PostgresEligibilitySweep::new(self.pool.clone());
+        let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+        let runtime = ProcessRuntime::new(
+            listener,
+            self.pool.clone(),
+            eligibility_nudge,
+            InProcessToolDispatchGate::default(),
+            HubModelConfiguration::parse(MODEL_CONFIGURATION)?,
+        );
+        let provider_text_deltas = runtime.provider_text_delta_sink();
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        self.shutdown = shutdown;
+        self.runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
+        self.work_source = Some(work_source);
+        self.provider_text_deltas = provider_text_deltas;
+        Ok(recovered_turn_count)
+    }
+
     fn take_work_source(&mut self) -> InProcessEligibilityWorkSource<PostgresEligibilitySweep> {
         self.work_source
             .take()
@@ -433,7 +463,8 @@ async fn submit_first_input(
                 command_id: command()?,
                 session_id,
                 content: InputContent::new(content),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
@@ -500,6 +531,13 @@ async fn attach_empty_follower(
             ..
         } if *snapshot_session == session_id
     ));
+    if version.as_u64() >= MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION {
+        assert!(matches!(
+            response_within(&mut follow).await?.message(),
+            ServerMessage::TranscriptModelCallsEnd { model_call_count }
+                if model_call_count.value() == 0
+        ));
+    }
     assert!(matches!(
         response_within(&mut follow).await?.message(),
         ServerMessage::TranscriptSnapshotEnd {
@@ -767,6 +805,113 @@ fn submitted_session(message: &ServerMessage) -> CanonicalUuid {
 }
 
 #[track_caller]
+fn transcript_snapshot_start_cursor(
+    message: &ServerMessage,
+    expected_session: CanonicalUuid,
+) -> u64 {
+    match message {
+        ServerMessage::TranscriptSnapshotStart { session_id, cursor }
+            if *session_id == expected_session =>
+        {
+            cursor.value()
+        }
+        message => panic!("fixture expected transcript-snapshot start, got {message:?}"),
+    }
+}
+
+#[track_caller]
+fn transcript_turn_projection(message: &ServerMessage) -> (CanonicalUuid, u64, TurnState) {
+    match message {
+        ServerMessage::TranscriptTurn {
+            turn_id,
+            acceptance_position,
+            state,
+        } => (*turn_id, acceptance_position.value(), state.clone()),
+        message => panic!("fixture expected transcript-turn projection, got {message:?}"),
+    }
+}
+
+#[track_caller]
+fn submitted_input_identity(
+    message: &ServerMessage,
+    expected_session: CanonicalUuid,
+    expected_position: u64,
+) -> CanonicalUuid {
+    match message {
+        ServerMessage::InputSubmitted {
+            session_id,
+            accepted_input_id,
+            acceptance_position,
+            ..
+        } if *session_id == expected_session
+            && acceptance_position.value() == expected_position =>
+        {
+            *accepted_input_id
+        }
+        message => panic!("fixture expected input-submitted receipt, got {message:?}"),
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct TranscriptSnapshotEndFacts {
+    session_id: CanonicalUuid,
+    cursor: u64,
+    turn_count: u64,
+    entry_count: u64,
+}
+
+#[track_caller]
+fn transcript_snapshot_end_facts(message: &ServerMessage) -> TranscriptSnapshotEndFacts {
+    match message {
+        ServerMessage::TranscriptSnapshotEnd {
+            session_id,
+            cursor,
+            turn_count,
+            entry_count,
+        } => TranscriptSnapshotEndFacts {
+            session_id: *session_id,
+            cursor: cursor.value(),
+            turn_count: turn_count.value(),
+            entry_count: entry_count.value(),
+        },
+        message => panic!("fixture expected transcript-snapshot end, got {message:?}"),
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct InputAcceptedEventFacts {
+    cursor: u64,
+    session_id: CanonicalUuid,
+    accepted_input_id: CanonicalUuid,
+    acceptance_position: u64,
+    content: InputContent,
+}
+
+#[track_caller]
+fn input_accepted_event_facts(message: &ServerMessage) -> InputAcceptedEventFacts {
+    match message {
+        ServerMessage::SessionEvent {
+            cursor,
+            session_id,
+            event:
+                SessionEvent::InputAccepted {
+                    accepted_input_id,
+                    acceptance_position,
+                    content,
+                    ..
+                },
+        } => InputAcceptedEventFacts {
+            cursor: cursor.value(),
+            session_id: *session_id,
+            accepted_input_id: *accepted_input_id,
+            acceptance_position: acceptance_position.value(),
+            content: content.clone(),
+        },
+        message => panic!("fixture expected input-accepted event, got {message:?}"),
+    }
+}
+
+#[track_caller]
 fn replaced_defaults(message: &ServerMessage) -> (CanonicalUuid, u64) {
     match message {
         ServerMessage::SessionDefaultsReplaced {
@@ -894,6 +1039,319 @@ async fn s28_inv038_version_five_reports_inserted_then_already_imported()
             imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
         }
     );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// One durable synthetic imported conversation and the identities its
+/// selectable positions carry.
+struct ImportedInspectionFixture {
+    conversation: CanonicalUuid,
+    user_entry: CanonicalUuid,
+    tool_entry: CanonicalUuid,
+    user_text: &'static str,
+    /// The greatest selectable position, which is also the entry count: the
+    /// two-record source below emits exactly one entry per record.
+    last_position: CanonicalU64,
+}
+
+impl ImportedInspectionFixture {
+    /// The exact attested user text at position one. Position two is a tool
+    /// call, which the conservative projection carries as a kind alone.
+    const USER_TEXT: &'static str = "imported question";
+
+    async fn insert(pool: &PgPool) -> Result<Self, Box<dyn Error>> {
+        let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x900));
+        let user_entry = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0x901));
+        let tool_entry = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0x902));
+        let source = concat!(
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",",
+            "\"content\":\"imported question\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[",
+            "{\"type\":\"tool_use\",\"id\":\"call\",\"name\":\"lookup\",",
+            "\"input\":{\"query\":\"synthetic\"}}]}}"
+        );
+        let mut import_service = ImportConversationService::new(
+            FixedImportIds {
+                conversations: [conversation].into(),
+                entries: [user_entry, tool_entry].into(),
+            },
+            ClaudeCodeJsonlConverter,
+            ImportedConversationRepository::new(pool.clone()),
+        );
+        assert_eq!(
+            import_service.execute(source.as_bytes()).await?,
+            ImportConversationOutcome::Inserted { conversation }
+        );
+        Ok(Self {
+            conversation: CanonicalUuid::from_uuid(conversation.into_uuid()),
+            user_entry: CanonicalUuid::from_uuid(user_entry.into_uuid()),
+            tool_entry: CanonicalUuid::from_uuid(tool_entry.into_uuid()),
+            user_text: Self::USER_TEXT,
+            last_position: CanonicalU64::new(2),
+        })
+    }
+}
+
+/// S28: the inspection read names every selectable imported position with its
+/// attestation, content kind, and bounded preview, so the ordinal
+/// `create_session_from_imported_frontier` consumes is observable before it is
+/// consumed.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_version_seventeen_reads_every_selectable_imported_position()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let fixture = ImportedInspectionFixture::insert(&runtime.pool).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Seventeen,
+            1,
+            ClientRequest::ReadImportedConversation {
+                imported_conversation_id: fixture.conversation,
+            },
+        )
+        .await?;
+
+    let start = response_within(&mut connection).await?;
+    assert_eq!(
+        start.message(),
+        &ServerMessage::ImportedConversationStart {
+            imported_conversation_id: fixture.conversation,
+        }
+    );
+    let first = response_within(&mut connection).await?;
+    assert_eq!(
+        first.message(),
+        &ServerMessage::ImportedConversationEntry {
+            position: CanonicalU64::new(1),
+            imported_entry_id: fixture.user_entry,
+            source_speaker: ImportedSourceSpeaker::Attested {
+                speaker: ImportedSpeaker::User,
+            },
+            content_kind: ImportedContentKind::Text,
+            text_preview: Some(ImportedTextPreview::of_exact_text(fixture.user_text)),
+        }
+    );
+    let second = response_within(&mut connection).await?;
+    assert_eq!(
+        second.message(),
+        &ServerMessage::ImportedConversationEntry {
+            position: fixture.last_position,
+            imported_entry_id: fixture.tool_entry,
+            source_speaker: ImportedSourceSpeaker::Attested {
+                speaker: ImportedSpeaker::Assistant,
+            },
+            content_kind: ImportedContentKind::ToolCall,
+            text_preview: None,
+        }
+    );
+    let end = response_within(&mut connection).await?;
+    assert_eq!(
+        end.message(),
+        &ServerMessage::ImportedConversationEnd {
+            imported_conversation_id: fixture.conversation,
+            entry_count: fixture.last_position,
+        }
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S28: an absent imported conversation is a read miss naming an imported
+/// conversation, never the absent-session diagnostic.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_version_seventeen_read_names_an_absent_imported_conversation()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Seventeen,
+            1,
+            ClientRequest::ReadImportedConversation {
+                imported_conversation_id: CanonicalUuid::from_uuid(Uuid::from_u128(0x9ff)),
+            },
+        )
+        .await?;
+
+    let response = response_within(&mut connection).await?;
+    let ServerMessage::Error { code, message, .. } = response.message() else {
+        panic!("an absent imported conversation returns an error");
+    };
+    assert_eq!(*code, ErrorCode::NotFound);
+    assert_eq!(message, "the requested imported conversation was not found");
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S28: a valid imported conversation carrying an out-of-range position is a
+/// rejection naming the selectable range, not a `not_found` claiming the
+/// identity was absent.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_version_seventeen_continuation_names_the_selectable_position_range()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let fixture = ImportedInspectionFixture::insert(&runtime.pool).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Seventeen,
+            1,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id: command()?,
+                imported_conversation_id: fixture.conversation,
+                through_position: CanonicalU64::new(999_999),
+                relationship: signalbox_process_protocol::ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+                },
+            },
+        )
+        .await?;
+
+    let response = response_within(&mut connection).await?;
+    let ServerMessage::Error { code, detail, .. } = response.message() else {
+        panic!("an out-of-range imported position returns an error");
+    };
+    assert_eq!(*code, ErrorCode::Rejected);
+    assert_eq!(
+        detail.value(),
+        Some(RejectionDetail::ImportedFrontierPositionOutOfRange {
+            imported_conversation_id: fixture.conversation,
+            requested_position: CanonicalU64::new(999_999),
+            last_position: fixture.last_position,
+        })
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S28: an absent imported conversation on the continuation command names an
+/// imported conversation as the missing target.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_version_seventeen_continuation_names_an_absent_imported_conversation()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let absent = CanonicalUuid::from_uuid(Uuid::from_u128(0x9ff));
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Seventeen,
+            1,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id: command()?,
+                imported_conversation_id: absent,
+                through_position: CanonicalU64::new(1),
+                relationship: signalbox_process_protocol::ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+                },
+            },
+        )
+        .await?;
+
+    let response = response_within(&mut connection).await?;
+    let ServerMessage::Error { code, detail, .. } = response.message() else {
+        panic!("an absent imported conversation returns an error");
+    };
+    assert_eq!(*code, ErrorCode::Rejected);
+    assert_eq!(
+        detail.value(),
+        Some(RejectionDetail::ImportedConversationNotFound {
+            imported_conversation_id: absent,
+        })
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S28 / INV-033: version ten's closed message vocabulary has no typed detail
+/// for an out-of-range position, so it keeps its undetailed `not_found` while
+/// only the non-normative message sharpens.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_inv033_version_ten_retains_its_undetailed_out_of_range_error()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let fixture = ImportedInspectionFixture::insert(&runtime.pool).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Ten,
+            1,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id: command()?,
+                imported_conversation_id: fixture.conversation,
+                through_position: CanonicalU64::new(999_999),
+                relationship: signalbox_process_protocol::ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+                },
+            },
+        )
+        .await?;
+
+    let response = response_within(&mut connection).await?;
+    assert_eq!(response.version(), ProtocolVersion::Ten);
+    let ServerMessage::Error {
+        code,
+        message,
+        detail,
+    } = response.message()
+    else {
+        panic!("an out-of-range imported position returns an error");
+    };
+    assert_eq!(*code, ErrorCode::NotFound);
+    assert_eq!(
+        message,
+        "the requested position is outside the imported conversation's positions"
+    );
+    assert_eq!(detail.value(), None);
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S28 / INV-033: the imported-conversation read belongs to version
+/// seventeen's closed request vocabulary, so version sixteen — the newest
+/// version that shipped without it — cannot carry it.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_inv033_version_sixteen_rejects_the_imported_conversation_read()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let fixture = ImportedInspectionFixture::insert(&runtime.pool).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .raw_request(&format!(
+            "{{\"version\":16,\"request_id\":\"1\",\"request\":{{\
+             \"type\":\"read_imported_conversation\",\
+             \"imported_conversation_id\":\"{}\"}}}}\n",
+            fixture.conversation
+        ))
+        .await?;
+
+    let response = response_within(&mut connection).await?;
+    let ServerMessage::Error { code, .. } = response.message() else {
+        panic!("a version-sixteen imported read returns an error");
+    };
+    assert_eq!(*code, ErrorCode::MalformedFrame);
 
     drop(connection);
     runtime.stop().await
@@ -1098,7 +1556,8 @@ async fn s33_inv012_inv033_inv046_submit_replay_precedes_mutable_history_gate()
                 command_id: command()?,
                 session_id,
                 content: InputContent::new(String::from("first model turn")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
@@ -1135,7 +1594,8 @@ async fn s33_inv012_inv033_inv046_submit_replay_precedes_mutable_history_gate()
         command_id: replayed_command,
         session_id,
         content: InputContent::new(String::from("second model turn")),
-        expected_defaults_version: CanonicalU64::new(2),
+        expected_defaults_version: Some(CanonicalU64::new(2)),
+        delivery: None,
     };
     connection
         .request_version(ProtocolVersion::Five, 4, replayed_request.clone())
@@ -1172,7 +1632,8 @@ async fn s33_inv012_inv033_inv046_submit_replay_precedes_mutable_history_gate()
                 command_id: unseen_command,
                 session_id,
                 content: InputContent::new(String::from("must remain gated")),
-                expected_defaults_version: CanonicalU64::new(2),
+                expected_defaults_version: Some(CanonicalU64::new(2)),
+                delivery: None,
             },
         )
         .await?;
@@ -1983,7 +2444,8 @@ async fn s28_version_one_submit_rejects_imported_session_without_mutation()
                 command_id: command()?,
                 session_id,
                 content: InputContent::new(String::from("must not mutate")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
@@ -2021,19 +2483,14 @@ async fn s28_version_two_submit_accepts_imported_session_continuation() -> Resul
                 command_id: command()?,
                 session_id,
                 content: InputContent::new(String::from("native continuation")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
     let accepted = response_within(&mut upgraded_submit).await?;
     assert_eq!(accepted.version(), ProtocolVersion::Two);
-    assert!(matches!(
-        accepted.message(),
-        ServerMessage::InputSubmitted {
-            session_id: submitted,
-            ..
-        } if *submitted == session_id
-    ));
+    assert_eq!(submitted_session(accepted.message()), session_id);
 
     drop(upgraded_submit);
     runtime.stop().await
@@ -2053,7 +2510,8 @@ async fn process_runtime_rejects_oversized_submitted_input() -> Result<(), Box<d
                 command_id: command()?,
                 session_id,
                 content: InputContent::new("x".repeat(OVERSIZED_SUBMITTED_INPUT_BYTES)),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
@@ -2177,22 +2635,17 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
                 command_id: command()?,
                 session_id,
                 content: InputContent::new(String::from("work while the ambiguity is unresolved")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
-    assert!(
-        matches!(
-            response_within(&mut connection).await?.message(),
-            ServerMessage::Error {
-                code: ErrorCode::Rejected,
-                detail,
-                ..
-            } if detail.value() == Some(RejectionDetail::ActiveTurnPresent {
-                session_id,
-                active_turn_id: parked_turn_id,
-            })
-        ),
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::ActiveTurnPresent {
+            session_id,
+            active_turn_id: parked_turn_id,
+        },
         "an ambiguity wait must keep refusing ordinary input while it holds the slot"
     );
 
@@ -2220,31 +2673,22 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
         )
         .await?;
     let start = response_within(&mut connection).await?;
-    assert!(matches!(
-        start.message(),
-        ServerMessage::TranscriptSnapshotStart {
-            session_id: snapshot_session,
-            ..
-        } if *snapshot_session == session_id
-    ));
+    transcript_snapshot_start_cursor(start.message(), session_id);
     let reconciled_turn = response_within(&mut connection).await?;
+    let (projected_reconciled_turn, reconciled_position, reconciled_state) =
+        transcript_turn_projection(reconciled_turn.message());
+    assert_eq!(projected_reconciled_turn, parked_turn_id);
+    assert_eq!(reconciled_position, 1);
     assert!(matches!(
-        reconciled_turn.message(),
-        ServerMessage::TranscriptTurn {
-            turn_id,
-            acceptance_position,
-            state: TurnState::ReconciliationRequired { .. },
-        } if *turn_id == parked_turn_id && acceptance_position.value() == 1
+        reconciled_state,
+        TurnState::ReconciliationRequired { .. }
     ));
     let successor_turn = response_within(&mut connection).await?;
-    assert!(matches!(
-        successor_turn.message(),
-        ServerMessage::TranscriptTurn {
-            turn_id,
-            acceptance_position,
-            state: TurnState::Queued { .. },
-        } if *turn_id == successor_turn_id && acceptance_position.value() == 2
-    ));
+    let (projected_successor_turn, successor_position, successor_state) =
+        transcript_turn_projection(successor_turn.message());
+    assert_eq!(projected_successor_turn, successor_turn_id);
+    assert_eq!(successor_position, 2);
+    assert!(matches!(successor_state, TurnState::Queued { .. }));
 
     drop(connection);
     runtime.stop().await
@@ -2634,107 +3078,113 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
     follow
         .request(5, ClientRequest::FollowSession { session_id })
         .await?;
-    let follow_cursor = match follow.response().await?.message() {
-        ServerMessage::TranscriptSnapshotStart {
-            session_id: snapshot_session,
-            cursor,
-        } if *snapshot_session == session_id => cursor.value(),
-        message => {
-            return Err(io::Error::other(format!("unexpected follow start: {message:?}")).into());
-        }
-    };
+    let follow_start = follow.response().await?;
+    let follow_cursor = transcript_snapshot_start_cursor(follow_start.message(), session_id);
 
     // The exact-limit queued content keeps the snapshot writer blocked after
     // its start frame. Commit the next update before draining the snapshot so
     // only a subscription formed before snapshot transmission can retain it.
+    let second_position = 2;
+    let second_content = InputContent::new(String::from("second input"));
     commands
         .request(
             6,
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new("second input".to_owned()),
-                expected_defaults_version: CanonicalU64::new(1),
+                content: second_content.clone(),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
-    let second_accepted_input = match commands.response().await?.message() {
-        ServerMessage::InputSubmitted {
-            session_id: submitted_session,
-            accepted_input_id,
-            acceptance_position,
-            ..
-        } if *submitted_session == session_id && acceptance_position.value() == 2 => {
-            *accepted_input_id
-        }
-        message => {
-            return Err(io::Error::other(format!("unexpected second submit: {message:?}")).into());
-        }
-    };
+    let second_submit = commands.response().await?;
+    let second_accepted_input =
+        submitted_input_identity(second_submit.message(), session_id, second_position);
 
     let queued_turn = response_within(&mut follow).await?;
-    assert!(matches!(
-        queued_turn.message(),
-        ServerMessage::TranscriptTurn {
-            turn_id,
-            acceptance_position,
-            state:
-                TurnState::Queued {
-                    accepted_input_id,
-                    content: projected_content,
-                },
-        } if *turn_id == first_turn
-            && acceptance_position.value() == 1
-            && *accepted_input_id == first_accepted_input
-            && projected_content.as_str() == first_content
-    ));
+    let (projected_turn, projected_position, projected_state) =
+        transcript_turn_projection(queued_turn.message());
+    assert_eq!(projected_turn, first_turn);
+    assert_eq!(projected_position, 1);
+    assert_eq!(
+        projected_state,
+        TurnState::Queued {
+            accepted_input_id: first_accepted_input,
+            content: InputContent::new(first_content),
+        }
+    );
     let snapshot_end = response_within(&mut follow).await?;
-    assert!(matches!(
-        snapshot_end.message(),
-        ServerMessage::TranscriptSnapshotEnd {
-            session_id: snapshot_session,
-            cursor,
-            turn_count,
-            entry_count,
-        } if *snapshot_session == session_id
-            && cursor.value() == follow_cursor
-            && turn_count.value() == 1
-            && entry_count.value() == 0
-    ));
+    assert_eq!(
+        transcript_snapshot_end_facts(snapshot_end.message()),
+        TranscriptSnapshotEndFacts {
+            session_id,
+            cursor: follow_cursor,
+            turn_count: 1,
+            entry_count: 0,
+        }
+    );
 
     let followed = response_within(&mut follow).await?;
-    assert!(matches!(
-        followed.message(),
-        ServerMessage::SessionEvent {
-            cursor,
-            session_id: event_session,
-            event:
-                SessionEvent::InputAccepted {
-                    accepted_input_id,
-                    acceptance_position,
-                    content,
-                    ..
-                },
-        } if cursor.value() > follow_cursor
-            && *event_session == session_id
-            && *accepted_input_id == second_accepted_input
-            && acceptance_position.value() == 2
-            && content.as_str() == "second input"
-    ));
+    let event = input_accepted_event_facts(followed.message());
+    assert!(event.cursor > follow_cursor);
+    assert_eq!(event.session_id, session_id);
+    assert_eq!(event.accepted_input_id, second_accepted_input);
+    assert_eq!(event.acceptance_position, second_position);
+    assert_eq!(event.content, second_content);
 
     drop(commands);
     drop(follow);
     runtime.stop().await
 }
 
-/// S01 / S02 / S24 / INV-032 / INV-035: the provider bridge asks the scripted
-/// runtime for streamed delivery, and two already-attached followers — one at
-/// version twelve and one at version sixteen, both of which admit the delta
-/// message — each observe the exact already-redacted deltas before the
-/// durable terminal entries expose the same complete assistant reply.
+/// S24 / INV-032 / INV-033: version thirteen retains the ephemeral
+/// provider-text stream introduced at version twelve.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_durable_truth()
+async fn s24_inv032_inv033_version_thirteen_inherits_provider_text_streaming()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut commands = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut commands).await?;
+    let follow =
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Thirteen, 9, session_id).await?;
+    let expected_delta_count = 1;
+    let (script, assistant) =
+        streamed_script(expected_delta_count, String::from("already [redacted]"));
+    let (_, turn_id) = submit_first_input(
+        &mut commands,
+        session_id,
+        String::from("retain streaming at version thirteen"),
+    )
+    .await?;
+
+    let probe = execute_streamed_turn(
+        &mut runtime,
+        ScriptedModel::single(script),
+        session_id,
+        turn_id,
+    )
+    .await?;
+    let followed = follow_streamed_turn_to_completion(follow, session_id, turn_id).await?;
+    let operations = probe.received_operations();
+
+    assert_eq!(followed.delta_count, expected_delta_count);
+    assert_eq!(followed.text, assistant);
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].delivery, DeliveryMode::Streamed);
+
+    drop(commands);
+    runtime.stop().await
+}
+
+/// S01 / S02 / S24 / INV-032 / INV-035: the provider bridge asks the scripted
+/// runtime for streamed delivery, and already-attached followers on versions
+/// twelve, fourteen, and sixteen each observe the exact already-redacted deltas
+/// before durable terminal entries expose the same complete assistant reply.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_three_followers_then_durable_truth()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut commands = Connection::connect(runtime.socket()).await?;
@@ -2742,7 +3192,9 @@ async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_dur
     let first_follow =
         attach_empty_follower(runtime.socket(), ProtocolVersion::Twelve, 10, session_id).await?;
     let second_follow =
-        attach_empty_follower(runtime.socket(), ProtocolVersion::Sixteen, 11, session_id).await?;
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Nineteen, 11, session_id).await?;
+    let third_follow =
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Sixteen, 12, session_id).await?;
     let expected_delta_count = 2;
     let (script, assistant) =
         streamed_script(expected_delta_count, String::from("already [redacted] "));
@@ -2758,17 +3210,22 @@ async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_dur
     .await?;
     let first = follow_streamed_turn_to_completion(first_follow, session_id, turn_id).await?;
     let second = follow_streamed_turn_to_completion(second_follow, session_id, turn_id).await?;
-    let first_durable = read_completed_assistant(runtime.socket(), 12, session_id, turn_id).await?;
+    let third = follow_streamed_turn_to_completion(third_follow, session_id, turn_id).await?;
+    let first_durable = read_completed_assistant(runtime.socket(), 13, session_id, turn_id).await?;
     let second_durable =
-        read_completed_assistant(runtime.socket(), 13, session_id, turn_id).await?;
+        read_completed_assistant(runtime.socket(), 14, session_id, turn_id).await?;
+    let third_durable = read_completed_assistant(runtime.socket(), 15, session_id, turn_id).await?;
     let operations = probe.received_operations();
 
     assert_eq!(first.delta_count, expected_delta_count);
     assert_eq!(first.text, assistant);
     assert_eq!(second.delta_count, expected_delta_count);
     assert_eq!(second.text, assistant);
+    assert_eq!(third.delta_count, expected_delta_count);
+    assert_eq!(third.text, assistant);
     assert_eq!(first_durable, assistant);
     assert_eq!(second_durable, assistant);
+    assert_eq!(third_durable, assistant);
     assert_eq!(operations.len(), 1);
     assert_eq!(operations[0].delivery, DeliveryMode::Streamed);
 
@@ -2852,6 +3309,49 @@ async fn s24_inv032_inv033_streaming_volume_does_not_perturb_version_eleven_foll
 
     assert_eq!(followed.delta_count, 0);
     assert!(followed.text.is_empty());
+    assert_eq!(durable, assistant);
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].delivery, DeliveryMode::Streamed);
+
+    drop(commands);
+    runtime.stop().await
+}
+
+/// S24 / INV-033: a version-seventeen follower inherits version twelve's
+/// ephemeral delta stream. The inspection version adds a read, not a follow
+/// downgrade, so the shipped client keeps live token delivery.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s24_inv033_version_seventeen_followers_inherit_the_streamed_deltas()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut commands = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut commands).await?;
+    let follow =
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Seventeen, 40, session_id).await?;
+    let expected_delta_count = 3;
+    let (script, assistant) =
+        streamed_script(expected_delta_count, String::from("already [redacted] "));
+    let (_, turn_id) = submit_first_input(
+        &mut commands,
+        session_id,
+        String::from("stream to the inspection version"),
+    )
+    .await?;
+
+    let probe = execute_streamed_turn(
+        &mut runtime,
+        ScriptedModel::single(script),
+        session_id,
+        turn_id,
+    )
+    .await?;
+    let followed = follow_streamed_turn_to_completion(follow, session_id, turn_id).await?;
+    let durable = read_completed_assistant(runtime.socket(), 41, session_id, turn_id).await?;
+    let operations = probe.received_operations();
+
+    assert_eq!(followed.delta_count, expected_delta_count);
+    assert_eq!(followed.text, assistant);
     assert_eq!(durable, assistant);
     assert_eq!(operations.len(), 1);
     assert_eq!(operations[0].delivery, DeliveryMode::Streamed);
@@ -3365,11 +3865,12 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
     );
 
     let parked = read_transcript_messages(&mut connection, 4, session_id).await?;
-    assert!(matches!(
+    assert_eq!(
         turn_state_of(&parked, parked_turn_id),
-        TurnState::ActiveAwaitingToolApproval { tool_request_id }
-            if tool_request_id == pending_request_id
-    ));
+        TurnState::ActiveAwaitingToolApproval {
+            tool_request_id: pending_request_id,
+        }
+    );
     assert_eq!(
         tool_use_entry_names(&parked, pending_request_id),
         vec![String::from("confirmed")],
@@ -3423,7 +3924,8 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 command_id: command()?,
                 session_id,
                 content: InputContent::new(String::from("ordinary later work")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
@@ -3705,7 +4207,8 @@ async fn inv012_decide_tool_request_replays_equally_and_refuses_conflicting_reus
                 command_id: submit_command,
                 session_id,
                 content: InputContent::new(String::from("claims a submit identity")),
-                expected_defaults_version: CanonicalU64::new(1),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
             },
         )
         .await?;
@@ -3833,6 +4336,171 @@ async fn s10_decide_tool_request_refuses_an_already_resolved_request() -> Result
     );
 
     drop(connection);
+    runtime.stop().await
+}
+
+async fn submit_queued_input(
+    connection: &mut Connection,
+    request_id: u64,
+    session_id: CanonicalUuid,
+    expected_active_turn_id: CanonicalUuid,
+    acceptance_position: u64,
+    content: &str,
+) -> Result<CanonicalUuid, Box<dyn Error>> {
+    connection
+        .request_version(
+            ProtocolVersion::Thirteen,
+            request_id,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(content.to_owned()),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: Some(InputDelivery::Queue {
+                    expected_active_turn_id,
+                }),
+            },
+        )
+        .await?;
+    accepted_successor_turn(connection, session_id, acceptance_position).await
+}
+
+async fn activate_expected_turn(
+    pool: &PgPool,
+    session: SessionId,
+    expected_turn: CanonicalUuid,
+) -> Result<(), Box<dyn Error>> {
+    let mut service = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    match service.execute(session).await? {
+        StartEligibleTurnOutcome::Activated(activated)
+            if activated.turn().into_uuid() == expected_turn.into_uuid() =>
+        {
+            Ok(())
+        }
+        StartEligibleTurnOutcome::Activated(activated) => Err(io::Error::other(format!(
+            "activated turn {} instead of expected {expected_turn}",
+            activated.turn().into_uuid()
+        ))
+        .into()),
+        StartEligibleTurnOutcome::NoEligibleTurn => {
+            Err(io::Error::other("the expected queued turn was not eligible").into())
+        }
+    }
+}
+
+/// S08: version-thirteen steering against an idle session is a durable-submit
+/// refusal with the exact expected turn, never an internal daemon error.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s08_steering_without_an_active_turn_is_a_typed_rejection() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let expected_active_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(0x1301));
+
+    connection
+        .request_version(
+            ProtocolVersion::Thirteen,
+            2,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(String::from("steer no turn")),
+                expected_defaults_version: None,
+                delivery: Some(InputDelivery::Steer {
+                    expected_active_turn_id,
+                }),
+            },
+        )
+        .await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::NoActiveTurn {
+            session_id,
+            expected_active_turn_id,
+        }
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S09: two after-current-turn inputs accepted through protocol version
+/// thirteen stay queued until the occupied slot terminalizes, then activate in
+/// immutable acceptance order.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s09_queued_inputs_deliver_in_acceptance_order_after_the_active_turn()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, active_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("active request")).await?;
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    activate_turn(&runtime.pool, session).await?;
+
+    let first_queued_turn = submit_queued_input(
+        &mut connection,
+        3,
+        session_id,
+        active_turn_id,
+        2,
+        "first queued request",
+    )
+    .await?;
+    let second_queued_turn = submit_queued_input(
+        &mut connection,
+        4,
+        session_id,
+        active_turn_id,
+        3,
+        "second queued request",
+    )
+    .await?;
+    assert_ne!(first_queued_turn, second_queued_turn);
+
+    let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+    complete_active_text_turn(&runtime.pool, session, targets.clone()).await?;
+    activate_expected_turn(&runtime.pool, session, first_queued_turn).await?;
+    complete_active_text_turn(&runtime.pool, session, targets).await?;
+    activate_expected_turn(&runtime.pool, session, second_queued_turn).await?;
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S03: an acknowledged after-current-turn input remains durable across an
+/// actual process stop, startup scan, and listener restart, then activates as
+/// the exact queued turn after the abandoned active turn is recovered.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s03_queued_input_survives_process_restart_and_startup_scan() -> Result<(), Box<dyn Error>>
+{
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, active_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("active request")).await?;
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    activate_turn(&runtime.pool, session).await?;
+    let queued_turn_id = submit_queued_input(
+        &mut connection,
+        3,
+        session_id,
+        active_turn_id,
+        2,
+        "durable queued request",
+    )
+    .await?;
+    drop(connection);
+
+    assert_eq!(runtime.restart().await?, 1);
+    activate_expected_turn(&runtime.pool, session, queued_turn_id).await?;
+
     runtime.stop().await
 }
 

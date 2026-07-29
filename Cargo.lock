@@ -2698,6 +2698,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-model-runtime-codex-cli"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "signalbox-model-runtime",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "signalbox-model-runtime-openai"
 version = "0.0.0"
 dependencies = [
