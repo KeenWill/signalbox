@@ -6117,7 +6117,6 @@ where
         eligibility_nudge,
         tool_dispatch_gate,
         model_configuration,
-        version.as_u64() < ProtocolVersion::TwentyTwo.as_u64(),
     )
     .await
 }
@@ -6266,7 +6265,6 @@ where
         eligibility_nudge,
         tool_dispatch_gate,
         model_configuration,
-        false,
     )
     .await
 }
@@ -6305,8 +6303,10 @@ where
     let expected_active_turn = TurnId::from_uuid(expected_active_turn_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
     let repository = SubmitInputRepository::new(pool.clone());
-    // Version eight admits every representation the selected-session gate
-    // guards, so no session-history version check runs for this request.
+    // The quick selected-session read is not repeated here: every
+    // representation gate below version twenty-two sits below version eight,
+    // which this verb already requires. The context-summary gate does not, so
+    // `run_submit_input` applies it authoritatively under the session lock.
     let Some(expected_version) =
         SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
     else {
@@ -6358,7 +6358,6 @@ where
         eligibility_nudge,
         tool_dispatch_gate,
         model_configuration,
-        false,
     )
     .await
 }
@@ -6377,7 +6376,6 @@ async fn run_submit_input<Writer>(
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
-    reject_context_summary_history: bool,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -6387,7 +6385,14 @@ where
         ConfiguredSubmitInputTransaction {
             repository,
             model_configuration,
-            reject_context_summary_history,
+            // Every request this helper runs — ordinary input and both
+            // interrupt mutations — durably accepts an input into the
+            // session's history, so none of them may hand a peer a successor
+            // in history it cannot decode. The negotiated version already
+            // decides that, so it is derived here instead of restated per call
+            // site, where a caller could pass — and two callers did pass —
+            // `false`.
+            reject_context_summary_history: version.as_u64() < ProtocolVersion::TwentyTwo.as_u64(),
         },
         eligibility_nudge.clone(),
         tool_dispatch_gate.clone(),

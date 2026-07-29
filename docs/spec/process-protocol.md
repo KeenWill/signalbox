@@ -649,12 +649,16 @@ snapshot request encounters this same gate. Versions six and above preserve
 every earlier shape and admit the new entry. A session system prompt adds no
 transcript entry and therefore raises no read or follow gate: transcripts of
 prompted sessions remain representable in every admitted version. A
-version-one-through-sixteen `read_transcript`, `follow_session`, or
-`submit_input` request targeting history that contains a context summary returns
-`unsupported_version` naming version twenty-two before snapshot construction or
-mutation; version twenty-two admits that entry without hiding any physical
-transcript member. For `submit_input`, the quick read is repeated
-authoritatively under the same session lock as command handling. Equal
+`read_transcript`, `follow_session`, `submit_input`, `reconcile_turn`, or
+`stop_turn` request below version twenty-two targeting history that contains a
+context summary returns `unsupported_version` naming version twenty-two before
+snapshot construction or mutation; version twenty-two admits that entry without
+hiding any physical transcript member. For `submit_input`, the quick read is
+repeated authoritatively under the same session lock as command handling; the
+two interrupt mutations apply that same authoritative check and no quick read,
+since every other representation gate sits below the versions those verbs
+already require. All three run one shared submit execution, which derives the
+check from the negotiated version so no request path can omit it. Equal
 claimed-command replay keeps precedence; an unseen legacy command racing a
 compaction either mutates before that compaction or observes the committed
 summary, returns this gate, and rolls back its tentative claim.

@@ -6301,3 +6301,111 @@ async fn s03_inv012_inv015_late_result_identity_collision_fails_completion_close
     drop(connection);
     runtime.stop().await
 }
+
+/// S07 / INV-012 / INV-029: a peer below version twenty-two cannot durably
+/// accept a successor into compacted history through an interrupt verb.
+///
+/// The interrupt mutations were exempt from the representation gate because
+/// every gate below version twenty-two sits below the versions they already
+/// require; the context summary is the first that does not. Both verbs run the
+/// same shared submit execution, so the gate is derived there from the
+/// negotiated version and neither handler can opt out of it.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s07_inv012_inv029_legacy_interrupts_cannot_write_into_compacted_history()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let (mut connection, session_id) = seed_completed_compaction_session(&mut runtime).await?;
+    let repository = ContextCompactionRepository::new(runtime.pool.clone());
+    let outcome = repository
+        .prepare(direct_compaction_request(
+            session_id,
+            DurableCommandId::from_uuid(Uuid::from_u128(0xfc01)),
+            None,
+            0xfc10,
+        ))
+        .await?;
+    let PrepareContextCompactionOutcome::Prepared(prepared) = outcome else {
+        panic!("the legacy interrupt fixture must prepare its compaction");
+    };
+    repository.authorize(&prepared).await?;
+    repository
+        .complete(
+            &prepared,
+            "legacy interrupt fixture summary",
+            ContextCompactionTokenUsage::unreported(),
+        )
+        .await?;
+    connection
+        .request_version(
+            ProtocolVersion::TwentyTwo,
+            60,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(String::from("work after the summary")),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                delivery: None,
+            },
+        )
+        .await?;
+    let parked_turn_id = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    park_turn_on_ambiguous_model_call(&runtime.pool, session_id).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::TwentyOne,
+            61,
+            ClientRequest::ReconcileTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: parked_turn_id,
+                content: InputContent::new(String::from("legacy reconciliation successor")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    let reconcile_response = response_within(&mut connection).await?;
+    connection
+        .request_version(
+            ProtocolVersion::TwentyOne,
+            62,
+            ClientRequest::StopTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: parked_turn_id,
+                content: InputContent::new(String::from("legacy stop successor")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    let stop_response = response_within(&mut connection).await?;
+
+    assert_eq!(
+        protocol_error_code(reconcile_response.message()),
+        ErrorCode::UnsupportedVersion
+    );
+    assert_eq!(
+        protocol_error_code(stop_response.message()),
+        ErrorCode::UnsupportedVersion
+    );
+    let accepted_inputs: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1
+            AND payload_kind = 'origin_accepted_input'",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(accepted_inputs, 2);
+    let active_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(parked_turn_id.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(active_state, "active");
+
+    drop(connection);
+    runtime.stop().await
+}
