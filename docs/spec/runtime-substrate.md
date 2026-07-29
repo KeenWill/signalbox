@@ -690,38 +690,41 @@ malformed JSON prevents the structural JSON scanner from claiming it.
 For a delta fragmentation of one text stream, including Unicode-escaped markers,
 the concatenated streamed output is never less redacted than the stateless scan
 of the concatenated provider text, except for the fragmentations the defect
-ledger names. That exception is not a covered limit: it is thirty splits of one
-shape — a quoted credential key at a position JSON would not admit, reached
-after an earlier delta released a clean prefix — and it is a defect awaiting a
-fix in the emitted-context path. Every committed corpus line is cut at every
-UTF-8 boundary on the default test path, and the enumeration matches the leaking
-splits against a named ledger exactly: a new one is a regression and a repaired
-one must shrink the ledger, so the set cannot drift in either direction. A shape
-the contract covers that the sink still leaks is carried as `KNOWN-FAILING`,
-which is a defect ledger and never an `ACCEPTED-UNCOVERED` classification — that
-status records only what this contract openly declines to cover. Fail-closed
-suppression is absorbing for the sink's lifetime: usage reports, other fact
-boundaries, and terminal flushes never re-enable provider-controlled bytes.
-Streamed lookbehind's 64-KiB memory bound is independent of its work bound. One
-initial unsafe-suffix classification decides whether a prefix is held; it is not
-charged as reclassification. After a streamed hold or a live dropped-provider
-match-only suffix at length L, reclassification occurs only when its length
-reaches at least twice L, while crossing the cap forces one final round. Each
-streamed post-hold round invokes the two top-level whole-buffer classifiers; a
-dropped suffix round invokes its suffix classifier but receives the same
-conservative two-classifier charge. Before invocation, the sink charges the full
-joined input, including emitted or dropped lookbehind context, at that rate. A
-live dropped suffix is extended in place between those checkpoints, empty
-dropped items are no-ops, and obsolete prefixes are compacted only at a
-checkpoint; suffix-copy work therefore follows the same geometric linear bound
-rather than growing with the square of the provider-event count. A
-per-continuously-unresolved-candidate budget fails closed before a round would
-make cumulative reclassification input exceed 393,216 bytes (six times 64 KiB),
-independent of delta count. Without external context, the geometric held lengths
-presented to each classifier sum to at most 196,608 bytes (three times 64 KiB).
-The 66,000 one-byte continuation shape performs its initial unsafe-suffix
-classification once, then thirteen reclassification rounds: 188,387 aggregate
-held bytes and 376,774 charged rescanned bytes.
+ledger names. That exception is not a covered limit: it is one shape — a quoted
+credential key at a position JSON would not admit, reached after an earlier
+delta released a clean prefix — and it is a defect awaiting a fix in the
+emitted-context path. Its reach grows with the number of delta boundaries rather
+than with the number of shapes, so the ledger pins thirty single-split
+fragmentations exactly and 1,095 two-split ones by count and digest. Every
+committed corpus line is cut at every UTF-8 boundary on the default test path,
+and the enumeration matches the leaking splits against a named ledger exactly: a
+new one is a regression and a repaired one must shrink the ledger, so the set
+cannot drift in either direction. A shape the contract covers that the sink
+still leaks is carried as `KNOWN-FAILING`, which is a defect ledger and never an
+`ACCEPTED-UNCOVERED` classification — that status records only what this
+contract openly declines to cover. Fail-closed suppression is absorbing for the
+sink's lifetime: usage reports, other fact boundaries, and terminal flushes
+never re-enable provider-controlled bytes. Streamed lookbehind's 64-KiB memory
+bound is independent of its work bound. One initial unsafe-suffix classification
+decides whether a prefix is held; it is not charged as reclassification. After a
+streamed hold or a live dropped-provider match-only suffix at length L,
+reclassification occurs only when its length reaches at least twice L, while
+crossing the cap forces one final round. Each streamed post-hold round invokes
+the two top-level whole-buffer classifiers; a dropped suffix round invokes its
+suffix classifier but receives the same conservative two-classifier charge.
+Before invocation, the sink charges the full joined input, including emitted or
+dropped lookbehind context, at that rate. A live dropped suffix is extended in
+place between those checkpoints, empty dropped items are no-ops, and obsolete
+prefixes are compacted only at a checkpoint; suffix-copy work therefore follows
+the same geometric linear bound rather than growing with the square of the
+provider-event count. A per-continuously-unresolved-candidate budget fails
+closed before a round would make cumulative reclassification input exceed
+393,216 bytes (six times 64 KiB), independent of delta count. Without external
+context, the geometric held lengths presented to each classifier sum to at most
+196,608 bytes (three times 64 KiB). The 66,000 one-byte continuation shape
+performs its initial unsafe-suffix classification once, then thirteen
+reclassification rounds: 188,387 aggregate held bytes and 376,774 charged
+rescanned bytes.
 
 This is a text-shape contract, not cross-field semantic correlation. It does not
 associate a credential name in one structural position with a value in another:
