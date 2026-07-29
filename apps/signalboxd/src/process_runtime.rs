@@ -79,7 +79,7 @@ use signalbox_persistence::{
         ProcessModelCallRecoveryPrecondition, ProcessModelSelection, ProcessReadError,
         ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionAncestry,
         ProcessSessionDefaultsRead, ProcessTranscriptEntry, ProcessTranscriptItem,
-        ProcessTranscriptTurn, ProcessTurnState,
+        ProcessTranscriptModelCallUsage, ProcessTranscriptTurn, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
@@ -100,7 +100,8 @@ use signalbox_process_protocol::{
     ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
-    MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState,
+    MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION, MetadataActor, MetadataLastWriter,
+    ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
     ModelSelection as WireModelSelection, PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
     ProtocolVersion, RejectionDetail, RequestId, ReviewDiffSide as WireReviewDiffSide,
     ReviewExternalObjectKind as WireReviewExternalObjectKind,
@@ -5811,11 +5812,15 @@ async fn spool_transcript(
     version: ProtocolVersion,
     request_id: RequestId,
 ) -> Result<Option<TranscriptSpool>, TranscriptSpoolError> {
-    let Some(mut reader) = repository
-        .open_transcript(session)
-        .await
-        .map_err(TranscriptSpoolError::Read)?
-    else {
+    let carries_model_call_usage = version.as_u64() >= MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION;
+    let reader = if carries_model_call_usage {
+        repository.open_transcript(session).await
+    } else {
+        repository
+            .open_transcript_without_model_call_usage(session)
+            .await
+    };
+    let Some(mut reader) = reader.map_err(TranscriptSpoolError::Read)? else {
         return Ok(None);
     };
     let standard_file = tempfile::tempfile()
@@ -5832,6 +5837,8 @@ async fn spool_transcript(
     )
     .await
     .map_err(TranscriptSpoolError::Spool)?;
+    let mut model_calls_ended = false;
+    let mut model_call_count = 0_u64;
     while let Some(item) = reader
         .next_item()
         .await
@@ -5844,7 +5851,32 @@ async fn spool_transcript(
                     .map_err(SnapshotSpoolError::from_connection)
                     .map_err(TranscriptSpoolError::Spool)?;
             }
+            ProcessTranscriptItem::ModelCallUsage(usage) => {
+                if carries_model_call_usage {
+                    write_model_call_usage(
+                        &mut file,
+                        version,
+                        request_id,
+                        model_call_count,
+                        &usage,
+                    )
+                    .await
+                    .map_err(SnapshotSpoolError::from_connection)
+                    .map_err(TranscriptSpoolError::Spool)?;
+                }
+                model_call_count = model_call_count
+                    .checked_add(1)
+                    .ok_or(SnapshotSpoolError::EncodeInvariant)
+                    .map_err(TranscriptSpoolError::Spool)?;
+            }
             ProcessTranscriptItem::Entry(entry) => {
+                if carries_model_call_usage && !model_calls_ended {
+                    write_model_calls_end(&mut file, version, request_id, model_call_count)
+                        .await
+                        .map_err(SnapshotSpoolError::from_connection)
+                        .map_err(TranscriptSpoolError::Spool)?;
+                    model_calls_ended = true;
+                }
                 write_transcript_entry(&mut file, version, request_id, &entry)
                     .await
                     .map_err(SnapshotSpoolError::from_connection)
@@ -5856,6 +5888,12 @@ async fn spool_transcript(
         .summary()
         .ok_or(SnapshotSpoolError::EncodeInvariant)
         .map_err(TranscriptSpoolError::Spool)?;
+    if carries_model_call_usage && !model_calls_ended {
+        write_model_calls_end(&mut file, version, request_id, model_call_count)
+            .await
+            .map_err(SnapshotSpoolError::from_connection)
+            .map_err(TranscriptSpoolError::Spool)?;
+    }
     write_spool_message(
         &mut file,
         version,
@@ -5934,6 +5972,58 @@ where
             turn_id: wire_uuid(turn.turn().into_uuid()),
             acceptance_position: CanonicalU64::new(turn.acceptance_position()),
             state: wire_turn_state(turn.state()),
+        },
+    )
+    .await
+}
+
+async fn write_model_call_usage<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    model_call_index: u64,
+    evidence: &ProcessTranscriptModelCallUsage,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let usage = evidence.usage();
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::TranscriptModelCallUsage {
+            model_call_index: CanonicalU64::new(model_call_index),
+            turn_id: wire_uuid(evidence.turn().into_uuid()),
+            model_call_id: wire_uuid(evidence.call().into_uuid()),
+            usage: ModelCallTokenUsage {
+                input_tokens: usage.input_tokens().map(CanonicalU64::new),
+                output_tokens: usage.output_tokens().map(CanonicalU64::new),
+                cache_creation_input_tokens: usage
+                    .cache_creation_input_tokens()
+                    .map(CanonicalU64::new),
+                cache_read_input_tokens: usage.cache_read_input_tokens().map(CanonicalU64::new),
+            },
+        },
+    )
+    .await
+}
+
+async fn write_model_calls_end<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    model_call_count: u64,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::TranscriptModelCallsEnd {
+            model_call_count: CanonicalU64::new(model_call_count),
         },
     )
     .await
@@ -6944,7 +7034,7 @@ impl ProtocolError {
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1 through 13, 16, and 17"
+                    "the protocol version is unsupported; supported versions: 1 through 13, 16, 17, 18, and 19"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
@@ -7699,7 +7789,7 @@ mod tests {
         assert!(
             ProtocolError::without_detail(ErrorCode::UnsupportedVersion)
                 .message
-                .contains("1 through 13, 16, and 17")
+                .contains("1 through 13, 16, 17, 18, and 19")
         );
     }
 

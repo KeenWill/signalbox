@@ -5019,6 +5019,126 @@ async fn inv014_model_call_credential_reference_is_total() -> Result<(), Box<dyn
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn model_call_usage_transcript_lookup_is_session_indexed() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef
+           FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND indexname = 'model_call_usage_by_session_state_turn_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(index_definition.contains("(session_id, state_kind, turn_id, model_call_id)"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Provider token fields reject fractional SQL input instead of rounding it
+/// into nearby evidence before constraint validation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn model_call_usage_rejects_fractional_evidence_without_rounding()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x6d00, true).await?;
+    let fractional_input_tokens = Decimal::new(5, 1);
+
+    let error = sqlx::query(
+        "UPDATE model_call
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'known_failed',
+                usage_input_tokens = $1
+          WHERE model_call_id = $2",
+    )
+    .bind(fractional_input_tokens)
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("fractional provider usage must not be rounded");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("model_call_usage_input_tokens_u64")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-006: cancellation evidence cannot carry provider usage because neither
+/// cancellation-confirmed nor pre-send cancellation reports token evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv006_cancelled_model_call_usage_is_unreported() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x6d80, true).await?;
+    let reported_output_tokens = Decimal::from(1_u64);
+
+    let error = sqlx::query(
+        "UPDATE model_call
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'cancelled',
+                usage_output_tokens = $1
+          WHERE model_call_id = $2",
+    )
+    .bind(reported_output_tokens)
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("cancelled calls cannot carry provider usage");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("model_call_cancelled_usage_is_unreported")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-006: a call terminalized directly from Prepared cannot carry usage because
+/// no provider send was authorized.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv006_unsent_model_call_usage_is_unreported() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x6e00, false).await?;
+    let reported_input_tokens = Decimal::from(1_u64);
+
+    let error = sqlx::query(
+        "UPDATE model_call
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'known_failed',
+                usage_input_tokens = $1
+          WHERE model_call_id = $2",
+    )
+    .bind(reported_input_tokens)
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("an unsent call cannot carry provider usage");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("model_call_unsent_usage_unreported")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-014: a reference pinned on a new model call cannot be replaced or
 /// cleared.
 #[tokio::test(flavor = "multi_thread")]

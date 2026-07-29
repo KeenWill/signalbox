@@ -1874,6 +1874,13 @@ max_output_tokens = 64
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_completes_an_offline_scripted_conversation() -> Result<(), Box<dyn Error>>
 {
+    const FIRST_ASSISTANT_REPLY: &str = "offline assistant reply";
+    const SECOND_ASSISTANT_REPLY: &str = "offline assistant reply without usage";
+    const REPORTED_INPUT_TOKENS: u64 = 120;
+    const REPORTED_OUTPUT_TOKENS: u64 = 7;
+    const REPORTED_CACHE_READ_INPUT_TOKENS: u64 = 80;
+    const EXPECTED_TERMINAL_CALLS: usize = 2;
+
     let (container, pool) = postgres().await?;
     let socket_directory = SocketDirectory::create()?;
     let selection_uuid = Uuid::from_u128(0x9101);
@@ -1903,16 +1910,29 @@ max_output_tokens = 64
         )
         .expect("the fixture runtime definition is valid")])
         .expect("the fixture runtime target is unique");
-    let runtime = ScriptedModel::single(Script::delivering(TerminalEvidence::Completed(
-        CompletionEvidence {
+    let runtime = ScriptedModel::following([
+        Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
             reported_model: Some(ProviderReportedModel::new("scripted-terminal")),
             finish: CompletionFinish::EndTurn,
-            content: vec![AssistantPart::Text(String::from("offline assistant reply"))],
+            content: vec![AssistantPart::Text(String::from(FIRST_ASSISTANT_REPLY))],
+            usage: TokenUsage {
+                input_tokens: Some(REPORTED_INPUT_TOKENS),
+                output_tokens: Some(REPORTED_OUTPUT_TOKENS),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(REPORTED_CACHE_READ_INPUT_TOKENS),
+            },
+        })),
+        Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("scripted-terminal")),
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::Text(String::from(SECOND_ASSISTANT_REPLY))],
             usage: TokenUsage::unreported(),
-        },
-    )));
+        })),
+    ]);
     let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
 
     let sweep = PostgresEligibilitySweep::new(pool.clone());
@@ -1994,10 +2014,33 @@ max_output_tokens = 64
         "send failed: {}",
         String::from_utf8_lossy(&send.stderr)
     );
-    assert_eq!(String::from_utf8(send.stdout)?, "offline assistant reply\n");
+    assert_eq!(
+        String::from_utf8(send.stdout)?,
+        format!("{FIRST_ASSISTANT_REPLY}\n")
+    );
     let recovery = String::from_utf8(send.stderr)?;
     assert!(recovery.contains("command_id="));
     assert!(recovery.contains("defaults_version=1"));
+    assert!(!fatal_execution.is_triggered());
+
+    let second_send = timeout(
+        Duration::from_secs(20),
+        run_client(
+            socket_directory.socket().to_owned(),
+            vec![String::from("send"), session_id.clone()],
+            Some(String::from("offline follow-up request")),
+        ),
+    )
+    .await??;
+    assert!(
+        second_send.status.success(),
+        "second send failed: {}",
+        String::from_utf8_lossy(&second_send.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(second_send.stdout)?,
+        format!("{SECOND_ASSISTANT_REPLY}\n")
+    );
     assert!(!fatal_execution.is_triggered());
 
     let transcript = run_client(
@@ -2009,8 +2052,37 @@ max_output_tokens = 64
     assert!(transcript.status.success());
     let transcript = String::from_utf8(transcript.stdout)?;
     assert!(transcript.contains("offline user request"));
-    assert!(transcript.contains("offline assistant reply"));
+    assert!(transcript.contains(FIRST_ASSISTANT_REPLY));
+    assert!(transcript.contains(SECOND_ASSISTANT_REPLY));
     assert!(transcript.contains("turn_completed"));
+    assert_eq!(
+        transcript.matches("usage turn=").count(),
+        EXPECTED_TERMINAL_CALLS
+    );
+    assert!(transcript.contains(&format!(
+        "terminal_calls=1 input_tokens={REPORTED_INPUT_TOKENS} \
+         input_tokens_reported_calls=1/1 output_tokens={REPORTED_OUTPUT_TOKENS} \
+         output_tokens_reported_calls=1/1 cache_creation_input_tokens=unreported \
+         cache_creation_input_tokens_reported_calls=0/1 \
+         cache_read_input_tokens={REPORTED_CACHE_READ_INPUT_TOKENS} \
+         cache_read_input_tokens_reported_calls=1/1"
+    )));
+    assert!(transcript.contains(
+        "terminal_calls=1 input_tokens=unreported input_tokens_reported_calls=0/1 \
+         output_tokens=unreported output_tokens_reported_calls=0/1 \
+         cache_creation_input_tokens=unreported \
+         cache_creation_input_tokens_reported_calls=0/1 \
+         cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/1"
+    ));
+    assert!(transcript.contains(&format!(
+        "usage_total scope=session terminal_calls={EXPECTED_TERMINAL_CALLS} \
+         input_tokens={REPORTED_INPUT_TOKENS} input_tokens_reported_calls=1/2 \
+         output_tokens={REPORTED_OUTPUT_TOKENS} output_tokens_reported_calls=1/2 \
+         cache_creation_input_tokens=unreported \
+         cache_creation_input_tokens_reported_calls=0/2 \
+         cache_read_input_tokens={REPORTED_CACHE_READ_INPUT_TOKENS} \
+         cache_read_input_tokens_reported_calls=1/2"
+    )));
 
     shutdown.send(true)?;
     assert_eq!(

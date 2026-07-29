@@ -82,6 +82,9 @@ pub(crate) enum Command {
     Follow {
         session_id: CanonicalUuid,
     },
+    Chat {
+        session_id: CanonicalUuid,
+    },
     Import {
         format: ConversationImportFormat,
         source: ImportSourceArgument,
@@ -229,6 +232,8 @@ enum CliCommand {
     Transcript(SessionArguments),
     /// Print a snapshot and follow durable session updates.
     Follow(SessionArguments),
+    /// Live in one session with streamed replies and in-loop control commands.
+    Chat(SessionArguments),
     /// Import Claude Code sessions or Codex rollout JSONL files.
     Import(ImportArguments),
     /// Reconcile a turn parked on an ambiguous model call and continue with
@@ -981,6 +986,9 @@ pub(crate) fn parse(
             session_id: arguments.session_id,
         },
         CliCommand::Follow(arguments) => Command::Follow {
+            session_id: arguments.session_id,
+        },
+        CliCommand::Chat(arguments) => Command::Chat {
             session_id: arguments.session_id,
         },
         CliCommand::Import(arguments) => Command::Import {
@@ -1948,6 +1956,19 @@ mod tests {
                 ..
             })) if session_id.to_string() == session && turn_id.to_string() == turn
         ));
+    }
+
+    #[test]
+    fn chat_binds_one_canonical_session() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let Ok(ParseOutcome::Run(arguments)) = parse(["chat", session].map(Into::into)) else {
+            panic!("the valid chat invocation runs the client");
+        };
+        let Command::Chat { session_id } = arguments.command else {
+            panic!("the chat invocation selects the chat command");
+        };
+
+        assert_eq!(session_id.to_string(), session);
     }
 
     #[test]
