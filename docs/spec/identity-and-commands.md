@@ -20,7 +20,9 @@ PR #265 (`agent/tool-batch-tier0`). The failed tool-attempt telemetry fields
 were verified through PR #285 (`agent/dev-instance-code-host-credential`). The
 current command/telemetry identity-generation, command-family, and
 ambiguity-ownership inventory was verified through PR #288
-(`agent/audit-fix-docs-coherence`).
+(`agent/audit-fix-docs-coherence`). The version-seventeen runner recovery
+command families are the foundation proposal at the bottom of their implementing
+stack and become verified only with those child pull requests.
 
 ## Identity model
 
@@ -175,25 +177,43 @@ All claimed command identifiers live in one owner-global, append-only
 `durable_command` registry (migration `202607180001` and successors): primary
 key `command_id`, a closed `command_kind` discriminator (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
-`replace_session_metadata`, `submit_input`, `decide_tool_request`), a
-kind-scoped `storage_version`, and `claimed_at` (`transaction_timestamp()`),
-which is non-semantic operational metadata. No command kind, session, or client
-has a separate command-ID namespace.
+`replace_session_metadata`, `submit_input`, `decide_tool_request`,
+`replace_lost_runner`, `abandon_lost_runner`), a kind-scoped `storage_version`,
+and `claimed_at` (`transaction_timestamp()`), which is non-semantic operational
+metadata. No command kind, session, or client has a separate command-ID
+namespace.
 
 Each admitted kind has one purpose-specific typed record family
 (`create_session_command`, `create_session_from_imported_frontier_command`,
 `replace_session_defaults_command`, `replace_session_metadata_command`,
-`submit_input_command`, `decide_tool_request_command`) keyed one-to-one by
-`command_id`, storing every caller-supplied semantic field, the terminal
-`applied`/`rejected` result discriminator, and the typed result fields, all
-under `CHECK` constraints and foreign keys. Kind and version agreement between
-the registry row and its typed record is enforced by a composite foreign key,
-and a deferred constraint trigger (`durable_command_requires_typed_record`,
-executing function `require_durable_command_typed_record`) requires exactly one
-typed record per claim at every transaction boundary. Why: typed relational
-records keep each command's comparison payload and result reviewable and
-constraint-checked instead of delegating meaning to a serializer; there is no
-universal JSONB or byte-blob payload anywhere.
+`submit_input_command`, `decide_tool_request_command`,
+`replace_lost_runner_command`, `abandon_lost_runner_command`) keyed one-to-one
+by `command_id`, storing every caller-supplied semantic field under `CHECK`
+constraints and foreign keys. Every family except replacement also stores its
+terminal `applied`/`rejected` discriminator and typed result fields in that row.
+Runner replacement instead has one immutable request row plus at most one
+append-only `replace_lost_runner_result`: the request row satisfies typed-claim
+completeness while provisioning crosses the runner boundary, and no success or
+rejection response exists until the result row commits. Kind and version
+agreement between the registry row and its typed record is enforced by a
+composite foreign key, and a deferred constraint trigger
+(`durable_command_requires_typed_record`, executing function
+`require_durable_command_typed_record`) requires exactly one typed record per
+claim at every transaction boundary. Why: typed relational records keep each
+command's comparison payload and result reviewable and constraint-checked
+instead of delegating meaning to a serializer; there is no universal JSONB or
+byte-blob payload anywhere.
+
+`replace_lost_runner` is the sole version-one multi-transaction command. Its
+first transaction claims the registry identity, stores the complete immutable
+request, and stores a single-use provisioning authorization. The handler waits
+without holding a database transaction while the pending runner returns or
+replays its workspace receipt; the terminal transaction appends exactly one
+result and atomically installs the replacement or its typed rejection. Equal
+replay during provisioning joins the same durable operation and can neither
+start another workspace nor acquire another meaning. Startup resumes an
+unterminated request before client admission. `abandon_lost_runner` remains one
+ordinary atomic claim-and-terminal-result transaction.
 
 For `SubmitInput`, each terminal command result must correlate with exactly its
 committed domain effects. Equal replay returns the recorded result only after
