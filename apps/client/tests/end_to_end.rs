@@ -78,12 +78,16 @@ const OVERSIZED_IMPORT_BYTES: u64 = 8 * 1024 * 1024;
 const IMPORT_MODEL_CONFIGURATION: &str = r#"
 version = 1
 
+[compaction]
+prompt = "Summarize the prior conversation faithfully for continuation."
+
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000001"
 target_id = "00000000-0000-0000-0000-000000000002"
 provider = "anthropic"
 provider_model = "import-fixture"
 max_output_tokens = 64
+context_window_tokens = 200000
 
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000003"
@@ -91,6 +95,7 @@ target_id = "00000000-0000-0000-0000-000000000004"
 provider = "anthropic"
 provider_model = "import-fixture-next"
 max_output_tokens = 64
+context_window_tokens = 200000
 "#;
 
 async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
@@ -1677,12 +1682,16 @@ async fn s28_inv038_inv014_terminal_client_completes_an_offline_imported_continu
         r#"
 version = 1
 
+[compaction]
+prompt = "Summarize the prior conversation faithfully for continuation."
+
 [[models]]
 selection_id = "{selection_uuid}"
 target_id = "{target_uuid}"
 provider = "anthropic"
 provider_model = "scripted-imported-continuation"
 max_output_tokens = 64
+context_window_tokens = 200000
 "#
     ))?;
     let targets =
@@ -1693,6 +1702,7 @@ max_output_tokens = 64
             target,
             String::from("scripted-imported-continuation"),
             64,
+            200_000,
         )
         .expect("the fixture runtime definition is valid")])
         .expect("the fixture runtime target is unique");
@@ -1891,12 +1901,16 @@ async fn terminal_client_completes_an_offline_scripted_conversation() -> Result<
         r#"
 version = 1
 
+[compaction]
+prompt = "Summarize the prior conversation faithfully for continuation."
+
 [[models]]
 selection_id = "{selection_uuid}"
 target_id = "{target_uuid}"
 provider = "anthropic"
 provider_model = "scripted-terminal"
 max_output_tokens = 64
+context_window_tokens = 200000
 "#
     ))?;
     let targets =
@@ -1907,6 +1921,7 @@ max_output_tokens = 64
             target,
             String::from("scripted-terminal"),
             64,
+            200_000,
         )
         .expect("the fixture runtime definition is valid")])
         .expect("the fixture runtime target is unique");
@@ -2113,12 +2128,16 @@ async fn terminal_client_drives_review_target_to_finding() -> Result<(), Box<dyn
         r#"
 version = 1
 
+[compaction]
+prompt = "Summarize the prior conversation faithfully for continuation."
+
 [[models]]
 selection_id = "{selection_uuid}"
 target_id = "{model_target_uuid}"
 provider = "anthropic"
 provider_model = "scripted-review"
 max_output_tokens = 64
+context_window_tokens = 200000
 "#
     ))?;
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
@@ -2131,6 +2150,7 @@ max_output_tokens = 64
             model_target,
             String::from("scripted-review"),
             64,
+            200_000,
         )
         .expect("the fixture runtime definition is valid")])
         .expect("the fixture runtime target is unique");
@@ -2586,12 +2606,16 @@ async fn terminal_client_approval_from_a_second_client_completes_a_waiting_send(
         r#"
 version = 1
 
+[compaction]
+prompt = "Summarize the prior conversation faithfully for continuation."
+
 [[models]]
 selection_id = "{selection_uuid}"
 target_id = "{target_uuid}"
 provider = "anthropic"
 provider_model = "scripted-approval"
 max_output_tokens = 64
+context_window_tokens = 200000
 "#
     ))?;
     let targets =
@@ -2602,6 +2626,7 @@ max_output_tokens = 64
             target,
             String::from("scripted-approval"),
             64,
+            200_000,
         )
         .expect("the fixture runtime definition is valid")])
         .expect("the fixture runtime target is unique");

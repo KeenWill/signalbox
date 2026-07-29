@@ -13,8 +13,11 @@ verified through PR #296 (`agent/continuation-reconstitution-siblings`); the
 version-thirteen delivery surface, queued restart behavior, and protocol-driven
 continuation steering were verified through PR #302 (`agent/mid-turn-steering`);
 the template-specific home requirement and template-catalog startup order were
-verified through PR #311 (`agent/session-templates-spec`). Code homes:
-`crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
+verified through PR #311 (`agent/session-templates-spec`); exact start-frontier
+reconstitution across a validated compaction boundary was verified through this
+PR (`agent/context-compaction-core`); and the corresponding persistent
+final-state gate was verified against `agent/context-compaction-protocol`. Code
+homes: `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,`
@@ -30,12 +33,14 @@ startup scan and removal of the superseded steering blocker were verified
 through PR #291 (`agent/turn-control-verbs`).
 [docs/invariants.md](../invariants.md) remains the law catalog; INV tags below
 reference its rows without restating them. Designed lifecycle behavior that has
-no committed code path appears only under [Open edges](#open-edges). Sibling
-pages named in scope deferrals below (identity-and-commands,
-sessions-and-transcript, persistence-protocol, model-call-execution,
-configuration-and-credentials, runtime-substrate) are companion pages of this
-spec set; each deferral names the owning page rather than restating its
-material.
+no committed code path appears only under [Open edges](#open-edges). The
+runner-loss recovery and runner-socket startup paragraphs are the foundation
+proposal at the bottom of their implementing stack and become verified only with
+those child pull requests. Sibling pages named in scope deferrals below
+(identity-and-commands, sessions-and-transcript, persistence-protocol,
+model-call-execution, configuration-and-credentials, runtime-substrate) are
+companion pages of this spec set; each deferral names the owning page rather
+than restating its material.
 
 ## Turns, states, and the single active slot
 
@@ -52,20 +57,24 @@ terminal disposition kind closed to `failed`, `completed`, `refused`,
 `202607220005`). The domain `TurnDisposition` algebra carries all five accepted
 variants — `Completed`, `Refused`, `Failed`, `Cancelled { cause }`,
 `ReconciliationRequired { marker }` — but `Cancelled` is constructible only from
-an `AppliedInterruptProof` and `ReconciliationRequired` only from a sealed
-`ReconciliationMarker`. Committed transitions produce every variant: interrupted
-physical ambiguity produces proof-bearing `ReconciliationRequired`, while
-confirmed interrupted cancellation produces proof-bearing `Cancelled`.
+an `AppliedInterruptProof`. `ReconciliationRequired` remains constructible only
+from a sealed `ReconciliationMarker`. Committed transitions produce every
+variant: interrupted physical ambiguity produces proof-bearing
+`ReconciliationRequired`, and confirmed interrupted cancellation produces
+proof-bearing `Cancelled`. Runner abandonment creates no additional turn-ending
+authority.
 
 The domain `ActiveTurnPhase` algebra is `Running { current_attempt }`,
-`AwaitingApproval { request }`, and
-`AwaitingRecoveryDecision { ambiguous_operations }`. Every active phase retains
-the session's progressing slot (`retains_progressing_slot()` is unconditionally
-true; INV-009). Storage and reconstitution admit `running`,
-`awaiting_tool_approval`, `awaiting_model_call_recovery`, and
-`awaiting_tool_recovery`; the domain `AwaitingApproval` phase maps to the exact
-stored `awaiting_tool_approval` discriminator. `AwaitingRecoveryDecision` is
-reconstituted from either an `ambiguous` terminal model call or an ambiguous
+`AwaitingApproval { request }`,
+`AwaitingRecoveryDecision { ambiguous_operations }`, and
+`AwaitingRunnerRecovery { runner, placement_revision, optional_tool_attempt }`.
+Every active phase retains the session's progressing slot
+(`retains_progressing_slot()` is unconditionally true; INV-009). Storage and
+reconstitution admit `running`, `awaiting_tool_approval`,
+`awaiting_model_call_recovery`, `awaiting_tool_recovery`, and
+`awaiting_runner_recovery`; the domain `AwaitingApproval` phase maps to the
+exact stored `awaiting_tool_approval` discriminator. `AwaitingRecoveryDecision`
+is reconstituted from either an `ambiguous` terminal model call or an ambiguous
 external-effect tool attempt correlated with its exact ended attempt
 (`ambiguous` from a live loss, `lost` from startup recovery). `StopRequested` is
 a stored current-attempt state inside the `running` active phase and
@@ -291,10 +300,26 @@ through the ports owned by [tool-loop](tool-loop.md).
 After configuration and database connection, signalboxd acquires the dedicated
 single-daemon advisory guard specified by
 [process-protocol](process-protocol.md), then orders startup strictly: embedded
-migrations, the startup scan to completion, process-socket bind, and only then
-request admission, outbox dispatch, and scheduling. Why: any lifecycle writer or
-client read before the scan could observe or alter a live-looking prior-process
-attempt (INV-034).
+migrations; runner-socket bind in recovery-only mode; retained runner inventory,
+evidence, and nonterminal replacement-command reconciliation; the generic
+startup scan to completion; process-socket bind; and only then ordinary runner
+enrollment, client request admission, outbox dispatch, and scheduling. Why: any
+lifecycle writer or client read before recovery could observe or alter a
+live-looking prior-process attempt, while a generic scan before runner evidence
+admission could terminalize the authority that evidence resolves (INV-034).
+
+The runner recovery phase admits only `resume` for a recorded active or pending
+identity and frames needed to reconcile its bounded inventory; it creates no new
+enrollment or lease. For each active attempt owned by a durable claimed runner
+lease, the phase ends only after retained terminal evidence commits, the local
+journal proves execution had not started, or the exact connection passes the
+fifteen-second loss bound and effect-class loss commits. An otherwise complete
+inventory that omits the claimed lease is itself loss evidence, never permission
+to repeat. A durable nonterminal `replace_lost_runner` command resumes its exact
+provisioning authorization and receipt in the same phase. The generic startup
+scan skips runner-owned attempts until this prior phase has resolved them, then
+classifies only remaining daemon-owned tenure. With no retained runner work the
+phase completes immediately.
 
 `StartupScanService` reads the finite inventory of sessions with an active turn
 (deterministic order), then runs one independent transaction per session under
@@ -451,6 +476,52 @@ The occupied-slot delivery outcomes implemented here are:
   ([tool-loop](tool-loop.md#approval-policy-and-decision-sources) owns the
   deny-first caller protocol).
 
+## Runner-loss session recovery
+
+The heartbeat-loss transaction durably advances the exact connection loss epoch
+and fences new offers before bounded per-session propagation. Each restartable
+session transaction marks a pinned placement `RunnerLost` or an unpinned
+placement whose exact-identity selector names the lost runner
+`RunnerLostBeforePin { runner }`, preserves exact tool-attempt ambiguity, and
+appends one durable runner state event. An active turn already at a runner
+boundary moves to `AwaitingRunnerRecovery`. A daemon-local model operation that
+was physically authorized before loss retains its ordinary completion or
+ambiguity law; its observation may complete the turn, but any returned
+runner-only proposal parks before authorization because the frozen runner locus
+is now lost. No provider call is repeated merely to project runner loss. A
+queued turn remains queued and cannot activate while its placement is lost. An
+unpinned capability-class request names no selected runner and is unaffected
+until a live registration can satisfy it. A stale connection epoch cannot write
+after the first commit. Locking, page bounds, and crash recovery are owned by
+[persistence-protocol](persistence-protocol.md).
+
+Only two owner commands consume that state. `ReplaceLostRunner` requires the
+expected current placement revision and either a different live exact runner or
+the one pending replacement enrollment it atomically activates. For a pinned
+loss, its transaction installs the checked successor placement and grant
+lineage, provisions a new revisioned workspace, appends the reference-only
+`RunnerPlacementChanged` semantic entry, extends the next context frontier, and
+returns the turn to the phase justified by its retained work. Safe retry proof
+may be consumed only inside this command. For `RunnerLostBeforePin`, replacement
+installs the new exact selector and returns the placement to `Unpinned` at the
+successor revision; it creates no semantic boundary, workspace, grant, or lease.
+Workspace provisioning and the first pin remain part of the eventual initial
+dispatch. `AbandonLostRunner` requires the same exact lost revision and no
+active turn, then installs terminal `RunnerAbandoned` placement state. If a turn
+is active it records `ActiveTurnRequiresExistingControl`; the owner first uses
+the existing `stop_turn`, approval-decision, or reconciliation flow until the
+slot is empty, so abandonment never mints cancellation authority. With no active
+turn, including an idle session with queued turns, no turn or frontier is
+fabricated; queued work remains queued and later runs with the daemon-only
+executable-tool snapshot because the terminal placement can issue no runner
+lease. No case turns ambiguous effect evidence into known failure.
+
+Equal command replay returns the recorded receipt. Another revision, a live or
+ordinary unpinned placement, the same runner, a stale connection, or an already
+replaced or abandoned session fails closed. These commands are administrative
+recovery, not input delivery: they neither widen `Interrupt` nor create a
+standalone cancellation path (INV-026, INV-029, INV-037, INV-044).
+
 ## Context frontier snapshots
 
 A context frontier is `{ owning_session, snapshot: ContextFrontierId }`;
@@ -479,15 +550,43 @@ the header-plus-prefix-delta representation; a deferred constraint trigger
 resolved membership — exact declared count, positions `1..count` — at commit.
 Reconstitution rejects any stored snapshot whose resolved membership disagrees
 with the complete entry set — one identifier can never resolve differently.
-In-memory append derivation structurally shares the immutable ordered prefix,
-membership index, and lineage index; complete iteration and comparison retain
-the same values and ordering. Imported ancestry resolves only through the
-checked session-creation producer; its separate one-to-one `ImportedSessionSeed`
-must name the exact stored frontier identity whose membership matches the
-selected imported prefix. Substituting an equal-content reminted identity for
-that seed fails reconstitution. `SingleSource` ancestry resolution remains
-unimplemented. `TranscriptFrontier` itself is
-[sessions-and-transcript](sessions-and-transcript.md) scope.
+Before validating any stored turn start, the complete scheduling scan
+reconstructs every dedicated compaction call, summary entry, source and result
+snapshot, exact summarized range, and predecessor link. Every compaction record
+requires its terminal `Completed` call and an exact source-plus-summary result;
+the predecessor chain must be single-rooted, linear, and prefix-preserving. A
+standalone `Completed` call or any standalone summary fails closed. A standalone
+`Prepared` or `InFlight` call blocks ordinary activation until the finite
+startup scan recovers its exactly correlated pending command: Prepared
+terminalizes `KnownFailed`, InFlight terminalizes `Ambiguous`, the command
+becomes failed, and neither branch creates a summary or result frontier. A
+terminal non-completed call remains historical recovery evidence without a
+summary or result. Live authorization and terminalization serialize on the
+session row and exactly replay an already-landed transition after an ambiguous
+commit. The same lock serializes a pre-version-seventeen `SubmitInput` mutation:
+a summary committed ahead of that waiter makes the authoritative transaction
+return the version-seventeen requirement and roll back its tentative command
+claim. Unreferenced snapshots and compaction records fail closed.
+
+The exact historical start law remains closed. Its prefix is either the
+immediate predecessor's terminal snapshot (or the imported seed for the first
+native turn), or the validated chain tip's result when the start follows that
+compaction. A historical start committed before the chain tip remains admissible
+only when its entire stored frontier is an exact semantic prefix of the tip's
+source; this preserves old starts without authorizing a later turn to omit the
+summary. In either shape, the only remaining suffix is the already-required
+model-identity boundary, when applicable, followed by the turn's exact origin. A
+summary entry is never accepted as an arbitrary extra suffix. New eligibility
+uses the unique latest result when it preserves the applicable seed or
+predecessor terminal prefix. In-memory append derivation structurally shares the
+immutable ordered prefix, membership index, and lineage index; complete
+iteration and comparison retain the same values and ordering. Imported ancestry
+resolves only through the checked session-creation producer; its separate
+one-to-one `ImportedSessionSeed` must name the exact stored frontier identity
+whose membership matches the selected imported prefix. Substituting an
+equal-content reminted identity for that seed fails reconstitution.
+`SingleSource` ancestry resolution remains unimplemented. `TranscriptFrontier`
+itself is [sessions-and-transcript](sessions-and-transcript.md) scope.
 
 ## Evidence-bearing reconstitution
 
@@ -595,25 +694,30 @@ rather than repairs, and no effect is authorized from a failed reconstruction
 
 ## Daemon runtime: startup order and shutdown
 
-signalboxd is the composition root. It reads the six required values
+signalboxd is the composition root. It reads the seven required values
 `DATABASE_URL`, `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML naming
 provider targets, selections, and aliases), `SIGNALBOX_TEMPLATE_CONFIG_FILE`,
-`ANTHROPIC_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, and `SIGNALBOX_SOCKET_PATH` from
-the process environment, plus `HOME` as specified by
+`ANTHROPIC_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, `SIGNALBOX_SOCKET_PATH`, and
+`SIGNALBOX_RUNNER_SOCKET_PATH` from the process environment, plus `HOME` as
+specified by
 [configuration and credentials](configuration-and-credentials.md#process-configuration).
 The configuration page owns these provisional channels. It validates the model
 catalog, then resolves the template catalog and all of its prompt files against
 that model catalog, before connecting. It then acquires the single-daemon guard,
 fences the prior pool incarnation, migrates and resolves the one-time imported
 display-title backfill
-([conversation-import](conversation-import.md#derived-display-titles)),
-completes recovery scan, binds the process socket, then concurrently admits
-protocol requests, dispatches the outbox, and schedules eligible work. On a
-database without the fence migration, the guarded first migration creates the
-fence row before the daemon initializes its first fenced pool. No request,
-dispatch cursor advance, or scheduler pass occurs before recovery completes. Any
-phase failure is a failed startup with a classified, key-bearing log line and a
-failure exit code.
+([conversation-import](conversation-import.md#derived-display-titles)), binds
+the runner socket in recovery-only mode, reconciles retained runner work,
+completes the generic recovery scan, binds the process socket, enables ordinary
+runner admission, then concurrently admits protocol requests, dispatches the
+outbox, and schedules eligible work. On a database without the fence migration,
+the guarded first migration creates the fence row before the daemon initializes
+its first fenced pool. No request, dispatch cursor advance, or scheduler pass
+occurs before recovery completes. Any phase failure is a failed startup with a
+classified, key-bearing log line and a failure exit code. The runner-socket
+bind, reconciliation, and admission steps are the foundation proposal at the
+bottom of their implementing stack and become verified only with those child
+pull requests.
 
 The dedicated guard connection is checked once per second while the runtime is
 active. Losing that session is a fatal fencing event: admission, dispatch, and
@@ -645,8 +749,8 @@ clones over the shared pool; no shared locked service instance exists.
 
 - Direct fatal terminalization has sealed domain derivation values
   (`fatal_mismatch` module) but no aggregate transition or commit path.
-- Dispatch fencing covers model calls and tool attempts; runner transport and
-  remote result envelopes remain deferred.
+- Dispatch fencing covers model calls, daemon tools, and local runner leases;
+  remote runner transport and result envelopes remain deferred.
 - The eligible terminal-failure path (queued turn fixes its start and fails
   without an attempt for a structurally unexecutable configuration) is
   unimplemented; activation is the only eligibility outcome.

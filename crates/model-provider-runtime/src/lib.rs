@@ -8,11 +8,19 @@
 //! docs/spec/model-call-execution.md. It owns no retry, fallback, lifecycle,
 //! or durable state.
 
+mod context_compaction;
+
+pub use context_compaction::{
+    ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
+    ContextCompactionModelResult, RuntimeContextCompactionModel,
+};
+
 use std::{collections::HashMap, error::Error, fmt, future::Future, sync::Arc};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallProvider,
-    ModelConversationMessage, ModelToolResultContent, OperatorFailureClass, PreparedModelOperation,
+    ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallInputTokenCount,
+    ModelCallInputTokenCounter, ModelCallProvider, ModelConversationMessage,
+    ModelToolResultContent, OperatorFailureClass, PreparedModelOperation,
 };
 use signalbox_domain::{
     AssistantResponsePart, AssistantText, AuthorizedModelCall, ContextFrontierId,
@@ -38,6 +46,7 @@ use signalbox_model_runtime::{
 const DIAGNOSTIC_MODEL_IDENTITY_LIMIT: usize = 128;
 
 const MODEL_IDENTITY_CHANGE_MESSAGE: &str = "Signalbox session event: your model identity is now";
+const CONTEXT_SUMMARY_MESSAGE: &str = "Signalbox prior-conversation summary:";
 
 /// One already-redacted provider text fragment for ephemeral presentation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -115,6 +124,7 @@ pub struct RuntimeModelDefinition {
     target: ResolvedProviderTarget,
     provider_model: String,
     max_output_tokens: u32,
+    context_window_tokens: u32,
 }
 
 impl RuntimeModelDefinition {
@@ -123,6 +133,7 @@ impl RuntimeModelDefinition {
         target: ResolvedProviderTarget,
         provider_model: String,
         max_output_tokens: u32,
+        context_window_tokens: u32,
     ) -> Result<Self, RuntimeModelDefinitionError> {
         if provider_model.is_empty() || provider_model.trim() != provider_model {
             return Err(RuntimeModelDefinitionError::InvalidProviderModel);
@@ -130,10 +141,17 @@ impl RuntimeModelDefinition {
         if max_output_tokens == 0 {
             return Err(RuntimeModelDefinitionError::InvalidOutputLimit);
         }
+        if context_window_tokens == 0 {
+            return Err(RuntimeModelDefinitionError::InvalidContextWindow);
+        }
+        if max_output_tokens > context_window_tokens {
+            return Err(RuntimeModelDefinitionError::OutputLimitExceedsContextWindow);
+        }
         Ok(Self {
             target,
             provider_model,
             max_output_tokens,
+            context_window_tokens,
         })
     }
 
@@ -151,6 +169,11 @@ impl RuntimeModelDefinition {
     pub const fn max_output_tokens(&self) -> u32 {
         self.max_output_tokens
     }
+
+    /// Returns the operator-declared input context-window limit.
+    pub const fn context_window_tokens(&self) -> u32 {
+        self.context_window_tokens
+    }
 }
 
 /// A runtime delivery definition cannot construct a request-safe mapping.
@@ -160,6 +183,10 @@ pub enum RuntimeModelDefinitionError {
     InvalidProviderModel,
     /// A provider request requires a positive output-token ceiling.
     InvalidOutputLimit,
+    /// Automatic guarding requires a positive declared context window.
+    InvalidContextWindow,
+    /// The reserved output alone cannot exceed the declared context window.
+    OutputLimitExceedsContextWindow,
 }
 
 impl fmt::Display for RuntimeModelDefinitionError {
@@ -167,6 +194,10 @@ impl fmt::Display for RuntimeModelDefinitionError {
         formatter.write_str(match self {
             Self::InvalidProviderModel => "provider model spelling is empty or padded",
             Self::InvalidOutputLimit => "provider output-token limit is zero",
+            Self::InvalidContextWindow => "provider context-window limit is zero",
+            Self::OutputLimitExceedsContextWindow => {
+                "provider output-token limit exceeds its context window"
+            }
         })
     }
 }
@@ -763,6 +794,110 @@ impl<R> fmt::Debug for RuntimeModelCallProvider<R> {
     }
 }
 
+/// Sanitized exact-count adapter failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeInputTokenCountError {
+    /// The durable target has no runtime mapping.
+    UnconfiguredTarget,
+    /// A checked application schema could not form runtime JSON.
+    InvalidToolSchema,
+    /// The runtime returned a different caller-owned correlation.
+    CorrelationMismatch,
+    /// The provider-native count request did not return a validated count.
+    CountFailed,
+}
+
+impl fmt::Display for RuntimeInputTokenCountError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("exact model input token counting failed")
+    }
+}
+
+impl Error for RuntimeInputTokenCountError {}
+
+impl ClassifyOperatorFailure for RuntimeInputTokenCountError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::CountFailed => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            Self::UnconfiguredTarget | Self::InvalidToolSchema | Self::CorrelationMismatch => {
+                OperatorFailureClass::CallerOrHubBug
+            }
+        }
+    }
+}
+
+impl<R> ModelCallInputTokenCounter for RuntimeModelCallProvider<R>
+where
+    R: signalbox_model_runtime::ModelInputTokenCounter<ModelCallId> + Send + Sync,
+{
+    type Error = RuntimeInputTokenCountError;
+
+    async fn count_input_tokens<Cancellation>(
+        &self,
+        operation: PreparedModelOperation,
+        cancellation: Cancellation,
+    ) -> Result<ModelCallInputTokenCount, Self::Error>
+    where
+        Cancellation: Future<Output = ()> + Send + 'static,
+    {
+        let request = operation.request();
+        let call = request.call();
+        let correlation = call.id();
+        let definition = self
+            .models
+            .resolve(call.target())
+            .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
+        let messages = render_runtime_messages(operation.messages());
+        let tools = operation
+            .tools()
+            .iter()
+            .map(|definition| {
+                let schema = decode_checked_raw_json(definition.input_schema().as_str())
+                    .map_err(|_| RuntimeInputTokenCountError::InvalidToolSchema)?;
+                Ok(ToolDefinition::with_raw_schema(
+                    definition.name().as_str(),
+                    definition.description(),
+                    schema,
+                ))
+            })
+            .collect::<Result<Vec<_>, RuntimeInputTokenCountError>>()?;
+        let mut runtime_operation = ModelOperation::new(
+            correlation,
+            CredentialReference::new(operation.credential_reference().as_str().to_owned()),
+            RequestedTarget::new(render_requested_target(call.selection())),
+            ResolvedTarget::new(definition.provider_model().to_owned()),
+            messages,
+            ModelSettings::new(definition.max_output_tokens()),
+        );
+        runtime_operation.system = operation.system_prompt().map(str::to_owned);
+        runtime_operation.tools = tools;
+        runtime_operation.delivery = DeliveryMode::Streamed;
+        match self
+            .runtime
+            .count_input_tokens(runtime_operation, CancellationSignal::when(cancellation))
+            .await
+        {
+            signalbox_model_runtime::InputTokenCountOutcome::Counted {
+                correlation: returned,
+                input_tokens,
+            } if returned == correlation => Ok(ModelCallInputTokenCount::Counted(input_tokens)),
+            signalbox_model_runtime::InputTokenCountOutcome::Cancelled {
+                correlation: returned,
+            } if returned == correlation => Ok(ModelCallInputTokenCount::Cancelled),
+            signalbox_model_runtime::InputTokenCountOutcome::Failed {
+                correlation: returned,
+            } if returned == correlation => Err(RuntimeInputTokenCountError::CountFailed),
+            signalbox_model_runtime::InputTokenCountOutcome::Counted { .. }
+            | signalbox_model_runtime::InputTokenCountOutcome::Cancelled { .. }
+            | signalbox_model_runtime::InputTokenCountOutcome::Failed { .. } => {
+                Err(RuntimeInputTokenCountError::CorrelationMismatch)
+            }
+        }
+    }
+}
+
 impl<R> ModelCallProvider for RuntimeModelCallProvider<R>
 where
     R: ModelRuntime<ModelCallId> + Send + Sync,
@@ -1013,6 +1148,14 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                     "{MODEL_IDENTITY_CHANGE_MESSAGE} {} (session defaults epoch {}).",
                     selected.into_uuid(),
                     defaults_version.as_u64()
+                )));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::ContextSummary { content, .. } => {
+                rendered.push(ConversationMessage::user_text(format!(
+                    "{CONTEXT_SUMMARY_MESSAGE}\n{}",
+                    content.as_str()
                 )));
                 assistant_call = None;
                 collecting_tool_results = false;
@@ -1482,8 +1625,8 @@ mod tests {
     use super::{
         AcceptanceObservations, ProviderTextDelta, ProviderTextDeltaContext, ProviderTextDeltaSink,
         RuntimeModelCallProviderError, RuntimeModelCatalog, RuntimeModelCatalogError,
-        RuntimeModelDefinition, classify_terminal, decode_checked_raw_json,
-        provider_reported_token_usage, render_runtime_messages,
+        RuntimeModelDefinition, RuntimeModelDefinitionError, classify_terminal,
+        decode_checked_raw_json, provider_reported_token_usage, render_runtime_messages,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -2638,12 +2781,20 @@ mod tests {
     }
 
     #[test]
+    fn output_reservation_cannot_exceed_context_window() {
+        assert_eq!(
+            RuntimeModelDefinition::try_new(target(1), String::from("fixture-model"), 65, 64,),
+            Err(RuntimeModelDefinitionError::OutputLimitExceedsContextWindow)
+        );
+    }
+
+    #[test]
     fn conflicting_runtime_target_meaning_is_rejected() {
         assert_eq!(
             RuntimeModelCatalog::try_from_definitions([
-                RuntimeModelDefinition::try_new(target(1), String::from("first"), 64)
+                RuntimeModelDefinition::try_new(target(1), String::from("first"), 64, 200_000)
                     .expect("fixture definition is valid"),
-                RuntimeModelDefinition::try_new(target(1), String::from("second"), 64)
+                RuntimeModelDefinition::try_new(target(1), String::from("second"), 64, 200_000)
                     .expect("fixture definition is valid"),
             ]),
             Err(RuntimeModelCatalogError::ConflictingTarget { target: target(1) })

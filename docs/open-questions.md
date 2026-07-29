@@ -51,9 +51,9 @@ identifiers refer to [scenarios.md](scenarios.md).
   and [model-call execution](spec/model-call-execution.md) own the implemented
   model-input projections; [conversation-import](spec/conversation-import.md)
   owns only normalized imported source content. Rich imported tool/result/media
-  projection, semantic compaction, selective omission, summarization, rebasing,
-  and context-window policy remain routed through the accepted frontier
-  extension gate owned by
+  projection, selective omission beyond the fixed compaction projection,
+  alternative summaries, and rebasing remain routed through the accepted
+  frontier extension gate owned by
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
   [sessions-and-transcript](spec/sessions-and-transcript.md). Blocks those
   extensions. (S02, S17, S28)
@@ -202,64 +202,49 @@ identifiers refer to [scenarios.md](scenarios.md).
 
 ## Scheduling and runners
 
-Dispatch fencing and initial scheduler mechanics are decided, specified in
-[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md); the
-runner identity, catalog, lease, placement, credential-grant, and workspace
-domain laws are specified in
+Dispatch fencing, initial scheduler mechanics, and the complete version-one
+local runner orchestration are specified in
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
 [runner protocol and placement](spec/runner-protocol.md). The questions below
 remain open.
 
-- **Runner loss recovery beyond explicit replacement.** The domain foundation
-  makes loss observable, forbids automatic migration, and emits complete
-  replacement-change facts. The owner command, application transaction, injected
-  semantic-message shape, client presentation, and recovery options when no
-  eligible replacement exists remain undecided. Blocks executable replacement
-  and frontier extension. (S30, S32)
-- **Lease and affinity orchestration.** One session is pinned to one runner
-  after first execution, while daemon-local tools remain separately admissible.
-  Scheduler ordering between attachment, credential authorization, workspace
-  provisioning, lease creation, runner loss, and explicit replacement remains
-  undecided. Blocks runner dispatch. (S16, S30–S32)
+- **Multiple-runner scheduling.** Pool admission, capacity-aware placement,
+  fairness, affinity scoring, draining, and automatic rescheduling beyond the
+  [version-one runner boundary](spec/runner-protocol.md#version-one-executable-boundary)
+  remain undecided. Blocks runner pools and remote fleets. (S16, S30–S32)
 - **MCP placement.** A future daemon-side MCP client may centralize shared
   servers and a future runner-side host may execute sandbox-local servers. Exact
   catalog declaration, lifecycle, credential, and compatibility semantics are
   deferred to the MCP pass; no MCP locus exists today. Blocks MCP tools.
-- **Runner reconnect and result orchestration.** The domain fence binds lease,
-  runner, physical tool attempt, and dispatch generation. Exact reconnect
-  inventory, duplicate/stale acknowledgement handling, subscriber observation,
-  and retention of rejected evidence remain undecided with the wire and store
-  stack. Blocks runner result delivery. (S05, S06, S12, S16, S31)
 
 ## Tool safety
 
-- **Future tool-attempt retry.** Version one never automatically creates another
-  physical attempt after a prepared, known-failed, crash-lost, or ambiguous tool
-  attempt. The runner foundation separately emits typed retry authority after
-  lease loss: loss before claim retains the never-executed attempt, while
-  claimed pure or idempotent loss requires a fresh physical attempt identity.
-  Application creation and durable linkage of that successor attempt still need
-  effect/evidence eligibility, duplicate-risk, idempotency-key, resource-limit,
-  and audit decisions. Blocks executable runner retry. (S05, S06, S31)
-- **Ambiguous tool-wait resolution.** Version one can preserve the exact
-  external-effect attempt and terminalize through a proof-bearing interrupt. Who
-  may record resolving evidence, how an exact accepted-risk continuation is
-  represented, and which effects permit it remain undecided. Blocks
-  reconciliation and continuation from `AwaitingToolRecovery`. (S06)
+- **Future tool-attempt retry.** General automatic retry, accepted-risk retry
+  after ambiguity, idempotency-key policy, duplicate-risk controls, and retry
+  resource limits beyond the sealed
+  [runner lease-loss transitions](spec/runner-protocol.md#effect-classes-and-runner-leases)
+  remain undecided. (S05, S06, S31)
+- **Ambiguous tool-wait resolution.** Who may record resolving evidence, how an
+  exact accepted-risk continuation is represented, and which effects permit it
+  beyond the
+  [proof-bearing terminal paths](spec/turn-lifecycle-and-scheduling.md#runner-loss-session-recovery)
+  remain undecided. Blocks reconciliation and continuation from
+  `AwaitingToolRecovery`. (S06)
 - **Durable tool-definition revisioning.** The implemented compiled catalog is
   immutable for one process lifetime. A dynamic catalog or a deployment that
   changes a definition while requests are outstanding must first decide how the
   advertised schema, permission default, effect class, validator, and executor
   revision are pinned and compared. Blocks runtime catalog mutation and safe
   rebinding across outstanding requests.
-- **Runner-catalog file and reload lifecycle.** The runner domain validates an
-  owner catalog independently of representation. TOML schema, configuration
-  path, startup/reload behavior, revision identity, change audit, and safe
-  rebinding of active registrations remain undecided. Blocks configured runner
-  catalogs.
-- **Execution-strategy configuration placement.** Version one serializes tool
-  attempts without exposing a knob. Whether a later serial/concurrent choice is
-  a deployment, session-default, per-turn, or executor-selection value remains
-  undecided. Blocks configurable/concurrent execution, not the serial loop.
+- **Dynamic runner-catalog lifecycle.** Mutable behavior beyond the
+  [compiled version-one catalog](spec/runner-protocol.md#advertised-catalogs-and-daemon-authority)
+  requires representation, revision identity, change audit, compatibility, and
+  safe rebinding decisions.
+- **Execution-strategy configuration placement.** Whether a future
+  serial/concurrent choice beyond the
+  [fixed serial loop](spec/tool-loop.md#serialized-staged-execution) is a
+  deployment, session-default, per-turn, or executor-selection value remains
+  undecided. Blocks configurable/concurrent execution.
 - **Model-declared approval expiry.** Pending owner approval currently waits
   indefinitely. Whether a model may request an expiry, how it is frozen, and
   what durable resolution expiry creates remain undecided.
@@ -267,24 +252,13 @@ remain open.
   producer or storage. Prompt storage, provenance/session tagging, and the
   boundary between recommendation and policy remain undecided; a judge can never
   claim owner agency (INV-020).
-- **Per-tool session overrides and high-risk guardrails.** The accepted policy
-  ladder reserves exact per-tool overrides between the dangerous blanket and
-  registry defaults, but override storage, replacement/equality semantics, and
-  the list of operations the blanket must never bypass remain undecided.
+- **Additional high-risk guardrails.** Operations that a future policy must
+  never make automatic, richer values beyond the
+  [fixed profile/override ladder](spec/runner-protocol.md#sandbox-profiles-and-approval),
+  and dynamic replacement/equality semantics remain undecided.
 - **Rich result-content variants.** Attempt content is text-only. Image and
   file/artifact arms, their resource governance, and provider/client rendering
   remain undecided.
-- **Initial sandboxing requirements.** Leaning: explicit ambient and restricted
-  profiles only to the strength justified by effective evidence. Blocks runner
-  release. (S13, S14)
-- **Ambient-user runner behavior.** Leaning: explicit selection and visible
-  boundary, likely stricter policy for material effects. Blocks the ambient
-  runner. (S13)
-- **Workspace provisioning and cleanup recovery.** The domain fixes
-  worktree-per-session capability, runner ownership, and cross-runner
-  noninheritance. Repository acquisition, worktree naming, filesystem
-  containment, cleanup timing, crash recovery, and leaked-workspace reporting
-  remain undecided. Blocks executable workspace provisioning. (S32)
 
 ## Identity, credentials, and resource governance
 
@@ -308,11 +282,11 @@ questions below remain open.
   selector may itself require a profile, and how availability changes affect
   class membership, remains undecided. Blocks profile-aware dynamic runner
   pools. (S30, S32)
-- **Runner result credential egress.** Runner credential control fields carry
-  profile names and policy, never values. Arbitrary runner tool result and error
-  text can nevertheless echo machine-local data. Whether the runner, daemon, or
-  tool contract applies redaction or stronger egress controls remains undecided.
-  Blocks a general no-credential-disclosure claim for runner output.
+- **Runner result credential egress beyond exact-value redaction.** Whether
+  stronger taint, isolation, or egress controls beyond the
+  [runner credential boundary](spec/configuration-and-credentials.md#runner-credential-lifecycle)
+  apply remains undecided. Blocks a general no-credential-disclosure claim for
+  runner output.
 - **In-memory credential hygiene.** Zeroization or equivalent handling for the
   request-scoped value read by `FileCredentialAccess` remains undecided, with no
   implementation. This question is separate from the accepted storage and
@@ -353,12 +327,12 @@ questions below remain open.
   snapshot and durable-update semantics are defined by
   [process-protocol](spec/process-protocol.md), while transient model-update
   streaming remains open below. (S02, S24)
-- **Runner transport and reconnect.** Durable runner facts are owned by
-  [runner protocol and placement](spec/runner-protocol.md). Exact transport
-  technology, framing, authentication binding, compatibility version,
-  backpressure, heartbeat, application transaction orchestration, reconnect
-  snapshot, and stale-evidence retention remain undecided. Blocks the runner
-  binary and remote dispatch. (S12, S16, S30–S32)
+- **Remote runner transport and reconnect.** The dedicated local socket,
+  framing, heartbeat, reconnect inventory, and transaction orchestration are
+  owned by [runner protocol and placement](spec/runner-protocol.md). Remote
+  transport, authentication binding, compatibility negotiation, internet
+  backpressure, and cross-host stale-evidence retention remain undecided. Blocks
+  remote dispatch, not the local runner. (S12, S16, S30–S32)
 - **Compatibility beyond the retained process-protocol versions.** Versions one
   through four have their owning [specification](spec/process-protocol.md). A
   future compatibility window, negotiation scheme, and generated-client policy

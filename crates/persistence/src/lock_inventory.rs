@@ -32,6 +32,27 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
                    AND state_kind = 'active'
             )";
 
+pub(crate) const CONTEXT_COMPACTION_SCHEDULER: &str = "SELECT
+            EXISTS (
+                SELECT 1
+                  FROM session
+                 WHERE session_id = $1
+            ),
+            (
+                SELECT session_id
+                  FROM session_scheduler
+                 WHERE session_id = $1
+                 FOR UPDATE
+            )";
+
+pub(crate) const CONTEXT_COMPACTION_DEFAULTS: &str = "SELECT current_version
+           FROM session_current_defaults
+          WHERE session_id = $1
+          FOR UPDATE";
+
+pub(crate) const CONTEXT_COMPACTION_LIFECYCLE_SESSION: &str =
+    "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
+
 pub(crate) const SUBMIT_INPUT_SESSION: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 

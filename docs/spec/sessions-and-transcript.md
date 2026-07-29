@@ -13,11 +13,16 @@ prompt was verified through PR #286 (`agent/session-system-prompt`); and the
 version-thirteen input-delivery surface and its user-reachable steering boundary
 were verified through PR #302 (`agent/mid-turn-steering`). The copy-on-create
 session-template provenance and creation mode were verified through PR #311
-(`agent/session-templates-spec`). The imported-conversation record and converter
-are owned by [conversation-import](conversation-import.md). Where a law is cited
-as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
-mechanics owned by another decision are summarized, the owning sibling page is
-linked inline.
+(`agent/session-templates-spec`). The append-only context-compaction record and
+projection were verified through this PR (`agent/context-compaction-core`); the
+command path and canonical visible-range selection were verified against
+`agent/context-compaction-protocol`. The runner placement-entry paragraphs are
+the foundation proposal at the bottom of their implementing stack and become
+verified only with those child pull requests. The imported-conversation record
+and converter are owned by [conversation-import](conversation-import.md). Where
+a law is cited as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of
+record; where mechanics owned by another decision are summarized, the owning
+sibling page is linked inline.
 
 ## Session identity and creation provenance
 
@@ -537,6 +542,11 @@ and closed:
 - `ModelIdentityChanged { turn, defaults_version, selected }` — the exact
   successor-turn boundary at which execution first observes a different frozen
   direct model identity;
+- `ContextSummary { producing_call, summarized, value }` — exact model-produced
+  summary text retaining its dedicated physical call and the first and through
+  source-qualified entries of the inclusive range it represents;
+- `RunnerPlacementChanged { placement_revision }` — a reference to the complete
+  checked replacement record at the owner-explicit runner/workspace boundary;
 - `TurnFailed { turn }` — an explicit marker that the turn terminalized as
   failed;
 - `AssistantText { producing_call, value }` — exact assistant text with
@@ -567,9 +577,10 @@ content in two inputs or imports yields distinct entries. Entry construction is
 sealed inside the domain crate — checked constructors are `pub(crate)`.
 `turn_eligibility.rs` produces eligibility and recovery history;
 `model_execution.rs` produces assistant and turn-terminal history;
-imported-frontier session creation is the only producer of `Imported`; and
-sealed tool transitions produce tool-use/result references only through the
-atomic boundaries owned by [tool-loop](tool-loop.md).
+imported-frontier session creation is the only producer of `Imported`; sealed
+tool transitions produce tool-use/result references only through the atomic
+boundaries owned by [tool-loop](tool-loop.md); and the checked owner replacement
+transaction is the only producer of `RunnerPlacementChanged`.
 
 `OriginAcceptedInput` and `SteeringAcceptedInput` reference the accepted input's
 identity; neither copies content. Steering additionally names the exact active
@@ -597,6 +608,59 @@ entry/turn-state trigger so an origin entry additionally requires its input's
 `semantic_transcript_entry_origin_disposition`); pending steering can never
 appear as a semantic origin.
 
+### Context compaction
+
+Context compaction changes model visibility, never durable history. A completed
+compaction has five correlated immutable facts: its identity and optional
+same-session predecessor, the complete source frontier, a dedicated physical
+model call, the exact inclusive source-qualified range summarized, and a result
+frontier equal to the source frontier plus one new `ContextSummary`. The summary
+entry names the producing call and repeats the exact range. Storage and domain
+reconstitution reject a missing endpoint, reversed range, mismatched summary,
+non-completing call, different source frontier, or result that is not exactly
+that one-entry append (INV-005, INV-015).
+
+The transcript therefore remains complete and addressable after compaction. No
+entry or frontier is deleted, replaced, reordered, or rewritten. The
+compaction-call record separately retains the session's current direct model
+selection, resolved provider target, source frontier, physical lifecycle and
+disposition, non-secret credential reference, and each independently optional
+provider-reported usage field. Summary production is its own model call; it is
+not assistant output attributed to an accepted-input turn.
+
+Compactions in one session form a forward-only chain. A successor's source must
+retain its predecessor's complete result frontier as a semantic prefix. A later
+ordinary turn cannot opt back into an uncompacted projection. The existing
+continue-from-boundary operation remains the escape hatch: choosing a position
+before the summary creates a different session whose ancestry frontier does not
+contain that compaction.
+
+Each compaction range starts at the current model-visible frontier start: the
+complete frontier's first entry for a root compaction, or the predecessor
+summary entry for a successor. Its through endpoint selects how much of that
+visible frontier the new summary replaces; a compaction cannot hide an
+unsummarized visible prefix. The through boundary is safe only when every
+assistant tool proposal inside the summarized range has its execution result,
+denial, or turn-end closure inside that same range; a boundary cannot leave a
+provider-visible tool result in the suffix after hiding its proposal.
+
+For model input only, summaries are applied in physical append order to the
+current model-visible sequence. Each summary replaces the visible prefix through
+its exact boundary with itself; entries after that boundary in the already
+projected sequence remain in order, even when a retained suffix physically
+precedes an earlier summary. The final sequence is therefore the latest summary
+plus its visible suffix. With no summary, projection is the complete frontier
+order. This rule deliberately separates the frontier a call durably records from
+the ordered subset the selected model sees.
+
+Explicit compaction chooses an optional through position, defaulting to the
+latest safe boundary. The daemon also compacts before an ordinary model send
+when that call's rendered input plus its full configured output-token
+reservation would exceed the current selection's declared context window. Both
+paths use the required deployment-configured compaction prompt and the session's
+current direct selection. Trigger and configuration mechanics are owned by
+[model-call-execution](model-call-execution.md).
+
 ### When entries come to exist
 
 An accepted input is durable at acceptance (INV-007) but becomes transcript
@@ -620,6 +684,19 @@ the ordinary `OriginAcceptedInput`. Every later native frontier retains its
 predecessor terminal prefix, then appends the model-identity boundary when the
 frozen direct selection changed, and finally appends its ordinary origin
 (INV-039, INV-046).
+
+Runner replacement has a session-level frontier boundary. The atomic replacement
+transaction appends one `RunnerPlacementChanged` entry after the latest
+authoritative semantic frontier, or establishes a one-entry root when no
+frontier exists, and advances the session placement-frontier pointer with the
+placement revision. Active continuation and the next eligible origin both extend
+that exact boundary before any successor-runner execution. A same-revision,
+missing-record, non-prefix, cross-session, or second placement boundary fails
+closed. The entry copies no runner advertisement, workspace path, credential
+fact, or tool output; the placement record remains its content authority. The
+provider projection resolves that record to the exact injected placement event
+owned by [model-call execution](model-call-execution.md#frontier-rendering)
+(INV-015, INV-044).
 
 Pending steering has a separate safe-point boundary (INV-036). A
 version-thirteen `steer` submit accepted while its exact source turn is active

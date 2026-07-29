@@ -55,7 +55,7 @@ final class AppCoordinator: ObservableObject {
             )
             self.settings.serverURLText = NativeAppConstants.defaultServerURL
             self.settings.apiKey = "mock-key"
-            self.processSettings.socketPath = "In-memory v5 JSONL harness"
+            self.processSettings.socketPath = "In-memory v18 JSONL harness"
             self.processSettings.markConnectedForHarness()
         } else if screenshotScenario == .setup {
             self.service = nil

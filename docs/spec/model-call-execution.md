@@ -25,21 +25,31 @@ projection and identity-before-terminal-evidence precedence were verified
 through PR #288 (`agent/audit-fix-docs-coherence`); the session system prompt on
 the prepared operation was verified through PR #286
 (`agent/session-system-prompt`). Provider-reported token evidence retention and
-exact commit-ambiguity comparison were verified through this PR
+exact commit-ambiguity comparison were verified through PR #301
 (`agent/token-usage`); the empty-thinking completion rule was verified through
-PR #305 (`agent/sonnet-streamed-tool-use`). Invariant tags cite
+PR #305 (`agent/sonnet-streamed-tool-use`). The context-summary projection and
+dedicated compaction-call evidence were verified through this PR
+(`agent/context-compaction-core`); the version-twenty-two explicit trigger,
+pre-activation context guard, configured prompt, and provider-native input
+counting were verified against `agent/context-compaction-protocol`. The
+runner-placement rendering and executable session-tool snapshot paragraphs are
+the foundation proposal at the bottom of their implementing stack and become
+verified only with those child pull requests. Invariant tags cite
 [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
 A model call is one durable daemon authorization to attempt a provider
-interaction (INV-014). Its record (`crates/domain/src/model_call.rs`) fixes at
-creation: `ModelCallId`, owning turn and attempt, the exact frozen model
-selection, the turn-pinned resolved target, and the exact ordered context
-frontier it consumes (INV-015). Nonterminal states are `Prepared`, `InFlight`,
-and `CancellationRequested`; terminal history is a separate `EndedModelCall`
-carrying one of five physical dispositions — `Completed`, `KnownFailed`,
-`Refused`, `Cancelled`, `Ambiguous` — and exposes no transition back (INV-006).
+interaction (INV-014). Ordinary and dedicated compaction calls reserve their
+`ModelCallId` from one append-only global call-identity registry, so the same
+physical identity cannot name both call kinds (INV-001). Its record
+(`crates/domain/src/model_call.rs`) fixes at creation: `ModelCallId`, owning
+turn and attempt, the exact frozen model selection, the turn-pinned resolved
+target, and the exact ordered context frontier it consumes (INV-015).
+Nonterminal states are `Prepared`, `InFlight`, and `CancellationRequested`;
+terminal history is a separate `EndedModelCall` carrying one of five physical
+dispositions — `Completed`, `KnownFailed`, `Refused`, `Cancelled`, `Ambiguous` —
+and exposes no transition back (INV-006).
 
 The predecessor matrix:
 
@@ -133,7 +143,12 @@ already performed the same correlation.
 ## Frontier rendering
 
 `PreparedModelOperation::render` (`crates/application/src/model_execution.rs`)
-projects the exact frontier order into provider-neutral messages:
+first applies the context-compaction projection to the exact complete frontier.
+If summaries exist, the latest summary is first and every entry after its exact
+through-boundary follows; the selected summary is omitted from its later
+physical position. Otherwise the complete order is unchanged. Malformed range or
+append provenance fails closed. The resulting order becomes provider-neutral
+messages:
 
 - `OriginAcceptedInput` renders as a user message with its checked accepted
   input content;
@@ -144,6 +159,18 @@ projects the exact frontier order into provider-neutral messages:
   epoch; the provider bridge later projects it as an injected user-role message
   with the fixed `Signalbox session event: your model identity is now` prefix
   (INV-046);
+- `ContextSummary` renders as a distinct user-role prior-conversation summary,
+  retaining the producing compaction call and exact summarized range in the
+  provider-neutral value;
+- `RunnerPlacementChanged` resolves its complete same-session successor
+  placement record and renders as a structured provider-neutral placement change
+  retaining the positive placement revision and selected sandbox profile. The
+  provider bridge projects it as an injected user-role message whose exact text
+  is
+  `Signalbox session event: runner placement changed to revision {revision} with profile {profile}; prior runner-local execution state is unavailable.`
+  The braces are replaced by the canonical decimal revision and exact
+  `workspace-restricted` or `ambient` token. Missing, stale, cross-session, or
+  non-successor placement authority fails rendering instead of inventing text;
 - `AssistantText` renders as an assistant message retaining its producing-call
   provenance;
 - imported `Text` with an attested value renders with its imported user or
@@ -160,10 +187,36 @@ projects the exact frontier order into provider-neutral messages:
   assistant tool calls and user tool results after resolving their referenced
   request, attempt, and decision records through [tool-loop](tool-loop.md).
 
-The model operation also carries the current registry declarations. The runtime
-bridge maps them to provider tool definitions and accepts `ToolCall` completion
-parts only with a matching `ToolUse` finish reason. Provider-native tool types
-remain inside the bridge.
+The prepared model operation carries one immutable `ExecutableToolSnapshot`, not
+the unfiltered process registry. Preparation includes every daemon-only tool;
+includes a combined-locus tool whenever its daemon executor is available; and
+includes a runner-only tool only when the session placement can bind that exact
+declaration to current execution authority. A pinned placement uses its frozen
+tool inventory and current matching registration. An ordinary unpinned request
+includes a runner-only definition only when a currently live registration
+satisfies its selector, sandbox, workspace, repository, and credential
+availability. An exact-identity selector binds that runner and registration
+revision for a possible first dispatch, so its loss produces
+`RunnerLostBeforePin`. A capability-class selector freezes the class and
+required availability, not a runner identity; the eventual first dispatch may
+select only a then-current satisfying registration. If none remains, the
+proposal closes known-failed as `ToolUnavailableBeforePin` without creating an
+attempt or placement, because no runner execution was authorized.
+`RunnerAbandoned` exposes daemon-executable tools only. `RunnerLost` and
+`RunnerLostBeforePin` cannot prepare a new model operation while the turn awaits
+owner recovery. An operation prepared before loss retains its frozen snapshot
+and physical-call disposition, but a runner-only proposal from it cannot
+authorize against the lost locus. A combined-locus definition remains executable
+through its daemon locus when runner availability disappears; an already frozen
+runner selection never silently falls back after the provider returns.
+
+Each snapshot entry binds the exact model definition, permission/effect policy,
+and selected executable locus used to validate and authorize a returned
+proposal. The runtime bridge maps only these entries to provider tool
+definitions and accepts `ToolCall` completion parts only with a matching
+`ToolUse` finish reason. A tool absent from the snapshot is an unknown proposal
+for that operation even if another session or a later registration can execute
+it. Provider-native tool types remain inside the bridge.
 
 Every message keeps its source-qualified semantic-entry reference and its
 content-authority provenance. Why: inherited entries need not come from a native
@@ -182,6 +235,95 @@ has no admitted media projection. Skipping affects only model visibility. It
 does not remove, rewrite, summarize, or reorder the semantic entries or their
 addressable imported frontier. A richer projection requires a later foundation
 decision.
+
+## Compaction calls and triggers
+
+Summary production uses a dedicated physical model call with its own durable
+`Prepared`, `InFlight`, and terminal lifecycle. The record pins the session's
+current direct selection, resolved provider target, complete source frontier,
+non-secret credential reference, terminal disposition, and the provider's
+independently optional input, output, cache-creation-input, and cache-read-input
+token fields. Only a completed call may produce a `ContextSummary` and
+compaction result. Its completion content folds into the summary under the same
+content rule the bridge applies to ordinary assistant content
+([provider observation classification](#provider-observation-classification)):
+text parts concatenate in order and an empty thinking block is dropped, while
+thinking with actual text, redacted thinking, and tool calls fail the summary
+closed. The compaction request configures no thinking display, so the empty
+thinking block is a default-path shape rather than an exceptional one. The
+compaction prompt is a required bounded deployment value in the model-catalog
+configuration, not a source-code literal; the ordinary session system prompt is
+not substituted for it.
+
+Authorization, failure, and completion take the same per-session row lock used
+by guarded session mutation. Each transition first rereads its exact call and
+command lifecycle: an equal `InFlight`, failed terminal disposition, or complete
+summary/result is a successful replay, while a different terminal fact fails
+closed. The daemon retries database and ambiguous-commit outcomes at this seam;
+it does not start provider interaction until authorization is resolved. Before
+authorization, an automatic compaction also retries transient database failures
+while loading its selected transcript range, retaining the live `Prepared` call
+as provably unsent rather than consuming that queued turn's sole automatic
+attempt. An integrity failure still terminalizes the unsent call. After a
+successful provider result, the daemon retains the summary and its usage in
+memory until the exact completion is durably applied or replayed.
+
+The explicit version-twenty-two `compact_session` request names a session and an
+optional semantic transcript position. Absence selects the latest safe terminal
+or pre-call boundary. The command records no projection preference: once its
+summary result commits, later model inputs in that session follow the projection
+rule. Command replay returns the same compaction identity, call, exact through
+position, summary entry, and result frontier.
+
+Preparation also rejects a freshly minted summary-entry, result-frontier, or
+compaction identity that already names a durable record, so the daemon remints
+and retries before any provider interaction exactly as it does for a colliding
+call identity; the rejected claim rolls back, leaving the owner-global command
+reusable. A uniqueness violation observed later, while applying the completion,
+is a decided fact rather than a retryable database failure: the completion fails
+closed and its in-flight call is left to startup recovery, because the prepared
+identities are pinned by then and every identical retry fails the same way.
+
+Every catalog model selection also declares `context_window_tokens` as a
+required nonzero integer beside `max_output_tokens`; configuration is invalid
+when the maximum output reservation exceeds the context window. The window is
+operator-declared per selection and is never inferred from provider/model names.
+Before activating an eligible turn, the daemon renders its prospective initial
+ordinary call and obtains the exact input-token count from that selection's
+provider adapter. The call fits only when that input count plus the selection's
+full `max_output_tokens` reservation is at most the declared context window;
+checked addition fails closed on overflow. When the requested total exceeds the
+window, the turn is not activated and the ordinary call is not sent; the daemon
+runs compaction through the latest safe boundary, reloads the resulting complete
+frontier, renders and counts again, and proceeds only when the recounted input
+plus the same output reservation fits. A compaction result that still cannot fit
+fails closed rather than looping or guessing a different limit. The first
+automatic prepare durably and immutably associates its compaction command with
+the queued turn, and at most one automatic command may name that turn in its
+session. A later scheduler pass for the same queued turn therefore fails closed
+without issuing another dedicated compaction call when the already-compacted
+frontier still exceeds the limit.
+
+Both triggers share the same compaction transaction and provider-call lifecycle.
+An explicit command first resolves its owner-global replay state; an equal
+applied command returns its original receipt even when the current deployment no
+longer resolves the original selection or compaction credential. Configuration
+and credential resolution occur only for an unseen command.
+
+Provider interaction remains outside database transactions, and the summary
+range loader selects only the exact source-qualified range fixed by the Prepared
+call rather than materializing the complete physical transcript. Restart treats
+a completed summary boundary as ordinary validated frontier evidence. Startup
+atomically terminalizes a standalone Prepared compaction call as `KnownFailed`
+and an InFlight call as `Ambiguous`, marks its exactly correlated pending
+command failed, and produces no summary or result frontier. Any missing,
+duplicate, or mismatched command/call correlation fails closed.
+
+For the automatic guard, the exact call identity used during provider-native
+counting is retained. Once the count fits, one scheduler-locked transaction
+revalidates the activation, commits it, and creates that exact no-steering
+Prepared call. Steering accepted after that transaction remains pending for a
+later call and cannot enter the already-counted operation.
 
 ## Staged execution
 
@@ -519,7 +661,16 @@ fatal signal, the scheduler stops (in-flight work bounded by a shutdown grace
 window), and the process exits nonzero so the next incarnation's startup scan
 regains authority. Why: startup recovery is the one audited path that classifies
 an issued call from durable evidence, so a live process that cannot construct a
-trustworthy result must stop rather than improvise.
+trustworthy result must stop rather than improvise. An eligibility pass raises
+the same signal whenever a durable stage it owns reports
+`Infrastructure { commit_ambiguous: true }` — the guarded counted activation
+commit and automatic compaction preparation alike — since only that next scan
+can decide what committed. The connection runtime raises it through the same
+handle for an explicit compaction command reporting that class, and still
+answers the client `commit_ambiguous`: a connection handler holds no prepared
+record to terminalize, replay of the command finds it pending, and a fresh
+command finds the nonterminal call, so the restart is the only remedy and
+nothing else would ask for it.
 
 Startup recovery (`crates/persistence/src/startup.rs`), inside the same
 per-session locked transaction as the general scan (INV-034):

@@ -492,6 +492,26 @@ impl ModelCallExecution {
         self.origin_contents.get(&accepted_input)
     }
 
+    /// Derives the exact first-call request without committing or changing this aggregate.
+    pub fn preview_initial_call(
+        &self,
+        call: ModelCallId,
+    ) -> Result<PreparedModelCallRequest, ModelCallPreparationError> {
+        let prepared = self.clone().prepare_initial_call(call)?;
+        Ok(PreparedModelCallRequest {
+            session: self.session,
+            turn: self.turn,
+            attempt: prepared.attempt(),
+            dangerous_tool_auto_approval: self
+                .configuration
+                .effective()
+                .dangerous_tool_auto_approval(),
+            call: prepared.call().clone(),
+            frontier_entries: self.frontier_entries.clone(),
+            origin_contents: self.origin_contents.clone(),
+        })
+    }
+
     /// Creates the initial durable `Prepared` call checkpoint.
     pub fn prepare_initial_call(
         self,
@@ -661,6 +681,7 @@ impl ModelCallExecution {
                     .map(|content| (*accepted_input, content.clone())),
                 SemanticTranscriptEntryPayload::TurnFailed { .. }
                 | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+                | SemanticTranscriptEntryPayload::ContextSummary { .. }
                 | SemanticTranscriptEntryPayload::Imported { .. }
                 | SemanticTranscriptEntryPayload::AssistantText { .. }
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
@@ -3179,6 +3200,7 @@ fn reconstitute(
             }
             SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
@@ -3552,6 +3574,7 @@ fn frontier_closes_latest_tool_round(
             SemanticTranscriptEntryPayload::AssistantToolUse { request, .. } => Some(*request),
             SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
@@ -3588,6 +3611,7 @@ fn frontier_closes_latest_tool_round(
             SemanticTranscriptEntryPayload::ToolClosed { .. } => false,
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
@@ -3616,6 +3640,7 @@ fn assistant_entry_call(entry: &SemanticTranscriptEntry) -> Option<ModelCallId> 
         }
         SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
         | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+        | SemanticTranscriptEntryPayload::ContextSummary { .. }
         | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
         | SemanticTranscriptEntryPayload::TurnFailed { .. }
         | SemanticTranscriptEntryPayload::Imported { .. }

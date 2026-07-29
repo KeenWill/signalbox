@@ -69,7 +69,12 @@ pub const INPUT_DELIVERY_PROTOCOL_VERSION: u64 = 13;
 /// enum decodes a version's frames against exactly its own vocabulary, never
 /// a gap's). Fourteen and fifteen are retired under this rule and are never
 /// admitted; a later surface always claims the next number above the
-/// highest already shipped, never a lower gap.
+/// highest already shipped, never a lower gap. Twenty was later reserved for
+/// the context-compaction protocol stack, but the two stacks landed out of
+/// their originally planned order and the model-alias-catalog stack shipped
+/// twenty-one to main first, before twenty ever shipped. Twenty is retired
+/// under the identical rule, alongside fourteen and fifteen, and is never
+/// admitted either.
 pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
 
 /// The imported-conversation inspection protocol version.
@@ -94,6 +99,36 @@ pub const SESSION_TEMPLATE_PROTOCOL_VERSION: u64 = 18;
 /// comment states. Fourteen is retired under that convention alongside
 /// fifteen and is never admitted.
 pub const MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION: u64 = 19;
+
+/// The deployment model-alias catalog read protocol version.
+///
+/// This surface originally reserved eighteen, but the session-template surface
+/// shipped that number first while this one was still in flight. Version
+/// twenty was separately allocated to the concurrent context-compaction
+/// protocol stack, also still in flight at the time. Numbering this request
+/// under either already-spoken-for number would collide with a sibling
+/// stack's closed vocabulary rather than the version-sixteen-style
+/// retroactive widening the retirement convention above guards against, but
+/// the same rule of taking the next genuinely free number applies, so this
+/// version sits above both instead. The two stacks went on to land out of
+/// their originally planned order, and this version reached main before
+/// twenty did; twenty is retired under the standing convention rather than
+/// reallocated beneath this already-shipped vocabulary.
+pub const MODEL_ALIAS_CATALOG_PROTOCOL_VERSION: u64 = 21;
+
+/// The append-only context-compaction protocol version.
+///
+/// This surface originally reserved seventeen, but versions sixteen,
+/// seventeen (imported-conversation inspection), and eighteen all shipped
+/// first while it was still in flight; it was then assigned twenty, above
+/// nineteen's already-shipped token-usage vocabulary. Before this version
+/// shipped, the model-alias-catalog stack landed to main out of the two
+/// stacks' originally planned order and claimed twenty-one, so twenty now
+/// sits below an already-closed version-twenty-one vocabulary. Twenty is
+/// retired under the standing convention, alongside fourteen and fifteen,
+/// and this version claims the next genuinely free number above the shipped
+/// maximum instead.
+pub const CONTEXT_COMPACTION_PROTOCOL_VERSION: u64 = 22;
 
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -132,6 +167,10 @@ pub enum ProtocolVersion {
     Eighteen,
     /// Provider-reported model-call token-usage vocabulary.
     Nineteen,
+    /// Deployment model-alias catalog vocabulary.
+    TwentyOne,
+    /// Explicit context compaction and summary provenance.
+    TwentyTwo,
 }
 
 impl ProtocolVersion {
@@ -155,6 +194,8 @@ impl ProtocolVersion {
             Self::Seventeen => IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
             Self::Eighteen => SESSION_TEMPLATE_PROTOCOL_VERSION,
             Self::Nineteen => MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
+            Self::TwentyOne => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
+            Self::TwentyTwo => CONTEXT_COMPACTION_PROTOCOL_VERSION,
         }
     }
 
@@ -177,6 +218,8 @@ impl ProtocolVersion {
             IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION => Some(Self::Seventeen),
             SESSION_TEMPLATE_PROTOCOL_VERSION => Some(Self::Eighteen),
             MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION => Some(Self::Nineteen),
+            MODEL_ALIAS_CATALOG_PROTOCOL_VERSION => Some(Self::TwentyOne),
+            CONTEXT_COMPACTION_PROTOCOL_VERSION => Some(Self::TwentyTwo),
             _ => None,
         }
     }
@@ -238,6 +281,9 @@ pub const MAX_SYSTEM_PROMPT_UTF8_BYTES: usize = 1_048_576;
 /// the transcript snapshot already carries attested imported text in full, and
 /// the immutable aggregate remains the authority for everything else.
 pub const MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES: usize = 256;
+
+/// Maximum entries in one deployment model-alias catalog.
+pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
 
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1643,6 +1689,17 @@ pub enum ClientRequest {
         )]
         delivery: Option<InputDelivery>,
     },
+    /// Compact one session's model-visible history without rewriting it.
+    CompactSession {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Optional one-based semantic position to summarize through; null
+        /// selects the latest safe boundary.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        through_position: Option<CanonicalU64>,
+    },
     /// Read one durable transcript snapshot.
     ReadTranscript {
         /// Target session.
@@ -1684,6 +1741,8 @@ pub enum ClientRequest {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         after: Option<ConversationCursor>,
     },
+    /// Read the deployment's complete configured model-alias catalog.
+    ListModelAliases {},
     /// Read one complete current metadata snapshot.
     ReadSessionMetadata {
         /// Target session.
@@ -1923,6 +1982,8 @@ impl ClientRequest {
                 SESSION_TEMPLATE_PROTOCOL_VERSION
             }
             Self::ListConversations { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
+            Self::CompactSession { .. } => CONTEXT_COMPACTION_PROTOCOL_VERSION,
+            Self::ListModelAliases {} => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
             Self::ReadSessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::CreateSessionFromImportedFrontier { .. } => {
                 IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION
@@ -1964,6 +2025,14 @@ impl ClientRequest {
             && through_position.value() == 0
         {
             return Err(FrameValidationError::ImportedFrontierShape);
+        }
+        if let Self::CompactSession {
+            through_position: Some(position),
+            ..
+        } = self
+            && position.value() == 0
+        {
+            return Err(FrameValidationError::ContextCompactionShape);
         }
         if let Self::ListSessionMetadata {
             required_tags,
@@ -3008,6 +3077,19 @@ pub enum TranscriptTextEntry {
         /// Producing model call.
         model_call_id: CanonicalUuid,
     },
+    /// Model-produced summary of one exact earlier semantic range.
+    ContextSummary {
+        /// Dedicated model call that produced the summary.
+        model_call_id: CanonicalUuid,
+        /// Source session of the inclusive range's first entry.
+        first_source_session_id: CanonicalUuid,
+        /// Identity of the inclusive range's first entry.
+        first_entry_id: CanonicalUuid,
+        /// Source session of the inclusive range's final entry.
+        through_source_session_id: CanonicalUuid,
+        /// Identity of the inclusive range's final entry.
+        through_entry_id: CanonicalUuid,
+    },
     /// Imported text whose exact value was source-attested.
     Imported {
         /// Owning imported conversation.
@@ -3023,7 +3105,8 @@ impl TranscriptTextEntry {
     const fn minimum_protocol_version(&self) -> u64 {
         match self {
             Self::Imported { .. } => IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
-            Self::User { .. } | Self::Assistant { .. } => 1,
+            Self::ContextSummary { .. } => CONTEXT_COMPACTION_PROTOCOL_VERSION,
+            Self::User { .. } | Self::Assistant { .. } => PROTOCOL_VERSION,
         }
     }
 }
@@ -3124,6 +3207,19 @@ pub enum SessionEvent {
         /// Exact committed batch state.
         state: ToolBatchState,
     },
+    /// One append-only context compaction committed.
+    ContextCompacted {
+        /// Exact compaction provenance record.
+        context_compaction_id: CanonicalUuid,
+        /// Dedicated producing model call.
+        model_call_id: CanonicalUuid,
+        /// One-based final summarized position.
+        through_position: CanonicalU64,
+        /// Appended semantic summary entry.
+        summary_entry_id: CanonicalUuid,
+        /// Complete result frontier.
+        result_frontier_id: CanonicalUuid,
+    },
     /// Turn completed.
     TurnCompleted {
         /// Completed turn.
@@ -3186,6 +3282,7 @@ impl SessionEvent {
     const fn minimum_protocol_version(&self) -> u64 {
         match self {
             Self::ToolBatchTransition { .. } | Self::TurnToolReconciliationRequired { .. } => 3,
+            Self::ContextCompacted { .. } => CONTEXT_COMPACTION_PROTOCOL_VERSION,
             Self::SessionCreated {}
             | Self::InputAccepted { .. }
             | Self::TurnActivated { .. }
@@ -3309,6 +3406,20 @@ pub enum ServerMessage {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         next_after: Option<ConversationCursor>,
     },
+    /// Begins the configured model-alias sequence.
+    ModelAliasesStart {},
+    /// One configured alias and the direct selection it currently names.
+    ModelAliasSummary {
+        /// Stable alias identity selectable by creation commands.
+        alias_id: CanonicalUuid,
+        /// Current deployment-owned direct selection target.
+        selection_id: CanonicalUuid,
+    },
+    /// Completes the configured model-alias sequence.
+    ModelAliasesEnd {
+        /// Number of preceding alias summaries.
+        alias_count: CanonicalU64,
+    },
     /// One complete current metadata read.
     SessionMetadata {
         /// Selected session.
@@ -3366,6 +3477,21 @@ pub enum ServerMessage {
         tool_request_id: CanonicalUuid,
         /// Exact recorded decision.
         decision: ToolDecision,
+    },
+    /// One completed append-only context-compaction receipt.
+    SessionCompacted {
+        /// Compacted session.
+        session_id: CanonicalUuid,
+        /// Immutable compaction identity.
+        context_compaction_id: CanonicalUuid,
+        /// Dedicated producing model call.
+        model_call_id: CanonicalUuid,
+        /// One-based exact through position in the source frontier.
+        through_position: CanonicalU64,
+        /// Appended summary semantic entry.
+        summary_entry_id: CanonicalUuid,
+        /// Complete source-plus-summary result frontier.
+        result_frontier_id: CanonicalUuid,
     },
     /// One new immutable imported conversation was inserted.
     ConversationImportInserted {
@@ -3644,6 +3770,10 @@ impl ServerMessage {
             Self::ConversationPageStart {}
             | Self::ConversationSummary { .. }
             | Self::ConversationPageEnd { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
+            Self::SessionCompacted { .. } => CONTEXT_COMPACTION_PROTOCOL_VERSION,
+            Self::ModelAliasesStart {}
+            | Self::ModelAliasSummary { .. }
+            | Self::ModelAliasesEnd { .. } => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
             Self::SessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::SteeringSubmitted { .. } => INPUT_DELIVERY_PROTOCOL_VERSION,
             Self::Error { detail, .. } => detail.minimum_protocol_version(),
@@ -3909,6 +4039,8 @@ pub enum FrameValidationError {
     SystemPromptShape,
     /// An imported-frontier request carried a nonpositive position.
     ImportedFrontierShape,
+    /// A context-compaction request carried a nonpositive position.
+    ContextCompactionShape,
     /// An imported-conversation entry carried a nonpositive position.
     ImportedConversationEntryShape,
     /// An imported text preview exceeded its bound or contradicted its own
@@ -3940,6 +4072,7 @@ impl fmt::Display for FrameValidationError {
             }
             Self::SystemPromptShape => "version-nine frame omits its required system-prompt member",
             Self::ImportedFrontierShape => "imported frontier position is not positive",
+            Self::ContextCompactionShape => "compaction through position is not positive",
             Self::ImportedConversationEntryShape => {
                 "imported conversation entry position is not positive"
             }
@@ -4000,7 +4133,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1 through 13 and 16 through 19",
+                "process-protocol version is unsupported; supported versions are 1 through 13, 16 through 19, 21, and 22",
             ),
         }
     }
@@ -4227,6 +4360,8 @@ fn probe_header(
             | "17"
             | "18"
             | "19"
+            | "21"
+            | "22"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -4347,6 +4482,8 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "17" => Some(ProtocolVersion::Seventeen),
         "18" => Some(ProtocolVersion::Eighteen),
         "19" => Some(ProtocolVersion::Nineteen),
+        "21" => Some(ProtocolVersion::TwentyOne),
+        "22" => Some(ProtocolVersion::TwentyTwo),
         _ => None,
     }
 }
@@ -4387,26 +4524,26 @@ pub fn recover_bounded_client_protocol_version(content: &[u8]) -> Option<Protoco
 #[cfg(test)]
 mod tests {
     use super::{
-        CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ConversationCursor, ConversationImportFormat, ConversationImportSource, ConversationOrigin,
-        ConversationOriginFilter, ConversationSummary, CurrentModelCall, CurrentModelCallState,
-        ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
-        FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
-        IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION, ImportedContentKind,
-        ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
-        ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+        CONTEXT_COMPACTION_PROTOCOL_VERSION, CanonicalU64, CanonicalUuid, ClientFrame,
+        ClientRequest, CommandId, ContentFragment, ConversationCursor, ConversationImportFormat,
+        ConversationImportSource, ConversationOrigin, ConversationOriginFilter,
+        ConversationSummary, CurrentModelCall, CurrentModelCallState, ErrorCode, ErrorDetail,
+        FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
+        FrameEncodeError, FrameValidationError, IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
+        ImportedContentKind, ImportedConversationSourceFormat, ImportedSessionRelationship,
+        ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
         MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
         MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
         MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
-        MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION, MetadataActor, MetadataLastWriter,
-        ModelCallDisposition, ModelCallState, ModelCallTokenUsage, ModelSelection,
-        PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId, ReviewTargetSubject,
-        SESSION_METADATA_PROTOCOL_VERSION, SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
-        SESSION_TEMPLATE_PROTOCOL_VERSION, ServerFrame, ServerMessage, SessionEvent,
-        SessionMetadata, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TurnState,
+        MODEL_ALIAS_CATALOG_PROTOCOL_VERSION, MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
+        MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState,
+        ModelCallTokenUsage, ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail,
+        RequestId, ReviewTargetSubject, SESSION_METADATA_PROTOCOL_VERSION,
+        SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, SESSION_TEMPLATE_PROTOCOL_VERSION, ServerFrame,
+        ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
         UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION, decode_client_line, decode_server_line,
         encode_client_line, encode_server_line,
     };
@@ -4490,7 +4627,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1 through 13 and 16 through 19")
+                .contains("supported versions are 1 through 13, 16 through 19, 21, and 22")
         );
     }
 
@@ -6711,10 +6848,11 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the admitted set is one through thirteen and sixteen through
-    /// nineteen; fourteen and fifteen remain retired and unsupported.
+    /// INV-033: the admitted set is one through thirteen, sixteen through
+    /// nineteen, twenty-one, and twenty-two; fourteen, fifteen, and twenty
+    /// remain retired and unsupported here.
     #[test]
-    fn inv033_version_nineteen_completes_the_admitted_set() {
+    fn inv033_version_twenty_two_completes_the_admitted_set() {
         assert_eq!(
             ProtocolVersion::Nine.as_u64(),
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
@@ -6763,6 +6901,117 @@ mod tests {
             Some(ProtocolVersion::Nineteen)
         );
         assert_eq!(ProtocolVersion::from_u64(20), None);
+        assert_eq!(
+            ProtocolVersion::TwentyOne.as_u64(),
+            MODEL_ALIAS_CATALOG_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            ProtocolVersion::from_u64(21),
+            Some(ProtocolVersion::TwentyOne)
+        );
+        assert_eq!(
+            ProtocolVersion::TwentyTwo.as_u64(),
+            CONTEXT_COMPACTION_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            ProtocolVersion::from_u64(22),
+            Some(ProtocolVersion::TwentyTwo)
+        );
+        assert_eq!(ProtocolVersion::from_u64(23), None);
+    }
+
+    /// INV-033: version twenty-one's alias-catalog request and messages have
+    /// exact closed shapes.
+    #[test]
+    fn inv033_version_twenty_one_model_alias_catalog_has_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::TwentyOne,
+            request_id,
+            ClientRequest::ListModelAliases {},
+        )?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":21,\"request_id\":\"1\",\"request\":{\"type\":\"list_model_aliases\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Sixteen,
+                request_id,
+                ClientRequest::ListModelAliases {},
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::ModelAliasesStart {},
+            r#"{"type":"model_aliases_start"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::ModelAliasSummary {
+                alias_id: uuid(4),
+                selection_id: uuid(5),
+            },
+            r#"{"type":"model_alias_summary","alias_id":"00000000-0000-0000-0000-000000000004","selection_id":"00000000-0000-0000-0000-000000000005"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(6)?,
+            ServerMessage::ModelAliasesEnd {
+                alias_count: CanonicalU64::new(1),
+            },
+            r#"{"type":"model_aliases_end","alias_count":"1"}"#,
+        )?;
+        Ok(())
+    }
+
+    /// INV-033: explicit context compaction has one closed version-twenty-two
+    /// request shape, and a requested semantic position must be nonzero.
+    #[test]
+    fn inv033_version_twenty_two_compaction_request_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let compact = ClientRequest::CompactSession {
+            command_id: command(1)?,
+            session_id: uuid(2),
+            through_position: Some(CanonicalU64::new(7)),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Sixteen,
+                request(3)?,
+                compact.clone(),
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::TwentyTwo, request(3)?, compact)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            concat!(
+                "{\"version\":22,\"request_id\":\"3\",\"request\":{",
+                "\"type\":\"compact_session\",",
+                "\"command_id\":\"00000000-0000-0000-0000-000000000001\",",
+                "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
+                "\"through_position\":\"7\"}}\n"
+            )
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+
+        let zero = ClientRequest::CompactSession {
+            command_id: command(4)?,
+            session_id: uuid(5),
+            through_position: Some(CanonicalU64::new(0)),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::TwentyTwo, request(6)?, zero,),
+            Err(FrameValidationError::ContextCompactionShape)
+        );
+        Ok(())
     }
 
     #[test]

@@ -523,11 +523,30 @@ Owns: model-call observation path, follow protocol, persistence checkpoints.
 Collides-with: turn machinery. Deltas are collected today but not delivered; the
 deferred draft-streaming policy decides what is durable versus transient.
 
-## Compaction [blocked-on: frontier-policy decision] [size: L]
+## Compaction [in-flight] [size: L]
 
 Owns: frontier machinery, compaction entries, new spec section. Collides-with:
-turn machinery. The frontier-snapshot substrate is ready. Never expose the state
-before the semantics.
+turn machinery. Owner-commissioned implementation started 2026-07-28.
+
+## Smarter compaction timing [blocked-on: compaction] [size: M]
+
+Owner direction, 2026-07-28. Compact at coherent task and turn boundaries before
+the context limit becomes the immediate constraint. Owns: compaction trigger
+policy and timing evidence. Collides-with: turn machinery and goal mode.
+
+## Agent-controlled self-compaction [blocked-on: compaction; tool policy] [size: M]
+
+Owner direction, 2026-07-28. Give an agent an explicit tool for compacting its
+current session when its own task state indicates a useful boundary. Owns: tool
+contract and compaction authorization. Collides-with: tool registry and context
+assembly.
+
+## Cross-session read tools for agents [blocked-on: read-tool policy] [size: M]
+
+Owner direction, 2026-07-28. Add bounded tools through which an agent can
+inspect other durable sessions without flattening their transcripts into the
+current session. Owns: read contracts and actor authorization. Collides-with:
+tool registry, conversation listing, and context assembly.
 
 ## Templates [delivered by session-templates stack] [size: M]
 
@@ -751,6 +770,22 @@ seed-from-frontier machinery the import milestone builds, with retargeting.
 Owns: network transport beside the local socket, authentication. Collides-with:
 process protocol surfaces. Gates iOS, the web surface, and any off-machine
 client. Bolted-on shared-key auth is the anti-pattern to avoid.
+
+Owner direction, 2026-07-28 (orientation only): prioritize a near-local
+Tailscale path for a real macOS client before broad internet exposure. The
+design pass must cover authenticated identity, authorization, revocation, and
+transport binding together; it must not present a raw local process socket on
+the tailnet or treat tailnet membership alone as application authorization.
+iPhone and iPad remain deferred behind this slice.
+
+## Native imported-conversation inspection [size: S]
+
+Owns: native SwiftUI imported transcript projection and continuation creation.
+Collides-with: process-protocol imported inspection and native conversation
+detail. The native v18 client identifies imported conversations through the
+unified list, and process-protocol version seventeen now provides their entry
+inventory. Add the read-only transcript and continue-from-frontier action
+without a client-owned transcript interpretation.
 
 ## Web surface [blocked-on: monitor stream; remote transport] [size: L]
 
