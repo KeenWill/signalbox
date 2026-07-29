@@ -470,17 +470,20 @@ truncation. It is a plain keyset read over the authoritative session,
 current-defaults, metadata, and imported-conversation tables in one
 repeatable-read, read-only transaction — no materialized view, cache, or
 analytical artifact stands between the caller and committed state, so every
-listed row is transactionally fresh. This section owns that stance and its
-scaling ladder. The unified order is by conversation identity UUID value, with a
-native session ordered before an imported conversation carrying a theoretical
-equal identity value. A cursor object has exactly `origin` (`native_session` or
-`imported_conversation`) and `conversation_id` (canonical UUID string); `after`
-is the exclusive keyset cursor at that total position, so no row can be skipped
-at a page boundary. A present `title_contains` is nonempty, rejects U+0000,
-carries at most 262,144 UTF-8 bytes, and applies the same exact case-sensitive
-substring filter to a present native metadata title or imported display title;
-an absent title matches no title query, and a transitional pending imported
-title survives every title filter so the read fails closed on it
+listed row is transactionally fresh. If measured read cost requires a different
+physical shape, the first upgrade is write-time-maintained projection tables
+updated atomically with the authoritative writes, not a materialized,
+periodically refreshed, cached, or otherwise lagging product read. The unified
+order is by conversation identity UUID value, with a native session ordered
+before an imported conversation carrying a theoretical equal identity value. A
+cursor object has exactly `origin` (`native_session` or `imported_conversation`)
+and `conversation_id` (canonical UUID string); `after` is the exclusive keyset
+cursor at that total position, so no row can be skipped at a page boundary. A
+present `title_contains` is nonempty, rejects U+0000, carries at most 262,144
+UTF-8 bytes, and applies the same exact case-sensitive substring filter to a
+present native metadata title or imported display title; an absent title matches
+no title query, and a transitional pending imported title survives every title
+filter so the read fails closed on it
 ([conversation-import](conversation-import.md#derived-display-titles)) rather
 than silently omitting an unresolved row. `origin` selects native rows, imported
 rows, or both; `include_archived = false` selects the default view excluding

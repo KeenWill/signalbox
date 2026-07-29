@@ -258,9 +258,9 @@ the sections do not.
   describes the implemented adapters, so the same PR updates its adapter
   coverage — or the bottom specification diff of the PR's stack supplies it —
   per the living-specification rule in [AGENTS.md](../../AGENTS.md). Enforcement
-  generated [invariant test index](../invariants.md) after adding the new
-  crate's tests (INV-035 lists each existing adapter's loopback suite) are
-  updated in the same change.
+  generated [invariant test index](../invariants.md) is updated in the same
+  change after adding the new crate's tests (INV-035 lists each existing
+  adapter's loopback suite).
 
 It does **NOT** touch: `model-provider-runtime` (the bridge is generic),
 `crates/application` (the `ModelCallProvider` port is provider-agnostic),

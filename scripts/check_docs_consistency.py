@@ -2169,11 +2169,10 @@ def rust_test_invariant_tags(
     module_prefixes: tuple[tuple[str, ...], ...] = ((),),
     aliases: list[ScopedTestAlias] | None = None,
 ) -> list[tuple[str, int]]:
-    """Return distinct INV tags and declaration lines from Rust tests.
+    """Return declaration-local INV tags and lines from Rust tests.
 
-    Every module path under which the harness registers this file's tests is
-    read, so a file included under more than one active module name carries
-    the tags of each of them.
+    Only the test name and its attached doc comments declare tags. Module names
+    are context, not test annotations, even when they happen to contain INV text.
     """
     found: dict[str, int] = {}
     code = mask_rust_non_code(text)
@@ -2197,20 +2196,11 @@ def rust_test_invariant_tags(
         if any(module.disabled for module in enclosing):
             continue
         doc_comments = "\n".join(rust_doc_comments(raw_prefix))
-        module_names = [module.name for module in enclosing]
         declaration_line = line_number(text, declaration.start("name"))
-        for module_prefix in module_prefixes:
-            material = "\n".join(
-                [
-                    doc_comments,
-                    *module_prefix,
-                    *module_names,
-                    declaration.group("name"),
-                ]
-            )
-            for tag in INVARIANT_TAG.finditer(material):
-                invariant = f"INV-{tag.group('number')}"
-                found.setdefault(invariant, declaration_line)
+        material = "\n".join([doc_comments, declaration.group("name")])
+        for tag in INVARIANT_TAG.finditer(material):
+            invariant = f"INV-{tag.group('number')}"
+            found.setdefault(invariant, declaration_line)
     return sorted(found.items())
 
 
@@ -2694,7 +2684,7 @@ def check_invariant_citations(
                 catalog_pairs.add((invariant, target_label))
                 declared_tags = declared_tags_by_file.get(target_label, set())
                 if (
-                    link.destination in tagged_destinations
+                    (len(cells) == 2 or link.destination in tagged_destinations)
                     and invariant not in declared_tags
                 ):
                     violations.append(

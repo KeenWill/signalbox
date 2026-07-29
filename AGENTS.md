@@ -155,10 +155,13 @@ linear and healthy:
 - Never force-push or rewrite a shared branch without first proving it necessary
   and safe; preserve owner-authored and externally added changes.
 
-Every normative prose statement lives in exactly one owning cross-component or
-versioned-wire contract. Other documents link to it rather than restating it. A
-fixture or scenario that is itself the statement of record changes only with the
-owner-approved contract change that authorizes it.
+Every normative statement has exactly one owner. Normative system prose lives in
+its cross-component or versioned-wire contract, while invariants live in their
+INV-tagged tests. Repository process rules live in `AGENTS.md` or the process
+document it names as their owner; scenarios and fixtures may themselves be the
+statement of record. Other documents link to an owner rather than restating it,
+and an owning scenario or fixture changes only with the owner-approved change
+that authorizes it.
 
 Ordinary implementation choices are made in the pull request and remain durable
 in its description and git history. Foundation-weight changes — changing
@@ -194,11 +197,18 @@ Directly affected documentation may be updated in an implementation pull request
 to keep it accurate. Avoid unrelated rewording, cleanup, restructuring, or
 formatting.
 
-**Operational traps.** Run `git worktree list` before working with another
-checkout of this clone. Never check out a branch by name in a second worktree:
-worktrees share branch refs, so a commit can move another worktree's HEAD and
-leave its index showing spurious staged deletions. Use
-`git checkout --detach origin/<branch>` and `git push origin HEAD:<branch>`.
+**Operational traps.** Do not adopt the review-slog toolkit as a merge gate
+until its
+[blocking condition](docs/open-questions.md#review-slog-toolkit-adoption) is
+cleared. Do not rely on automatic context compaction until its
+[blocking condition](docs/open-questions.md#automatic-context-compaction) is
+cleared.
+
+Run `git worktree list` before working with another checkout of this clone.
+Never check out a branch by name in a second worktree: worktrees share branch
+refs, so a commit can move another worktree's HEAD and leave its index showing
+spurious staged deletions. Use `git checkout --detach origin/<branch>` and
+`git push origin HEAD:<branch>`.
 
 Always pass `--no-fail-fast` to Cargo test runs. The default can let one early
 flaky failure truncate the remaining tests and hide another defect. The ignored

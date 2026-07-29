@@ -4,13 +4,44 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
-from check_docs_consistency import rust_invariant_test_files, rust_sources
+from check_docs_consistency import (
+    markdown_sources,
+    mask_block_content,
+    rust_invariant_test_files,
+    rust_sources,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT = Path("docs/invariants.md")
+INVARIANT_REFERENCE = re.compile(
+    r"(?<![A-Za-z0-9])INV-[0-9]{3}(?![A-Za-z0-9])"
+)
+
+
+def orphan_invariant_references(root: Path) -> dict[str, tuple[str, ...]]:
+    """Return prose INV references that have no tagged Rust test."""
+    tested = {
+        tag for tag, _source in rust_invariant_test_files(rust_sources(root)).keys()
+    }
+    references: dict[str, set[str]] = {}
+    for source in markdown_sources(root):
+        if source == root / OUTPUT:
+            continue
+        label = source.relative_to(root).as_posix()
+        text = mask_block_content(source.read_text(encoding="utf-8"))
+        for number, line in enumerate(text.splitlines(), start=1):
+            for match in INVARIANT_REFERENCE.finditer(line):
+                tag = match.group(0)
+                if tag not in tested:
+                    references.setdefault(tag, set()).add(f"{label}:{number}")
+    return {
+        tag: tuple(sorted(locations))
+        for tag, locations in sorted(references.items())
+    }
 
 
 def render(root: Path) -> str:
@@ -64,6 +95,16 @@ def main() -> int:
         help="replace docs/invariants.md with the code-derived index",
     )
     arguments = parser.parse_args()
+
+    orphans = orphan_invariant_references(ROOT)
+    if orphans:
+        print(
+            "INV references without tagged Rust tests:",
+            file=sys.stderr,
+        )
+        for tag, locations in orphans.items():
+            print(f"  {tag}: {', '.join(locations)}", file=sys.stderr)
+        return 1
 
     expected = render(ROOT)
     destination = ROOT / OUTPUT

@@ -15,6 +15,7 @@ sys.dont_write_bytecode = True
 
 import check_docs_consistency
 from check_docs_consistency import PR_TOKEN, Violation, github_slug, run_checks
+from generate_invariants import orphan_invariant_references
 
 
 def failure_categories(failures: list[Violation]) -> list[str]:
@@ -175,6 +176,29 @@ class DocsConsistencyTests(unittest.TestCase):
     def test_valid_fixture_passes(self) -> None:
         self.assertEqual(run_checks(self.root), [])
 
+    def test_generator_rejects_an_invariant_reference_without_a_tagged_test(
+        self,
+    ) -> None:
+        orphan_tag = "INV-999"
+        test_source = self.root / "src/tests.rs"
+        test_source.write_text(
+            "#[test]\nfn inv001_named_test() {}\n", encoding="utf-8"
+        )
+        spec_source = self.root / "docs/spec/example.md"
+        spec_source.write_text(
+            spec_source.read_text(encoding="utf-8")
+            + f"\nAn unsupported claim cites {orphan_tag}.\n",
+            encoding="utf-8",
+        )
+        expected_location = (
+            f"docs/spec/example.md:{len(spec_source.read_text(encoding='utf-8').splitlines())}"
+        )
+
+        self.assertEqual(
+            orphan_invariant_references(self.root),
+            {orphan_tag: (expected_location,)},
+        )
+
     def test_git_fixture_commands_disable_signing_and_hooks(self) -> None:
         hooks = self.root / ".fixture-hooks"
         hooks.mkdir()
@@ -303,6 +327,25 @@ class DocsConsistencyTests(unittest.TestCase):
             "| -- | -- | -- | -- | -- |\n"
             "| INV-001 | Law. | Domain | Accepted | INV-001-tagged tests in "
             "[`src/tests.rs`](../src/tests.rs). |\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["invariant-tag"])
+        self.assertIn("test name or attached doc comment", failures[0].message)
+
+    def test_generated_index_link_requires_tagged_test_declaration(
+        self,
+    ) -> None:
+        (self.root / "src/tests.rs").write_text(
+            "#[test]\nfn untagged_test() {}\n", encoding="utf-8"
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Enforcement |\n"
+            "| -- | -- |\n"
+            "| INV-001 | [`src/tests.rs`](../src/tests.rs) |\n",
             encoding="utf-8",
         )
 
@@ -482,7 +525,7 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
-    def test_reverse_discovers_invariant_tag_in_module_path(self) -> None:
+    def test_inline_module_name_does_not_supply_invariant_tag(self) -> None:
         (self.root / "src/uncited.rs").write_text(
             "mod inv_001 {\n"
             "    #[test]\n"
@@ -491,20 +534,14 @@ class DocsConsistencyTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        failures = run_checks(self.root)
+        self.assertEqual(run_checks(self.root), [])
 
-        self.assertEqual(
-            failure_categories(failures),
-            ["invariant-registration"],
-        )
-        self.assertIn("src/uncited.rs", failures[0].message)
-
-    def test_reverse_discovers_out_of_line_module_path(self) -> None:
+    def test_reverse_discovers_local_tag_through_out_of_line_module(self) -> None:
         (self.root / "src/uncited_root.rs").write_text(
             '#[path = "generic.rs"]\nmod inv_001;\n', encoding="utf-8"
         )
         (self.root / "src/generic.rs").write_text(
-            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_rejects() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -515,7 +552,7 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("src/generic.rs", failures[0].message)
 
-    def test_reverse_discovers_nested_out_of_line_module_path(self) -> None:
+    def test_reverse_discovers_local_tag_through_nested_module(self) -> None:
         (self.root / "src/uncited_root.rs").write_text(
             "mod inv_001;\n", encoding="utf-8"
         )
@@ -524,7 +561,7 @@ class DocsConsistencyTests(unittest.TestCase):
             "mod deeper;\n", encoding="utf-8"
         )
         (self.root / "src/inv_001/deeper.rs").write_text(
-            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_rejects() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -820,7 +857,7 @@ class DocsConsistencyTests(unittest.TestCase):
             "mod inv_001 {\n"
             "    fn helper<'a>() -> char { let c = 'x'; c }\n"
             "    #[test]\n"
-            "    fn rejects() {}\n"
+            "    fn inv_001_rejects() {}\n"
             "}\n",
             encoding="utf-8",
         )
@@ -838,7 +875,7 @@ class DocsConsistencyTests(unittest.TestCase):
             "mod inv_001 {\n"
             "    fn helper() { 'outer: loop { let c = 'x'; break 'outer; } }\n"
             "    #[test]\n"
-            "    fn rejects() {}\n"
+            "    fn inv_001_rejects() {}\n"
             "}\n",
             encoding="utf-8",
         )
@@ -890,7 +927,7 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
-    def test_every_active_out_of_line_module_prefix_is_read(self) -> None:
+    def test_out_of_line_module_names_do_not_supply_tags(self) -> None:
         (self.root / "src/uncited_root.rs").write_text(
             '#[path = "generic.rs"]\nmod ordinary;\n'
             '#[path = "generic.rs"]\nmod inv_001;\n',
@@ -900,13 +937,15 @@ class DocsConsistencyTests(unittest.TestCase):
             "#[test]\nfn rejects() {}\n", encoding="utf-8"
         )
 
-        failures = run_checks(self.root)
+        self.assertEqual(run_checks(self.root), [])
 
-        self.assertEqual(
-            failure_categories(failures),
-            ["invariant-registration"],
+    def test_inline_module_names_do_not_supply_tags(self) -> None:
+        (self.root / "src/ordinary.rs").write_text(
+            "mod inv_999 {\n    #[test]\n    fn ordinary_name() {}\n}\n",
+            encoding="utf-8",
         )
-        self.assertIn("src/generic.rs", failures[0].message)
+
+        self.assertEqual(run_checks(self.root), [])
 
     def test_matcher_only_test_attribute_generates_no_test(self) -> None:
         (self.root / "src/generated.rs").write_text(
@@ -1014,7 +1053,7 @@ class DocsConsistencyTests(unittest.TestCase):
             '#[path = "second.rs"]\nmod inv_001;\n', encoding="utf-8"
         )
         (self.root / "src/second.rs").write_text(
-            '#[path = "first.rs"]\nmod back;\n#[test]\nfn rejects() {}\n',
+            '#[path = "first.rs"]\nmod back;\n#[test]\nfn inv_001_rejects() {}\n',
             encoding="utf-8",
         )
 
@@ -1034,7 +1073,7 @@ class DocsConsistencyTests(unittest.TestCase):
             '#[path = "../outer.rs"]\nmod inv_001;\n', encoding="utf-8"
         )
         (self.root / "outer.rs").write_text(
-            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_rejects() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -1093,7 +1132,7 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         (self.root / "src/uncited_root/inv_001").mkdir(parents=True)
         (self.root / "src/uncited_root/inv_001/cases.rs").write_text(
-            "#[test]\nfn generic() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_generic() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -1188,7 +1227,7 @@ class DocsConsistencyTests(unittest.TestCase):
             "pub fn ordinary() {}\n", encoding="utf-8"
         )
         (self.root / "src/uncited_root/generic.rs").write_text(
-            "#[test]\nfn generic() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_generic() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -1211,7 +1250,7 @@ class DocsConsistencyTests(unittest.TestCase):
             "pub fn windows() {}\n", encoding="utf-8"
         )
         (self.root / "src/uncited_root/unix.rs").write_text(
-            "#[test]\nfn generic() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_generic() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -1338,7 +1377,7 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         (self.root / "src/uncited_root").mkdir()
         (self.root / "src/uncited_root/generic.rs").write_text(
-            "#[test]\nfn generic() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_generic() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -1355,7 +1394,7 @@ class DocsConsistencyTests(unittest.TestCase):
             encoding="utf-8",
         )
         (self.root / "src/generic.rs").write_text(
-            "#[test]\nfn generic() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_generic() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)

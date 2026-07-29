@@ -322,7 +322,7 @@ Sandbox profile is also closed vocabulary: `WorkspaceRestricted`
 (`workspace-restricted` on configuration and wire surfaces) and `Ambient`
 (`ambient`). Both must be explicitly advertised before a session can select
 them. The daemon owns each profile's fixed meaning and approval defaults; an
-advertisement asserts availability only (INV-022, INV-023, INV-042).
+advertisement asserts availability only (INV-042).
 
 One `RunnerCatalog` domain value contains allowed capability classes, complete
 runner-tool declarations, allowed workspace capabilities, and the two fixed
@@ -640,20 +640,20 @@ replacement; it never causes automatic dispatch.
 Reconstitution accepts a complete public raw-facts input and rejects ordinary
 `Unpinned` above revision one unless append-only history proves an exact
 lost-before-pin owner replacement into that revision. It rejects
-`RunnerLostBeforePin` unless the request selector is the retained exact runner,
-a pinned or pinned-loss state that does not match its current request and
-validated capabilities, and any stored credential-grant lineage whose revision
-is newer than the placement revision. A profileless placement with retained
-lineage additionally requires the exact terminally revoked grant tombstone for
-that session, runner, and revision; an omitted, active, or cross-wired tombstone
-fails closed. Durable replacement-history verification is enforced by the
-persistence projection described below. Pinned or pinned-loss reconstitution
-validates against the exact registration snapshot that produced the pin and
-rejects any stored tool or runner-required-tool inventory that differs from that
-checked result. A current narrowed re-registration is reconciled separately and
-is not substituted for that historical snapshot. This domain aggregate accepts
-every positive placement revision because each is reachable through checked
-successor transitions.
+`RunnerLostBeforePin` unless the request selector is the retained exact runner.
+It also rejects a pinned or pinned-loss state that does not match its current
+request and validated capabilities, and any stored credential-grant lineage
+whose revision is newer than the placement revision. A profileless placement
+with retained lineage additionally requires the exact terminally revoked grant
+tombstone for that session, runner, and revision; an omitted, active, or
+cross-wired tombstone fails closed. Durable replacement-history verification is
+enforced by the persistence projection described below. Pinned or pinned-loss
+reconstitution validates against the exact registration snapshot that produced
+the pin and rejects any stored tool or runner-required-tool inventory that
+differs from that checked result. A current narrowed re-registration is
+reconciled separately and is not substituted for that historical snapshot. This
+domain aggregate accepts every positive placement revision because each is
+reachable through checked successor transitions.
 
 The store retains append-only created, pinned, runner-lost-before-pin,
 pre-pin-replaced, runner-lost, runner-replaced, abandoned, and profile-replaced
@@ -719,7 +719,7 @@ prove the required namespace and bind behavior. File tools use
 descriptor-relative traversal beneath the repository and refuse symlinks, magic
 links, device nodes, sockets, and path escape. Writes replace a sibling
 temporary file atomically. Shell and build/test tools receive no host path that
-was not bound into their namespace (INV-022, INV-023).
+was not bound into their namespace.
 
 The restricted network namespace has no host interface. A namespace-local shim
 connects through one per-dispatch Unix socket to a runner-owned HTTPS broker.

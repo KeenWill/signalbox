@@ -56,8 +56,9 @@ definitions are a material fraction of the set. The nine new files alone add
 duplicate constraints, prefix-conversion history, and history-pinning tests
 while paying nearly all reset risk.
 
-The governing authority already permits a clean baseline while every database is
-disposable: Pre-production schema discipline. The
+The historical owner checkpoint in
+[commit f6db5e71](https://github.com/KeenWill/signalbox/commit/f6db5e71c)
+permits a clean baseline while every database is disposable. The
 [backlog entry](../agents/backlog.md#migration-baseline-reset-blocked-on-schema-audit-verdict-owner-checkpoint-call-size-s-m)
 adds the remaining owner checkpoint gate.
 
@@ -300,8 +301,8 @@ bound by foreign key and command transaction behavior.
 
 - The prior diseased column is fixed. Migration `240007` makes
   `model_call.credential_reference` NOT NULL and non-empty, and the store no
-  longer carries the NULL-read branch. This matches the superseding
-  credential-reference decision.
+  longer carries the NULL-read branch. This matches the authorizing change in
+  [PR #217](https://github.com/KeenWill/signalbox/pull/217).
 - The former stale migration inventory is fixed:
   [persistence-protocol](../spec/persistence-protocol.md#migrations) says 27
   files through `202607280001`.

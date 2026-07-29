@@ -119,6 +119,48 @@ cross-component and wire contracts live in the
   whether an interrupt-only path may bypass `StopRequested` remains undecided.
   Later scope. (S07)
 
+### Automatic context compaction
+
+This is a blocking condition rather than an open design question. Automatic
+context compaction ships with a known defect on its primary path, accepted on
+the grounds that the code sits unused until something depends on it. That ground
+disappears the moment anything relies on it, so the condition is recorded here
+rather than only in the review thread that raised it.
+
+**The defect.** The compaction request wraps accumulated plain-text history in
+JSON with provenance metadata and reserves the same `max_output_tokens` as the
+ordinary call, and is never counted against `context_window_tokens`. It can
+therefore be *larger* than the input that already overflowed the window. The
+provider may reject the summary call for context overflow; that call is then
+terminalized, and the per-turn automatic marker prevents a second attempt.
+
+**The consequence.** A session that crosses its context window has its queued
+turn stalled with its single automatic attempt consumed and no path forward
+inside the running daemon — which is the exact situation automatic compaction
+exists to rescue. Nothing durable is corrupted, no summary boundary is written
+wrong, and no transcript entries are lost: the failed call is recorded as
+legitimate terminal non-Completed evidence. The session is stalled, not damaged.
+
+**The trigger is the common case, not an edge of it.** Compaction is invoked
+precisely when history is large. History large enough that wrapping it in JSON
+with metadata overflows the window is the middle of that condition rather than
+its boundary.
+
+**The condition.** Automatic context compaction must not be relied on until the
+summary call is guaranteed to fit. Anything built on top of it, and any workflow
+that assumes a long-running session will rescue itself, is blocked on that fix
+rather than merely improved by it. Explicit compaction is unaffected by this
+particular defect.
+
+**Shape of the fix.** Count the summary request against `context_window_tokens`
+before triggering it, or select a compaction strategy guaranteed to fit — for
+example bounding the history actually wrapped rather than reserving the full
+`max_output_tokens` on top of unbounded input. Scheduled as a follow-up pull
+request against a quiet `main` rather than inside the compaction stack.
+
+Raised as a review finding and dispositioned with this condition attached:
+https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
+
 ## Session organization, visibility, and retention
 
 - **Creation-attributed default visibility.** The implemented visibility and
@@ -441,23 +483,60 @@ because each one is a write with nowhere to land.
   workspace-free placement mode. (S16, S30–S32)
   [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3670201450)
 
-### Specification corrections
-
-Not open questions — the intent is settled and the prose is wrong. Recorded here
-because they would otherwise survive into an implementation.
-
-- **Placement reconstitution rejection conditions are inverted.** The conditions
-  that should *cause* placement reconstitution to reject a record are attached
-  to an "unless" exception clause, so a mismatched pinned state or a too-new
-  credential record reads as something that prevents rejection rather than
-  something that triggers it. An implementer following the sentence literally
-  would build a fail-open reconstitution that accepts exactly the corrupt states
-  the rule exists to reject. Intended meaning: a mismatched pinned state or a
-  credential record newer than the reconstituted placement **must cause
-  rejection**. Rewrite the sentence so the conditions read as triggers.
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3670385088)
-
 ## Tool safety
+
+### Review-slog toolkit adoption
+
+This is a blocking condition rather than an open design question. The
+review-slog toolkit ships with a known race in its merge gate, accepted on the
+grounds that the toolkit is not yet load-bearing. That ground disappears the
+moment it is adopted, so the condition is recorded here rather than only in the
+review thread that raised it.
+
+**The window.** `review_gate_transaction` reads stack state, thread inventory,
+convergence state, stack state again, and convergence state again, then requires
+the two stack reads to be equal and the two convergence reads to be equal before
+composing the gate. The stack pair brackets the interval between the first and
+second stack reads; the convergence pair brackets the interval between the first
+and second convergence reads. Neither pair brackets the interval between the
+final stack read and the final convergence read. A stack-only change inside that
+interval — the immediate base advancing, or a child change request being opened
+or force-pushed — leaves both stack reads equal, because both were taken before
+it, and leaves both convergence reads equal, because convergence evidence
+carries no ancestry facts. The equality check passes and the gate composes its
+verdict from a stack snapshot that is already stale.
+
+**What becomes silently missable.** Every stack-derived blocker:
+`parent_needs_merge_forward`, `base_chain_missing_main`,
+`child_needs_merge_forward`, and `evidence_truncated` where it derives from a
+truncated child page. The gate reports `ready: true` with no blocker recorded
+and nothing in the result marking the stack evidence as stale, so a reader of
+the output cannot detect the condition. Convergence-derived blockers —
+unresolved, undispositioned and buried threads, continuous-integration state,
+mergeability, and reviewer verdict status — are not affected, because the gate
+is composed from the final convergence read, which is the freshest read in the
+transaction.
+
+**This is a sequencing argument, not a severity one.** A base advancing
+concurrently with a gate check is normal in a merge train, not exotic; the race
+is not rare. What makes it acceptable to ship is that merges are gated by the
+standalone convergence checker, not by this tool, so a stale verdict cannot
+currently affect a real merge decision.
+
+**The condition.** The review gate must not be used to gate any merge decision
+until the stale-stack-read window is closed. Adoption is blocked on the fix; the
+fix does not follow adoption.
+
+**Shape of the fix.** Minimally, a third stack read after the final convergence
+read, folded into the equality check: this closes the window and leaves only the
+post-transaction interval, which no read ordering can close, since the base may
+always advance after the last read. Preferably, a stable read loop that repeats
+the stack and convergence reads until two consecutive complete snapshots agree.
+Both are small changes and either is cheap relative to trusting the tool with a
+merge decision.
+
+Raised as a review finding and dispositioned with this condition attached:
+https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
 
 - **Future tool-attempt retry.** General automatic retry, accepted-risk retry
   after ambiguity, idempotency-key policy, duplicate-risk controls, and retry
