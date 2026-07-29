@@ -665,7 +665,12 @@ trustworthy result must stop rather than improvise. An eligibility pass raises
 the same signal whenever a durable stage it owns reports
 `Infrastructure { commit_ambiguous: true }` — the guarded counted activation
 commit and automatic compaction preparation alike — since only that next scan
-can decide what committed.
+can decide what committed. The connection runtime raises it through the same
+handle for an explicit compaction command reporting that class, and still
+answers the client `commit_ambiguous`: a connection handler holds no prepared
+record to terminalize, replay of the command finds it pending, and a fresh
+command finds the nonterminal call, so the restart is the only remedy and
+nothing else would ask for it.
 
 Startup recovery (`crates/persistence/src/startup.rs`), inside the same
 per-session locked transaction as the general scan (INV-034):

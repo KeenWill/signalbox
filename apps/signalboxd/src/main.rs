@@ -523,6 +523,10 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor),
     );
+    // The connection runtime has no execution role, so it reaches the same
+    // fatal recovery signal through this handle rather than ending an
+    // undecidable durable outcome at the client response.
+    let process_runtime = process_runtime.with_recovery_reporter(execution.recovery_reporter());
     let pass = ContextGuardedTurnPass::new(
         StartEligibleTurnRepository::new(scheduler_pool),
         guarded_model_repository,

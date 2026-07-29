@@ -3,6 +3,7 @@
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use rust_decimal::Decimal;
+use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
 use signalbox_domain::{
     ContextCompactionId, ContextCompactionTokenUsage, ContextFrontierId, DirectModelSelection,
     DurableCommandId, ModelCallId, ResolvedProviderTarget, SemanticTranscriptEntryId,
@@ -1370,6 +1371,21 @@ impl Error for ContextCompactionRepositoryError {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
             Self::Corruption(error) => Some(error),
             Self::IdentityCollision => None,
+        }
+    }
+}
+
+impl ClassifyOperatorFailure for ContextCompactionRepositoryError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::Database(_) => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            Self::CommitAmbiguous(_) => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            },
+            Self::IdentityCollision => OperatorFailureClass::IdentityCollision,
+            Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
         }
     }
 }

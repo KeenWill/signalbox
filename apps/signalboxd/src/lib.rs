@@ -123,6 +123,24 @@ pub trait ActivatedTurnExecution {
     fn report_post_activation_failure(&self) {}
 }
 
+/// Cheap-clone handle that raises the daemon's fatal recovery signal.
+///
+/// The scheduler pass reaches the signal through its execution role, but the
+/// connection runtime has no execution role and still observes durable
+/// outcomes the running process cannot decide. Both raise the same signal
+/// through this one handle rather than growing a second recovery mechanism.
+#[derive(Clone, Debug)]
+pub struct FatalRecoveryReporter {
+    fatal_signal: watch::Sender<bool>,
+}
+
+impl FatalRecoveryReporter {
+    /// Reports that durable state may require startup recovery.
+    pub fn report_recovery_required(&self) {
+        self.fatal_signal.send_replace(true);
+    }
+}
+
 /// Cloneable signal raised when an activated turn may require recovery.
 #[derive(Clone, Debug)]
 pub struct FatalExecutionSignal {
@@ -157,6 +175,13 @@ pub struct FatalExecutionSupervisor<Execution> {
 }
 
 impl<Execution> FatalExecutionSupervisor<Execution> {
+    /// Returns a handle raising the same fatal signal this supervisor raises.
+    pub fn recovery_reporter(&self) -> FatalRecoveryReporter {
+        FatalRecoveryReporter {
+            fatal_signal: self.fatal_signal.clone(),
+        }
+    }
+
     /// Wraps one execution role and returns its independently awaitable signal.
     pub fn new(execution: Execution) -> (Self, FatalExecutionSignal) {
         let (fatal_signal, triggered) = watch::channel(false);
@@ -198,7 +223,7 @@ where
     }
 
     fn report_post_activation_failure(&self) {
-        self.fatal_signal.send_replace(true);
+        self.recovery_reporter().report_recovery_required();
     }
 }
 
@@ -497,14 +522,24 @@ where
     Execution: ActivatedTurnExecution,
     Failure: ClassifyOperatorFailure,
 {
-    if matches!(
+    if commit_outcome_is_unknown(error) {
+        execution.report_post_activation_failure();
+    }
+}
+
+/// Whether one classified failure left a durable commit outcome the running
+/// process cannot decide.
+///
+/// Surfaces without an execution role apply this to the same declared class
+/// before raising the same signal, so the question has one answer wherever it
+/// is asked.
+pub(crate) fn commit_outcome_is_unknown(error: &impl ClassifyOperatorFailure) -> bool {
+    matches!(
         error.operator_failure_class(),
         signalbox_application::OperatorFailureClass::Infrastructure {
             commit_ambiguous: true
         }
-    ) {
-        execution.report_post_activation_failure();
-    }
+    )
 }
 
 fn activation_session_matches<Execution>(

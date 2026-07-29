@@ -139,7 +139,8 @@ use tokio::{
 };
 
 use crate::{
-    HubModelConfiguration, LocalProcessListener, LocalSocketError, SessionTemplateConfiguration,
+    FatalRecoveryReporter, HubModelConfiguration, LocalProcessListener, LocalSocketError,
+    SessionTemplateConfiguration,
 };
 
 const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -177,6 +178,7 @@ impl ContextCompactionModel for UnavailableContextCompactionModel {
 
 #[derive(Clone, Debug)]
 struct ConnectionServices {
+    recovery_reporter: Option<FatalRecoveryReporter>,
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
@@ -195,6 +197,7 @@ struct ConnectionServices {
 /// durable and streaming fan-outs, and one guarded Unix listener.
 #[derive(Debug)]
 pub struct ProcessRuntime {
+    recovery_reporter: Option<FatalRecoveryReporter>,
     listener: LocalProcessListener,
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
@@ -243,6 +246,7 @@ impl ProcessRuntime {
         let (durable_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         let (streaming_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         Self {
+            recovery_reporter: None,
             listener,
             pool,
             eligibility_nudge,
@@ -271,6 +275,17 @@ impl ProcessRuntime {
         self
     }
 
+    /// Installs the handle raising the daemon's fatal recovery signal.
+    ///
+    /// A connection handler has no execution role, so without this a durable
+    /// outcome it cannot decide would end at the client response and nothing
+    /// would stop the process for the next incarnation's startup scan.
+    #[must_use]
+    pub fn with_recovery_reporter(mut self, reporter: FatalRecoveryReporter) -> Self {
+        self.recovery_reporter = Some(reporter);
+        self
+    }
+
     pub fn provider_text_delta_sink(&self) -> ProcessProviderTextDeltaSink {
         ProcessProviderTextDeltaSink {
             updates: self.fanouts.streaming.clone(),
@@ -282,6 +297,7 @@ impl ProcessRuntime {
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), ProcessRuntimeError> {
         let fanouts = self.fanouts;
         let connection_dependencies = ConnectionDependencies {
+            recovery_reporter: self.recovery_reporter,
             pool: self.pool.clone(),
             eligibility_nudge: self.eligibility_nudge,
             tool_dispatch_gate: self.tool_dispatch_gate,
@@ -348,6 +364,7 @@ async fn dispatch_updates(
 }
 
 struct ConnectionDependencies {
+    recovery_reporter: Option<FatalRecoveryReporter>,
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
@@ -367,6 +384,7 @@ async fn serve_connections(
         snapshot_reader_capacity(dependencies.pool.options().get_max_connections())
             .ok_or(ProcessRuntimeError::InsufficientPoolCapacity)?;
     let services = ConnectionServices {
+        recovery_reporter: dependencies.recovery_reporter,
         pool: dependencies.pool,
         eligibility_nudge: dependencies.eligibility_nudge,
         tool_dispatch_gate: dependencies.tool_dispatch_gate,
@@ -3377,8 +3395,14 @@ where
             .await;
         }
         Err(error) => {
-            return write_context_compaction_repository_error(writer, version, request_id, error)
-                .await;
+            return write_context_compaction_repository_error(
+                writer,
+                version,
+                request_id,
+                services.recovery_reporter.as_ref(),
+                error,
+            )
+            .await;
         }
     }
     let Some(credential_reference) = services
@@ -3520,7 +3544,11 @@ where
             Err(ContextCompactionRepositoryError::IdentityCollision) => continue,
             Err(error) => {
                 return write_context_compaction_repository_error(
-                    writer, version, request_id, error,
+                    writer,
+                    version,
+                    request_id,
+                    services.recovery_reporter.as_ref(),
+                    error,
                 )
                 .await;
             }
@@ -3533,6 +3561,7 @@ where
                 writer,
                 version,
                 request_id,
+                services.recovery_reporter.as_ref(),
                 &repository,
                 &prepared,
                 error,
@@ -3541,7 +3570,14 @@ where
         }
     };
     if let Err(error) = authorize_context_compaction_until_resolved(&repository, &prepared).await {
-        return write_context_compaction_repository_error(writer, version, request_id, error).await;
+        return write_context_compaction_repository_error(
+            writer,
+            version,
+            request_id,
+            services.recovery_reporter.as_ref(),
+            error,
+        )
+        .await;
     }
     let request = ContextCompactionModelRequest {
         call: prepared.call(),
@@ -3563,6 +3599,7 @@ where
                     writer,
                     version,
                     request_id,
+                    services.recovery_reporter.as_ref(),
                     repository_error,
                 )
                 .await;
@@ -3591,8 +3628,14 @@ where
     {
         Ok(applied) => applied,
         Err(error) => {
-            return write_context_compaction_repository_error(writer, version, request_id, error)
-                .await;
+            return write_context_compaction_repository_error(
+                writer,
+                version,
+                request_id,
+                services.recovery_reporter.as_ref(),
+                error,
+            )
+            .await;
         }
     };
     write_context_compaction_receipt(writer, version, request_id, session_id, applied).await
@@ -3620,21 +3663,14 @@ impl Error for AutomaticContextCompactionError {}
 impl ClassifyOperatorFailure for AutomaticContextCompactionError {
     fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass {
         match self {
-            Self::Read(ProcessReadError::Database(_))
-            | Self::Repository(ContextCompactionRepositoryError::Database(_))
-            | Self::Model => signalbox_application::OperatorFailureClass::Infrastructure {
-                commit_ambiguous: false,
-            },
-            Self::Repository(ContextCompactionRepositoryError::CommitAmbiguous(_)) => {
+            Self::Repository(error) => error.operator_failure_class(),
+            Self::Read(ProcessReadError::Database(_)) | Self::Model => {
                 signalbox_application::OperatorFailureClass::Infrastructure {
-                    commit_ambiguous: true,
+                    commit_ambiguous: false,
                 }
             }
-            Self::Read(ProcessReadError::Corruption(_))
-            | Self::Repository(ContextCompactionRepositoryError::Corruption(_))
-            | Self::Integrity => signalbox_application::OperatorFailureClass::FailClosedCorruption,
-            Self::Repository(ContextCompactionRepositoryError::IdentityCollision) => {
-                signalbox_application::OperatorFailureClass::IdentityCollision
+            Self::Read(ProcessReadError::Corruption(_)) | Self::Integrity => {
+                signalbox_application::OperatorFailureClass::FailClosedCorruption
             }
             Self::Configuration | Self::State | Self::AlreadyAttempted => {
                 signalbox_application::OperatorFailureClass::CallerOrHubBug
@@ -4202,6 +4238,7 @@ async fn fail_context_compaction_before_response<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
+    recovery_reporter: Option<&FatalRecoveryReporter>,
     repository: &ContextCompactionRepository,
     prepared: &PreparedContextCompaction,
     error: ContextCompactionRangeLoadError,
@@ -4222,6 +4259,7 @@ where
                     writer,
                     version,
                     request_id,
+                    recovery_reporter,
                     repository_error,
                 )
                 .await;
@@ -4240,6 +4278,7 @@ where
                     writer,
                     version,
                     request_id,
+                    recovery_reporter,
                     repository_error,
                 )
                 .await;
@@ -4281,15 +4320,34 @@ where
     .await
 }
 
+/// Answers one explicit compaction repository failure, reporting first when it
+/// left a durable outcome this process cannot decide.
+///
+/// The automatic sibling reaches the same signal through the scheduler pass's
+/// execution role. A connection handler has none, and it cannot terminalize the
+/// record either: `prepare` returned no `PreparedContextCompaction`, so `fail`
+/// has nothing to name, replay of the same command finds it `Pending`, and a
+/// fresh command finds the nonterminal call. Startup recovery does reconcile
+/// exactly this state — `active_sessions` includes sessions holding a
+/// nonterminal compaction call — but only the next incarnation runs it, so
+/// without this report the session's compaction boundary stays owned by a call
+/// nothing terminalizes for the life of the process, with nothing telling an
+/// operator to restart.
 async fn write_context_compaction_repository_error<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
+    recovery_reporter: Option<&FatalRecoveryReporter>,
     error: ContextCompactionRepositoryError,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
+    if crate::commit_outcome_is_unknown(&error)
+        && let Some(reporter) = recovery_reporter
+    {
+        reporter.report_recovery_required();
+    }
     let response = match error {
         ContextCompactionRepositoryError::Database(_) => ProtocolError::mutation_unavailable(false),
         ContextCompactionRepositoryError::CommitAmbiguous(_) => {
@@ -8776,11 +8834,15 @@ mod tests {
         replacement_model_is_admitted, required_protocol_version_for_selected_session,
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, wire_model_call_state, wire_tool_decision, wire_turn_state,
-        wire_uuid, write_content, write_snapshot_spool_error, write_transcript_entry,
+        wire_uuid, write_content, write_context_compaction_repository_error,
+        write_snapshot_spool_error, write_transcript_entry,
     };
+    use crate::FatalExecutionSupervisor;
     use signalbox_model_provider_runtime::ContextCompactionModelError;
     use signalbox_persistence::{
-        context_compaction::FailedContextCompactionDisposition,
+        context_compaction::{
+            ContextCompactionRepositoryError, FailedContextCompactionDisposition,
+        },
         outbox::{
             DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEventKind,
             DispatchedReconciliationOperation, DispatchedToolBatchState,
@@ -9026,6 +9088,79 @@ mod tests {
         assert!(admits_provider_text_deltas(ProtocolVersion::Thirteen));
         assert!(admits_provider_text_deltas(ProtocolVersion::Sixteen));
         assert!(admits_provider_text_deltas(ProtocolVersion::Eighteen));
+    }
+
+    /// S03 / INV-034: an explicit compaction whose commit outcome cannot be
+    /// decided raises the same fatal recovery signal its automatic sibling
+    /// raises through the scheduler pass, and still answers the client with the
+    /// stable ambiguous code.
+    ///
+    /// Without the report the connection handler has nowhere left to go: it
+    /// holds no `PreparedContextCompaction` to terminalize, replay of the same
+    /// command finds it pending, a fresh command finds the nonterminal call,
+    /// and the startup scan that does reconcile this state only runs in the
+    /// next incarnation.
+    #[tokio::test]
+    async fn s03_inv034_ambiguous_explicit_compaction_commit_raises_the_fatal_recovery_signal()
+    -> Result<(), Box<dyn Error>> {
+        let (supervisor, signal) = FatalExecutionSupervisor::new(());
+        let reporter = supervisor.recovery_reporter();
+        let (mut writer, mut reader) = duplex(1_024);
+
+        write_context_compaction_repository_error(
+            &mut writer,
+            ProtocolVersion::One,
+            RequestId::try_new(11)?,
+            Some(&reporter),
+            ContextCompactionRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
+        )
+        .await?;
+        drop(writer);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+
+        assert!(signal.is_triggered());
+        assert!(matches!(
+            decode_server_line(&encoded)?.message(),
+            ServerMessage::Error {
+                code: ErrorCode::CommitAmbiguous,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    /// S03 / INV-034: a failure proven to precede the commit boundary is
+    /// ordinary unavailability and raises no recovery signal, so the reaction
+    /// stays scoped to the one declared class that needs it.
+    #[tokio::test]
+    async fn s03_inv034_decided_explicit_compaction_failure_raises_no_recovery_signal()
+    -> Result<(), Box<dyn Error>> {
+        let (supervisor, signal) = FatalExecutionSupervisor::new(());
+        let reporter = supervisor.recovery_reporter();
+        let (mut writer, mut reader) = duplex(1_024);
+
+        write_context_compaction_repository_error(
+            &mut writer,
+            ProtocolVersion::One,
+            RequestId::try_new(12)?,
+            Some(&reporter),
+            ContextCompactionRepositoryError::Database(sqlx::Error::PoolClosed),
+        )
+        .await?;
+        drop(writer);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+
+        assert!(!signal.is_triggered());
+        assert!(matches!(
+            decode_server_line(&encoded)?.message(),
+            ServerMessage::Error {
+                code: ErrorCode::Unavailable,
+                ..
+            }
+        ));
+        Ok(())
     }
 
     #[test]
