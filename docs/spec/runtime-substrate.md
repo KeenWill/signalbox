@@ -5,7 +5,7 @@ This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime-openai`, `crates/model-runtime-codex-cli`, and
 `crates/model-runtime-claude-cli`, verified against the implementing stack
 through PR #183 (`agent/provider-call-security-parser`). The Claude Code CLI
-adapter implementation was verified against `2e967a40` on
+adapter implementation was verified against `41ad8a7a` on
 `agent/claude-cli-adapter`. The Codex CLI adapter stack comprises PR #264
 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
 escalation closeout is PR #317 (`agent/escalation-closeout`). The `signalboxd`
@@ -636,10 +636,13 @@ acknowledgement that Signalbox recorded the proposal; Claude consequently emits
 a typed assistant `tool_use` followed by a user `tool_result`, and the adapter
 returns the proposal for external authorization and execution. A controlled
 `SessionStart` hook waits for a private readiness marker written only after the
-bridge has answered `tools/list`. This closes the print-mode discovery race: the
-accepted `system/init` must report that server `connected` and its `tools` set
-must equal the qualified declared MCP surface before any assistant content is
-admitted.
+bridge has answered `tools/list`. The bridge accepts exactly the MCP
+`2025-11-25` initialization protocol observed from Claude Code `2.1.220`; its
+`tools/call` request carries the declared name and object arguments, and its
+fixed result returns one text content block. This closes the print-mode
+discovery race: the accepted `system/init` must report that server `connected`
+and its `tools` set must equal the qualified declared MCP surface before any
+assistant content is admitted.
 
 The invocation excludes ambient settings, sessions, slash commands, browser
 integration, plugins, and built-in tools. `--tools` selects an empty built-in
@@ -657,15 +660,15 @@ The pinned stream establishes correlation and reported-model evidence through
 `system/init`. Assistant `text`, `thinking`, `redacted_thinking`, and `tool_use`
 blocks become typed observations and assistant parts. A tool proposal must name
 the private MCP namespace, match a declared schema name, carry a unique nonempty
-id and object arguments, and receive exactly one matching fixed acknowledgement.
-Only a terminal `result` event can establish success or refusal; an error
-`result` and a nonzero process exit produce typed provider-error evidence. Exit
-zero without it is `BoundaryLoss(StreamEndedWithoutTerminalMarker)`; malformed
-or contradictory JSONL is `BoundaryLoss(StreamProtocolViolation)`; and prose
-alone never becomes terminal evidence. A success must satisfy the operation's
-any/named tool choice, with a structured-output contract represented as the
-required named MCP tool. Provider usage is retained only where the CLI reports
-it.
+id and object arguments, and receive exactly one matching user `tool_result`
+whose sole text block is the fixed acknowledgement. Only a terminal `result`
+event can establish success or refusal; an error `result` and a nonzero process
+exit produce typed provider-error evidence. Exit zero without it is
+`BoundaryLoss(StreamEndedWithoutTerminalMarker)`; malformed or contradictory
+JSONL is `BoundaryLoss(StreamProtocolViolation)`; and prose alone never becomes
+terminal evidence. A success must satisfy the operation's any/named tool choice,
+with a structured-output contract represented as the required named MCP tool.
+Provider usage is retained only where the CLI reports it.
 
 The adapter accepts only its configured non-secret `CredentialReference` and
 leaves subscription-login resolution inside Claude Code. It clears the child
