@@ -778,5 +778,4 @@ failures after staleness handling.
   `model-provider-runtime` bridge, the daemon composition root) is a review-time
   contract only; no manifest allowlist check enforces it.
 - [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
-  owns controlled provider-proxy and private-root support, and owns the open
-  streamed-redaction defect after a released clean prefix.
+  owns controlled provider-proxy and private-root support.

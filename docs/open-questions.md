@@ -313,16 +313,6 @@ questions below remain open.
   text can nevertheless echo machine-local data. Whether the runner, daemon, or
   tool contract applies redaction or stronger egress controls remains undecided.
   Blocks a general no-credential-disclosure claim for runner output.
-- **Streamed redaction after a released clean prefix.** A quoted credential key
-  at a JSON-ineligible position (`detail: "` then `client_secret":"…"`) is still
-  released when an earlier delta has already emitted a clean prefix. A short
-  trailing context accrued by accident routes the next delta through the
-  emitted-context path, which splits the member at its value and holds the tail
-  as a fresh candidate that is clean on its own bytes. Corpus line 143 carries
-  the `KNOWN-FAILING` classification and the split enumeration pins the exact
-  thirty leaking fragmentations across lines 79, 83, 139, and 143. This is a
-  defect ledger awaiting a fix in the emitted-context path, never an accepted
-  limit: a new leak fails the enumeration and a repaired one shrinks the ledger.
 - **In-memory credential hygiene.** Zeroization or equivalent handling for the
   request-scoped value read by `FileCredentialAccess` remains undecided, with no
   implementation. This question is separate from the accepted storage and
