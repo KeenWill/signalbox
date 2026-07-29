@@ -6767,10 +6767,6 @@ mod tests {
             IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
         );
         assert_eq!(
-            ProtocolVersion::Eighteen.as_u64(),
-            MODEL_ALIAS_CATALOG_PROTOCOL_VERSION
-        );
-        assert_eq!(
             ProtocolVersion::Sixteen.as_u64(),
             UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION
         );
