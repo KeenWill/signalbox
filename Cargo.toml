@@ -16,6 +16,7 @@ members = [
     "crates/persistence",
     "crates/process-protocol",
     "crates/tool-contract",
+    "crates/tool-schema-derive",
     "crates/tools-basic",
     "crates/tools-code-host",
 ]

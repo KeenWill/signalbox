@@ -1,0 +1,7 @@
+error: field `inner`: serde flatten is not supported by ToolSchema; declare the fields explicitly
+  --> tests/ui/flatten.rs:11:5
+   |
+11 | /     #[serde(flatten)]
+12 | |     #[tool_schema(description = "Flattened value.")]
+13 | |     inner: Inner,
+   | |________________^

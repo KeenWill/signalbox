@@ -19,6 +19,7 @@ use signalbox_domain::{
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
+use signalbox_tool_schema_derive::ToolSchema;
 
 pub const CURRENT_TIME_NAME: &str = "current_time";
 const INVALID_ARGUMENTS_DETAIL: &str = "expected an object with one optional IANA timezone string";
@@ -220,12 +221,14 @@ where
 }
 
 /// Typed `current_time` argument shape; decoder and rendered schema share it.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize, ToolSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CurrentTimeArguments {
-    /// Optional IANA time-zone name; defaults to UTC.
     #[serde(default, deserialize_with = "present_time_zone_only")]
-    #[schemars(with = "IanaTimeZone")]
+    #[tool_schema(
+        description = "Optional IANA time-zone name; defaults to UTC.",
+        with = String
+    )]
     timezone: Option<IanaTimeZone>,
 }
 
@@ -250,22 +253,6 @@ where
 struct IanaTimeZone {
     name: String,
     time_zone: TimeZone,
-}
-
-impl schemars::JsonSchema for IanaTimeZone {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("IanaTimeZone")
-    }
-
-    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "string",
-        })
-    }
-
-    fn inline_schema() -> bool {
-        true
-    }
 }
 
 /// A supplied time-zone value is not one recognized IANA identifier.
@@ -373,7 +360,7 @@ mod tests {
         RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus, ToolCatalog,
         ToolCatalogValidationFailure, ToolContinuationIdentities, ToolCrashClosureIdentities,
         ToolDefinition, ToolExecutionService, ToolExecutionServiceOutcome,
-        ToolExecutionTransaction, UuidV7ToolLoopIdGenerator,
+        ToolExecutionTransaction, ToolInputSchema, UuidV7ToolLoopIdGenerator,
     };
     use signalbox_domain::{
         AcceptedInputId, AuthorizedToolAttempt, ContextFrontierId,
@@ -386,6 +373,22 @@ mod tests {
         TurnAttemptId, TurnId,
     };
     use uuid::Uuid;
+
+    const SHIPPED_CURRENT_TIME_SCHEMA: &str = r#"{
+        "type": "object",
+        "properties": {
+            "timezone": {
+                "type": "string",
+                "description": "Optional IANA time-zone name; defaults to UTC."
+            }
+        },
+        "additionalProperties": false
+    }"#;
+
+    fn shipped_current_time_schema() -> ToolInputSchema {
+        ToolInputSchema::try_new(String::from(SHIPPED_CURRENT_TIME_SCHEMA))
+            .expect("shipped current_time schema remains admitted")
+    }
 
     fn arguments(value: &str) -> NormalizedToolArguments {
         NormalizedToolArguments::try_from_provider_text(value.to_owned())
@@ -593,16 +596,16 @@ mod tests {
         assert_eq!(definition.effect_class(), ToolEffectClass::EffectFree);
     }
 
-    /// S15: the complete rendered wire schema. The pretty golden is the
-    /// review surface; the byte-exact assertion pins the canonical compact
-    /// form the registry stores and providers receive as its exact
-    /// serialization.
+    /// S15: the derived schema remains byte-identical to the canonical
+    /// artifact produced from the hand-written schema that shipped before
+    /// derivation.
     #[test]
-    fn s15_current_time_rendered_schema_is_the_exact_wire_artifact() {
+    fn s15_current_time_derived_schema_is_byte_identical_to_shipped_schema() {
         let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
             .expect("static current_time tool compiles")
             .into_parts();
         let definition = &catalog.definitions()[0];
+        let shipped = shipped_current_time_schema();
         let schema: serde_json::Value = serde_json::from_str(definition.input_schema().as_str())
             .expect("registry schema is valid JSON");
 
@@ -618,7 +621,11 @@ mod tests {
               "type": "object"
             }"#]]
         .assert_eq(&format!("{schema:#}"));
-        assert_eq!(definition.input_schema().as_str(), schema.to_string());
+        assert_eq!(definition.input_schema().as_str(), shipped.as_str());
+        assert_eq!(
+            <CurrentTimeArguments as signalbox_tool_contract::ToolSchema>::schema().to_string(),
+            shipped.as_str()
+        );
     }
 
     /// S15: an explicit `timezone: null` is not the omitted-member default;
