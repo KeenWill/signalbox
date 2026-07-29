@@ -326,7 +326,7 @@ credential presence is never consulted (INV-008):
   turn as a known failure before any model call exists; a credential or send
   failure occurs only after the call exists. Why: keeping configuration absence
   distinct from provider failure, with no silent model substitution, is what
-  INV-017 and INV-018 require. Lifecycle detail is
+  INV-018 requires. Lifecycle detail is
   [model-call-execution](model-call-execution.md) material.
 
 Each accepted origin retains the selection frozen from its defaults epoch.
@@ -391,15 +391,15 @@ deployment-side rules that code cannot enforce are stated in
 - **Failure behavior.** A failed resolution, or a value that cannot form an HTTP
   header (empty, non-UTF-8, non-header-safe bytes), is a typed known preparation
   failure: the call ends `KnownFailed`, the attempt ends with a known failure,
-  the turn fails — no automatic retry, no fallback (INV-014, INV-017, INV-018).
-  Why: a missing credential is deployment misconfiguration, and retry or
-  substitution would hide it. A provider rejecting the credential after send is
-  ordinary outcome evidence ([model-call-execution](model-call-execution.md)).
-  For a code-host tool, resolution or header failure is fixed known-failure
-  evidence naming the credential rather than the code host — the request never
-  left the daemon; definitive code-host rejection is likewise fixed under its
-  own detail, while an uncertain mutation acknowledgement follows the tool
-  loop's external-effect ambiguity contract.
+  the turn fails — no automatic retry, no fallback (INV-014, INV-018). Why: a
+  missing credential is deployment misconfiguration, and retry or substitution
+  would hide it. A provider rejecting the credential after send is ordinary
+  outcome evidence ([model-call-execution](model-call-execution.md)). For a
+  code-host tool, resolution or header failure is fixed known-failure evidence
+  naming the credential rather than the code host — the request never left the
+  daemon; definitive code-host rejection is likewise fixed under its own detail,
+  while an uncertain mutation acknowledgement follows the tool loop's
+  external-effect ambiguity contract.
 - **Durable references, never values.** Postgres never stores a credential
   value. Each model call durably pins its non-secret credential reference at the
   `Prepared` insert (`model_call.credential_reference`), immutable thereafter

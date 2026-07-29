@@ -36,17 +36,16 @@ companion pages. This page also owns the shared
 
 ## Boundary and crate layout
 
-The runtime layer is five library crates, hand-rolled per the 2026-07-20
-[decision-ledger entry](../decisions.md) that closed the substrate's
-vendor-versus-hand-roll question: one provider-neutral core crate plus
-separately named provider adapters, with SerdesAI as a design reference only.
-`signalbox-model-runtime` is the shared vocabulary; the Anthropic and OpenAI
-adapters additionally own their HTTP, TLS, and serde dependencies, while the CLI
-adapters own only focused subprocess, temporary-file, signal, and serde
-dependencies. Test helpers ship in no built library artifact. `crates/domain`,
-`crates/application`, and `crates/persistence` declare no dependency on any
-runtime crate, and no runtime type appears in a domain or application signature
-(INV-002, INV-005); the approved runtime consumers are the adapter crates, the
+The runtime layer is five hand-rolled library crates: one provider-neutral core
+crate plus separately named provider adapters, with SerdesAI as a design
+reference only. `signalbox-model-runtime` is the shared vocabulary; the
+Anthropic and OpenAI adapters additionally own their HTTP, TLS, and serde
+dependencies, while the CLI adapters own only focused subprocess,
+temporary-file, signal, and serde dependencies. Test helpers ship in no built
+library artifact. `crates/domain`, `crates/application`, and
+`crates/persistence` declare no dependency on any runtime crate, and no runtime
+type appears in a domain or application signature (INV-002, INV-005); the
+approved runtime consumers are the adapter crates, the
 `crates/model-provider-runtime` bridge — whose `RuntimeModelCallProvider`
 implements the application's `ModelCallProvider` port over any
 `ModelRuntime<ModelCallId>`, depending on both crates so the dependency arrow

@@ -683,7 +683,7 @@ mod tests {
         assert_eq!(handling.await.expect("fake transaction succeeds"), expected);
     }
 
-    /// Decision log 2026-07-20: exact-bound text remains admissible before
+    /// The accepted-input contract admits exact-bound text before
     /// canonical command construction, including a multi-byte terminal scalar.
     #[test]
     fn accepted_input_content_at_the_utf8_byte_bound_is_admitted() {
@@ -697,7 +697,7 @@ mod tests {
         assert_eq!(request.content().text().as_str().len(), 1_048_576);
     }
 
-    /// Decision log 2026-07-20: oversized text is rejected at the application
+    /// The accepted-input contract rejects oversized text at the application
     /// admission boundary without retaining it in the error.
     #[test]
     fn oversized_accepted_input_content_is_rejected_before_command_construction() {

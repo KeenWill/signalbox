@@ -325,6 +325,10 @@ revalidates the activation, commits it, and creates that exact no-steering
 Prepared call. Steering accepted after that transaction remains pending for a
 later call and cannot enter the already-counted operation.
 
+The automatic path's known request-fit limitation and its blocking reliance
+condition are recorded under
+[Automatic context compaction](../open-questions.md#automatic-context-compaction).
+
 ## Staged execution
 
 `ModelCallExecutionService::execute` runs one linear invocation over five

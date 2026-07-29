@@ -24,6 +24,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Check generated invariant index
+        run: python3 scripts/generate_invariants.py --check
       - name: Check domain spine sync
         run: python3 scripts/check_domain_spine.py
       - name: Check documentation consistency
@@ -74,11 +76,11 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Run tests
-        run: cargo test --workspace --all-targets --all-features
+        run: cargo test --no-fail-fast --workspace --all-targets --all-features
       # `--all-targets` excludes doctests, so the domain's compile_fail
       # sealing proofs need this separate run.
       - name: Run doctests
-        run: cargo test --workspace --all-features --doc
+        run: cargo test --no-fail-fast --workspace --all-features --doc
       - name: Build documentation
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
@@ -95,18 +97,18 @@ jobs:
         include:
           - suite: persistence
             command: >-
-              cargo test -p signalbox-persistence
+              cargo test --no-fail-fast -p signalbox-persistence
               --features postgres-integration
               --tests
               -- --ignored --test-threads=4
           - suite: signalboxd
             command: >-
-              cargo test -p signalboxd
+              cargo test --no-fail-fast -p signalboxd
               --tests
               -- --ignored --test-threads=4
           - suite: terminal-client
             command: >-
-              cargo test -p signalbox-client
+              cargo test --no-fail-fast -p signalbox-client
               --test end_to_end
               terminal_client_completes_an_offline
               -- --ignored --test-threads=4

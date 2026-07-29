@@ -628,9 +628,7 @@ preserved source records so the unified conversation listing owned by
 [process-protocol](process-protocol.md) can present imported rows by name. The
 title is presentation evidence, not identity: it never participates in the
 source digest, the imported-conversation identity, or the unique source-identity
-constraint, and the
-[derivation decision](../decisions.md#2026-07-27--derive-imported-display-titles-at-import-time)
-records the placement choice.
+constraint. This section owns the derivation placement contract.
 
 `ImportedConversationDisplayTitle::derive` reads only the immutable aggregate —
 never a filename, wall clock, or import-time context — so re-deriving from the

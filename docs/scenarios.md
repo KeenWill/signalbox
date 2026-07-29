@@ -8,14 +8,14 @@ event-sourcing design. Invariant identifiers link to
 
 The scenarios are frozen design fixtures. New or changed normative behavior
 belongs in the record that owns it (the owning [spec page](spec/README.md) or
-the [decision log](decisions.md)); a scenario's normative content changes or is
-added only alongside the decision that motivates it, and a decision introducing
+implemented test); a scenario's normative content changes or is added only
+alongside the owner-accepted change that motivates it, and a change introducing
 a new lifecycle edge adds or amends its scenario fixture in the same change.
 Test coverage is recorded outside this document: tests name the scenario
 identifiers they enforce under the rules in [AGENTS.md](../AGENTS.md) and
-[testing-style.md](agents/testing-style.md), and the
-[invariant catalog](invariants.md)'s enforcement column accumulates the links to
-those tests.
+[testing-style.md](agents/testing-style.md). The
+[invariant test index](invariants.md) is generated separately from corresponding
+INV-tagged test names and attached doc comments.
 
 ## S01 — Create a new interactive session
 
@@ -473,7 +473,7 @@ those tests.
   effective ambient boundary, and the system never labels this runner isolated
   on the strength of that claim. Loss or side effects follow the same ambiguity
   rules, potentially with stricter confirmation.
-- **Required invariants:** INV-019, INV-022–INV-026.
+- **Required invariants:** INV-019, INV-024–INV-026.
 - **Remaining questions:** Required warnings, policy differences,
   verification/attestation, and minimum sandbox requirements for other profiles.
 
@@ -585,7 +585,7 @@ those tests.
   be delivered explicitly rather than disappearing into parent UI state. The
   current foundation does not permit an implementation to invent those
   transitions.
-- **Required invariants:** INV-003, INV-010, INV-031, INV-034.
+- **Required invariants:** INV-003, INV-010, INV-034.
 - **Remaining questions:** The delegation decision must define the child-wait
   variant, result representation, cancellation propagation, detached work, and
   resource limits. Any accepted child wait retains the parent session slot
@@ -609,7 +609,7 @@ those tests.
   already-issued effects are never undone, the child never silently disappears,
   and ambiguous child effects remain reconcilable. Implementations must not
   choose a policy before the delegation decision is accepted.
-- **Required invariants:** INV-010, INV-025, INV-026, INV-029, INV-031, INV-034.
+- **Required invariants:** INV-010, INV-025, INV-026, INV-029, INV-034.
 - **Remaining questions:** The delegation decision remains blocking for
   propagation, detached-child support, result delivery after parent termination,
   and the parent/child disposition model. Ordinary archive is independently
@@ -643,7 +643,7 @@ those tests.
   after turn terminality, including atomic refusal. Historical provenance does
   not claim which hidden physical backend executed the call when the provider
   does not reveal it.
-- **Required invariants:** INV-008, INV-014, INV-017.
+- **Required invariants:** INV-008, INV-014.
 - **Remaining questions:** Alias administration, visibility, and whether a
   future frozen alias policy may include fallback. Acceptance-time definition
   freezing and pre-call target resolution are decided in
@@ -688,7 +688,7 @@ those tests.
   create a separate call with its own exact target; it cannot legitimize
   substitution on this call. Absent provider evidence, Signalbox does not claim
   knowledge of the hidden physical backend.
-- **Required invariants:** INV-014, INV-015, INV-017, INV-018.
+- **Required invariants:** INV-014, INV-015, INV-018.
 - **Remaining questions:** Provider identifier normalization and reproducibility
   claims beyond observable model identity remain open
   ([model fallback and provenance](open-questions.md#model-fallback-and-provenance));
@@ -716,7 +716,7 @@ those tests.
   failure rule ([model-call-execution](spec/model-call-execution.md)) and is
   never an allowed substitution. The scenario does not establish automatic
   fallback as accepted behavior.
-- **Required invariants:** INV-014, INV-017, INV-018.
+- **Required invariants:** INV-014, INV-018.
 - **Remaining questions:** Whether fallback ships, qualifying failures,
   configuration, model-change identity, cost limits, and user confirmation.
 
@@ -758,7 +758,7 @@ those tests.
   Mismatch first learned after a valid atomically refused turn adds
   reconciliation evidence without rewriting that disposition or committed
   refusal.
-- **Required invariants:** INV-014, INV-017, INV-018, INV-032.
+- **Required invariants:** INV-014, INV-018, INV-032.
 - **Remaining questions:** Refusal taxonomy, user-facing remediation, and
   whether any explicit fallback is ever allowed. Provider-identity normalization
   remains open
@@ -979,8 +979,8 @@ those tests.
   claims, selector mismatch, unavailable credential profile, missing workspace
   capability, or a second ordinary runner fails explicitly without changing
   placement. Hardware or network changes never derive a new identity implicitly.
-- **Required invariants:** INV-001, INV-002, INV-022, INV-023, INV-024, INV-035,
-  INV-042, INV-044, INV-045.
+- **Required invariants:** INV-001, INV-002, INV-024, INV-035, INV-042, INV-044,
+  INV-045.
 - **Remaining questions:** Authentication exchange, store transactions,
   streaming transport, application session creation, and client presentation
   remain under

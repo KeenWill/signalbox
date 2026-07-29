@@ -236,7 +236,6 @@ public enum SignalboxSessionSynchronizationEffect: Equatable, Sendable {
 /// race explicit and allow stale work to be ignored without mutating state.
 public struct SignalboxSessionSynchronizationMachine: Sendable {
   static let maximumRetainedDiagnostics = 128
-  // docs/decisions.md records the 4 KiB retained-message choice.
   static let maximumRetainedDiagnosticMessageUTF8Bytes = 4 * 1_024
 
   public private(set) var phase: SignalboxSessionSynchronizationPhase = .stopped

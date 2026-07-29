@@ -23,9 +23,10 @@ semantic entry vocabulary in
 provider translation in [model-call-execution](model-call-execution.md);
 durable-command identity in [identity-and-commands](identity-and-commands.md);
 and relational mechanics in [persistence-protocol](persistence-protocol.md).
-Invariant tags cite [the invariant catalog](../invariants.md). The runner-locus
-paragraphs in this page are the foundation proposal at the bottom of their
-implementing stack and become verified only with those child pull requests.
+Invariant tags cite [the invariant test index](../invariants.md). The
+runner-locus paragraphs in this page are the foundation proposal at the bottom
+of their implementing stack and become verified only with those child pull
+requests.
 
 ## Intra-turn rounds and request batches
 

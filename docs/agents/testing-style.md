@@ -164,9 +164,8 @@ dev-dependency arriving with its first adopting tests.
     describes the single check-function, data-driven form these settle into.
 
 10. **Snapshots supplement invariant enforcement; they never replace it.** A
-    test linked from an enforcement column in
-    [the invariant catalog](../invariants.md) keeps its precise targeted
-    asserts; a snapshot proves output-didn't-change, not invariant-holds.
+    INV-tagged test keeps its precise targeted asserts; a snapshot proves
+    output-didn't-change, not invariant-holds.
 
 11. **Never bless a diff you haven't read.** Review a snapshot update with the
     same care as a code change; the snapshot diff is the review surface.
@@ -289,10 +288,8 @@ assert_recorded_result_passes_through(SubmitInputResult::Rejected(
     though its description contains "and". Splitting such guarantees across
     separate executions lets each half pass under a different interleaving while
     no test can detect a violation of the combined contract. Before renaming or
-    splitting any test, check the enforcement column of
-    [the invariant catalog](../invariants.md): it binds by file and INV-tag, not
-    by test function name, so verify the file's tagged coverage still holds
-    after the change and update the column in the same change if it moves. Keep
+    splitting any test, preserve its INV tags in the test name or attached doc
+    comment, then regenerate the [invariant test index](../invariants.md). Keep
     names stable anyway — reviewers and diffs read them — but the binding
     reference is the file plus its tags.
 
@@ -430,9 +427,9 @@ acceptance cannot pass — the interrupt relation names the predecessor fixture
 itself, and the expected order is spelled in fixture values, so the assertion
 cannot silently diverge from the setup.
 
-Because this test is linked from an invariant enforcement column, the exact
-assert above is decisive and stays (rule 10). A snapshot may supplement it to
-make the derived shape reviewable at a glance (rules 9 and 12):
+Because this is an INV-tagged test, the exact assert above is decisive and stays
+(rule 10). A snapshot may supplement it to make the derived shape reviewable at
+a glance (rules 9 and 12):
 
 ```rust
 expect![[r#"

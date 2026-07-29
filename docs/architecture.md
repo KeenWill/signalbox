@@ -269,8 +269,8 @@ in the same page; their listed operational refinements remain open.
   the long-lived session aggregate and load boundary
   ([sessions-and-transcript](spec/sessions-and-transcript.md)): cancellation
   delivery, streaming checkpoint policy, and archival form remain open; the
-  first physical frontier layout is recorded in the
-  [decision log](decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage).
+  first physical frontier layout is specified in
+  [persistence-protocol](spec/persistence-protocol.md).
 - Client implementation order and web technology.
 - Deployment decomposition: modular monolith is acceptable; microservices are
   not presumed.

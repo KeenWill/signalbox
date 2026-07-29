@@ -10,7 +10,7 @@ Session execution remains owned by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
 execution by [tool loop](tool-loop.md), and relational mechanics shared with the
 rest of the daemon by [persistence protocol](persistence-protocol.md). Invariant
-tags cite [the invariant catalog](../invariants.md).
+tags cite [the invariant test index](../invariants.md).
 
 ## Bounded-context boundary
 
@@ -32,10 +32,9 @@ rejectable during reconstitution (INV-001, INV-040).
 
 Key-like and narrative values preserve their exact UTF-8 content without
 trimming or normalization. Construction rejects empty values, U+0000, and values
-beyond the key or narrative byte limits fixed by the
-[review-text admission decision](../decisions.md#2026-07-25--bound-exact-review-workflow-text-by-utf-8-bytes).
-The provisional admission budgets are enforced in both domain construction and
-relational checks.
+beyond the key or narrative byte limits fixed by this contract. The provisional
+admission budgets are enforced in both domain construction and relational
+checks.
 
 ## Targets and frozen policy
 
@@ -67,14 +66,12 @@ and stack propagation. Policy is immutable run input rather than process
 configuration: it carries an ordinal version plus minimum judge and publication
 confidence values. Confidence is an exact integer count of basis points from
 zero through 10,000. Version one's exact thresholds and ordering are fixed by
-the
-[basis-point policy decision](../decisions.md#2026-07-25--store-review-confidence-as-versioned-basis-point-policy);
-construction and reconstitution admit only version one and enforce its exact
-thresholds and ordering. An unknown version fails closed until a later recorded
-decision adds its exact tuple; support for that later version changes only later
-runs. Why: stored exact policy data makes the reason for unattended judgment and
-publication reconstructible without depending on the executing binary's
-defaults.
+this contract; construction and reconstitution admit only version one and
+enforce its exact thresholds and ordering. An unknown version fails closed until
+a later owner-accepted contract revision adds its exact tuple; support for that
+later version changes only later runs. Why: stored exact policy data makes the
+reason for unattended judgment and publication reconstructible without depending
+on the executing binary's defaults.
 
 Runs use the closed state machine
 `Queued → Running → {Succeeded, Failed, Blocked, Cancelled}`, with
@@ -392,9 +389,8 @@ the receipt; an equal retry recognizes the exact complete effect, records a
 missing receipt, and returns the stable result. Once recorded, the receipt is
 inspected before mutable aggregate-state validation and carries every fact
 needed to return the original response, so a later aggregate state cannot turn
-an equal retry into a rejection. Distinct reuse fails closed. The representation
-choice and rejected alternatives are recorded in the
-[durable review-command decision](../decisions.md#2026-07-26--recover-review-commands-from-their-exact-aggregate-effects).
+an equal retry into a rejection. Distinct reuse fails closed. This
+representation is the durable review-command contract.
 
 The terminal client exposes target creation, run admission and activation,
 single-finding read-only completion, finding listing, and target, run, and

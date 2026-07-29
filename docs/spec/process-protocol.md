@@ -314,15 +314,13 @@ an equal retry returns that response even after the operation changed the
 aggregate state. Each aggregate effect uses its owning store transaction. Fresh
 run admission creates its run and sole pass in one transaction; recovery also
 recognizes and completes a matching run-only intermediate committed by the
-earlier multi-transaction implementation. The
-[atomic run-admission decision](../decisions.md#2026-07-26--admit-review-run-and-pass-roots-atomically)
-owns this refinement. If an effect commits before the receipt and the process
-exits, an equal retry recognizes the exact complete effect, records the missing
-receipt, and returns the stable result. Reusing the command identity for a
-different digest, operation kind, aggregate payload, complete inventory, event,
-or attachment fails closed. The
-[durable review-command decision](../decisions.md#2026-07-26--recover-review-commands-from-their-exact-aggregate-effects)
-owns this representation choice.
+earlier multi-transaction implementation. This atomicity is the run-admission
+contract. If an effect commits before the receipt and the process exits, an
+equal retry recognizes the exact complete effect, records the missing receipt,
+and returns the stable result. Reusing the command identity for a different
+digest, operation kind, aggregate payload, complete inventory, event, or
+attachment fails closed. This representation is the durable review-command
+contract.
 
 The daemon admits one review mutation at a time and retains that admission
 through claim inspection, aggregate effect recovery, and receipt recording. A
@@ -331,9 +329,8 @@ that admission, so queued maximum-size requests remain inside the same 64 MiB
 aggregate frame budget; the frame slot is released after the review permit is
 acquired and before application handling. Review reads remain concurrent. This
 bound composes with the snapshot-reader reservation so an open claim cannot form
-a circular pool wait with its nested aggregate transaction; the
-[review-command admission decision](../decisions.md#2026-07-26--serialize-durable-review-command-claims)
-owns the capacity choice.
+a circular pool wait with its nested aggregate transaction; this section owns
+the review-command admission capacity.
 
 Before application construction, `replace_session_defaults` validates the
 requested direct selection or alias against the process's immutable model
@@ -350,8 +347,7 @@ accepted-input content bound, restated by the wire constant
 `MAX_SYSTEM_PROMPT_UTF8_BYTES` — leaving response-envelope and worst-case
 JSON-escaping headroom below the 8 MiB frame limit when the same prompt is
 echoed by a receipt or defaults read. Bound, placement, and capacity reasoning
-are recorded in the
-[bound-and-placement decision](../decisions.md#2026-07-26--bound-the-session-system-prompt-as-a-defaults-epoch-value).
+are part of this contract.
 
 A metadata object has exactly `title` (string or null), `tags` (string array),
 `attributes` (an object whose values are strings), and `archived` (boolean).
@@ -365,9 +361,8 @@ bytes across the object, at most 256 tags, at most 256 attributes, and at most
 1,024 UTF-8 bytes in each tag or attribute key. Those bounds leave
 response-envelope and worst-case JSON-escaping headroom below the 8 MiB frame
 limit while bounding normalized satellite work when a complete accepted object
-is echoed by a read or replacement receipt. The exact capacity choice is
-recorded in the
-[metadata-bound decision](../decisions.md#2026-07-25--bound-session-metadata-for-storage-and-process-frames).
+is echoed by a read or replacement receipt. The exact capacity choice is owned
+by this contract.
 
 `list_session_metadata` admits one through 100 results. `required_tags` is an
 exact AND-filter, a present `title_contains` is nonempty and applies an exact
@@ -392,13 +387,14 @@ truncation. It is a plain keyset read over the authoritative session,
 current-defaults, metadata, and imported-conversation tables in one
 repeatable-read, read-only transaction — no materialized view, cache, or
 analytical artifact stands between the caller and committed state, so every
-listed row is transactionally fresh; the
-[unified-listing decision](../decisions.md#2026-07-27--serve-the-unified-conversation-listing-from-authoritative-tables)
-records this stance and its scaling ladder. The unified order is by conversation
-identity UUID value, with a native session ordered before an imported
-conversation carrying a theoretical equal identity value. A cursor object has
-exactly `origin` (`native_session` or `imported_conversation`) and
-`conversation_id` (canonical UUID string); `after` is the exclusive keyset
+listed row is transactionally fresh. If measured read cost requires a different
+physical shape, the first upgrade is write-time-maintained projection tables
+updated atomically with the authoritative writes, not a materialized,
+periodically refreshed, cached, or otherwise lagging product read. The unified
+order is by conversation identity UUID value, with a native session ordered
+before an imported conversation carrying a theoretical equal identity value. A
+cursor object has exactly `origin` (`native_session` or `imported_conversation`)
+and `conversation_id` (canonical UUID string); `after` is the exclusive keyset
 cursor at that total position, so no row can be skipped at a page boundary. A
 present `title_contains` is nonempty, rejects U+0000, carries at most 262,144
 UTF-8 bytes, and applies the same exact case-sensitive substring filter to a
@@ -495,8 +491,7 @@ Submitted `content` is limited to 1 MiB of UTF-8. The daemon applies that
 boundary before application construction or mutation and returns
 `invalid_request` when it is exceeded. This leaves enough space for worst-case
 JSON escaping when the same accepted content is projected in a queued turn or
-durable update event. The exact capacity choice is recorded in the
-[input-bound decision](../decisions.md#2026-07-23--bound-process-protocol-input-at-1-mib).
+durable update event. This section owns the exact capacity.
 
 An import `source` is the complete exact byte sequence encoded with RFC 4648
 standard-alphabet padded base64. A noncanonical spelling is a malformed frame.
@@ -953,8 +948,7 @@ live events.
 
 Session-list, transcript-read, and follow-snapshot construction share bounded
 admission that reserves application-pool capacity for non-snapshot work. The
-exact reservation is owned by the
-[snapshot-resource decision](../decisions.md#2026-07-23--bound-process-snapshot-construction-resources).
+exact reservation is owned by this contract.
 
 Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 

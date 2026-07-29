@@ -8,16 +8,17 @@ selection aims at a destination instead of drifting.
 
 This document is **directional destination only, never authority**. Implemented
 behavior is owned by the [living specification](spec/README.md) under
-`docs/spec/`, together with the [invariant catalog](invariants.md) and the
-[domain spine](domain-spine.md); where this document and those pages disagree
-about what the system does, they win and this document describes only where the
-system is headed. The [glossary](glossary.md) is a terminology index, not part
-of that normative surface. Concepts described here that the spec does not yet
-describe are **targets awaiting decisions, not decisions**: naming a concept
-here authorizes neither its implementation nor a silent closure of an open
-question. The [one-place rule](../AGENTS.md) applies throughout — implemented
-semantics are linked, never restated, and only target-only concepts are owned by
-this document.
+`docs/spec/`, together with INV-tagged tests indexed in
+[invariants.md](invariants.md) and the [domain spine](domain-spine.md); where
+this document and those pages disagree about what the system does, they win and
+this document describes only where the system is headed. The
+[glossary](glossary.md) is a terminology index, not part of that normative
+surface. Concepts described here that the spec does not yet describe are
+**targets awaiting decisions, not decisions**: naming a concept here authorizes
+neither its implementation nor a silent closure of an open question. The
+[one-place rule](../AGENTS.md) applies throughout — implemented semantics are
+linked, never restated, and only target-only concepts are owned by this
+document.
 
 Milestone selection rules for autonomous runs live in
 [goal-mode.md](agents/goal-mode.md); this document owns only the
@@ -197,13 +198,13 @@ local process cancellation must terminate the entire process group (see
 ### Delegation (target)
 
 A delegated child is a real session: distinct identity, independently browsable,
-with an explicit typed relationship to the exact parent work (INV-031). The
-delegated creation cause carries the exact durable parent-work identity, and
-cause remains independent of transcript ancestry. Result delivery targets the
-exact parent `ToolRequest`, so a late or duplicate child result cannot attach to
-the wrong work. Parent cancellation may request child cancellation under
-explicit policy but never deletes the child session or its history. Child waits,
-result representation, detached work, and cancellation propagation all await
+with an explicit typed relationship to the exact parent work. The delegated
+creation cause carries the exact durable parent-work identity, and cause remains
+independent of transcript ancestry. Result delivery targets the exact parent
+`ToolRequest`, so a late or duplicate child result cannot attach to the wrong
+work. Parent cancellation may request child cancellation under explicit policy
+but never deletes the child session or its history. Child waits, result
+representation, detached work, and cancellation propagation all await
 delegation's owning foundation decision.
 
 ### Implemented lifecycles
@@ -242,10 +243,9 @@ Claimed isolation never exceeds evidence: declared, configured, and verified
 runner properties stay distinct, an ambient-user runner is an explicit visible
 choice never labeled sandboxed, and the
 [execution boundary](glossary.md#execution-boundary) shown for a dispatch
-reflects only what the evidence supports (INV-022, INV-023). The isolation
-strength required for hostile or arbitrary generated code is deliberately still
-open; the target treats stronger sandboxes as an extension point, not a baseline
-assumption.
+reflects only what the evidence supports. The isolation strength required for
+hostile or arbitrary generated code is deliberately still open; the target
+treats stronger sandboxes as an extension point, not a baseline assumption.
 
 ## Live updates target
 
@@ -311,11 +311,11 @@ remain daemon-owned when work spans worktrees, pull requests, or machines;
 runners only execute dispatched tools, and the daemon applies every resulting
 message through the same durable messaging surface. The grounding is future
 delegation and the rule it builds on — a child is a real session, independently
-browsable, with an explicit typed relationship to the exact parent work
-(INV-031), per the [delegation sketch](#delegation-target) above. Linking a
-session that delegation did not create requires its own foundation decision for
-the typed related-session relationship. Cross-machine tool placement remains
-owned by the future runner-protocol decision.
+browsable, with an explicit typed relationship to the exact parent work, per the
+[delegation sketch](#delegation-target) above. Linking a session that delegation
+did not create requires its own foundation decision for the typed
+related-session relationship. Cross-machine tool placement remains owned by the
+future runner-protocol decision.
 
 ### Session linking and visibility authority (target)
 
@@ -329,10 +329,10 @@ tool request would instead require an explicit policy-reevaluation and
 approval-invalidation decision. No configuration grants unlimited permission.
 Visibility and approval authority is owned by the future tool-policy and
 approval decisions, constrained by the accepted binding and honesty rules
-(INV-019, INV-020, INV-023); per-session configurability lands through new
-configuration categories, extending the request, default, override, and
-effective-value algebras together. Independent-session linking remains blocked
-on the separate foundation decision identified above.
+(INV-019, INV-020); per-session configurability lands through new configuration
+categories, extending the request, default, override, and effective-value
+algebras together. Independent-session linking remains blocked on the separate
+foundation decision identified above.
 
 ### Goal mode as a platform feature (target)
 

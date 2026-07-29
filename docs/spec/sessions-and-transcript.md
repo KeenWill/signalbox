@@ -20,9 +20,9 @@ command path and canonical visible-range selection were verified through PR #314
 the foundation proposal at the bottom of their implementing stack and become
 verified only with those child pull requests. The imported-conversation record
 and converter are owned by [conversation-import](conversation-import.md). Where
-a law is cited as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of
-record; where mechanics owned by another decision are summarized, the owning
-sibling page is linked inline.
+a law is cited as `INV-NNN`, the generated
+[invariant test index](../invariants.md) resolves it; where mechanics owned by
+another contract are summarized, the owning sibling page is linked inline.
 
 ## Session identity and creation provenance
 
@@ -260,10 +260,8 @@ truncating or rewriting, and equality is the exact ordered scalar sequence.
 Absence is typed `None`, never empty text. `CreateSession` and
 `CreateSessionFromImportedFrontier` carry the optional prompt inside their
 complete unversioned initial defaults, and `ReplaceSessionDefaults` replaces it
-only as part of the complete successor epoch — there is no prompt-only mutation;
-the
-[bound-and-placement decision](../decisions.md#2026-07-26--bound-the-session-system-prompt-as-a-defaults-epoch-value)
-records the capacity and epoch-placement choice. Matching
+only as part of the complete successor epoch — there is no prompt-only mutation.
+This section owns the capacity and epoch-placement contract. Matching
 `octet_length(convert_to(system_prompt, 'UTF8'))` CHECK constraints protect the
 durable epoch and command columns (migration
 `202607280303_session_system_prompt.sql`), and command/defaults schema agreement
@@ -278,11 +276,9 @@ version — so every call the turn prepares sets `ModelOperation.system` to
 exactly that epoch's prompt, or none. A replacement that changes only the system
 prompt appends no semantic transcript entry: the new instructions reach the
 provider whole and out of band on the successor turn's calls, and the turn's
-frozen epoch already records durably which prompt governed it, as recorded by
-the
-[no-transcript-boundary decision](../decisions.md#2026-07-26--deliver-system-prompt-changes-without-a-transcript-boundary).
-The `ModelIdentityChanged` boundary below remains keyed to the frozen direct
-model selection alone.
+frozen epoch already records durably which prompt governed it. The
+`ModelIdentityChanged` boundary below remains keyed to the frozen direct model
+selection alone.
 
 ### Session-template provenance
 
@@ -351,14 +347,12 @@ immediately before that turn's origin entry. The entry names the turn, its
 frozen defaults epoch, and its exact direct selection. It is absent for the
 first turn and for equal-selection successors. Thus the frontier records the
 model identity actually crossed by executed conversation history rather than
-unused or redundant replacement epochs (INV-046). The exact provider-message
-projection is recorded by the
-[model-identity injection decision](../decisions.md#2026-07-25--render-model-identity-boundaries-as-injected-user-role-events).
-Started frontiers committed before this boundary existed retain their exact
-historical membership: an immutable per-turn compatibility fact grandfathers
-only those already-active or terminal starts. Turns still queued at migration
-and every newly accepted turn require the boundary normally, as recorded by the
-[legacy-frontier decision](../decisions.md#2026-07-25--grandfather-pre-boundary-started-frontiers).
+unused or redundant replacement epochs (INV-046). The provider-message
+projection is owned by [model-call execution](model-call-execution.md). Started
+frontiers committed before this boundary existed retain their exact historical
+membership: an immutable per-turn compatibility fact grandfathers only those
+already-active or terminal starts. Turns still queued at migration and every
+newly accepted turn require the boundary normally.
 
 ## Session metadata and list projection
 
@@ -381,9 +375,7 @@ A snapshot carries at most 256 tags, at most 256 attributes, and at most 262,144
 total UTF-8 bytes across its present title, tags, attribute keys, and attribute
 values. Each tag and attribute key carries at most 1,024 UTF-8 bytes so its
 composite PostgreSQL index entry remains representable. Construction rejects any
-excess before command handling; the exact provisional capacity choice is
-recorded in the
-[metadata-bound decision](../decisions.md#2026-07-25--bound-session-metadata-for-storage-and-process-frames).
+excess before command handling; this section owns the capacity contract.
 
 The root `session_metadata` row and normalized
 `session_metadata_tag`/`session_metadata_attribute` rows (migration
@@ -797,8 +789,7 @@ Why (bytes, at admission): byte measurement matches wire and storage cost and
 keeps the domain value exactly as accepted; rejecting before construction can
 never truncate or rewrite content.
 
-This is a provisional owner-decided floor (decision log, 2026-07-20), not the
-resource-governance policy.
+This is a provisional owner-approved floor, not the resource-governance policy.
 
 ## Actor attribution
 

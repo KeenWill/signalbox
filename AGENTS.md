@@ -1,19 +1,20 @@
 # Agent guidance
 
-Signalbox is built in narrowly scoped slices authorized by recorded decisions or
-explicit owner-approved plans; speculative product behavior is not permitted.
+Signalbox is built in narrowly scoped slices authorized by implemented contracts
+or explicit owner-approved plans; speculative product behavior is not permitted.
 
-The normative surface is the living specification: the subsystem pages under
-`docs/spec/` (implemented behavior), the invariant catalog `docs/invariants.md`
-(laws, with INV-tagged tests as the enforcement of record), and
-`docs/domain-spine.md` (public API shapes). `docs/decisions.md` is the
-append-only record of recorded choices; `docs/open-questions.md` is the one home
-of deferred design; `docs/scenarios.md` and `docs/agents/testing-style.md`
-govern scenarios and tests; `docs/style.md` governs literal provenance and label
-discipline in production and test code alike; `docs/architecture.md` orients but
-owns nothing. The historical ADR corpus formerly under `docs/decisions/` is
-retired: its content was distilled into `docs/spec/` (mapping in
-`docs/spec/README.md`), git history is its archive, and it is not citable as
+**Documentation discipline.** A document earns its place only when it tells a
+reader who has the code something the code cannot say. Public API type shapes
+belong in `docs/domain-spine.md`, which is mechanically checked. Invariants
+belong in INV-tagged tests that fail; `docs/invariants.md` is only their
+generated index. Decisions belong in pull-request descriptions and git history.
+Prose under `docs/spec/` is reserved for cross-crate and wire contracts:
+agreements between components or across versions that no single crate can state.
+Deferred design has one home in `docs/open-questions.md`; `docs/scenarios.md`
+and `docs/agents/testing-style.md` govern scenarios and tests; `docs/style.md`
+governs literal provenance and label discipline in production and test code
+alike; `docs/architecture.md` orients but owns nothing. The retired ADR corpus
+and decision ledger remain available in git history and are not citable as
 current authority. When selecting milestones, consult the priority order in
 `docs/target-model.md` — directional, never overriding the sources above.
 
@@ -32,7 +33,9 @@ practice, stop and report the conflict rather than reconciling it silently.
 Autonomous milestone-delivering runs additionally follow
 `docs/agents/goal-mode.md`. Replacing or abandoning an open pull-request stack —
 closing its pull requests in favor of a rewrite — is surfaced to the owner
-before the replacement lands, never decided silently.
+before the replacement lands, never decided silently. Defer-and-record applies
+only to a pre-existing defect encountered outside the assigned change; an agent
+must fix every defect it introduces.
 
 **Domain spine.** `docs/domain-spine.md` mirrors the public API of the domain
 and application crates as bare declarations and is the owner's primary review
@@ -52,7 +55,8 @@ for behavior the bottom diff does not describe.
 **Finished pull requests.** The owner merges every pull request; deliver each
 one finished and awaiting owner merge:
 
-- CI is green on the final commit.
+- CI is green on the final commit. An owner merge is terminal: a merged pull
+  request is converged, and no agent waits for another verdict on landed work.
 - Every reviewer comment receives an in-thread reply, never deferred to a later
   wave. For an accepted finding, push the commit or commits that resolve it,
   then reply naming the fixing commit or commits. For a declined finding, reply
@@ -88,23 +92,22 @@ one finished and awaiting owner merge:
     `docs/agents/testing-style.md` rule 2 before pushing;
   - confirm each added assertion compares against a fixture accessor, not a
     literal re-encoding a value the fixture already states (rule 6);
-  - confirm every new INV-tagged test is bound from the enforcement column of
-    [`docs/invariants.md`](docs/invariants.md) — bindings are by file and INV
-    tag (rule 17), so add a citation in the same diff only when the test's file
-    is not already cited for that tag;
+  - confirm every new INV-tagged test is discoverable from its test name or
+    attached doc comment, then regenerate
+    [`docs/invariants.md`](docs/invariants.md) with
+    `python3 scripts/generate_invariants.py --write`;
   - re-verify any count or inventory the diff states against the current head;
   - when the diff changes what a `docs/spec/` page states as implemented
     behavior, re-verify that behavior against the head and advance the page's
     verified-against-ref line; a wording, link, or formatting edit that changes
     no stated behavior leaves the reference alone, since the reference records
     verification against code and not the fact of an edit.
-- External reviews are re-requested after a change that could alter what a
-  reviewer already approved — code, tests, normative documentation or
-  specifications, contract-bearing comments, or claims in the description — not
-  after one that leaves a previously green state effectively unchanged (a
-  rename, non-semantic comment-only edits, or a merge of `main` with no
-  meaningful interaction). Codex runs only on an explicit `@codex review`
-  comment.
+- External reviews are re-requested only after a semantically meaningful diff
+  that could alter what a reviewer approved: code, tests, normative documents,
+  or claims in the description. A source-comment-only diff does not trigger a
+  re-request even when the comment describes a contract. Never re-request after
+  a clean merge-forward, a rename, or any comment-only edit. Codex runs only on
+  an explicit `@codex review` comment.
 - The description is at most 350 words, states the count of meaningfully changed
   lines (excluding lockfiles), and claims only what the code enforces — a
   contract binding future implementors is described as a contract, not an
@@ -115,24 +118,30 @@ one finished and awaiting owner merge:
   whether or not any fix commit results; a quiet wave, whose review pass returns
   no actionable findings or whose findings are all declined, produces no
   accepted finding and concludes the loop: the pull request is finished and
-  awaits owner merge. The wave-cap ladder governs a loop that will not quiet: at
-  wave five, stop and escalate to the owner regardless of hit rate, reporting in
-  one line the per-wave history goal mode already requires. The owner may
-  authorize exactly one extension of up to three further waves; after that
-  extension is spent the loop hard-stops. Past the hard stop no further review
-  is requested, and any new auto-pass finding is closed in-thread with the named
-  disposition "Escalated without disposition" rather than fixed or argued. When
-  a pull request's open-thread count exceeds roughly fifty, a wave's replies may
-  batch, but a reply-and-resolve sweep across every open thread is mandatory
-  before the pull request is declared finished. A re-report of an already-fixed
-  finding made against a stale head is declined by standing policy, naming the
-  fixing commit; a finding materially identical to one dispositioned in a prior
-  wave is a re-raise, declined by the same standing policy with a link to the
-  prior thread. Neither standing decline applies to a finding that reproduces on
-  the current head: a defect reintroduced by a later wave's edits is live and is
-  dispositioned on its merits. When more than half of a wave's accepted findings
-  are defects in code the previous wave's fixes introduced, stop and escalate to
-  the owner instead of continuing the loop.
+  awaits owner merge. Wave five is the ordinary cap. An agent may take exactly
+  one extension of up to three further waves without asking only when the
+  preceding wave produced an accepted finding and none of that wave's findings
+  was a defect introduced by an earlier wave's fix. Otherwise it stops at the
+  cap and dispositions any later automatic finding as "Escalated without
+  disposition". The extension is a hard stop after wave eight; no further review
+  is requested. Report the per-wave history in the one-line form goal mode
+  requires. The wave count is relative to the base that was reviewed. A forward
+  merge that materially changes the code under review and therefore the pull
+  request's diff resets the counter because earlier hit rates describe code that
+  is no longer under review; merely advancing the base does not. The reset never
+  weakens the regression stop: a finding caused by an earlier wave's own fix
+  still counts as a regression and triggers the stop regardless of any reset.
+  When a pull request's open-thread count exceeds roughly fifty, a wave's
+  replies may batch, but a reply-and-resolve sweep across every open thread is
+  mandatory before the pull request is declared finished. A re-report of an
+  already-fixed finding made against a stale head is declined by standing
+  policy, naming the fixing commit; a finding materially identical to one
+  dispositioned in a prior wave is a re-raise, declined by the same standing
+  policy with a link to the prior thread. Neither standing decline applies to a
+  finding that reproduces on the current head: a defect reintroduced by a later
+  wave's edits is live and is dispositioned on its merits. If a wave finds any
+  defect introduced by a previous wave's fix, stop and escalate to the owner
+  instead of continuing the loop.
 
 **Stacked pull requests.** Stacks may grow as deep as the work requires; the
 owner merges in batches, so never wait on a merge to continue. Keep every stack
@@ -147,41 +156,36 @@ linear and healthy:
 - Never force-push or rewrite a shared branch without first proving it necessary
   and safe; preserve owner-authored and externally added changes.
 
-Every normative statement lives in exactly one place — the owning `docs/spec/`
-page, a decision-log entry, an invariant row, a scenario that is its own
-statement of record, or an implemented test — and other documents link to it
-rather than restating it. Do not restate content owned elsewhere in overview
-documents; a row or fixture that is itself the statement of record changes only
-together with the decision that authorizes the change.
+Every normative statement has exactly one owner. Normative system prose lives in
+its cross-component or versioned-wire contract, while invariants live in their
+INV-tagged tests. Repository process rules live in `AGENTS.md` or the process
+document it names as their owner; scenarios and fixtures may themselves be the
+statement of record. Other documents link to an owner rather than restating it,
+and an owning scenario or fixture changes only with the owner-approved change
+that authorizes it.
 
-Decisions have two weights. Ordinary decisions — a new dependency, a provisional
-parameter or limit, a policy or process change, a migration choice the
-specification does not already fix — are made in the pull request and recorded
-as a dated entry in `docs/decisions.md` stating context, decision, rejected
-alternatives, and what it affects. Implementing behavior the specification and
-recorded decisions already fix is not itself a decision; the pull-request
-description and the spec update are its record. Foundation-weight changes —
-changing normative semantics in a `docs/spec/` page beyond recording behavior
-the same stack implements, moving a boundary between domain, storage, wire, or
-framework representations, weakening an invariant, introducing a technology that
-constrains several components, or closing an open question whose resolution has
-any of these effects — are proposed as a specification diff reviewed at the
-bottom of the implementing stack, with a `docs/decisions.md` entry recording the
-choice; owner merge is acceptance. A foundation spec-diff describes the behavior
-its stack implements and merges only together with that stack, so `main` never
-carries specification prose for unimplemented behavior. Do not silently change a
-foundational decision or close a recorded open question. Keep domain types
+Ordinary implementation choices are made in the pull request and remain durable
+in its description and git history. Foundation-weight changes — changing
+normative cross-crate or wire semantics, moving a boundary between domain,
+storage, wire, or framework representations, weakening an invariant, introducing
+a technology that constrains several components, or closing an open question
+with any of those effects — are proposed as a specification diff at the bottom
+of the implementing stack; owner merge is acceptance. A foundation spec diff
+describes behavior its stack implements and merges only with that stack, so
+`main` never carries prose for unimplemented behavior. Do not silently change a
+foundational contract or close a recorded open question. Keep domain types
 distinct from storage records, protocol messages, and framework types. Keep pull
 requests narrow and reviewable.
 
 Tests reference the scenario and invariant identifiers they enforce when the
 connection is meaningful (for example `S12_INV011_rejects_stale_generation`, or
 a doc comment naming the invariant). When a test becomes the enforcement of an
-accepted invariant, link it from the invariant catalog's enforcement column in
-the same change. Test style rules live in `docs/agents/testing-style.md`; the
-literal-provenance and label discipline binding production and test code alike
-lives in `docs/style.md`; the process documents that govern how agents work on
-the repository are collected under `docs/agents/`.
+accepted invariant, give it the INV tag in its name or attached doc comment and
+regenerate the invariant index in the same change. Test style rules live in
+`docs/agents/testing-style.md`; the literal-provenance and label discipline
+binding production and test code alike lives in `docs/style.md`; the process
+documents that govern how agents work on the repository are collected under
+`docs/agents/`.
 
 Dependencies are allowed when they provide clearer types or interfaces, replace
 code Signalbox would otherwise need to own, or supply another focused capability
@@ -194,21 +198,52 @@ Directly affected documentation may be updated in an implementation pull request
 to keep it accurate. Avoid unrelated rewording, cleanup, restructuring, or
 formatting.
 
-Run the repository-wide validation sequence:
+**Operational traps.** Do not adopt the review-slog toolkit as a merge gate
+until its
+[blocking condition](docs/open-questions.md#review-slog-toolkit-adoption) is
+cleared. Do not rely on automatic context compaction until its
+[blocking condition](docs/open-questions.md#automatic-context-compaction) is
+cleared.
+
+Run `git worktree list` before working with another checkout of this clone.
+Never check out a branch by name in a second worktree: worktrees share branch
+refs, so a commit can move another worktree's HEAD and leave its index showing
+spurious staged deletions. Use `git checkout --detach origin/<branch>` and
+`git push origin HEAD:<branch>`.
+
+Always pass `--no-fail-fast` to Cargo test runs. The default can let one early
+flaky failure truncate the remaining tests and hide another defect. The ignored
+persistence integration suite must include its feature:
+`cargo test --no-fail-fast -p signalbox-persistence --features postgres-integration --tests -- --ignored`;
+without `--features postgres-integration` it runs zero tests and exits
+successfully.
+
+Size validation to the change. A documentation-only change runs the
+documentation bar below; a change to code, tests, dependency manifests,
+generated contracts, or any other semantic surface runs the complete bar. CI is
+authoritative and is the backstop.
+
+Documentation bar:
 
 ```bash
+python3 scripts/generate_invariants.py --check
 python3 scripts/check_domain_spine.py
 python3 scripts/check_docs_consistency.py
 python3 scripts/test_check_docs_consistency.py
-cargo fmt --all -- --check
 mdformat --check *.md docs/
+git diff --check
+```
+
+Complete bar (the documentation bar plus):
+
+```bash
+cargo fmt --all -- --check
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --all-features
-cargo test --workspace --all-features --doc
+cargo test --no-fail-fast --workspace --all-targets --all-features
+cargo test --no-fail-fast --workspace --all-features --doc
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 cargo metadata --no-deps --format-version 1
-git diff --check
 ```
 
 Repository tool commands such as mdformat run inside the devenv environment

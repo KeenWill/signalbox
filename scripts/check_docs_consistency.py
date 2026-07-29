@@ -9,9 +9,7 @@ The check is deterministic and offline. It verifies:
    tag, and every Rust test file carrying an INV tag is cited by that row,
 2. every relative Markdown link in ``docs/**/*.md`` and the root ``AGENTS.md``
    resolves inside the repository, including GitHub-style heading fragments,
-3. every H2 in ``docs/decisions.md`` is a valid dated entry and entry dates are
-   non-increasing, and
-4. every subsystem page under ``docs/spec/`` has an offline verification
+3. every subsystem page under ``docs/spec/`` has an offline verification
    reference whose PR token uses ``PR #N (`branch-ref`)``, optionally narrowed
    to the surface that PR settled by a semicolon tail: ``PR #N (`branch-ref`;
    <scope>)``. The scope tail is free-form prose: its content is not validated,
@@ -45,20 +43,19 @@ import html
 import json
 import os
 import re
+import shlex
 import string
 import subprocess
 import sys
 import tomllib
 import unicodedata
 from dataclasses import dataclass
-from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 INVARIANTS = Path("docs/invariants.md")
-DECISIONS = Path("docs/decisions.md")
 SPEC_DIR = Path("docs/spec")
 
 ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$")
@@ -129,7 +126,6 @@ REFERENCE_DEFINITION = re.compile(
 )
 LIST_ITEM = re.compile(r"^[ \t]*(?:[-+*]|\d+[.)])[ \t]+")
 FENCE_LIST_CONTAINER = re.compile(r"^ {0,3}(?:[-+*]|\d+[.)])[ \t]+")
-DECISION_HEADING = re.compile(r"^(\d{4}-\d{2}-\d{2}) — (\S.*)$")
 # Block boundaries also occur in block-quoted form: inside a quote a blank line
 # is written ``>`` and a sibling list item ``> -``, at any nesting depth. Both
 # boundaries therefore admit the same repeated quote prefix the container
@@ -210,10 +206,6 @@ VERIFICATION_NEGATION = re.compile(
 EMPHASIS_DELIMITER = re.compile(r"[*_~]+")
 THEMATIC_BREAK = re.compile(
     r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"
-)
-DECISION_ENTRY_HEADING = re.compile(r"^ {0,3}##(?!#)(?:[ \t]+|$)(?P<title>.*)$")
-LIST_WRAPPED_ENTRY_HEADING = re.compile(
-    r"^ {0,3}(?:(?:[-+*]|\d+[.)])[ \t]+)+##(?!#)(?:[ \t]|$)"
 )
 TEST_GROUP = re.compile(
     r"\btests?[ \t]+"
@@ -314,6 +306,27 @@ RUST_CFG_PREDICATE = re.compile(
     r"\((?P<body>.*)\)[ \t\r\n]*$",
     re.DOTALL,
 )
+RUST_CFG_VALUE = re.compile(
+    r'^(?P<name>[A-Za-z_][A-Za-z0-9_]*)[ \t\r\n]*='
+    r'[ \t\r\n]*"(?P<value>[^"\n]*)"$'
+)
+CI_CFG_NAMES = {
+    "debug_assertions": True,
+    "test": True,
+    "unix": True,
+    "windows": False,
+}
+CI_CFG_VALUES = {
+    "panic": "unwind",
+    "target_abi": "",
+    "target_arch": "x86_64",
+    "target_endian": "little",
+    "target_env": "gnu",
+    "target_family": "unix",
+    "target_os": "linux",
+    "target_pointer_width": "64",
+    "target_vendor": "unknown",
+}
 RUST_TEST_META = re.compile(
     r"^(?:::[ \t\r\n]*)?"
     rf"(?:{RUST_IDENTIFIER_PATTERN}[ \t\r\n]*::[ \t\r\n]*)*"
@@ -358,7 +371,6 @@ RUST_PATH_META = re.compile(
     re.DOTALL,
 )
 RUST_CRATE_ROOT_NAMES = ("mod.rs", "lib.rs", "main.rs")
-RUST_HARNESS_PREDICATE = "test"
 RUST_MACRO_RULES = re.compile(
     rf"\bmacro_rules![ \t\r\n]*(?P<name>{RUST_IDENTIFIER_PATTERN})"
     r"[ \t\r\n]*(?P<opening>[\(\[\{])"
@@ -421,6 +433,7 @@ class InlineModule:
     closing: int
     name: str
     disabled: bool
+    ci_disabled: bool
 
 
 @dataclass(frozen=True)
@@ -444,6 +457,7 @@ class RustSource:
     invocations: dict[str, list[int]]
     aliases: list[ScopedTestAlias]
     module_prefixes: tuple[tuple[str, ...], ...]
+    ignored_test_filters: tuple[str, ...] | None
 
 
 @dataclass(frozen=True)
@@ -584,6 +598,18 @@ def mask_rust_non_code(
     return "".join(buffer)
 
 
+def rust_comment_text(text: str) -> str:
+    """Return only Rust comments while preserving source offsets and lines."""
+    without_comments = mask_rust_non_code(text, preserve_literals=True)
+    comments = ["\n" if character == "\n" else " " for character in text]
+    for index, (character, visible) in enumerate(
+        zip(text, without_comments, strict=True)
+    ):
+        if character not in " \t\r\n" and visible == " ":
+            comments[index] = character
+    return "".join(comments)
+
+
 def rust_doc_comments(prefix: str) -> list[str]:
     """Return attached outer Rust doc comments, including nested block docs."""
     metadata = mask_rust_non_code(prefix, preserve_doc_comments=True)
@@ -625,15 +651,21 @@ def split_rust_meta_items(body: str) -> list[str]:
 
 
 def rust_cfg_truth(meta: str) -> bool | None:
-    """Evaluate cfg predicates whose truth the harness build already fixes.
+    """Evaluate cfg predicates against the repository's Ubuntu CI harness.
 
-    The catalog is checked against what `cargo test` registers, so the bare
-    `test` predicate is true here; every other configuration name stays
-    unknown unless a build-independent combinator settles it.
+    The generated catalog names tests that can fail in authoritative CI, whose
+    Rust jobs use Ubuntu x86-64 and all features. Unknown custom predicates stay
+    unknown; combinators can still settle a result without guessing them.
     """
     meta = meta.strip()
-    if meta == RUST_HARNESS_PREDICATE:
-        return True
+    if meta in CI_CFG_NAMES:
+        return CI_CFG_NAMES[meta]
+    value = RUST_CFG_VALUE.fullmatch(meta)
+    if value is not None:
+        if value.group("name") == "feature":
+            return True
+        expected = CI_CFG_VALUES.get(value.group("name"))
+        return None if expected is None else value.group("value") == expected
     predicate = RUST_CFG_PREDICATE.fullmatch(meta)
     if predicate is None:
         return None
@@ -770,7 +802,7 @@ def rust_meta_applies_test(
     if cfg_attr is None:
         return False
     items = split_rust_meta_items(cfg_attr.group("body"))
-    if not items or rust_cfg_truth(items[0]) is False:
+    if not items or rust_cfg_truth(items[0]) is not True:
         return False
     return any(rust_meta_applies_test(item, aliases) for item in items[1:])
 
@@ -827,6 +859,14 @@ def rust_top_level_meta_items(text: str) -> list[str]:
     return items
 
 
+def rust_raw_attributes(text: str, masked: str) -> str:
+    """Return raw attached attributes found in the comment-masked prefix."""
+    return "\n".join(
+        text[attribute.start() : attribute.end()]
+        for attribute in RUST_ATTRIBUTE.finditer(masked)
+    )
+
+
 def rust_attributes_apply_test(
     prefix: str, aliases: frozenset[str] = frozenset()
 ) -> bool:
@@ -840,11 +880,9 @@ def rust_attributes_apply_test(
 def rust_meta_module_paths(meta: str) -> list[str]:
     """Return the module files one meta names, directly or under `cfg_attr`.
 
-    The subject of this check is the test build, so a `cfg_attr` whose
-    condition is not build-independently false is read as applied — the same
-    reading `cfg_attr(test, test)` already gets. Conditions this checker
-    cannot settle, such as a target predicate, therefore each contribute a
-    candidate rather than the first one shadowing the rest.
+    The subject is the fixed CI test build, so known target predicates select
+    their exact path and a truly unknown condition contributes candidates
+    conservatively rather than letting one shadow the rest.
     """
     meta = meta.strip()
     direct = RUST_PATH_META.fullmatch(meta)
@@ -896,7 +934,53 @@ def rust_item_is_disabled(prefix: str) -> bool:
     return False
 
 
-def rust_inline_module_spans(code: str) -> list[InlineModule]:
+def rust_meta_disables_ci_item(meta: str) -> bool:
+    """Return whether metadata can exclude an item from the fixed CI target."""
+    meta = meta.strip()
+    cfg = RUST_CFG_META.fullmatch(meta)
+    if cfg is not None:
+        return rust_cfg_truth(cfg.group("body")) is not True
+    cfg_attr = RUST_CFG_ATTR_META.fullmatch(meta)
+    if cfg_attr is None:
+        return False
+    items = split_rust_meta_items(cfg_attr.group("body"))
+    condition = None if not items else rust_cfg_truth(items[0])
+    if condition is False:
+        return False
+    return any(rust_meta_disables_ci_item(item) for item in items[1:])
+
+
+def rust_item_is_disabled_in_ci(prefix: str) -> bool:
+    """Return whether attached cfg metadata can remove an item from CI."""
+    return any(
+        rust_meta_disables_ci_item(attribute.group("meta"))
+        for attribute in RUST_ATTRIBUTE.finditer(prefix)
+    )
+
+
+def rust_meta_may_ignore_test(meta: str) -> bool:
+    """Return whether active or build-dependent metadata may ignore a test."""
+    meta = meta.strip()
+    if re.fullmatch(r"ignore(?:[ \t\r\n]*=.*)?", meta, re.DOTALL):
+        return True
+    cfg_attr = RUST_CFG_ATTR_META.fullmatch(meta)
+    if cfg_attr is None:
+        return False
+    items = split_rust_meta_items(cfg_attr.group("body"))
+    if not items or rust_cfg_truth(items[0]) is False:
+        return False
+    return any(rust_meta_may_ignore_test(item) for item in items[1:])
+
+
+def rust_item_may_be_ignored(prefix: str) -> bool:
+    """Return whether attached metadata can exclude a test from an ordinary run."""
+    return any(
+        rust_meta_may_ignore_test(attribute.group("meta"))
+        for attribute in RUST_ATTRIBUTE.finditer(prefix)
+    )
+
+
+def rust_inline_module_spans(code: str, text: str | None = None) -> list[InlineModule]:
     """Return brace-delimited inline module spans from masked Rust code."""
     stack: list[int] = []
     closing_brace: dict[int, int] = {}
@@ -911,12 +995,18 @@ def rust_inline_module_spans(code: str) -> list[InlineModule]:
         opening = code.rfind("{", module.start(), module.end())
         closing = closing_brace.get(opening)
         if closing is not None:
+            attributes = module.group("attributes")
+            if text is not None:
+                attributes = text[
+                    module.start("attributes") : module.end("attributes")
+                ]
             spans.append(
                 InlineModule(
                     opening,
                     closing,
                     module.group("name"),
-                    rust_item_is_disabled(module.group("attributes")),
+                    rust_item_is_disabled(attributes),
+                    rust_item_is_disabled_in_ci(attributes),
                 )
             )
     return spans
@@ -2177,16 +2267,16 @@ def rust_test_invariant_tags(
     text: str,
     module_prefixes: tuple[tuple[str, ...], ...] = ((),),
     aliases: list[ScopedTestAlias] | None = None,
+    ignored_test_filters: tuple[str, ...] | None = (),
 ) -> list[tuple[str, int]]:
-    """Return distinct INV tags and declaration lines from Rust tests.
+    """Return declaration-local INV tags and lines from Rust tests.
 
-    Every module path under which the harness registers this file's tests is
-    read, so a file included under more than one active module name carries
-    the tags of each of them.
+    Only the test name and its attached doc comments declare tags. Module names
+    are context, not test annotations, even when they happen to contain INV text.
     """
     found: dict[str, int] = {}
     code = mask_rust_non_code(text)
-    module_spans = rust_inline_module_spans(code)
+    module_spans = rust_inline_module_spans(code, text)
     if aliases is None:
         aliases = rust_test_attribute_aliases(code)
     for declaration in RUST_TEST_DECLARATION.finditer(code):
@@ -2194,32 +2284,40 @@ def rust_test_invariant_tags(
             declaration.start("prefix") : declaration.end("prefix")
         ]
         code_prefix = declaration.group("prefix")
+        attributes = rust_raw_attributes(raw_prefix, code_prefix)
         visible = rust_visible_test_aliases(aliases, declaration.start())
         if (
             RUST_TEST_ATTRIBUTE.search(code_prefix) is None
-            and not rust_attributes_apply_test(code_prefix, visible)
+            and not rust_attributes_apply_test(attributes, visible)
         ):
             continue
-        if rust_item_is_disabled(code_prefix):
+        if rust_item_is_disabled_in_ci(attributes):
+            continue
+        ignored = rust_item_may_be_ignored(attributes)
+        if ignored and ignored_test_filters == ():
             continue
         enclosing = rust_enclosing_modules(module_spans, declaration.start())
-        if any(module.disabled for module in enclosing):
+        if any(module.ci_disabled for module in enclosing):
             continue
-        doc_comments = "\n".join(rust_doc_comments(raw_prefix))
-        module_names = [module.name for module in enclosing]
-        declaration_line = line_number(text, declaration.start("name"))
-        for module_prefix in module_prefixes:
-            material = "\n".join(
-                [
-                    doc_comments,
-                    *module_prefix,
-                    *module_names,
-                    declaration.group("name"),
-                ]
+        if ignored and ignored_test_filters is not None:
+            local_name = tuple(
+                [*(module.name for module in enclosing), declaration.group("name")]
             )
-            for tag in INVARIANT_TAG.finditer(material):
-                invariant = f"INV-{tag.group('number')}"
-                found.setdefault(invariant, declaration_line)
+            registered_names = (
+                "::".join((*prefix, *local_name)) for prefix in module_prefixes
+            )
+            if not any(
+                test_filter in registered_name
+                for registered_name in registered_names
+                for test_filter in ignored_test_filters
+            ):
+                continue
+        doc_comments = "\n".join(rust_doc_comments(raw_prefix))
+        declaration_line = line_number(text, declaration.start("name"))
+        material = "\n".join([doc_comments, declaration.group("name")])
+        for tag in INVARIANT_TAG.finditer(material):
+            invariant = f"INV-{tag.group('number')}"
+            found.setdefault(invariant, declaration_line)
     return sorted(found.items())
 
 
@@ -2288,23 +2386,23 @@ def rust_module_graph(
     children: dict[Path, list[tuple[tuple[str, ...], Path]]] = {}
     declared: set[Path] = set()
     for source in sources:
-        module_spans = rust_inline_module_spans(source.code)
+        module_spans = rust_inline_module_spans(source.code, source.text)
         for module in RUST_OUT_OF_LINE_MODULE.finditer(source.code):
-            # Masking preserves offsets but blanks string literals, so the
-            # `#[path]` destination is read back from the raw source.
-            attributes = source.text[
+            # Masking preserves offsets but blanks string literals, so cfg
+            # and `#[path]` metadata are read back from the raw source.
+            raw_attributes = source.text[
                 module.start("attributes") : module.end("attributes")
             ]
-            if rust_item_is_disabled(module.group("attributes")):
+            if rust_item_is_disabled_in_ci(raw_attributes):
                 continue
             enclosing = rust_enclosing_modules(
                 module_spans, module.start("name")
             )
-            if any(item.disabled for item in enclosing):
+            if any(item.ci_disabled for item in enclosing):
                 continue
             inline = tuple(item.name for item in enclosing)
             for child in rust_module_children(
-                source.path, module.group("name"), attributes, inline
+                source.path, module.group("name"), raw_attributes, inline
             ):
                 if child == source.path:
                     continue
@@ -2322,12 +2420,15 @@ def rust_module_graph(
                 continue
             plain = literal.group("plain")
             relative = literal.group("raw") if plain is None else plain
-            if rust_item_is_disabled(include.group("attributes")):
+            raw_attributes = source.text[
+                include.start("attributes") : include.end("attributes")
+            ]
+            if rust_item_is_disabled_in_ci(raw_attributes):
                 continue
             enclosing = rust_enclosing_modules(
                 module_spans, include.end("opening")
             )
-            if any(item.disabled for item in enclosing):
+            if any(item.ci_disabled for item in enclosing):
                 continue
             # `include!` splices into the module that includes it, so the
             # included file carries that module path with no new segment.
@@ -2377,6 +2478,203 @@ def rust_module_graph(
         {path: tuple(paths) for path, paths in prefixes.items()},
         roots,
     )
+
+
+@dataclass(frozen=True)
+class IgnoredTestRun:
+    """One Cargo invocation that executes ignored tests in authoritative CI."""
+
+    package: str
+    all_tests: bool
+    target: str | None
+    filters: tuple[str, ...]
+
+
+def folded_workflow_commands(root: Path) -> list[str]:
+    """Return folded `command: >-` scalar bodies from the Rust workflow."""
+    workflow = root / ".github/workflows/rust.yml"
+    if not workflow.is_file():
+        return []
+    lines = workflow.read_text(encoding="utf-8").splitlines()
+    runner_targets = {
+        match.group("target")
+        for line in lines
+        if (match := re.match(r"^[ ]*runs-on:[ ]*(?P<target>[^ #]+)", line))
+    }
+    if runner_targets and runner_targets != {"ubuntu-latest"}:
+        targets = ", ".join(sorted(runner_targets))
+        raise ValueError(f"Rust CI target changed from ubuntu-latest: {targets}")
+    commands: list[str] = []
+    index = 0
+    while index < len(lines):
+        match = re.match(r"^(?P<indent>[ ]*)command:[ ]*>-[ ]*$", lines[index])
+        if match is None:
+            index += 1
+            continue
+        indentation = len(match.group("indent"))
+        index += 1
+        body: list[str] = []
+        while index < len(lines):
+            line = lines[index]
+            if line.strip() and len(line) - len(line.lstrip(" ")) <= indentation:
+                break
+            if line.strip():
+                body.append(line.strip())
+            index += 1
+        commands.append(" ".join(body))
+    return commands
+
+
+def cargo_argument_filters(arguments: list[str]) -> tuple[str, ...]:
+    """Return Cargo/libtest positional filters from one `cargo test` command."""
+    value_options = {
+        "--bench",
+        "--bin",
+        "--color",
+        "--exclude",
+        "--example",
+        "--features",
+        "--jobs",
+        "--manifest-path",
+        "--message-format",
+        "--package",
+        "--profile",
+        "--target",
+        "--target-dir",
+        "--test",
+        "-F",
+        "-j",
+        "-p",
+    }
+    filters: list[str] = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument in value_options:
+            index += 2
+            continue
+        if argument.startswith("-"):
+            index += 1
+            continue
+        filters.append(argument)
+        index += 1
+    return tuple(filters)
+
+
+def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
+    """Read the ignored-test selections executed by the Rust CI workflow."""
+    runs: list[IgnoredTestRun] = []
+    for command in folded_workflow_commands(root):
+        arguments = shlex.split(command)
+        if len(arguments) < 3 or arguments[:2] != ["cargo", "test"]:
+            continue
+        if "--" not in arguments:
+            continue
+        separator = arguments.index("--")
+        cargo_arguments = arguments[2:separator]
+        harness_arguments = arguments[separator + 1 :]
+        if "--ignored" not in harness_arguments:
+            continue
+        package = None
+        target = None
+        for option in ("-p", "--package"):
+            if option in cargo_arguments:
+                package = cargo_arguments[cargo_arguments.index(option) + 1]
+        if "--test" in cargo_arguments:
+            target = cargo_arguments[cargo_arguments.index("--test") + 1]
+        if package is None:
+            continue
+        cargo_filters = cargo_argument_filters(cargo_arguments)
+        harness_filters = cargo_argument_filters(harness_arguments)
+        runs.append(
+            IgnoredTestRun(
+                package=package,
+                all_tests="--tests" in cargo_arguments,
+                target=target,
+                filters=tuple(sorted(set((*cargo_filters, *harness_filters)))),
+            )
+        )
+    return runs
+
+
+def cargo_package_directories(root: Path) -> dict[str, Path]:
+    """Return each Cargo package name and its manifest directory."""
+    packages: dict[str, Path] = {}
+    for manifest in sorted(root.rglob("Cargo.toml")):
+        if ".git" in manifest.parts or "target" in manifest.parts:
+            continue
+        try:
+            declared = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        package = declared.get("package")
+        name = package.get("name") if isinstance(package, dict) else None
+        if isinstance(name, str):
+            packages[name] = manifest.parent
+    return packages
+
+
+def conventional_test_target(package: Path, name: str) -> Path | None:
+    """Resolve one conventional or explicitly declared integration target."""
+    manifest = package / "Cargo.toml"
+    try:
+        declared = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        declared = {}
+    targets = declared.get("test")
+    if isinstance(targets, list):
+        for target in targets:
+            if not isinstance(target, dict) or target.get("name") != name:
+                continue
+            relative = target.get("path")
+            if isinstance(relative, str):
+                candidate = Path(os.path.normpath(package / relative))
+                return candidate if candidate.is_file() else None
+    candidates = [
+        package / "tests" / f"{name}.rs",
+        package / "tests" / name / "main.rs",
+    ]
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def cargo_test_roots(package: Path) -> list[Path]:
+    """Return Cargo target roots selected by `cargo test --tests`."""
+    roots: list[Path] = []
+    for target in cargo_target_roots(package):
+        relative = target.relative_to(package)
+        if relative == Path("build.rs") or relative.parts[0] in (
+            "benches",
+            "examples",
+        ):
+            continue
+        roots.append(target)
+    return roots
+
+
+def ignored_test_filters_by_target(root: Path) -> dict[Path, tuple[str, ...] | None]:
+    """Map Cargo target roots to the ignored tests authoritative CI executes."""
+    packages = cargo_package_directories(root)
+    selected: dict[Path, tuple[str, ...] | None] = {}
+    for run in workflow_ignored_test_runs(root):
+        package = packages.get(run.package)
+        if package is None:
+            continue
+        if run.all_tests:
+            targets = cargo_test_roots(package)
+        elif run.target is not None:
+            target = conventional_test_target(package, run.target)
+            targets = [] if target is None else [target]
+        else:
+            targets = []
+        filters = None if not run.filters else run.filters
+        for target in targets:
+            if target not in selected or filters is None:
+                selected[target] = filters
+                continue
+            current = selected[target]
+            if current is not None:
+                selected[target] = tuple(sorted(set((*current, *filters))))
+    return selected
 
 
 CARGO_TARGET_TABLES = ("bin", "test", "bench", "example")
@@ -2457,10 +2755,12 @@ def rust_sources(root: Path) -> list[RustSource]:
                 invocations=invocations,
                 aliases=[],
                 module_prefixes=((),),
+                ignored_test_filters=(),
             )
         )
     target_roots = frozenset(cargo_target_roots(root))
     prefixes, roots = rust_module_graph(prepared, target_roots)
+    ignored_by_target = ignored_test_filters_by_target(root)
     reachable = set(prefixes)
     prepared = [source for source in prepared if source.path in reachable]
     exported = {
@@ -2475,6 +2775,23 @@ def rust_sources(root: Path) -> list[RustSource]:
         source.aliases = rust_test_attribute_aliases(
             source.code, frozenset(visible)
         )
+        ignored_selections = [
+            ignored_by_target[target]
+            for target in roots.get(source.path, {source.path})
+            if target in ignored_by_target
+        ]
+        if any(selection is None for selection in ignored_selections):
+            source.ignored_test_filters = None
+        else:
+            source.ignored_test_filters = tuple(
+                sorted(
+                    {
+                        test_filter
+                        for selection in ignored_selections
+                        for test_filter in selection or ()
+                    }
+                )
+            )
     return prepared
 
 
@@ -2488,6 +2805,7 @@ def rust_invariant_test_files(
             source.text,
             source.module_prefixes,
             source.aliases,
+            source.ignored_test_filters,
         )
         for invariant, line in tags:
             found[(invariant, source.label)] = line
@@ -2614,18 +2932,21 @@ def check_invariant_citations(
         if not re.match(r"^\|[ \t]*INV-[0-9]{3}[ \t]*\|", line):
             continue
         cells = split_table_row(line)
-        if len(cells) != 5:
+        if len(cells) not in (2, 5):
             violations.append(
                 Violation(
                     INVARIANTS.as_posix(),
                     number,
                     "invariant-citation",
-                    f"expected 5 table cells, found {len(cells)}",
+                    f"expected 2 generated-index cells, found {len(cells)}",
                 )
             )
             continue
         invariant = cells[0]
-        enforcement = cells[4]
+        # Five-cell rows remain accepted by focused parser fixtures. The
+        # repository file itself is exact-checked as a generated two-cell
+        # index by scripts/generate_invariants.py.
+        enforcement = cells[-1]
         tagged_marker = re.compile(
             rf"(?i)(?<![A-Za-z0-9]){re.escape(invariant)}-tagged(?![A-Za-z0-9])",
         )
@@ -2700,7 +3021,7 @@ def check_invariant_citations(
                 catalog_pairs.add((invariant, target_label))
                 declared_tags = declared_tags_by_file.get(target_label, set())
                 if (
-                    link.destination in tagged_destinations
+                    (len(cells) == 2 or link.destination in tagged_destinations)
                     and invariant not in declared_tags
                 ):
                     violations.append(
@@ -2840,113 +3161,6 @@ def check_relative_links(
                     f"`{repository_path(root, target)}`",
                 )
             )
-    return violations
-
-
-def check_decision_order(root: Path) -> list[Violation]:
-    source = root / DECISIONS
-    text = mask_block_content(source.read_text(encoding="utf-8"))
-    lines = text.splitlines()
-    violations: list[Violation] = []
-    previous: tuple[date, int] | None = None
-    entries = 0
-
-    for number, line in enumerate(lines, start=1):
-        if (
-            number < len(lines)
-            and line.strip()
-            and ATX_HEADING.match(line) is None
-            and LIST_ITEM.match(line) is None
-            and BLOCK_QUOTE_CONTAINER.match(line) is None
-            and re.match(r"^ {0,3}-+[ \t]*$", lines[number])
-        ):
-            entries += 1
-            violations.append(
-                Violation(
-                    DECISIONS.as_posix(),
-                    number,
-                    "decision-order",
-                    "entry heading must be `## YYYY-MM-DD — <title>`; "
-                    "Setext H2 headings are not permitted",
-                )
-            )
-            continue
-        if LIST_WRAPPED_ENTRY_HEADING.match(line):
-            entries += 1
-            violations.append(
-                Violation(
-                    DECISIONS.as_posix(),
-                    number,
-                    "decision-order",
-                    "entry heading must be `## YYYY-MM-DD — <title>`; H2 "
-                    "headings nested inside a list are not permitted",
-                )
-            )
-            continue
-        if BLOCK_QUOTE_CONTAINER.match(line) and DECISION_ENTRY_HEADING.match(
-            strip_heading_containers(line)
-        ):
-            entries += 1
-            violations.append(
-                Violation(
-                    DECISIONS.as_posix(),
-                    number,
-                    "decision-order",
-                    "entry heading must be `## YYYY-MM-DD — <title>`; H2 "
-                    "headings nested inside a block quote are not permitted",
-                )
-            )
-            continue
-        heading = DECISION_ENTRY_HEADING.match(line)
-        if heading is None:
-            continue
-        entries += 1
-        title = heading.group("title").strip()
-        match = DECISION_HEADING.fullmatch(title)
-        if not match:
-            violations.append(
-                Violation(
-                    DECISIONS.as_posix(),
-                    number,
-                    "decision-order",
-                    "entry heading must be `## YYYY-MM-DD — <title>`",
-                )
-            )
-            continue
-        try:
-            entry_date = date.fromisoformat(match.group(1))
-        except ValueError:
-            violations.append(
-                Violation(
-                    DECISIONS.as_posix(),
-                    number,
-                    "decision-order",
-                    f"invalid ISO date `{match.group(1)}`",
-                )
-            )
-            continue
-        if previous is not None and entry_date > previous[0]:
-            violations.append(
-                Violation(
-                    DECISIONS.as_posix(),
-                    number,
-                    "decision-order",
-                    f"entry date {entry_date.isoformat()} is newer than the "
-                    f"preceding {previous[0].isoformat()} entry at line "
-                    f"{previous[1]}",
-                )
-            )
-        previous = (entry_date, number)
-
-    if entries == 0:
-        violations.append(
-            Violation(
-                DECISIONS.as_posix(),
-                1,
-                "decision-order",
-                "no dated decision entries found",
-            )
-        )
     return violations
 
 
@@ -3258,7 +3472,6 @@ def run_checks(root: Path = ROOT) -> list[Violation]:
     )
     failures = invariant_failures
     failures.extend(check_relative_links(root, enforcement_links))
-    failures.extend(check_decision_order(root))
     failures.extend(check_spec_verification_references(root))
     failures.extend(check_rust_test_generation(sources))
     return sorted(set(failures))
