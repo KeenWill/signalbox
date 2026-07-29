@@ -32,8 +32,9 @@ use signalbox_domain::{
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelTargetCatalog, ModelTargetDefinition, PendingSteeringReclassificationIdentity,
     PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest,
-    PreparedToolResultProjection, ProviderModelIdentity, ReclassifiedPendingSteeringTurn,
-    ReconciliationRequiredModelCallTurn, ReconciliationRequiredToolTurn, RefusedModelCallTurn,
+    PreparedToolResultProjection, ProviderModelIdentity, ProviderReportedTokenUsage,
+    ReclassifiedPendingSteeringTurn, ReconciliationRequiredModelCallTurn,
+    ReconciliationRequiredToolTurn, RefusedModelCallTurn,
     ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget, SemanticTranscriptEntry,
     SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef, SessionId,
     StopRequestedModelCallTurn, ToolApprovalDecision, ToolApprovalResolution, ToolDecisionSource,
@@ -546,7 +547,12 @@ impl PostgresModelCallRepository {
                                 "target-resolution failure could not close fresh execution state",
                             )
                         })?;
-                    persist_failed(&mut transaction, &failed).await?;
+                    persist_failed(
+                        &mut transaction,
+                        &failed,
+                        ProviderReportedTokenUsage::unreported(),
+                    )
+                    .await?;
                     return Ok((
                         true,
                         PrepareInitialModelCallOutcome::TargetUnavailable(Box::new(failed)),
@@ -662,6 +668,7 @@ impl PostgresModelCallRepository {
                 &execution,
                 &mut next_reclassified_turn,
             )?;
+            let usage = observation.usage();
             let outcome = execution
                 .apply_terminal_observation(observation, identities)
                 .map_err(|_| {
@@ -669,7 +676,7 @@ impl PostgresModelCallRepository {
                         "terminal observation does not match fresh issued state",
                     )
                 })?;
-            persist_terminal_outcome(&mut transaction, &outcome).await?;
+            persist_terminal_outcome_with_usage(&mut transaction, &outcome, usage).await?;
             Ok(outcome)
         }
         .await;
@@ -705,7 +712,12 @@ impl PostgresModelCallRepository {
                         "capability failure requires a Prepared call",
                     )
                 })?;
-            persist_failed(&mut transaction, &failed).await?;
+            persist_failed(
+                &mut transaction,
+                &failed,
+                ProviderReportedTokenUsage::unreported(),
+            )
+            .await?;
             Ok(failed)
         }
         .await;
@@ -973,32 +985,34 @@ impl PostgresModelCallRepository {
                     "retained observation session changed",
                 ));
             }
-            let stored =
-                sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, Uuid, String, Option<String>)>(
-                    "SELECT session_id, turn_id, turn_attempt_id,
+            let stored_row = sqlx::query(
+                "SELECT session_id, turn_id, turn_attempt_id,
                         resolved_provider_model_identity_id, context_frontier_id,
-                        state_kind, terminal_disposition_kind
+                        state_kind, terminal_disposition_kind,
+                        usage_input_tokens, usage_output_tokens,
+                        usage_cache_creation_input_tokens,
+                        usage_cache_read_input_tokens
                    FROM model_call
                   WHERE model_call_id = $1",
-                )
-                .bind(observation.call().into_uuid())
-                .fetch_optional(&mut *transaction)
-                .await?
-                .ok_or(ModelCallCorruption::Missing(
-                    "retained observation model call",
-                ))?;
-            let (stored_session, turn, attempt, target, frontier, state, disposition) = stored;
-            if stored_session != session_id_to_uuid(correlation.session())
-                || turn != turn_id_to_uuid(correlation.turn())
-                || attempt != correlation.attempt().into_uuid()
-                || target != correlation.target().identity().into_uuid()
-                || frontier != correlation.frontier().into_uuid()
+            )
+            .bind(observation.call().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(ModelCallCorruption::Missing(
+                "retained observation model call",
+            ))?;
+            let stored = decode_stored_model_call_observation(&stored_row)?;
+            if stored.session != session_id_to_uuid(correlation.session())
+                || stored.turn != turn_id_to_uuid(correlation.turn())
+                || stored.attempt != correlation.attempt().into_uuid()
+                || stored.target != correlation.target().identity().into_uuid()
+                || stored.frontier != correlation.frontier().into_uuid()
             {
                 return Err(ModelCallRepositoryError::InvalidTransition(
                     "retained observation correlation changed",
                 ));
             }
-            match (state.as_str(), disposition.as_deref()) {
+            match (stored.state.as_str(), stored.disposition.as_deref()) {
                 ("in_flight", None) => {
                     let execution = require_exact_call(
                         require_live_execution(&mut transaction, session, &self.targets).await?,
@@ -1041,7 +1055,7 @@ impl PostgresModelCallRepository {
                         )",
                     )
                     .bind(session_id_to_uuid(session))
-                    .bind(turn)
+                    .bind(stored.turn)
                     .bind(observation.call().into_uuid())
                     .fetch_one(&mut *transaction)
                     .await?;
@@ -1054,7 +1068,8 @@ impl PostgresModelCallRepository {
                 }
                 ("terminal", Some(stored_disposition))
                     if stored_disposition
-                        == encode_disposition(observation.observation().disposition()) =>
+                        == encode_disposition(observation.observation().disposition())
+                        && stored.usage == encode_token_usage(observation.usage()) =>
                 {
                     if !terminal_observation_closure_matches(&mut transaction, session, observation)
                         .await?
@@ -1207,7 +1222,12 @@ where
                         "continuation target failure could not close execution",
                     )
                 })?;
-            persist_failed(connection, &failed).await?;
+            persist_failed(
+                connection,
+                &failed,
+                ProviderReportedTokenUsage::unreported(),
+            )
+            .await?;
             return Ok(PrepareToolContinuationOutcome::TargetUnavailable(Box::new(
                 failed,
             )));
@@ -1265,7 +1285,12 @@ where
                 "tool crash could not close evidence-free execution",
             )
         })?;
-    persist_failed(connection, &failed).await?;
+    persist_failed(
+        connection,
+        &failed,
+        ProviderReportedTokenUsage::unreported(),
+    )
+    .await?;
     Ok(failed)
 }
 
@@ -3441,24 +3466,41 @@ pub(crate) async fn persist_terminal_outcome(
     connection: &mut PgConnection,
     outcome: &ModelCallTerminalOutcome,
 ) -> Result<(), ModelCallRepositoryError> {
+    persist_terminal_outcome_with_usage(
+        connection,
+        outcome,
+        ProviderReportedTokenUsage::unreported(),
+    )
+    .await
+}
+
+async fn persist_terminal_outcome_with_usage(
+    connection: &mut PgConnection,
+    outcome: &ModelCallTerminalOutcome,
+    usage: ProviderReportedTokenUsage,
+) -> Result<(), ModelCallRepositoryError> {
     match outcome {
         ModelCallTerminalOutcome::Completed(completed) => {
-            persist_completed(connection, completed).await
+            persist_completed(connection, completed, usage).await
         }
-        ModelCallTerminalOutcome::ToolRound(round) => persist_tool_round(connection, round).await,
+        ModelCallTerminalOutcome::ToolRound(round) => {
+            persist_tool_round(connection, round, usage).await
+        }
         ModelCallTerminalOutcome::CancelledWithToolResponse(cancelled) => {
-            persist_cancelled_tool_round(connection, cancelled).await
+            persist_cancelled_tool_round(connection, cancelled, usage).await
         }
-        ModelCallTerminalOutcome::Failed(failed) => persist_failed(connection, failed).await,
+        ModelCallTerminalOutcome::Failed(failed) => persist_failed(connection, failed, usage).await,
         ModelCallTerminalOutcome::Cancelled(cancelled) => {
-            persist_cancelled(connection, cancelled).await
+            persist_cancelled(connection, cancelled, usage).await
         }
-        ModelCallTerminalOutcome::Refused(refused) => persist_refused(connection, refused).await,
+        ModelCallTerminalOutcome::Refused(refused) => {
+            persist_refused(connection, refused, usage).await
+        }
         ModelCallTerminalOutcome::ReconciliationRequired(reconciliation) => {
-            persist_reconciliation_required(connection, reconciliation).await
+            persist_reconciliation_required(connection, reconciliation, usage).await
         }
         ModelCallTerminalOutcome::AwaitingRecovery(ambiguous) => {
-            persist_ambiguous(connection, ambiguous).await
+            persist_ambiguous(connection, ambiguous, usage).await
         }
     }
 }
@@ -3466,6 +3508,7 @@ pub(crate) async fn persist_terminal_outcome(
 async fn persist_reconciliation_required(
     connection: &mut PgConnection,
     reconciliation: &ReconciliationRequiredModelCallTurn,
+    usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
     let call_already_ambiguous = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
@@ -3491,6 +3534,7 @@ async fn persist_reconciliation_required(
             reconciliation.session(),
             reconciliation.turn(),
             reconciliation.call(),
+            usage,
         )
         .await?;
     }
@@ -3610,8 +3654,16 @@ pub(crate) async fn persist_tool_reconciliation_required(
 async fn persist_tool_round(
     connection: &mut PgConnection,
     round: &ToolRoundModelCallTurn,
+    usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call(connection, round.session(), round.turn(), round.call()).await?;
+    persist_ended_call(
+        connection,
+        round.session(),
+        round.turn(),
+        round.call(),
+        usage,
+    )
+    .await?;
     persist_ended_attempt(connection, round.session(), round.turn(), round.attempt()).await?;
     persist_tool_round_authority(
         connection,
@@ -3739,12 +3791,14 @@ async fn persist_tool_round(
 async fn persist_cancelled_tool_round(
     connection: &mut PgConnection,
     cancelled: &CancelledToolRoundModelCallTurn,
+    usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
     persist_ended_call(
         connection,
         cancelled.session(),
         cancelled.turn(),
         cancelled.call(),
+        usage,
     )
     .await?;
     persist_ended_attempt(
@@ -3972,9 +4026,17 @@ fn encode_tool_decision_source(
 async fn persist_cancelled(
     connection: &mut PgConnection,
     cancelled: &CancelledModelCallTurn,
+    usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
     if let Some(call) = cancelled.call() {
-        persist_ended_call(connection, cancelled.session(), cancelled.turn(), call).await?;
+        persist_ended_call(
+            connection,
+            cancelled.session(),
+            cancelled.turn(),
+            call,
+            usage,
+        )
+        .await?;
     }
     persist_ended_attempt(
         connection,
@@ -4042,12 +4104,14 @@ async fn persist_cancelled(
 async fn persist_completed(
     connection: &mut PgConnection,
     completed: &CompletedModelCallTurn,
+    usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
     persist_ended_call(
         connection,
         completed.session(),
         completed.turn(),
         completed.call(),
+        usage,
     )
     .await?;
     persist_ended_attempt(
@@ -4137,9 +4201,10 @@ async fn persist_completed(
 async fn persist_failed(
     connection: &mut PgConnection,
     failed: &FailedModelCallTurn,
+    usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
     if let Some(call) = failed.call() {
-        persist_ended_call(connection, failed.session(), failed.turn(), call).await?;
+        persist_ended_call(connection, failed.session(), failed.turn(), call, usage).await?;
     }
     persist_ended_attempt(
         connection,
@@ -4202,12 +4267,14 @@ async fn persist_failed(
 async fn persist_refused(
     connection: &mut PgConnection,
     refused: &RefusedModelCallTurn,
+    usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
     persist_ended_call(
         connection,
         refused.session(),
         refused.turn(),
         refused.call(),
+        usage,
     )
     .await?;
     persist_ended_attempt(
@@ -4403,12 +4470,14 @@ async fn persist_reclassified_pending_steering(
 async fn persist_ambiguous(
     connection: &mut PgConnection,
     ambiguous: &AmbiguousModelCallTurn,
+    usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
     persist_ended_call(
         connection,
         ambiguous.session(),
         ambiguous.turn(),
         ambiguous.call(),
+        usage,
     )
     .await?;
     persist_ended_attempt(
@@ -4446,24 +4515,74 @@ async fn persist_ambiguous(
     Ok(())
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EncodedTokenUsage {
+    input_tokens: Option<Decimal>,
+    output_tokens: Option<Decimal>,
+    cache_creation_input_tokens: Option<Decimal>,
+    cache_read_input_tokens: Option<Decimal>,
+}
+
+#[derive(Debug)]
+struct StoredModelCallObservation {
+    session: Uuid,
+    turn: Uuid,
+    attempt: Uuid,
+    target: Uuid,
+    frontier: Uuid,
+    state: String,
+    disposition: Option<String>,
+    usage: EncodedTokenUsage,
+}
+
+fn decode_stored_model_call_observation(
+    row: &PgRow,
+) -> Result<StoredModelCallObservation, sqlx::Error> {
+    Ok(StoredModelCallObservation {
+        session: row.try_get("session_id")?,
+        turn: row.try_get("turn_id")?,
+        attempt: row.try_get("turn_attempt_id")?,
+        target: row.try_get("resolved_provider_model_identity_id")?,
+        frontier: row.try_get("context_frontier_id")?,
+        state: row.try_get("state_kind")?,
+        disposition: row.try_get("terminal_disposition_kind")?,
+        usage: EncodedTokenUsage {
+            input_tokens: row.try_get("usage_input_tokens")?,
+            output_tokens: row.try_get("usage_output_tokens")?,
+            cache_creation_input_tokens: row.try_get("usage_cache_creation_input_tokens")?,
+            cache_read_input_tokens: row.try_get("usage_cache_read_input_tokens")?,
+        },
+    })
+}
+
 async fn persist_ended_call(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
     call: &signalbox_domain::EndedModelCall,
+    usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
+    let usage = encode_token_usage(usage);
     let rows = sqlx::query(
         "UPDATE model_call
             SET state_kind = 'terminal',
-                terminal_disposition_kind = $1
-          WHERE model_call_id = $2
-            AND turn_id = $3
-            AND session_id = $4
-            AND turn_attempt_id = $5
+                terminal_disposition_kind = $1,
+                usage_input_tokens = $2,
+                usage_output_tokens = $3,
+                usage_cache_creation_input_tokens = $4,
+                usage_cache_read_input_tokens = $5
+          WHERE model_call_id = $6
+            AND turn_id = $7
+            AND session_id = $8
+            AND turn_attempt_id = $9
             AND state_kind <> 'terminal'
             AND terminal_disposition_kind IS NULL",
     )
     .bind(encode_disposition(call.disposition()))
+    .bind(usage.input_tokens)
+    .bind(usage.output_tokens)
+    .bind(usage.cache_creation_input_tokens)
+    .bind(usage.cache_read_input_tokens)
     .bind(call.id().into_uuid())
     .bind(turn_id_to_uuid(turn))
     .bind(session_id_to_uuid(session))
@@ -4472,6 +4591,15 @@ async fn persist_ended_call(
     .await?
     .rows_affected();
     require_single(rows, "terminal model call")
+}
+
+fn encode_token_usage(usage: ProviderReportedTokenUsage) -> EncodedTokenUsage {
+    EncodedTokenUsage {
+        input_tokens: usage.input_tokens().map(Decimal::from),
+        output_tokens: usage.output_tokens().map(Decimal::from),
+        cache_creation_input_tokens: usage.cache_creation_input_tokens().map(Decimal::from),
+        cache_read_input_tokens: usage.cache_read_input_tokens().map(Decimal::from),
+    }
 }
 
 async fn persist_ended_attempt(
@@ -4775,7 +4903,7 @@ async fn finish_optional_commit<T>(
 fn map_scheduling_error(error: SubmitInputRepositoryError) -> ModelCallRepositoryError {
     match error {
         SubmitInputRepositoryError::Database(error) => error.into(),
-        SubmitInputRepositoryError::ContextSummaryRequiresProtocolVersion17 => {
+        SubmitInputRepositoryError::ContextSummaryRequiresProtocolVersion22 => {
             ModelCallCorruption::Inconsistent("origin context-summary version gate").into()
         }
         SubmitInputRepositoryError::CommitAmbiguous(error) => {

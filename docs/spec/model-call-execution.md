@@ -24,13 +24,18 @@ model-call cause codes were verified through PR #280
 projection and identity-before-terminal-evidence precedence were verified
 through PR #288 (`agent/audit-fix-docs-coherence`); the session system prompt on
 the prepared operation was verified through PR #286
-(`agent/session-system-prompt`); the empty-thinking completion rule was verified
-through PR #305 (`agent/sonnet-streamed-tool-use`). Invariant tags cite
-[docs/invariants.md](../invariants.md). The context-summary projection and
-dedicated compaction-call evidence were verified against `319dd05b`; the
-version-seventeen explicit trigger, pre-activation context guard, configured
-prompt, and provider-native input counting were verified against
-`agent/context-compaction-protocol`.
+(`agent/session-system-prompt`). Provider-reported token evidence retention and
+exact commit-ambiguity comparison were verified through PR #301
+(`agent/token-usage`); the empty-thinking completion rule was verified through
+PR #305 (`agent/sonnet-streamed-tool-use`). The context-summary projection and
+dedicated compaction-call evidence were verified through this PR
+(`agent/context-compaction-core`); the version-twenty-two explicit trigger,
+pre-activation context guard, configured prompt, and provider-native input
+counting were verified against `agent/context-compaction-protocol`. The
+runner-placement rendering and executable session-tool snapshot paragraphs are
+the foundation proposal at the bottom of their implementing stack and become
+verified only with those child pull requests. Invariant tags cite
+[docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
@@ -57,6 +62,16 @@ The predecessor matrix:
   what was externally done, and rewriting it would let later facts silently
   change that record.
 
+The same terminal transition stores the provider's four token-usage fields —
+input, output, cache-creation input, and cache-read input — on the `model_call`
+row. Each field is independently nullable: null means the provider did not
+report that field, while a reported zero remains zero. Calls closed from
+`ProvenUnsent`, `CancellationConfirmed`, capability failure, or restart recovery
+have all four fields unreported because no provider usage evidence exists.
+Historical rows likewise remain unreported. The terminal-row immutability rule
+makes this evidence write-once; no later path estimates, normalizes, or corrects
+it.
+
 Storage enforces the matrix durably
 (`crates/persistence/migrations/202607220001_model_call_execution.sql`): the
 `model_call_changes_are_guarded` trigger rejects any insert whose state is not
@@ -67,7 +82,10 @@ transition, any rewrite of a terminal row, any unsent-terminal disposition other
 than `KnownFailed`/`Cancelled`, and any delete; `model_call_pinned_target_fk`
 forces every call row's resolved target to equal the turn's pinned target. Why:
 the schema backstops the aggregate against any buggy or racing writer, not just
-the audited one.
+the audited one. Migration `202607290301_model_call_token_usage.sql` adds the
+terminal-only usage-field constraints and rejects reported usage on every direct
+`Prepared -> Terminal` transition, because that transition proves no send was
+authorized.
 
 The provider target is pinned as a turn-level fact before any call exists: the
 turn's frozen selection resolves through an immutable configured
@@ -144,6 +162,15 @@ messages:
 - `ContextSummary` renders as a distinct user-role prior-conversation summary,
   retaining the producing compaction call and exact summarized range in the
   provider-neutral value;
+- `RunnerPlacementChanged` resolves its complete same-session successor
+  placement record and renders as a structured provider-neutral placement change
+  retaining the positive placement revision and selected sandbox profile. The
+  provider bridge projects it as an injected user-role message whose exact text
+  is
+  `Signalbox session event: runner placement changed to revision {revision} with profile {profile}; prior runner-local execution state is unavailable.`
+  The braces are replaced by the canonical decimal revision and exact
+  `workspace-restricted` or `ambient` token. Missing, stale, cross-session, or
+  non-successor placement authority fails rendering instead of inventing text;
 - `AssistantText` renders as an assistant message retaining its producing-call
   provenance;
 - imported `Text` with an attested value renders with its imported user or
@@ -160,10 +187,36 @@ messages:
   assistant tool calls and user tool results after resolving their referenced
   request, attempt, and decision records through [tool-loop](tool-loop.md).
 
-The model operation also carries the current registry declarations. The runtime
-bridge maps them to provider tool definitions and accepts `ToolCall` completion
-parts only with a matching `ToolUse` finish reason. Provider-native tool types
-remain inside the bridge.
+The prepared model operation carries one immutable `ExecutableToolSnapshot`, not
+the unfiltered process registry. Preparation includes every daemon-only tool;
+includes a combined-locus tool whenever its daemon executor is available; and
+includes a runner-only tool only when the session placement can bind that exact
+declaration to current execution authority. A pinned placement uses its frozen
+tool inventory and current matching registration. An ordinary unpinned request
+includes a runner-only definition only when a currently live registration
+satisfies its selector, sandbox, workspace, repository, and credential
+availability. An exact-identity selector binds that runner and registration
+revision for a possible first dispatch, so its loss produces
+`RunnerLostBeforePin`. A capability-class selector freezes the class and
+required availability, not a runner identity; the eventual first dispatch may
+select only a then-current satisfying registration. If none remains, the
+proposal closes known-failed as `ToolUnavailableBeforePin` without creating an
+attempt or placement, because no runner execution was authorized.
+`RunnerAbandoned` exposes daemon-executable tools only. `RunnerLost` and
+`RunnerLostBeforePin` cannot prepare a new model operation while the turn awaits
+owner recovery. An operation prepared before loss retains its frozen snapshot
+and physical-call disposition, but a runner-only proposal from it cannot
+authorize against the lost locus. A combined-locus definition remains executable
+through its daemon locus when runner availability disappears; an already frozen
+runner selection never silently falls back after the provider returns.
+
+Each snapshot entry binds the exact model definition, permission/effect policy,
+and selected executable locus used to validate and authorize a returned
+proposal. The runtime bridge maps only these entries to provider tool
+definitions and accepts `ToolCall` completion parts only with a matching
+`ToolUse` finish reason. A tool absent from the snapshot is an unknown proposal
+for that operation even if another session or a later registration can execute
+it. Provider-native tool types remain inside the bridge.
 
 Every message keeps its source-qualified semantic-entry reference and its
 content-authority provenance. Why: inherited entries need not come from a native
@@ -215,7 +268,7 @@ attempt. An integrity failure still terminalizes the unsent call. After a
 successful provider result, the daemon retains the summary and its usage in
 memory until the exact completion is durably applied or replayed.
 
-The explicit version-seventeen `compact_session` request names a session and an
+The explicit version-twenty-two `compact_session` request names a session and an
 optional semantic transcript position. Absence selects the latest safe terminal
 or pre-call boundary. The command records no projection preference: once its
 summary result commits, later model inputs in that session follow the projection
@@ -444,6 +497,15 @@ Tool-call parts with a `ToolUse` finish become the normalized proposals owned by
 fails the adapter stage closed because no durable semantic representation
 exists. Scripted providers declare their exact terminal observation; nothing is
 inferred from timing or injected I/O errors.
+
+For `Completed`, `Refused`, `ProviderError`, and `BoundaryLoss`, the bridge also
+copies the runtime terminal evidence's final absorbed `TokenUsage` fields into
+the correlated observation verbatim. Classification does not derive usage from
+the disposition, content, context, or provider family. The observation commit
+stores those fields atomically with the terminal disposition. A commit-ambiguity
+reread returns `AlreadyCommitted` only when the durable disposition, closure,
+and every independently nullable usage field equal the retained observation;
+different or newly absent usage is conflicting evidence, not an equal replay.
 
 ### Provider-target identity
 

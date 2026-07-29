@@ -21,7 +21,10 @@ were verified through PR #285 (`agent/dev-instance-code-host-credential`). The
 current command/telemetry identity-generation, command-family, and
 ambiguity-ownership inventory was verified through PR #288
 (`agent/audit-fix-docs-coherence`); the context-compaction command lifecycle was
-verified against `agent/context-compaction-protocol`.
+verified against `agent/context-compaction-protocol`. The version-seventeen
+runner recovery command families are the foundation proposal at the bottom of
+their implementing stack and become verified only with those child pull
+requests.
 
 ## Identity model
 
@@ -177,25 +180,45 @@ All claimed command identifiers live in one owner-global, append-only
 key `command_id`, a closed `command_kind` discriminator (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
-`review_workflow`, `compact_session`), a kind-scoped `storage_version`, and
-`claimed_at` (`transaction_timestamp()`), which is non-semantic operational
-metadata. No command kind, session, or client has a separate command-ID
-namespace.
+`review_workflow`, `compact_session`, `replace_lost_runner`,
+`abandon_lost_runner`), a kind-scoped `storage_version`, and `claimed_at`
+(`transaction_timestamp()`), which is non-semantic operational metadata. No
+command kind, session, or client has a separate command-ID namespace.
 
-Each admitted kind has one purpose-specific typed record family, including
-`compact_session_command`, keyed one-to-one by `command_id`, storing every
-caller-supplied semantic field and the kind's closed result or effect-lifecycle
-fields under `CHECK` constraints and foreign keys. A compact-session record
-begins `pending` with its exact dedicated Prepared call, then changes exactly
-once to `applied` with its receipt or to `failed`; its request fields never
-change. Kind and version agreement between the registry row and its typed record
-is enforced by a composite foreign key, and a deferred constraint trigger
+Each admitted kind has one purpose-specific typed record family
+(`create_session_command`, `create_session_from_imported_frontier_command`,
+`replace_session_defaults_command`, `replace_session_metadata_command`,
+`submit_input_command`, `decide_tool_request_command`,
+`review_workflow_command`, `compact_session_command`,
+`replace_lost_runner_command`, `abandon_lost_runner_command`) keyed one-to-one
+by `command_id`, storing every caller-supplied semantic field under `CHECK`
+constraints and foreign keys. Every family except replacement also stores its
+terminal `applied`/`rejected` discriminator and typed result fields in that row.
+A compact-session record begins `pending` with its exact dedicated Prepared
+call, then changes exactly once to `applied` with its receipt or to `failed`;
+its request fields never change. Runner replacement instead has one immutable
+request row plus at most one append-only `replace_lost_runner_result`: the
+request row satisfies typed-claim completeness while provisioning crosses the
+runner boundary, and no success or rejection response exists until the result
+row commits. Kind and version agreement between the registry row and its typed
+record is enforced by a composite foreign key, and a deferred constraint trigger
 (`durable_command_requires_typed_record`, executing function
 `require_durable_command_typed_record`) requires exactly one typed record per
 claim at every transaction boundary. Why: typed relational records keep each
 command's comparison payload and result reviewable and constraint-checked
 instead of delegating meaning to a serializer; there is no universal JSONB or
 byte-blob payload anywhere.
+
+`replace_lost_runner` is the sole version-one multi-transaction command. Its
+first transaction claims the registry identity, stores the complete immutable
+request, and stores a single-use provisioning authorization. The handler waits
+without holding a database transaction while the pending runner returns or
+replays its workspace receipt; the terminal transaction appends exactly one
+result and atomically installs the replacement or its typed rejection. Equal
+replay during provisioning joins the same durable operation and can neither
+start another workspace nor acquire another meaning. Startup resumes an
+unterminated request before client admission. `abandon_lost_runner` remains one
+ordinary atomic claim-and-terminal-result transaction.
 
 For `SubmitInput`, each terminal command result must correlate with exactly its
 committed domain effects. Equal replay returns the recorded result only after
@@ -217,9 +240,12 @@ undecodable claim as unseen would let one identifier acquire a second meaning
 (INV-012). Corruption is a distinct error family from infrastructure failure and
 from recorded domain rejection.
 
-New `CreateSession`, `CreateSessionFromImportedFrontier`, and
-`ReplaceSessionDefaults` records use version 2 for the complete defaults value;
-version 1 reconstitutes with dangerous blanket approval disabled.
+New `CreateSession` records use storage version 4. New
+`CreateSessionFromImportedFrontier` and `ReplaceSessionDefaults` records use
+version 3. All three families reconstitute version 1 with dangerous blanket
+approval disabled and versions 1 and 2 with no system prompt. Create-session
+versions 1 through 3 carry no template provenance; version 4 requires provenance
+for template mode and requires its absence for explicit mode.
 `ReplaceSessionMetadata`, `SubmitInput`, and `DecideToolRequest` use version 1.
 `CreateSession` records applied results only (its one preparation failure is an
 error, not a recorded rejection); `CreateSessionFromImportedFrontier` also
@@ -233,8 +259,15 @@ rejections claim the identifier exactly as applied results do.
 ## Replay and equality
 
 The canonical command payload is the typed domain value constructed at the
-boundary before registry lookup — not a serialization. Structural equality
-(hand-written `PartialEq` on `CreateSession`,
+boundary — not a serialization. Ordinarily that construction precedes registry
+lookup. Template creation is the one narrower caller-intent preflight: the
+boundary validates command identity and template name, then looks up the durable
+command before consulting the live template catalog or constructing the complete
+domain payload. An existing create command compares explicit-versus-template
+mode and, for template mode, the caller-supplied name; equality returns the
+recorded result without catalog resolution. Only an unseen identity resolves the
+startup catalog and constructs the complete defaults-and-provenance payload.
+Structural equality (hand-written `PartialEq` on `CreateSession`,
 `CreateSessionFromImportedFrontier`, `ReplaceSessionDefaults`, `SubmitInput`,
 `ReplaceSessionMetadata`, and `DecideToolRequest` in `crates/domain`) covers
 every caller-supplied semantic field and excludes `DurableCommandId`. Why: the
@@ -263,8 +296,10 @@ validation (INV-012):
    disposition. No applied result is returned before its transaction commits,
    and a failed claim transaction claims no identifier.
 
-After registry inspection and before claiming an unseen identifier, a command
-may perform an owner-specified pre-claim admission read.
+Before complete payload construction, template creation may perform only the
+caller-intent registry preflight above. After the repository inspects the
+registry for a constructed command and before claiming an unseen identifier, a
+command may perform an owner-specified pre-claim admission read.
 `CreateSessionFromImportedFrontier` uses that phase to load the conversation
 named by `frontier.conversation()` and resolve the frontier's inclusive
 boundary; a missing target returns the corresponding admission error without

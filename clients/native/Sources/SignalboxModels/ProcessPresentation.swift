@@ -19,6 +19,20 @@ public struct SignalboxProcessSession: Identifiable, Equatable, Sendable {
     self.archived = summary.archived
   }
 
+  public init(
+    id: SignalboxCanonicalUUID,
+    defaults: SignalboxSessionDefaultsRead,
+    metadata: SignalboxProcessSessionMetadata
+  ) {
+    self.id = id
+    self.defaultsVersion = defaults.defaultsVersion
+    self.modelSelection = defaults.modelSelection
+    self.dangerousToolAutoApproval = defaults.dangerousToolAutoApproval
+    self.title = metadata.title
+    self.tags = metadata.tags
+    self.archived = metadata.archived
+  }
+
   public var displayTitle: String {
     guard let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       return "Session \(id.rawValue.prefix(8))"
@@ -33,6 +47,138 @@ public struct SignalboxProcessSession: Identifiable, Equatable, Sendable {
     case .alias(let aliasID):
       return "Alias \(aliasID.rawValue.prefix(8))"
     }
+  }
+}
+
+public enum SignalboxProcessConversationOrigin: String, Equatable, Sendable {
+  case native
+  case imported
+}
+
+public struct SignalboxProcessConversation: Identifiable, Equatable, Sendable {
+  public enum Record: Equatable, Sendable {
+    case native(SignalboxNativeConversationSummary)
+    case imported(SignalboxImportedConversationSummary)
+  }
+
+  public let record: Record
+
+  public init(summary: SignalboxConversationSummary) {
+    switch summary {
+    case .native(let native):
+      record = .native(native)
+    case .imported(let imported):
+      record = .imported(imported)
+    }
+  }
+
+  public var id: String {
+    switch record {
+    case .native(let native):
+      return "native-\(native.sessionID.rawValue)"
+    case .imported(let imported):
+      return "imported-\(imported.importedConversationID.rawValue)"
+    }
+  }
+
+  public var origin: SignalboxProcessConversationOrigin {
+    switch record {
+    case .native:
+      return .native
+    case .imported:
+      return .imported
+    }
+  }
+
+  public var conversationID: SignalboxCanonicalUUID {
+    switch record {
+    case .native(let native):
+      return native.sessionID
+    case .imported(let imported):
+      return imported.importedConversationID
+    }
+  }
+
+  public var title: String? {
+    switch record {
+    case .native(let native):
+      return native.title
+    case .imported(let imported):
+      return imported.title
+    }
+  }
+
+  public var displayTitle: String {
+    guard let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      switch origin {
+      case .native:
+        return "Session \(conversationID.rawValue.prefix(8))"
+      case .imported:
+        return "Imported \(conversationID.rawValue.prefix(8))"
+      }
+    }
+    return title
+  }
+
+  public var archived: Bool {
+    guard case .native(let native) = record else {
+      return false
+    }
+    return native.archived
+  }
+
+  public var defaultsVersion: SignalboxCanonicalUInt64? {
+    guard case .native(let native) = record else {
+      return nil
+    }
+    return native.defaultsVersion
+  }
+
+  public var importedEntryCount: SignalboxCanonicalUInt64? {
+    guard case .imported(let imported) = record else {
+      return nil
+    }
+    return imported.entryCount
+  }
+
+  public var importedSourceFormat: SignalboxImportedConversationSourceFormat? {
+    guard case .imported(let imported) = record else {
+      return nil
+    }
+    return imported.sourceFormat
+  }
+}
+
+public struct SignalboxProcessStreamedText: Identifiable, Equatable, Sendable {
+  public let sessionID: SignalboxCanonicalUUID
+  public let turnID: SignalboxCanonicalUUID
+  public let modelCallID: SignalboxCanonicalUUID
+  public private(set) var text: String
+
+  public init(delta: SignalboxProviderTextDelta) {
+    sessionID = delta.sessionID
+    turnID = delta.turnID
+    modelCallID = delta.modelCallID
+    text = delta.content
+  }
+
+  public var id: String {
+    "\(turnID.rawValue)-\(modelCallID.rawValue)"
+  }
+
+  @discardableResult
+  public mutating func append(_ delta: SignalboxProviderTextDelta) -> Bool {
+    let (retainedBytes, overflowed) = text.utf8.count.addingReportingOverflow(
+      delta.content.utf8.count
+    )
+    guard
+      !overflowed,
+      retainedBytes <= SignalboxProcessProtocol.maximumStreamedTextUTF8Bytes
+    else {
+      return false
+    }
+    text += delta.content
+    return true
   }
 }
 

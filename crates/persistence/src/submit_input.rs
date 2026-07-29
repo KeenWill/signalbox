@@ -297,7 +297,7 @@ pub enum SubmitInputRepositoryError {
     /// PostgreSQL obscured whether the requested commit succeeded.
     CommitAmbiguous(sqlx::Error),
     /// The selected history requires process protocol version seventeen.
-    ContextSummaryRequiresProtocolVersion17,
+    ContextSummaryRequiresProtocolVersion22,
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
         /// The owner-global identifier that names another kind.
@@ -329,7 +329,7 @@ impl fmt::Display for SubmitInputRepositoryError {
                     "SubmitInput commit outcome is ambiguous: {error}"
                 )
             }
-            Self::ContextSummaryRequiresProtocolVersion17 => {
+            Self::ContextSummaryRequiresProtocolVersion22 => {
                 formatter.write_str("SubmitInput history requires protocol version seventeen")
             }
             Self::DifferentCommandKind { command_id } => {
@@ -358,7 +358,7 @@ impl Error for SubmitInputRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::ContextSummaryRequiresProtocolVersion17
+            Self::ContextSummaryRequiresProtocolVersion22
             | Self::DifferentCommandKind { .. }
             | Self::AcceptedInputIdentityCollision { .. } => None,
             Self::Corruption(error) => Some(error),
@@ -1103,7 +1103,7 @@ async fn prepare_against_locked_state(
         .fetch_one(&mut *connection)
         .await?;
         if has_context_summary {
-            return Err(SubmitInputRepositoryError::ContextSummaryRequiresProtocolVersion17);
+            return Err(SubmitInputRepositoryError::ContextSummaryRequiresProtocolVersion22);
         }
     }
     let scheduler_exists =

@@ -66,7 +66,8 @@ use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationImportFormat,
     ConversationImportSource, ConversationOriginFilter, ConversationSummary, CurrentModelCallState,
     ErrorCode, ImportedContentKind, ImportedConversationSourceFormat, ImportedSourceSpeaker,
-    ImportedSpeaker, InputContent, InputDelivery, MetadataActor, ModelSelection, ProtocolVersion,
+    ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+    MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION, MetadataActor, ModelSelection, ProtocolVersion,
     RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent, SessionMetadata,
     SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry,
     TurnState, decode_server_line, encode_client_line,
@@ -681,6 +682,13 @@ async fn attach_empty_follower(
             ..
         } if *snapshot_session == session_id
     ));
+    if version.as_u64() >= MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION {
+        assert!(matches!(
+            response_within(&mut follow).await?.message(),
+            ServerMessage::TranscriptModelCallsEnd { model_call_count }
+                if model_call_count.value() == 0
+        ));
+    }
     assert!(matches!(
         response_within(&mut follow).await?.message(),
         ServerMessage::TranscriptSnapshotEnd {
@@ -1403,6 +1411,319 @@ async fn s28_inv038_version_five_reports_inserted_then_already_imported()
             imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
         }
     );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// One durable synthetic imported conversation and the identities its
+/// selectable positions carry.
+struct ImportedInspectionFixture {
+    conversation: CanonicalUuid,
+    user_entry: CanonicalUuid,
+    tool_entry: CanonicalUuid,
+    user_text: &'static str,
+    /// The greatest selectable position, which is also the entry count: the
+    /// two-record source below emits exactly one entry per record.
+    last_position: CanonicalU64,
+}
+
+impl ImportedInspectionFixture {
+    /// The exact attested user text at position one. Position two is a tool
+    /// call, which the conservative projection carries as a kind alone.
+    const USER_TEXT: &'static str = "imported question";
+
+    async fn insert(pool: &PgPool) -> Result<Self, Box<dyn Error>> {
+        let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x900));
+        let user_entry = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0x901));
+        let tool_entry = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0x902));
+        let source = concat!(
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",",
+            "\"content\":\"imported question\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[",
+            "{\"type\":\"tool_use\",\"id\":\"call\",\"name\":\"lookup\",",
+            "\"input\":{\"query\":\"synthetic\"}}]}}"
+        );
+        let mut import_service = ImportConversationService::new(
+            FixedImportIds {
+                conversations: [conversation].into(),
+                entries: [user_entry, tool_entry].into(),
+            },
+            ClaudeCodeJsonlConverter,
+            ImportedConversationRepository::new(pool.clone()),
+        );
+        assert_eq!(
+            import_service.execute(source.as_bytes()).await?,
+            ImportConversationOutcome::Inserted { conversation }
+        );
+        Ok(Self {
+            conversation: CanonicalUuid::from_uuid(conversation.into_uuid()),
+            user_entry: CanonicalUuid::from_uuid(user_entry.into_uuid()),
+            tool_entry: CanonicalUuid::from_uuid(tool_entry.into_uuid()),
+            user_text: Self::USER_TEXT,
+            last_position: CanonicalU64::new(2),
+        })
+    }
+}
+
+/// S28: the inspection read names every selectable imported position with its
+/// attestation, content kind, and bounded preview, so the ordinal
+/// `create_session_from_imported_frontier` consumes is observable before it is
+/// consumed.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_version_seventeen_reads_every_selectable_imported_position()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let fixture = ImportedInspectionFixture::insert(&runtime.pool).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Seventeen,
+            1,
+            ClientRequest::ReadImportedConversation {
+                imported_conversation_id: fixture.conversation,
+            },
+        )
+        .await?;
+
+    let start = response_within(&mut connection).await?;
+    assert_eq!(
+        start.message(),
+        &ServerMessage::ImportedConversationStart {
+            imported_conversation_id: fixture.conversation,
+        }
+    );
+    let first = response_within(&mut connection).await?;
+    assert_eq!(
+        first.message(),
+        &ServerMessage::ImportedConversationEntry {
+            position: CanonicalU64::new(1),
+            imported_entry_id: fixture.user_entry,
+            source_speaker: ImportedSourceSpeaker::Attested {
+                speaker: ImportedSpeaker::User,
+            },
+            content_kind: ImportedContentKind::Text,
+            text_preview: Some(ImportedTextPreview::of_exact_text(fixture.user_text)),
+        }
+    );
+    let second = response_within(&mut connection).await?;
+    assert_eq!(
+        second.message(),
+        &ServerMessage::ImportedConversationEntry {
+            position: fixture.last_position,
+            imported_entry_id: fixture.tool_entry,
+            source_speaker: ImportedSourceSpeaker::Attested {
+                speaker: ImportedSpeaker::Assistant,
+            },
+            content_kind: ImportedContentKind::ToolCall,
+            text_preview: None,
+        }
+    );
+    let end = response_within(&mut connection).await?;
+    assert_eq!(
+        end.message(),
+        &ServerMessage::ImportedConversationEnd {
+            imported_conversation_id: fixture.conversation,
+            entry_count: fixture.last_position,
+        }
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S28: an absent imported conversation is a read miss naming an imported
+/// conversation, never the absent-session diagnostic.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_version_seventeen_read_names_an_absent_imported_conversation()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Seventeen,
+            1,
+            ClientRequest::ReadImportedConversation {
+                imported_conversation_id: CanonicalUuid::from_uuid(Uuid::from_u128(0x9ff)),
+            },
+        )
+        .await?;
+
+    let response = response_within(&mut connection).await?;
+    let ServerMessage::Error { code, message, .. } = response.message() else {
+        panic!("an absent imported conversation returns an error");
+    };
+    assert_eq!(*code, ErrorCode::NotFound);
+    assert_eq!(message, "the requested imported conversation was not found");
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S28: a valid imported conversation carrying an out-of-range position is a
+/// rejection naming the selectable range, not a `not_found` claiming the
+/// identity was absent.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_version_seventeen_continuation_names_the_selectable_position_range()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let fixture = ImportedInspectionFixture::insert(&runtime.pool).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Seventeen,
+            1,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id: command()?,
+                imported_conversation_id: fixture.conversation,
+                through_position: CanonicalU64::new(999_999),
+                relationship: signalbox_process_protocol::ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+                },
+            },
+        )
+        .await?;
+
+    let response = response_within(&mut connection).await?;
+    let ServerMessage::Error { code, detail, .. } = response.message() else {
+        panic!("an out-of-range imported position returns an error");
+    };
+    assert_eq!(*code, ErrorCode::Rejected);
+    assert_eq!(
+        detail.value(),
+        Some(RejectionDetail::ImportedFrontierPositionOutOfRange {
+            imported_conversation_id: fixture.conversation,
+            requested_position: CanonicalU64::new(999_999),
+            last_position: fixture.last_position,
+        })
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S28: an absent imported conversation on the continuation command names an
+/// imported conversation as the missing target.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_version_seventeen_continuation_names_an_absent_imported_conversation()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let absent = CanonicalUuid::from_uuid(Uuid::from_u128(0x9ff));
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Seventeen,
+            1,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id: command()?,
+                imported_conversation_id: absent,
+                through_position: CanonicalU64::new(1),
+                relationship: signalbox_process_protocol::ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+                },
+            },
+        )
+        .await?;
+
+    let response = response_within(&mut connection).await?;
+    let ServerMessage::Error { code, detail, .. } = response.message() else {
+        panic!("an absent imported conversation returns an error");
+    };
+    assert_eq!(*code, ErrorCode::Rejected);
+    assert_eq!(
+        detail.value(),
+        Some(RejectionDetail::ImportedConversationNotFound {
+            imported_conversation_id: absent,
+        })
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S28 / INV-033: version ten's closed message vocabulary has no typed detail
+/// for an out-of-range position, so it keeps its undetailed `not_found` while
+/// only the non-normative message sharpens.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_inv033_version_ten_retains_its_undetailed_out_of_range_error()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let fixture = ImportedInspectionFixture::insert(&runtime.pool).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Ten,
+            1,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id: command()?,
+                imported_conversation_id: fixture.conversation,
+                through_position: CanonicalU64::new(999_999),
+                relationship: signalbox_process_protocol::ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+                },
+            },
+        )
+        .await?;
+
+    let response = response_within(&mut connection).await?;
+    assert_eq!(response.version(), ProtocolVersion::Ten);
+    let ServerMessage::Error {
+        code,
+        message,
+        detail,
+    } = response.message()
+    else {
+        panic!("an out-of-range imported position returns an error");
+    };
+    assert_eq!(*code, ErrorCode::NotFound);
+    assert_eq!(
+        message,
+        "the requested position is outside the imported conversation's positions"
+    );
+    assert_eq!(detail.value(), None);
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S28 / INV-033: the imported-conversation read belongs to version
+/// seventeen's closed request vocabulary, so version sixteen — the newest
+/// version that shipped without it — cannot carry it.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_inv033_version_sixteen_rejects_the_imported_conversation_read()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let fixture = ImportedInspectionFixture::insert(&runtime.pool).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .raw_request(&format!(
+            "{{\"version\":16,\"request_id\":\"1\",\"request\":{{\
+             \"type\":\"read_imported_conversation\",\
+             \"imported_conversation_id\":\"{}\"}}}}\n",
+            fixture.conversation
+        ))
+        .await?;
+
+    let response = response_within(&mut connection).await?;
+    let ServerMessage::Error { code, .. } = response.message() else {
+        panic!("a version-sixteen imported read returns an error");
+    };
+    assert_eq!(*code, ErrorCode::MalformedFrame);
 
     drop(connection);
     runtime.stop().await
@@ -3230,13 +3551,12 @@ async fn s24_inv032_inv033_version_thirteen_inherits_provider_text_streaming()
 }
 
 /// S01 / S02 / S24 / INV-032 / INV-035: the provider bridge asks the scripted
-/// runtime for streamed delivery, and two already-attached followers — one at
-/// version twelve and one at version sixteen, both of which admit the delta
-/// message — each observe the exact already-redacted deltas before the
-/// durable terminal entries expose the same complete assistant reply.
+/// runtime for streamed delivery, and already-attached followers on versions
+/// twelve, fourteen, and sixteen each observe the exact already-redacted deltas
+/// before durable terminal entries expose the same complete assistant reply.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_durable_truth()
+async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_three_followers_then_durable_truth()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut commands = Connection::connect(runtime.socket()).await?;
@@ -3244,7 +3564,9 @@ async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_dur
     let first_follow =
         attach_empty_follower(runtime.socket(), ProtocolVersion::Twelve, 10, session_id).await?;
     let second_follow =
-        attach_empty_follower(runtime.socket(), ProtocolVersion::Sixteen, 11, session_id).await?;
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Nineteen, 11, session_id).await?;
+    let third_follow =
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Sixteen, 12, session_id).await?;
     let expected_delta_count = 2;
     let (script, assistant) =
         streamed_script(expected_delta_count, String::from("already [redacted] "));
@@ -3260,17 +3582,22 @@ async fn s01_s02_s24_inv032_inv035_streamed_reply_reaches_two_followers_then_dur
     .await?;
     let first = follow_streamed_turn_to_completion(first_follow, session_id, turn_id).await?;
     let second = follow_streamed_turn_to_completion(second_follow, session_id, turn_id).await?;
-    let first_durable = read_completed_assistant(runtime.socket(), 12, session_id, turn_id).await?;
+    let third = follow_streamed_turn_to_completion(third_follow, session_id, turn_id).await?;
+    let first_durable = read_completed_assistant(runtime.socket(), 13, session_id, turn_id).await?;
     let second_durable =
-        read_completed_assistant(runtime.socket(), 13, session_id, turn_id).await?;
+        read_completed_assistant(runtime.socket(), 14, session_id, turn_id).await?;
+    let third_durable = read_completed_assistant(runtime.socket(), 15, session_id, turn_id).await?;
     let operations = probe.received_operations();
 
     assert_eq!(first.delta_count, expected_delta_count);
     assert_eq!(first.text, assistant);
     assert_eq!(second.delta_count, expected_delta_count);
     assert_eq!(second.text, assistant);
+    assert_eq!(third.delta_count, expected_delta_count);
+    assert_eq!(third.text, assistant);
     assert_eq!(first_durable, assistant);
     assert_eq!(second_durable, assistant);
+    assert_eq!(third_durable, assistant);
     assert_eq!(operations.len(), 1);
     assert_eq!(operations[0].delivery, DeliveryMode::Streamed);
 
@@ -3354,6 +3681,49 @@ async fn s24_inv032_inv033_streaming_volume_does_not_perturb_version_eleven_foll
 
     assert_eq!(followed.delta_count, 0);
     assert!(followed.text.is_empty());
+    assert_eq!(durable, assistant);
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].delivery, DeliveryMode::Streamed);
+
+    drop(commands);
+    runtime.stop().await
+}
+
+/// S24 / INV-033: a version-seventeen follower inherits version twelve's
+/// ephemeral delta stream. The inspection version adds a read, not a follow
+/// downgrade, so the shipped client keeps live token delivery.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s24_inv033_version_seventeen_followers_inherit_the_streamed_deltas()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut commands = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut commands).await?;
+    let follow =
+        attach_empty_follower(runtime.socket(), ProtocolVersion::Seventeen, 40, session_id).await?;
+    let expected_delta_count = 3;
+    let (script, assistant) =
+        streamed_script(expected_delta_count, String::from("already [redacted] "));
+    let (_, turn_id) = submit_first_input(
+        &mut commands,
+        session_id,
+        String::from("stream to the inspection version"),
+    )
+    .await?;
+
+    let probe = execute_streamed_turn(
+        &mut runtime,
+        ScriptedModel::single(script),
+        session_id,
+        turn_id,
+    )
+    .await?;
+    let followed = follow_streamed_turn_to_completion(follow, session_id, turn_id).await?;
+    let durable = read_completed_assistant(runtime.socket(), 41, session_id, turn_id).await?;
+    let operations = probe.received_operations();
+
+    assert_eq!(followed.delta_count, expected_delta_count);
+    assert_eq!(followed.text, assistant);
     assert_eq!(durable, assistant);
     assert_eq!(operations.len(), 1);
     assert_eq!(operations[0].delivery, DeliveryMode::Streamed);

@@ -11,21 +11,28 @@ proof was verified through PR #265 (`agent/tool-batch-tier0`); the
 through PR #272 (`agent/mid-session-model`); the runner lease-admission trigger
 lock was verified against PR #267 (`agent/runner-persistence`); the current
 classifier names, ambiguity reconstitution facts, and command-adapter boundaries
-were verified through PR #288 (`agent/audit-fix-docs-coherence`); and the
-session system-prompt columns were verified through PR #286
-(`agent/session-system-prompt`); the context-compaction transaction and lock
-inventory were verified against `agent/context-compaction-protocol`. This page
-covers the Postgres representation in `crates/persistence` (source and
-migrations), migration discipline, durable command storage and replay equality,
-the fail-closed reconstitution boundary, the lock protocol, pending-steering
-durable state, the corruption taxonomy, commit-ambiguity handling, and the
-transactional outbox. Session aggregate semantics live in
+were verified through PR #288 (`agent/audit-fix-docs-coherence`); the session
+system-prompt columns were verified through PR #286
+(`agent/session-system-prompt`); the terminal model-call token evidence columns
+and transcript reader were verified through this PR (`agent/token-usage`); the
+session-template provenance columns and storage version four were verified
+through PR #311 (`agent/session-templates-spec`); and the context-compaction
+transaction and lock inventory were verified against
+`agent/context-compaction-protocol`. This page covers the Postgres
+representation in `crates/persistence` (source and migrations), migration
+discipline, durable command storage and replay equality, the fail-closed
+reconstitution boundary, the lock protocol, pending-steering durable state, the
+corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
+Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
-[docs/invariants.md](../invariants.md); this page cites rows by tag.
+[docs/invariants.md](../invariants.md); this page cites rows by tag. The
+runner-orchestration transaction and lock paragraphs are the foundation proposal
+at the bottom of their implementing stack and become verified only with those
+child pull requests.
 
 ## Stack and boundaries
 
@@ -61,8 +68,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — thirty-six files, `202607180001` through
-`202607290201` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — thirty-eight files, `202607180001` through
+`202607300101` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -109,7 +116,9 @@ Implemented table families (across the forward-only migrations):
 - `durable_command` plus typed command records (`create_session_command`,
   `create_session_from_imported_frontier_command`,
   `replace_session_defaults_command`, `replace_session_metadata_command`,
-  `submit_input_command`, `decide_tool_request_command`);
+  `submit_input_command`, `decide_tool_request_command`,
+  `replace_lost_runner_command`, `replace_lost_runner_result`, and
+  `abandon_lost_runner_command`);
 - `session`, `imported_session_seed`, `session_defaults_version`,
   `session_current_defaults`, `session_scheduler`;
 - `session_metadata` plus its current tag and attribute satellites,
@@ -123,7 +132,15 @@ Implemented table families (across the forward-only migrations):
 - `model_call` (execution state owned by
   [model-call-execution](model-call-execution.md), its turn-level
   provider-target pin on `turn_lifecycle`, and its pinned
-  `credential_reference`);
+  `credential_reference`); migration `202607290301` adds four independently
+  nullable, scale-preserving `numeric` token-usage columns whose explicit
+  integrality and full-`u64` range checks reject fractional or out-of-range
+  input without rounding. A nonterminal row must keep all four null, and a
+  direct Prepared-to-terminal transition likewise requires all four null because
+  no send occurred; the `cancelled` terminal disposition also requires all four
+  null because cancellation evidence reports no usage. The ordinary sent-call
+  terminal update installs the exact provider-reported fields alongside the
+  disposition before terminal-row immutability applies;
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_delta`,
   plus the resolved `context_frontier_member` compatibility projection;
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
@@ -133,6 +150,18 @@ Implemented table families (across the forward-only migrations):
 
 Representation rules, all enforced in the schema:
 
+- Migration `202607300101` adds the optional session-template provenance pair
+  (`template_name`, `template_content_digest`) to `session` and
+  `create_session_command`. Both members are absent or present together; names
+  satisfy the domain's 1-through-128-byte lowercase ASCII grammar and digests
+  are exactly 32 bytes. The create-command row carries the same pair only at
+  storage version 4; versions 1 through 3 require two nulls. A present pair also
+  requires a nonnull command system prompt in both the schema and Rust reader.
+  Reciprocal foreign keys bind every present pair across the creation command
+  and its created session, so command replay and checked reconstitution cannot
+  cross-wire provenance. Preexisting, imported, and explicit sessions carry two
+  nulls. Both tables retain their append-only guards; no template catalog or
+  mutable template object exists in Postgres (INV-047).
 - Migration `202607280303` adds the optional bounded `system_prompt` column to
   `session_defaults_version` and the three defaults-bearing command tables, each
   guarded by the 1,048,576-UTF-8-byte and nonempty CHECK constraints and, on
@@ -286,19 +315,31 @@ identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
-`review_workflow`, `compact_session`) and a kind-scoped `storage_version`.
-Defaults-bearing create, imported-create, and replace-defaults records write
-version 3; they reconstitute version 1 with the disabled dangerous-tool posture,
-and versions 1 and 2 with no system prompt — a pre-version-three row carrying
-one fails closed in both the schema and every Rust reader. Metadata, submit, and
-decision records use version 1. Each kind has one typed subordinate record keyed
-by `command_id` that stores every caller-supplied semantic field in typed,
-`CHECK`-constrained columns, plus the kind's closed result or lifecycle fields.
-Result-shape `CHECK` constraints tie each terminal kind to exactly its fields,
-and deferred reverse constraints require exactly one typed record per claimed
-registry row at commit. Why: typed per-kind records keep replay semantics
-reviewable and constraint-checked, where a universal serialized payload would
-make the serializer a second semantic authority.
+`review_workflow`, `compact_session`, `replace_lost_runner`,
+`abandon_lost_runner`) and a kind-scoped `storage_version`. Create-session
+records write the provenance-gated version specified above; defaults-bearing
+imported-create and replace-defaults records write version 3. Create-session
+records reconstitute version 1 with the disabled dangerous-tool posture, and
+versions 1 and 2 with no system prompt — a pre-version-three row carrying one
+fails closed in both the schema and every Rust reader. A pre-version-four create
+row carrying template provenance likewise fails closed; therefore a rollback
+reader that supports only versions 1 through 3 rejects every new create record
+instead of projecting template creation as explicit creation. Metadata, submit,
+decision, review-workflow, compaction, and runner-recovery records use version
+1\. Each kind has one typed subordinate request record keyed by `command_id` that
+stores every caller-supplied semantic field in typed, `CHECK`-constrained
+columns. Every kind except runner replacement also stores the terminal
+`applied`/`rejected` result and typed result fields there.
+`replace_lost_runner_command` is the immutable request and
+provisioning-authorization root; at most one append-only
+`replace_lost_runner_result` supplies its terminal result after off-transaction
+runner I/O. Result-shape `CHECK` constraints tie each rejection kind to exactly
+its fields. Deferred reverse constraints require exactly one typed request per
+claimed registry row at commit and forbid a replacement result without its
+request; acknowledgement requires the terminal result. Why: typed per-kind
+records keep replay semantics reviewable and constraint-checked, where a
+universal serialized payload would make the serializer a second semantic
+authority.
 
 Adapter mechanics behind the shared protocol: registry inspection is the first
 durable operation, before any current-state read, and an unseen identifier is
@@ -411,6 +452,55 @@ Locks per transaction, in acquisition order:
   and each opened streaming list page use one read-only repeatable-read
   transaction, so their root and satellite values come from one database
   snapshot.
+- **Runner total order**: every transaction that takes more than one runner
+  authority lock uses the same applicable subsequence, omitting absent rows but
+  never reordering them: `session_scheduler` when present; current enrollment or
+  pending replacement-request heads in canonical identity order; runner
+  connection/loss heads in runner-identity order; current registration head;
+  placement; current credential grant; lease; and only then semantic-frontier
+  and turn rows. A durable owner-command claim precedes this subsequence.
+- **Runner enrollment and registration**: the current enrollment or pending
+  replacement-request head is locked first, followed by the relevant runner
+  heads in runner-identity order and then the current registration head.
+  Activating a pending replacement retires the old enrollment, persists the
+  issued successor identities and registration, and installs the owner-command
+  effect in one transaction.
+- **Runner dispatch and result**: `session_scheduler` is the first lock,
+  followed by enrollment, current runner connection/loss, registration,
+  placement, current credential grant when present, and lease heads in the total
+  order above. The initial dispatch transaction then stores workspace receipt
+  consumption, pin, grant, `InFlight` attempt, and offered lease together. Claim
+  locks enrollment, runner, registration, and lease in that order and commits
+  before acknowledgement. Result admission takes the session scheduler first,
+  then the applicable runner and lease rows without acquiring an earlier omitted
+  lock, and commits the checked terminal attempt observation and claimed-lease
+  completion together.
+- **Runner loss**: one short transaction locks only the current connection/loss
+  head, advances a positive durable loss epoch, and thereby makes every trigger
+  reject new offers or claims from that connection. It never holds that global
+  row while waiting for a session lock. A restartable propagation cursor pages
+  at most 64 affected session identities in order; each session is updated in
+  its own transaction by locking `session_scheduler` first, then the loss head,
+  placement, current lease, and guarded turn rows. Offered leases with no
+  durable claim acquire exact no-execution proof; claimed leases follow effect
+  loss law. A crash resumes at the first uncommitted session, while every
+  not-yet-projected placement is already effectively lost through the epoch
+  fence.
+- **Runner replace, abandon, and release**: an unseen abandonment command owns
+  its durable-command claim and terminalizes in one transaction. An unseen
+  replacement command first claims its immutable request and provisioning
+  authorization in a short transaction, performs no runner I/O under database
+  locks, then its terminal transaction follows the runner total order exactly:
+  `session_scheduler`, enrollment or pending-request heads, relevant runner
+  heads in identity order, registration, placement, grant and lease, then
+  guarded semantic-frontier and turn rows. Replacement rechecks and atomically
+  activates one pending enrollment, consumes workspace-ready evidence when
+  required, installs the placement frontier, and appends the terminal command
+  result. A crash before that result leaves the immutable request and
+  authorization resumable. Abandon requires an empty active-turn slot and stores
+  only terminal placement state. Either transition enqueues the retired
+  placement release; release acknowledgement uses the same
+  scheduler-then-placement order and never mutates turn lifecycle.
 - **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
   exactly `delivered_through + 1` and its typed record are read. Only an
   accepted synchronous offer advances that same singleton inside the
@@ -469,11 +559,14 @@ The scheduling load proves its own completeness — it counts
 than trusting whichever rows a filter returned. It also walks the union of the
 required frontier prefix chains once, loads each reachable header and delta
 once, and reconstitutes shared prefixes without rebuilding their complete
-membership. A process transcript read likewise opens one database cursor over
-one resolution of the selected frontier chain, validates its declared count and
-contiguous positions while advancing, and decodes at most one entry row at a
-time. Active-phase, terminal-evidence, and acceptance-tail validation semantics
-are owned by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
+membership. A process transcript read likewise yields acceptance-ordered turns,
+then every terminal model call in turn-acceptance and call-identity order, then
+opens one database cursor over one resolution of the selected frontier chain. It
+validates declared counts and contiguous positions while advancing and decodes
+at most one row at a time. The model-call phase decodes every nullable token
+field through the full-range ordinal boundary; null remains absence.
+Active-phase, terminal-evidence, and acceptance-tail validation semantics are
+owned by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired

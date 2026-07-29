@@ -143,6 +143,29 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testSteadyProviderTextDeltaPublishesWithoutAdvancingDurableCursor() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
+    let delta = SignalboxProviderTextDelta(
+      sessionID: try SynchronizationFixture.sessionID(),
+      turnID: try SignalboxCanonicalUUID(validating: SynchronizationFixture.turn),
+      modelCallID: try SignalboxCanonicalUUID(validating: SynchronizationFixture.modelCall),
+      partIndex: SignalboxCanonicalUInt64(rawValue: 0),
+      content: "live"
+    )
+
+    let effects = transport.send(
+      .frame(generation: 1, message: .providerTextDelta(delta))
+    )
+
+    XCTAssertEqual(effects, [.publishProviderTextDelta(delta)])
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.steady(cursor: SynchronizationFixture.initialCursor)
+    )
+  }
+
   func testReplayPreservesFutureUnknownEvent() throws {
     let snapshotCursor = SynchronizationFixture.initialCursor
     let unknownCursor = SynchronizationFixture.unknownCursor
@@ -2398,7 +2421,7 @@ private enum SynchronizationFixture {
   static func message(_ object: String) throws -> SignalboxProcessServerMessage {
     let data = Data(
       """
-      {"version":5,"request_id":"1","message":\(object)}
+      {"version":21,"request_id":"1","message":\(object)}
       """.utf8
     )
     return try SignalboxProcessServerFrame.decode(from: data).message
@@ -2521,6 +2544,8 @@ private enum SynchronizationFixture {
         return "publish_snapshot"
       case .publishEvent:
         return "publish_event"
+      case .publishProviderTextDelta:
+        return "publish_provider_text_delta"
       case .requestSideSnapshot:
         return "request_side_snapshot"
       case .cancelSideSnapshot:

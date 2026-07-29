@@ -6,21 +6,26 @@ against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 verified through PR #258 (`agent/signalboxd-rename`), and the Tier 0 catalog
 extension through PR #265 (`agent/tool-batch-tier0`). The Tier 1 code-host
 catalog extension is verified through PR #270 (`agent/tool-batch-tier1`), the
-failed-attempt operator event together with the credential-shaped code-host
+deterministic review-slog extension through PR #306 (`agent/review-slog-tools`),
+the failed-attempt operator event together with the credential-shaped code-host
 detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
 decision surface through PR #291 (`agent/turn-control-verbs`), and
 runner-protocol batch reconstitution through PR #260
-(`agent/runner-protocol-domain`). It owns logical tool requests, approval policy
-and decisions, physical tool attempts, result admission, intra-turn
-continuation, crash classification, the compiled registry, and the daemon-local
-catalog. Turn and attempt lifecycle law lives in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
-entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
-model-call staging and provider translation in
-[model-call-execution](model-call-execution.md); durable-command identity in
-[identity-and-commands](identity-and-commands.md); and relational mechanics in
-[persistence-protocol](persistence-protocol.md). Invariant tags cite
-[the invariant catalog](../invariants.md).
+(`agent/runner-protocol-domain`). Template-derived blanket creation was verified
+through PR #311 (`agent/session-templates-spec`). The runner executable stack
+rooted at this foundation proposal extends the same laws to the runner locus.
+This page owns logical tool requests, approval policy and decisions, physical
+tool attempts, result admission, intra-turn continuation, crash classification,
+the compiled registry, and the daemon-local catalog. Turn and attempt lifecycle
+law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
+semantic entry vocabulary in
+[sessions-and-transcript](sessions-and-transcript.md); model-call staging and
+provider translation in [model-call-execution](model-call-execution.md);
+durable-command identity in [identity-and-commands](identity-and-commands.md);
+and relational mechanics in [persistence-protocol](persistence-protocol.md).
+Invariant tags cite [the invariant catalog](../invariants.md). The runner-locus
+paragraphs in this page are the foundation proposal at the bottom of their
+implementing stack and become verified only with those child pull requests.
 
 ## Intra-turn rounds and request batches
 
@@ -72,35 +77,36 @@ Every request has an approval state separate from its execution state. The
 implemented decision sources are:
 
 - `OwnerCommand` — one applied owner-global durable decision command;
-- `PolicyAuto` — the registry declaration selected automatic approval; and
-- `SessionBlanket` — the turn's frozen dangerous blanket posture selected
-  automatic approval.
+- `PolicyAuto` — the selected registry or sandbox-profile default supplied
+  automatic approval;
+- `SessionBlanket` — the frozen dangerous blanket supplied daemon-local
+  automatic approval; and
+- `SessionOverride` — an exact runner-placement tool override supplied automatic
+  approval.
 
-`SessionOverride` and `JudgeRecommendation` are typed additive vocabulary but
-have no storage encoding or producer. In particular, an automated source never
-constructs `OwnerCommand` or claims owner agency (INV-020).
+`JudgeRecommendation` remains typed additive vocabulary without a storage
+encoding or producer. An automated source never constructs `OwnerCommand` or
+claims owner agency (INV-020).
 
-The implemented precedence below governs daemon-local execution and sessions
-without a credential profile. Runner dispatch under a selected credential
-profile first resolves the pair posture specified by
-[runner protocol and placement](runner-protocol.md#credential-profiles-and-approval):
-after the frozen dangerous blanket, pair-level `Automatic` authorizes the exact
-pair and `SessionPolicy` or an absent pair requires confirmation. The later
-application stack must add a distinct durable credential-policy decision source;
-this foundation does not encode one into the current persistence vocabulary.
-
-Daemon-local policy resolution uses this accepted precedence:
+Daemon-local execution keeps this precedence:
 
 1. the frozen session posture `DangerousToolAutoApproval::ApproveAll`;
-2. a future exact per-tool session override;
-3. the registry default (`Auto` or `Confirm`); then
-4. fail-closed `Confirm` when no declaration exists.
+2. the registry default (`Auto` or `Confirm`); then
+3. fail-closed `Confirm` when no declaration exists.
 
-Only steps 1, 3, and 4 have producers in this slice. The producing-call
-completion transaction resolves policy independently for every proposal: the
-blanket posture records `SessionBlanket`, registry auto records `PolicyAuto`,
-and confirm leaves that request undecided. Thus a frozen automatic decision may
-exist after an earlier confirmation wait without bypassing it; only
+Runner execution instead uses the immutable placement policy owned by
+[runner protocol and placement](runner-protocol.md#sandbox-profiles-and-approval):
+
+1. an exact per-tool override, recording `SessionOverride` for `Auto` and
+   leaving `Confirm` undecided;
+2. the selected profile default, recording `PolicyAuto` for `Auto` and leaving
+   `Confirm` undecided; then
+3. fail closed when no exact daemon-owned runner declaration exists.
+
+The dangerous blanket has no runner rung. The producing-call completion
+transaction resolves policy independently for every proposal after selecting its
+admissible locus and immutable definition snapshot. A frozen automatic choice
+may exist after an earlier confirmation wait without bypassing it; only
 owner-command decisions must form a proposal-order prefix. After each owner
 command, the earliest remaining undecided confirmation is the next wait, while
 already frozen automatic decisions require no later command. Why: recording the
@@ -108,12 +114,13 @@ selected source makes unattended operation inspectable without laundering policy
 as human consent.
 
 The blanket is a field of each immutable `VersionedSessionConfigurationDefaults`
-value and is named `DangerousToolAutoApproval::{Disabled, ApproveAll}`. Safe
-session creation uses `Disabled`. Replacement installs a complete later defaults
+value and is named `DangerousToolAutoApproval::{Disabled, ApproveAll}`. Explicit
+session creation uses `Disabled`; template-derived creation copies the resolved
+template's configured blanket. Replacement installs a complete later defaults
 version through the existing `ReplaceSessionDefaults` command. Origin acceptance
 freezes the posture into `EffectiveConfiguration` alongside model selection;
-steering-derived work inherits its source turn's frozen value. A later defaults
-replacement never changes queued, active, or completed work (INV-008).
+steering-derived work inherits the frozen value of its source turn. A later
+defaults replacement never changes queued, active, or completed work (INV-008).
 
 An owner decision is the canonical `DecideToolRequest` command: owner-global
 `DurableCommandId`, exact `ToolRequestId`, and either `Approve` or
@@ -179,33 +186,156 @@ The current daemon-local application catalog remains one process-lifetime
 immutable compiled value. Its existing `EffectFree` declaration maps to
 `RunnerToolEffectClass::Pure`, and `ExternalEffect` maps to
 `RunnerToolEffectClass::SideEffecting`; no current local declaration can project
-`Idempotent`. Before a shared name can use a daemon locus, the later application
-adapter must validate exact model-facing description and schema, permission
+`Idempotent`. Before a shared name can use a daemon locus, the application
+adapter validates exact model-facing description and schema, permission
 equality, and this effect mapping against the authoritative runner declaration;
 it also compiles the schema into the executable validator used before dispatch.
-A mismatch is unavailable, never a choice between two policies. Consolidating
-the typed representations requires the later application and persistence stack
-and no migration is introduced here. Catalog lookup and iteration are ports
-rather than a static global, but runtime rebinding and deployment compatibility
-for outstanding requests are not implemented; they require the durable
-definition-revision decision recorded under Open edges.
+A mismatch is unavailable, never a choice between two policies. The runner
+authority child stack persists the consolidated placement and policy snapshot.
+Catalog lookup and iteration remain ports rather than a static global, but
+runtime rebinding and deployment compatibility for outstanding requests are not
+implemented; they require the durable definition-revision decision recorded
+under Open edges.
 
-Each provider operation carries one exact definition snapshot. Initial approval
-for proposals returned by that operation is derived from that same advertised
-snapshot, never from a later catalog lookup. A dynamic catalog change while the
-provider call is in flight therefore cannot upgrade a proposal from `Confirm` to
-unattended execution.
+The version-one workstation registry has exactly these runner-only tools and
+effects:
+
+- `workspace_read` is `Pure`;
+- `workspace_write` and `workspace_edit` are `SideEffecting`;
+- `git_fetch` is `Idempotent`;
+- `git_clone`, `git_branch`, `git_commit`, and `git_push` are `SideEffecting`;
+  and
+- `shell_exec` and `build_test` are `SideEffecting`.
+
+### Version-one workstation tool contracts
+
+Every argument schema below is a JSON object with every named member required,
+`additionalProperties: false`, and no nullable member. A repository-relative
+`path` is 1 through 4,096 UTF-8 bytes, uses `/` separators, has no U+0000,
+leading slash, empty component, or `.` or `..` component, and resolves beneath
+the exact session repository without following a symlink. A `cwd` is either `.`
+or such a path resolving to an existing real directory. Text is UTF-8 with no
+U+0000. File content and each edit operand are at most 1,048,576 bytes.
+
+An `argv` is an array of 1 through 128 strings: element zero is nonempty and at
+most 4,096 bytes, every later element is at most 8,192 bytes, the complete array
+contains at most 65,536 UTF-8 bytes, and no element contains U+0000. It is
+passed directly to `execve`; no shell, word splitting, interpolation, or
+response-file expansion is inserted. A timeout is a JSON integer from 1 through
+1,800 seconds. Captured bytes use exactly
+`{ "encoding": "base64", "data": canonical_padded_base64 }`; stdout and stderr
+are each bounded to 1,048,576 decoded bytes. Process success is
+`{ "exit_code": 0, "stdout": captured_bytes, "stderr": captured_bytes }`.
+Crossing either bound terminates the process group and returns known failure
+`result_too_large`; timeout returns `timed_out`. A signal or nonzero exit is
+known failure carrying its signal or integer exit status and the bounded
+captured streams. Runner-side infrastructure uncertainty after process start
+remains ambiguous according to the tool effect.
+
+Git `remote` is 1 through 64 ASCII bytes matching `[A-Za-z0-9][A-Za-z0-9._-]*`.
+Before network use its configured URL must equal a canonical URL from the runner
+repository map and that entry must name the exact granted credential profile. A
+`branch` is at most 255 bytes and must pass `git check-ref-format --branch`; a
+`ref` or refspec is 1 through 1,024 UTF-8 bytes, contains no U+0000, and is
+passed after option termination. A commit message is 1 through 65,536 UTF-8
+bytes with no U+0000. Git commands never use a credential-bearing URL, force,
+delete, tag, recurse-submodule, hook-bypass, amend, or signing option unless a
+later contract adds that operation explicitly.
+
+The exact tools are:
+
+- `workspace_read` takes `{ "path": path }`. It opens one regular file
+  descriptor-relatively, rejects a file larger than 1,048,576 bytes or invalid
+  UTF-8, and returns `{ "content": string }` with the exact bytes decoded as
+  UTF-8.
+- `workspace_write` takes `{ "path": path, "content": text }`. The parent must
+  already exist. The target may be absent or a regular nonsymlink file. It
+  writes and fsyncs a sibling temporary, preserves an existing target mode or
+  uses `0644` for a new file, atomically renames, fsyncs the parent, and returns
+  `{ "bytes_written": canonical_decimal_string }`.
+- `workspace_edit` takes
+  `{ "path": path, "old_text": nonempty_text, "new_text": text, "occurrence": "one" | "all" }`.
+  `one` requires exactly one byte-exact UTF-8 match; `all` requires at least one
+  and replaces nonoverlapping matches from left to right. An output above the
+  file-content bound fails before mutation. The atomic write rules and result
+  are exactly `workspace_write`.
+- `git_clone` takes
+  `{ "repository": checked_repository_key, "destination": path }`. Destination
+  must not exist and its parent must be real. The runner resolves the named
+  canonical URL and exact granted profile, clones without submodules into that
+  destination, and returns
+  `{ "head": canonical_full_commit_hex, "branch": string | null }`. The nullable
+  `branch` is result vocabulary, not an argument.
+- `git_fetch` takes
+  `{ "remote": remote, "refspecs": ref_array, "prune": boolean }`, where the
+  array has 0 through 32 unique refspecs. It validates the remote as above and
+  performs one noninteractive fetch with no tags or submodules and optional
+  prune. Success returns `{ "head": canonical_full_commit_hex }` for the
+  unchanged checked-out HEAD.
+- `git_branch` takes `{ "name": branch, "start_point": ref }`. The name must not
+  already exist and the start point must resolve to one commit. It creates and
+  checks out the branch without force, then returns
+  `{ "branch": string, "head": canonical_full_commit_hex }`.
+- `git_commit` takes `{ "message": commit_message, "paths": path_array }`, where
+  the array contains 1 through 256 unique paths. It stages exactly those paths,
+  requires a nonempty resulting commit, uses the configured runner author name
+  and email, neither amends nor signs, and returns
+  `{ "commit": canonical_full_commit_hex }`. A failed commit honestly retains
+  any index changes already made.
+- `git_push` takes `{ "remote": remote, "branch": branch }`. After validating
+  the remote and exact granted profile, it pushes exactly
+  `HEAD:refs/heads/{branch}` with upstream tracking and without force, deletion,
+  or tags. Success returns
+  `{ "remote": string, "branch": string, "commit": canonical_full_commit_hex }`.
+- `shell_exec` takes `{ "argv": argv, "cwd": cwd, "timeout_seconds": timeout }`
+  and applies the common direct-process result.
+- `build_test` takes
+  `{ "program": "cargo" | "mdformat", "arguments": argument_array, "cwd": cwd, "timeout_seconds": timeout }`,
+  where `argument_array` has 0 through 127 elements and otherwise uses the
+  `argv` element and total bounds. The executable is the exact real `cargo` or
+  `mdformat` found in the declared read-only toolchain allowlist, not a
+  workspace-controlled `PATH` entry, and the common direct-process result
+  applies.
+
+Git full commit hex is exactly 40 or 64 lowercase hexadecimal characters,
+matching the repository object format. Every known-failure code is closed:
+`invalid_arguments`, `path_unavailable`, `not_regular_file`, `symlink_refused`,
+`content_too_large`, `invalid_utf8`, `match_not_found`, `match_not_unique`,
+`repository_unavailable`, `credential_unavailable`, `git_refused`,
+`process_failed`, `timed_out`, or `result_too_large`. Failure detail contains
+only bounded tool output after exact injected-value redaction; it carries no
+host path, configured URL, credential path, or credential value.
+
+`workspace-restricted` defaults all ten tools to `Auto`; `ambient` defaults only
+`workspace_read` to `Auto`. The runner derives advertisement and executor lookup
+from this same compiled registry, while the daemon remains the declaration and
+policy authority.
+
+Each provider operation carries the exact session-executable definition and
+locus snapshot prepared under
+[model-call execution](model-call-execution.md#frontier-rendering). Runner-only
+definitions absent from current selected execution authority are not advertised;
+`RunnerAbandoned` exposes daemon-executable declarations only, and lost
+placement blocks preparation until owner recovery. Initial approval and dispatch
+for a proposal are derived from that same frozen snapshot, never from a later
+catalog or registration lookup. A dynamic catalog or runner change while the
+provider call is in flight therefore cannot upgrade permission, introduce an
+unavailable runner tool, widen its frozen selector, or silently move the
+selected locus.
 
 The registry is advisory input to policy and execution, never request-content
-authority. A model may propose an unknown name; absent a frozen `ApproveAll`
-blanket, fail-closed policy requires confirmation, and an approved unknown
-request produces a typed `UnknownTool` error without invoking an executor.
-Because the attempt schema requires a closed effect class, preparation records
-`EffectFree` as a non-dispatching sentinel when no declaration exists. The
-preflight transaction closes that attempt before authorization and before the
-executor boundary; the sentinel is not a claim that an unknown tool is safe to
-run. A declaration added or removed after the request was recorded does not
-rewrite its name or arguments.
+authority. For daemon-local execution, a model may propose an unknown name;
+absent a frozen `ApproveAll` blanket, fail-closed policy requires confirmation,
+and an approved unknown request produces a typed `UnknownTool` error without
+invoking an executor. Runner locus selection requires an exact declaration and
+advertised availability before approval, so an unknown runner name is
+unavailable and never reaches a runner lease. Because the attempt schema
+requires a closed effect class, preparation records `EffectFree` as a
+non-dispatching sentinel when no declaration exists. The preflight transaction
+closes that attempt before authorization and before the executor boundary; the
+sentinel is not a claim that an unknown tool is safe to run. A declaration added
+or removed after the request was recorded does not rewrite its name or
+arguments.
 
 Effect class controls crash classification, not permission identity. In the
 current daemon-local executor, a crash-lost prepared attempt, or an in-flight
@@ -221,52 +351,77 @@ fabricating a new physical attempt.
 
 ## Serialized staged execution
 
-Tool execution is daemon-local and in-process behind the application
-`ToolExecutor` port. The executor receives checked request content and returns
-evidence; it cannot write transcript, request, attempt, approval, or turn state
-(INV-024). Execution is serialized in this slice:
+The application selects the admissible locus before authorization. Daemon-local
+execution crosses the in-process `ToolExecutor` port. Runner execution crosses
+the lease repository and checked wire adapter. Either executor receives checked
+request content and returns evidence; neither can write transcript, request,
+attempt, approval, turn, placement, grant, or lease state directly (INV-024).
+Execution is serialized:
 
 - approval visits requests in proposal order;
 - a turn has at most one live tool attempt;
-- approved requests execute strictly in proposal order; and
+- approved requests execute strictly in proposal order;
 - each attempt reaches a durable terminal state before the next attempt is
-  created.
+  created; and
+- the version-one runner holds one process-wide execution permit across all
+  sessions.
 
-After all approvals resolve, the fresh current turn attempt owns the batch's
+After all approvals resolve, the fresh current turn attempt owns the batch
 execution and continuation. For each next approved request:
 
 1. **Prepare transaction.** The application mints a UUIDv7 `ToolAttemptId` and
    commits a `Prepared` attempt row before executor work. It fixes the request,
-   owning turn, issuing turn attempt, effect class, and
-   `ToolDispatchGeneration::first()`.
+   owning turn, issuing turn attempt, effect class, selected locus, sandbox
+   profile when applicable, and `ToolDispatchGeneration::first()`.
 2. **Authorize transaction.** Fresh locked state validates that the request is
    approved, is the earliest unresolved executable request, and still belongs to
-   the issuing current turn attempt; it transitions the tool attempt to
-   `InFlight` and the turn attempt from `Prepared` to `Running` when necessary.
-3. **Execution.** No database transaction spans the in-process effect. The
-   executor receives a correlation containing request, tool attempt, issuing
-   turn attempt, and dispatch generation and returns one evidence value. Only
-   the issued authorization mints the executor fence that can bind returned
-   evidence into a committable observation; a correlation reconstituted from raw
-   durable facts compares and persists but cannot bind.
-4. **Commit-result transaction.** Fresh locked state validates the complete
-   correlation and that the dispatch generation is current before changing the
-   attempt. A stale or duplicate result cannot advance logical state (INV-011,
-   INV-021). The row moves monotonically to `Completed`, `KnownFailed`, or
-   `Ambiguous` and never reopens. An `Ambiguous` result atomically ends the
-   issuing turn attempt as `WithoutStop(Ambiguous)` and moves the lifecycle to
-   `awaiting_tool_recovery` correlated with that exact attempt. The logical
-   orchestration has yielded to a durable wait; the stored attempt disposition
-   remains the exact physical ambiguity classification.
+   the issuing current turn attempt. For daemon execution it transitions the
+   attempt to `InFlight` and the turn attempt to `Running` when necessary. For
+   runner execution one repository transaction additionally consumes any
+   workspace-ready evidence, pins initial placement and grant when needed,
+   consumes the exact runner authorization, stores the offered lease, and moves
+   the same attempt and turn states. A crash cannot commit `InFlight` without
+   the correlated lease.
+3. **Claim transaction.** The runner admits the complete immutable dispatch but
+   cannot execute it. The daemon validates and commits the exact lease claim
+   before acknowledging it. Only receipt of that acknowledgement plus the
+   matching `dispatch` gives the runner an execution capability. This step is
+   absent for daemon-local execution.
+4. **Execution.** No database transaction spans the effect. The executor
+   correlation contains runner and lease generation when applicable in addition
+   to request, tool attempt, issuing turn attempt, and dispatch generation. Only
+   the issued authorization or claimed-lease capability can bind returned
+   evidence into a committable observation; raw durable facts can compare but
+   cannot bind.
+5. **Commit-result transaction.** Fresh locked state validates the complete
+   correlation and current dispatch generation. For a runner result, one
+   transaction also locks the current lease, proves that the claimed lease is
+   the source of the observation, stores the lease completion, and consumes the
+   result exactly once. A stale or duplicate result cannot advance either
+   aggregate (INV-011, INV-021). The attempt moves monotonically to `Completed`,
+   `KnownFailed`, or `Ambiguous` and never reopens. An `Ambiguous` result
+   atomically ends the issuing turn attempt as `WithoutStop(Ambiguous)` and
+   moves lifecycle to `awaiting_tool_recovery` correlated with that exact
+   attempt.
+
+The runner durably spools a terminal evidence envelope until `result_recorded`.
+A process exit, timeout, supervisor loss, or channel loss after claim is not a
+known tool failure; it enters the effect-class loss and ambiguity law. A tool
+that executes and exits nonzero returns bounded structured `ExecutionFailed`
+evidence and is `KnownFailed`. Output admission applies the existing size,
+U+0000, credential-redaction, and correlation checks before durable semantic
+projection.
 
 If the authorization commit acknowledgement is ambiguous, execution does not
 begin from the returned error. While retaining the dispatch gate and exact
 request, the application rereads the attempt under the scheduler lock.
-`Prepared` proves non-consumption and returns the infrastructure failure;
-`InFlight` restores the exact authorization fence and may enter the executor. An
-inconclusive reread retains that authority state for another identical reread,
-so neither retry nor crash classification can be inferred from a lost commit
-response.
+`Prepared` proves non-consumption and returns the infrastructure failure. For a
+daemon locus, `InFlight` restores the exact authorization fence and may enter
+the executor. For a runner locus, it must also load the exact offered or claimed
+lease and resume only the corresponding wire phase; bare attempt state never
+permits execution. An inconclusive reread retains that authority state for
+another identical reread, so neither retry nor crash classification can be
+inferred from a lost commit response.
 
 A process-shared turn-keyed dispatch gate orders immediate interrupts against
 physical-attempt checkpointing, prepared-attempt preflight, the authorize →
@@ -547,12 +702,14 @@ tools:
   mechanics remain owned by
   [sessions-and-transcript](sessions-and-transcript.md#session-metadata-and-list-projection).
 
-The Tier 1 catalog adds ten GitHub change-request tools. Every operation is
-`ExternalEffect` because GitHub observes its authenticated request. The six
+The Tier 1 catalog adds fourteen GitHub change-request tools. Every operation is
+`ExternalEffect` because GitHub observes its authenticated request. The ten
 read-only declarations — `change_request_summary`,
 `change_request_changed_files`, `change_request_file_patch`,
-`change_request_checks_status`, `change_request_review_threads`, and
-`change_request_ci_job_log` — default to `Auto`. The four mutations —
+`change_request_checks_status`, `change_request_review_threads`,
+`change_request_ci_job_log`, `change_request_convergence_state`,
+`change_request_stack_state`, `change_request_thread_inventory`, and
+`review_gate_check` — default to `Auto`. The four mutations —
 `change_request_comment`, `change_request_thread_reply`,
 `change_request_thread_resolve`, and `change_request_rerun_failed_jobs` —
 default to `Confirm`. The normal approval transaction therefore authorizes each
@@ -589,14 +746,88 @@ The declarations and compact result objects are:
   returns that id, at most 64 KiB of lossy UTF-8 log text, and `truncated`.
 - `change_request_rerun_failed_jobs` accepts `repository` and a positive
   workflow `run_id`; it returns the acknowledged run id.
+- `change_request_convergence_state` accepts `repository` and `number`. It
+  returns the exact head and mergeable state; the current-head CI rollup and
+  bounded check contexts; unresolved-thread identities; open and buried
+  escalation-marker identities; all resolved or unresolved undispositioned
+  threads; and reviewer-verdict evidence. Reviewer evidence merges review bodies
+  and issue comments in code-host timestamp order. Only the exact
+  `chatgpt-codex-connector` bot can supply a verdict or usage-limit response;
+  the last complete, line-anchored `Reviewed commit:` record is the verdict, and
+  only the complete canonical usage-limit response is starvation evidence. The
+  evidence also reports usage-limit starvation and whether the latest explicit
+  `@codex review` request by an owner, member, or collaborator has no later
+  verdict or starvation response. A request tied with the latest response
+  timestamp is treated as still pending because the code host does not expose a
+  reliable order within that timestamp. Typed construction rejects an open
+  escalation identity absent from the unresolved-thread evidence. Its derived
+  verdict is `converged`, `converged_with_escalations`, `not_converged`, or
+  `indeterminate`. A missing or non-successful CI rollup, conflicting
+  mergeability, any unresolved non-escalation or undispositioned thread,
+  reviewer starvation, or a still-pending request prevents convergence; an
+  additive unknown mergeability state or any truncated evidence required for the
+  verdict makes it indeterminate.
+- `change_request_stack_state` accepts `repository`, `number`, and an optional
+  opaque GraphQL child-page `cursor`. It returns the current immediate-base,
+  head, and default-branch refs and revisions; current-base commits absent from
+  the head; default-branch commits absent from the current base chain; and one
+  projected page of at most 100 immediate child requests whose base names the
+  request's head branch. Each child carries the same merge-forward and
+  default-chain comparison for its level. Children are discovered in the
+  request's head repository. Comparisons use count-only GraphQL projections
+  authenticated against each current base revision, with at most eight child
+  comparisons in flight. The complete stack transaction has the transport's
+  30-second aggregate deadline. The adapter then re-reads the request, current
+  and default branches, and exact projected child page and rejects evidence if
+  any revision, child inventory, or child-page continuation snapshot changed.
+  The child page carries `children_truncated` and `children_next_cursor`.
+- `change_request_thread_inventory` accepts `repository`, `number`, and an
+  optional opaque GraphQL `cursor`. It returns the observed head revision and at
+  most 100 review threads with exact resolution and outdated posture, path and
+  optional line, first-comment author and `bot` / `human` / `unknown` class, the
+  bounded first-comment finding title, and its `fix_named` / `declined` /
+  `escalation_marker` / `undispositioned` class. A thread without a reply is
+  undispositioned. `fix_named` requires a reply beginning with `Fixed in commit`
+  or `Fixed in commits`, followed by exactly one space and an optionally
+  backtick-delimited 7-to-40-hex commit token; `declined` requires a reply
+  beginning `Declined:` and a nonempty reason. Only replies whose code-host
+  association is `OWNER`, `MEMBER`, or `COLLABORATOR` can supply disposition
+  evidence. The latest recognized fix or decline survives later non-disposition
+  replies, while `escalation_marker` requires the trimmed last reply to equal
+  the exact marker. Classification rejects a thread whose comment history
+  exceeds the 100-comment read bound. The page carries `truncated` and
+  `next_cursor`.
+- `review_gate_check` accepts `repository`, `number`, and purpose
+  `request_review_wave` or `declare_convergence`. It reads the same fresh typed
+  evidence as the three slog tools, then re-reads stack ancestry and convergence
+  after inventory. It rejects the composed read if either before-and-after
+  evidence pair differs and uses the final stack and convergence reads for
+  blockers, then purely derives `ready`, the exact head, and stable blocker
+  codes with affected identities within the transport's 30-second aggregate
+  deadline. Both purposes block when the three evidence sources name different
+  heads, a review request is still in flight, evidence is incomplete, CI is not
+  green, threads are undispositioned or unresolved, escalations are buried, or
+  parent, default-chain, or immediate-child ancestry is unhealthy. Declaring
+  convergence additionally requires the exact mergeable posture and an actual
+  current-head reviewer verdict not followed by usage-limit starvation.
+  Requesting a review wave is blocked when a completed reviewer verdict already
+  covers the current head and no later usage-limit response requires a retry,
+  because that quiet or all-declined wave concludes the loop.
 
 Shared typed admission rejects extra object members; repositories are at most
 256 bytes, paths 4 KiB, comment bodies and returned text fields 64 KiB, and
-opaque node ids 512 bytes. A returned node id or head revision is admitted by
-the same predicate its argument counterpart uses, so an identity a result
-carries can always be passed back as an argument, and every returned URL is one
-absolute credential-free HTTPS location. No result has more than 100 collection
-members or more than 512 KiB of encoded JSON.
+opaque node ids and GraphQL cursors are at most 512 bytes. A returned node id,
+head revision, or stack or inventory continuation is admitted by the same
+predicate its argument counterpart uses, so those identities and continuations
+can be passed back as arguments. Convergence-state cursors identify a diagnostic
+truncation boundary; that tool and the gate remain indeterminate rather than
+performing an unbounded continuation scan. Every returned URL is one absolute
+credential-free HTTPS location. Typed construction rejects aggregate convergence
+evidence whose overlapping bounded lists would exceed the shared encoded-result
+limit. No result has more than 100 collection members or more than 512 KiB of
+encoded JSON. Every bounded slog list reports whether it is truncated and the
+matching continuation cursor; a verdict never silently treats a partial evidence
+page as complete.
 
 The production adapter uses fixed GitHub REST and GraphQL endpoints. It disables
 ambient proxies, automatic redirects, protocol retries, and idle reuse; uses
@@ -623,7 +854,7 @@ detail.
 
 The merged catalog sorts declarations by checked tool name and rejects
 duplicates during construction. Its executor dispatches only those same four
-preexisting names and the ten code-host names; disagreement between the
+preexisting names and the fourteen code-host names; disagreement between the
 advertised catalog and executor is classified as a daemon defect.
 
 ## Persistence boundaries
@@ -640,34 +871,32 @@ reconstructing provider history in frontier order; it performs no per-entry
 database round trips while holding the scheduler lock.
 
 `DecideToolRequest` joins the owner-global durable-command registry as its own
-typed record family. Because adding the dangerous posture changes every
-defaults-bearing canonical command payload, new `CreateSession`,
-`CreateSessionFromImportedFrontier`, and `ReplaceSessionDefaults` records use
-kind-scoped storage version 2; their version-1 records reconstitute with
-`DangerousToolAutoApproval::Disabled`. `SubmitInput` remains version 1, and the
-new decision command begins at version 1; registry inspection validates the
-supported version set for the selected kind rather than applying one global
-version constant.
+typed record family. Adding the dangerous posture originally advanced each
+defaults-bearing command family to kind-scoped storage version 2; version-1
+records reconstitute with `DangerousToolAutoApproval::Disabled`. Later
+system-prompt and template provenance migrations advance the affected families
+independently. The current kind-scoped versions and their compatibility gates
+are owned by
+[identity and commands](identity-and-commands.md#durable-command-records) and
+[persistence protocol](persistence-protocol.md#relational-representation).
+`SubmitInput` and `DecideToolRequest` remain version 1; registry inspection
+validates the supported version set for the selected kind rather than applying
+one global version constant.
 
 ## Open edges
 
-- Execution-strategy configuration placement is recorded in
+- Dynamic execution-strategy policy beyond the two named runner profiles,
+  model-declared approval expiry, LLM-judge approval, and additional high-risk
+  guardrails are recorded in [Tool safety](../open-questions.md#tool-safety).
+- Rich result-content variants and durable tool-definition revisioning across
+  outstanding requests are recorded in
   [Tool safety](../open-questions.md#tool-safety).
-- Model-declared approval expiry is recorded in
+- General tool-attempt retry and ambiguous-wait resolution beyond the sealed
+  runner-loss transitions are recorded in
   [Tool safety](../open-questions.md#tool-safety).
-- LLM-judge approval mechanics are recorded in
-  [Tool safety](../open-questions.md#tool-safety).
-- Per-tool session overrides and high-risk guardrails are recorded in
-  [Tool safety](../open-questions.md#tool-safety).
-- Rich result-content variants are recorded in
-  [Tool safety](../open-questions.md#tool-safety).
-- Durable tool-definition revisioning and safe deployment across outstanding
-  requests are recorded in [Tool safety](../open-questions.md#tool-safety).
-- Tool-attempt retry and ambiguous-wait resolution are recorded in
-  [Tool safety](../open-questions.md#tool-safety).
-- Runner placement and domain lease law are owned by
-  [runner protocol and placement](runner-protocol.md); its later transport,
-  persistence, and authentication edges remain recorded under
+- Runner placement, local transport, workspace, profile, and lease law are owned
+  by [runner protocol and placement](runner-protocol.md). Remote runner
+  transport and multiple-runner scheduling remain recorded under
   [Scheduling and runners](../open-questions.md#scheduling-and-runners),
   [Protocols and persistence](../open-questions.md#protocols-and-persistence),
   and

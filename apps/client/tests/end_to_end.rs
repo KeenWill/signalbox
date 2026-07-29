@@ -19,14 +19,16 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
-    ModelCallCredentialReference, OperatorFailureClass, SchedulerLoop, SchedulerLoopExit,
-    StartEligibleTurnOutcome, StartEligibleTurnService, ToolDefinition, ToolExecutionInvocation,
-    ToolExecutor, ToolExecutorEvidence, ToolInputSchema, UuidV7StartEligibleTurnIdGenerator,
+    LoadSessionService, ModelCallCredentialReference, OperatorFailureClass, SchedulerLoop,
+    SchedulerLoopExit, StartEligibleTurnOutcome, StartEligibleTurnService, ToolDefinition,
+    ToolExecutionInvocation, ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
+    UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
     ActivatedAcceptedInputTurn, DirectModelSelection, ModelTargetCatalog, ModelTargetDefinition,
     NormalizedToolArguments, ProviderModelIdentity, ResolvedProviderTarget, SessionId,
-    ToolEffectClass, ToolExecutionErrorDetail, ToolName, ToolPermissionDefault,
+    SessionTemplateName, ToolEffectClass, ToolExecutionErrorDetail, ToolName,
+    ToolPermissionDefault,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -39,7 +41,8 @@ use signalbox_model_runtime::{
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
     local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
-    scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
+    scheduler::PostgresEligibilitySweep, session::SessionRepository,
+    start_eligible_turn::StartEligibleTurnRepository,
 };
 use signalbox_process_protocol::{
     CanonicalUuid, ClientFrame, ClientRequest, CommandId, ProtocolVersion, RequestId,
@@ -49,6 +52,7 @@ use signalboxd::{
     ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnExecution, ActivatedTurnPass,
     FatalExecutionSupervisor, FileCredentialAccess, HubModelConfiguration, LocalProcessListener,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
+    SessionTemplateConfiguration,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -205,6 +209,53 @@ const SEARCH_FIXTURE_SELECTION: &str = "00000000-0000-0000-0000-000000000001";
 
 /// The process server the metadata-search tests drive. They start no turn, so
 /// the fixture runs the process boundary without a scheduler or provider.
+/// One independently restartable process runtime sharing a caller-owned pool.
+struct TemplateProcessRuntime {
+    socket_directory: SocketDirectory,
+    shutdown: watch::Sender<bool>,
+    process_task: JoinHandle<Result<(), ProcessRuntimeError>>,
+    _work_source: InProcessEligibilityWorkSource<PostgresEligibilitySweep>,
+}
+
+impl TemplateProcessRuntime {
+    async fn start(
+        pool: &PgPool,
+        models: HubModelConfiguration,
+        templates: SessionTemplateConfiguration,
+    ) -> Result<Self, Box<dyn Error>> {
+        let socket_directory = SocketDirectory::create()?;
+        let sweep = PostgresEligibilitySweep::new(pool.clone());
+        let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+        let listener = LocalProcessListener::bind(socket_directory.socket())?;
+        let process_runtime = ProcessRuntime::new_with_templates(
+            listener,
+            pool.clone(),
+            eligibility_nudge,
+            InProcessToolDispatchGate::default(),
+            models,
+            templates,
+        );
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
+        Ok(Self {
+            socket_directory,
+            shutdown,
+            process_task,
+            _work_source: work_source,
+        })
+    }
+
+    fn socket(&self) -> PathBuf {
+        self.socket_directory.socket().to_owned()
+    }
+
+    async fn stop(self) -> Result<(), Box<dyn Error>> {
+        self.shutdown.send(true)?;
+        timeout(Duration::from_secs(10), self.process_task).await???;
+        self.socket_directory.cleanup()
+    }
+}
+
 struct MetadataSearchRuntime {
     container: ContainerAsync<Postgres>,
     pool: PgPool,
@@ -327,6 +378,190 @@ fn required_environment(name: &'static str) -> Result<OsString, Box<dyn Error>> 
         )
         .into()
     })
+}
+
+/// S35 / INV-047: the shipped client lists daemon-owned templates, creates from one
+/// resolved startup snapshot, and a catalog edit plus daemon reload changes
+/// only later sessions while both copies retain exact provenance.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s35_inv047_terminal_template_create_is_copy_on_create_across_daemon_reload()
+-> Result<(), Box<dyn Error>> {
+    const TEMPLATE_NAME: &str = "reviewer";
+    const ORIGINAL_TEMPLATE_VERSION: u64 = 1;
+    const EDITED_TEMPLATE_VERSION: u64 = 2;
+    const ORIGINAL_PROMPT: &str = "Review the change and report concrete findings.";
+    const EDITED_PROMPT: &str = "Review the change and prioritize correctness findings.";
+    const ORIGINAL_COMMAND: &str = "40000000-0000-4000-8000-000000000001";
+    const EDITED_COMMAND: &str = "40000000-0000-4000-8000-000000000002";
+
+    let (container, pool) = postgres().await?;
+    let deployment = tempfile::tempdir()?;
+    let catalog_path = deployment.path().join("session-templates.toml");
+    let models = HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?;
+    let original_catalog = format!(
+        r#"
+version = 1
+
+[[templates]]
+name = "{TEMPLATE_NAME}"
+version = {ORIGINAL_TEMPLATE_VERSION}
+model = "00000000-0000-0000-0000-000000000001"
+system_prompt = "{ORIGINAL_PROMPT}"
+dangerous_tool_auto_approval = true
+"#,
+    );
+    fs::write(&catalog_path, original_catalog)?;
+    let original_templates = SessionTemplateConfiguration::read(&catalog_path, || None, &models)?;
+    let template_name = SessionTemplateName::try_new(TEMPLATE_NAME.to_owned())?;
+    let original_template = original_templates
+        .resolve(&template_name)
+        .expect("original template resolves");
+    let original_provenance = original_template.provenance().clone();
+    let original_defaults = original_template.defaults().clone();
+    let original_runtime =
+        TemplateProcessRuntime::start(&pool, models.clone(), original_templates).await?;
+
+    let original_list = run_client(
+        original_runtime.socket(),
+        vec![String::from("templates")],
+        None,
+    )
+    .await?;
+    assert!(original_list.status.success());
+    assert_eq!(
+        String::from_utf8(original_list.stdout)?,
+        format!("name={TEMPLATE_NAME} version={ORIGINAL_TEMPLATE_VERSION}\n")
+    );
+    let original_create = run_client(
+        original_runtime.socket(),
+        vec![
+            String::from("create"),
+            String::from("--template"),
+            String::from(TEMPLATE_NAME),
+            String::from("--command-id"),
+            String::from(ORIGINAL_COMMAND),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        original_create.status.success(),
+        "template create failed: {}",
+        String::from_utf8_lossy(&original_create.stderr)
+    );
+    assert!(original_create.stderr.is_empty());
+    let original_session = Uuid::parse_str(String::from_utf8(original_create.stdout)?.trim())?;
+    original_runtime.stop().await?;
+
+    let edited_catalog = format!(
+        r#"
+version = 1
+
+[[templates]]
+name = "{TEMPLATE_NAME}"
+version = {EDITED_TEMPLATE_VERSION}
+model = "00000000-0000-0000-0000-000000000003"
+system_prompt = "{EDITED_PROMPT}"
+dangerous_tool_auto_approval = false
+"#,
+    );
+    fs::write(&catalog_path, edited_catalog)?;
+    let edited_templates = SessionTemplateConfiguration::read(&catalog_path, || None, &models)?;
+    let edited_template = edited_templates
+        .resolve(&template_name)
+        .expect("edited template resolves");
+    let edited_provenance = edited_template.provenance().clone();
+    let edited_defaults = edited_template.defaults().clone();
+    let edited_runtime =
+        TemplateProcessRuntime::start(&pool, models.clone(), edited_templates).await?;
+    let edited_list = run_client(
+        edited_runtime.socket(),
+        vec![String::from("templates")],
+        None,
+    )
+    .await?;
+    assert!(edited_list.status.success());
+    assert_eq!(
+        String::from_utf8(edited_list.stdout)?,
+        format!("name={TEMPLATE_NAME} version={EDITED_TEMPLATE_VERSION}\n")
+    );
+    let edited_create = run_client(
+        edited_runtime.socket(),
+        vec![
+            String::from("create"),
+            String::from("--template"),
+            String::from(TEMPLATE_NAME),
+            String::from("--command-id"),
+            String::from(EDITED_COMMAND),
+        ],
+        None,
+    )
+    .await?;
+    assert!(edited_create.status.success());
+    assert!(edited_create.stderr.is_empty());
+    let edited_session = Uuid::parse_str(String::from_utf8(edited_create.stdout)?.trim())?;
+    edited_runtime.stop().await?;
+
+    fs::write(&catalog_path, "version = 1\n")?;
+    let empty_templates = SessionTemplateConfiguration::read(&catalog_path, || None, &models)?;
+    let replay_runtime =
+        TemplateProcessRuntime::start(&pool, models.clone(), empty_templates).await?;
+    let original_replay = run_client(
+        replay_runtime.socket(),
+        vec![
+            String::from("create"),
+            String::from("--template"),
+            String::from(TEMPLATE_NAME),
+            String::from("--command-id"),
+            String::from(ORIGINAL_COMMAND),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        original_replay.status.success(),
+        "template replay after removal failed: {}",
+        String::from_utf8_lossy(&original_replay.stderr)
+    );
+    assert!(original_replay.stderr.is_empty());
+    assert_eq!(
+        Uuid::parse_str(String::from_utf8(original_replay.stdout)?.trim())?,
+        original_session
+    );
+    replay_runtime.stop().await?;
+
+    let load = LoadSessionService::new(SessionRepository::new(pool.clone()));
+    let original_loaded = load
+        .execute(SessionId::from_uuid(original_session))
+        .await?
+        .expect("original template session remains loadable after reload");
+    let edited_loaded = load
+        .execute(SessionId::from_uuid(edited_session))
+        .await?
+        .expect("edited template session is loadable");
+
+    assert_eq!(
+        original_loaded.current_configuration_defaults().defaults(),
+        &original_defaults
+    );
+    assert_eq!(
+        original_loaded.template_provenance(),
+        Some(&original_provenance)
+    );
+    assert_eq!(
+        edited_loaded.current_configuration_defaults().defaults(),
+        &edited_defaults
+    );
+    assert_eq!(
+        edited_loaded.template_provenance(),
+        Some(&edited_provenance)
+    );
+    assert_ne!(original_provenance, edited_provenance);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 /// S25: the terminal search verb lists only the sessions that satisfy every
@@ -839,6 +1074,240 @@ async fn terminal_client_imports_one_file_and_reports_exact_reimport() -> Result
     socket_directory.cleanup()?;
     drop(container);
     Ok(())
+}
+
+/// The model selection the imported-continuation test installs on the session
+/// it creates. It is the first selection `IMPORT_MODEL_CONFIGURATION` defines;
+/// the test starts no turn, so which model it names does not affect the
+/// boundary under test.
+const IMPORTED_CONTINUATION_SELECTION: &str = "00000000-0000-0000-0000-000000000001";
+
+/// The synthetic imported source both imported-inspection tests read, and the
+/// exact entries its two positions carry.
+struct ImportedInspectionFixture {
+    user_text: &'static str,
+    assistant_text: &'static str,
+}
+
+impl ImportedInspectionFixture {
+    fn new() -> Self {
+        Self {
+            user_text: "synthetic imported question",
+            assistant_text: "synthetic imported answer",
+        }
+    }
+
+    /// The greatest selectable position, which is also the entry count: the
+    /// two-record source below emits exactly one entry per record.
+    fn last_position(&self) -> u64 {
+        2
+    }
+
+    /// One row per selectable position plus the trailing count line.
+    fn listed_line_count(&self) -> usize {
+        usize::try_from(self.last_position()).expect("the fixture position fits a line count") + 1
+    }
+
+    fn source(&self) -> String {
+        format!(
+            "{{\"sessionId\":\"terminal-import-inspect\",\"type\":\"user\",\
+             \"message\":{{\"role\":\"user\",\"content\":\"{}\"}}}}\n\
+             {{\"sessionId\":\"terminal-import-inspect\",\"type\":\"assistant\",\
+             \"message\":{{\"role\":\"assistant\",\"content\":\"{}\"}}}}",
+            self.user_text, self.assistant_text,
+        )
+    }
+}
+
+/// S28: the shipped terminal exposes an imported conversation's selectable
+/// positions with their previews and total, so the position `continue`
+/// consumes never has to be guessed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_terminal_client_completes_an_offline_imported_inspection() -> Result<(), Box<dyn Error>>
+{
+    let fixture = ImportedInspectionFixture::new();
+    let (container, pool) = postgres().await?;
+    let socket_directory = SocketDirectory::create()?;
+    let source_directory = tempfile::tempdir()?;
+    let source_path = source_directory.path().join("inspect-session.jsonl");
+    fs::write(&source_path, fixture.source())?;
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let listener = LocalProcessListener::bind(socket_directory.socket())?;
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        InProcessToolDispatchGate::default(),
+        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+    );
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
+
+    let imported_conversation_id =
+        import_inspection_source(socket_directory.socket(), &source_path).await?;
+    let listed = run_client(
+        socket_directory.socket().to_owned(),
+        vec![String::from("imported"), imported_conversation_id],
+        None,
+    )
+    .await?;
+
+    assert!(
+        listed.status.success(),
+        "imported failed: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(listed.stderr.is_empty());
+    let rows: Vec<String> = String::from_utf8(listed.stdout)?
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let first = rows
+        .first()
+        .expect("the first selectable position is listed");
+    assert!(first.starts_with("position=1 "), "first row: {first}");
+    assert!(first.contains(" speaker=user kind=text truncated=false text="));
+    assert!(first.ends_with(fixture.user_text), "first row: {first}");
+    let second = rows
+        .get(1)
+        .expect("the second selectable position is listed");
+    assert!(
+        second.starts_with(&format!("position={} ", fixture.last_position())),
+        "second row: {second}"
+    );
+    assert!(second.contains(" speaker=assistant kind=text truncated=false text="));
+    assert!(
+        second.ends_with(fixture.assistant_text),
+        "second row: {second}"
+    );
+    assert_eq!(
+        rows.get(2).map(String::as_str),
+        Some(format!("entry_count={}", fixture.last_position()).as_str())
+    );
+    assert_eq!(rows.len(), fixture.listed_line_count());
+
+    shutdown.send(true)?;
+    timeout(Duration::from_secs(10), process_task).await???;
+    pool.close().await;
+    socket_directory.cleanup()?;
+    drop(container);
+    Ok(())
+}
+
+/// S28: `latest` resolves to the imported conversation's final position,
+/// prints that concrete ordinal, and seeds the created session through it, so
+/// the owner never has to know the count to continue from the end.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_terminal_client_completes_an_offline_latest_position_continuation()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ImportedInspectionFixture::new();
+    let (container, pool) = postgres().await?;
+    let socket_directory = SocketDirectory::create()?;
+    let source_directory = tempfile::tempdir()?;
+    let source_path = source_directory.path().join("latest-session.jsonl");
+    fs::write(&source_path, fixture.source())?;
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let listener = LocalProcessListener::bind(socket_directory.socket())?;
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        InProcessToolDispatchGate::default(),
+        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+    );
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
+
+    let imported_conversation_id =
+        import_inspection_source(socket_directory.socket(), &source_path).await?;
+    let continued = run_client(
+        socket_directory.socket().to_owned(),
+        vec![
+            String::from("continue"),
+            imported_conversation_id,
+            String::from("--through-position"),
+            String::from("latest"),
+            String::from("--relationship"),
+            String::from("resume"),
+            String::from("--model"),
+            String::from(IMPORTED_CONTINUATION_SELECTION),
+        ],
+        None,
+    )
+    .await?;
+
+    assert!(
+        continued.status.success(),
+        "continue failed: {}",
+        String::from_utf8_lossy(&continued.stderr)
+    );
+    let session_id = String::from_utf8(continued.stdout)?.trim().to_owned();
+    Uuid::parse_str(&session_id)?;
+    let printed = String::from_utf8(continued.stderr)?;
+    assert!(printed.starts_with("command_id="), "printed: {printed}");
+    assert!(
+        printed.ends_with(&format!("through_position={}\n", fixture.last_position())),
+        "printed: {printed}"
+    );
+
+    let transcript = run_client(
+        socket_directory.socket().to_owned(),
+        vec![String::from("transcript"), session_id],
+        None,
+    )
+    .await?;
+    assert!(transcript.status.success());
+    let transcript = String::from_utf8(transcript.stdout)?;
+    assert!(
+        transcript.contains(fixture.user_text),
+        "transcript: {transcript}"
+    );
+    assert!(
+        transcript.contains(fixture.assistant_text),
+        "transcript: {transcript}"
+    );
+
+    shutdown.send(true)?;
+    timeout(Duration::from_secs(10), process_task).await???;
+    pool.close().await;
+    socket_directory.cleanup()?;
+    drop(container);
+    Ok(())
+}
+
+/// Imports one synthetic inspection source file and returns the durable
+/// imported conversation identity its receipt names.
+async fn import_inspection_source(
+    socket: &Path,
+    source_path: &Path,
+) -> Result<String, Box<dyn Error>> {
+    let imported = run_client(
+        socket.to_owned(),
+        vec![
+            String::from("import"),
+            String::from("--format"),
+            String::from("claude-code"),
+            source_path.display().to_string(),
+        ],
+        None,
+    )
+    .await?;
+    assert!(
+        imported.status.success(),
+        "import failed: {}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let identity = String::from_utf8(imported.stdout)?
+        .strip_prefix("inserted imported_conversation_id=")
+        .expect("the synthetic import returns an inserted receipt")
+        .trim()
+        .to_owned();
+    Uuid::parse_str(&identity)?;
+    Ok(identity)
 }
 
 /// S28 / INV-038: scan mode selects recursive matching regular files and
@@ -1415,6 +1884,13 @@ context_window_tokens = 200000
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_completes_an_offline_scripted_conversation() -> Result<(), Box<dyn Error>>
 {
+    const FIRST_ASSISTANT_REPLY: &str = "offline assistant reply";
+    const SECOND_ASSISTANT_REPLY: &str = "offline assistant reply without usage";
+    const REPORTED_INPUT_TOKENS: u64 = 120;
+    const REPORTED_OUTPUT_TOKENS: u64 = 7;
+    const REPORTED_CACHE_READ_INPUT_TOKENS: u64 = 80;
+    const EXPECTED_TERMINAL_CALLS: usize = 2;
+
     let (container, pool) = postgres().await?;
     let socket_directory = SocketDirectory::create()?;
     let selection_uuid = Uuid::from_u128(0x9101);
@@ -1449,16 +1925,29 @@ context_window_tokens = 200000
         )
         .expect("the fixture runtime definition is valid")])
         .expect("the fixture runtime target is unique");
-    let runtime = ScriptedModel::single(Script::delivering(TerminalEvidence::Completed(
-        CompletionEvidence {
+    let runtime = ScriptedModel::following([
+        Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
             reported_model: Some(ProviderReportedModel::new("scripted-terminal")),
             finish: CompletionFinish::EndTurn,
-            content: vec![AssistantPart::Text(String::from("offline assistant reply"))],
+            content: vec![AssistantPart::Text(String::from(FIRST_ASSISTANT_REPLY))],
+            usage: TokenUsage {
+                input_tokens: Some(REPORTED_INPUT_TOKENS),
+                output_tokens: Some(REPORTED_OUTPUT_TOKENS),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(REPORTED_CACHE_READ_INPUT_TOKENS),
+            },
+        })),
+        Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("scripted-terminal")),
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::Text(String::from(SECOND_ASSISTANT_REPLY))],
             usage: TokenUsage::unreported(),
-        },
-    )));
+        })),
+    ]);
     let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
 
     let sweep = PostgresEligibilitySweep::new(pool.clone());
@@ -1540,10 +2029,33 @@ context_window_tokens = 200000
         "send failed: {}",
         String::from_utf8_lossy(&send.stderr)
     );
-    assert_eq!(String::from_utf8(send.stdout)?, "offline assistant reply\n");
+    assert_eq!(
+        String::from_utf8(send.stdout)?,
+        format!("{FIRST_ASSISTANT_REPLY}\n")
+    );
     let recovery = String::from_utf8(send.stderr)?;
     assert!(recovery.contains("command_id="));
     assert!(recovery.contains("defaults_version=1"));
+    assert!(!fatal_execution.is_triggered());
+
+    let second_send = timeout(
+        Duration::from_secs(20),
+        run_client(
+            socket_directory.socket().to_owned(),
+            vec![String::from("send"), session_id.clone()],
+            Some(String::from("offline follow-up request")),
+        ),
+    )
+    .await??;
+    assert!(
+        second_send.status.success(),
+        "second send failed: {}",
+        String::from_utf8_lossy(&second_send.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(second_send.stdout)?,
+        format!("{SECOND_ASSISTANT_REPLY}\n")
+    );
     assert!(!fatal_execution.is_triggered());
 
     let transcript = run_client(
@@ -1555,8 +2067,37 @@ context_window_tokens = 200000
     assert!(transcript.status.success());
     let transcript = String::from_utf8(transcript.stdout)?;
     assert!(transcript.contains("offline user request"));
-    assert!(transcript.contains("offline assistant reply"));
+    assert!(transcript.contains(FIRST_ASSISTANT_REPLY));
+    assert!(transcript.contains(SECOND_ASSISTANT_REPLY));
     assert!(transcript.contains("turn_completed"));
+    assert_eq!(
+        transcript.matches("usage turn=").count(),
+        EXPECTED_TERMINAL_CALLS
+    );
+    assert!(transcript.contains(&format!(
+        "terminal_calls=1 input_tokens={REPORTED_INPUT_TOKENS} \
+         input_tokens_reported_calls=1/1 output_tokens={REPORTED_OUTPUT_TOKENS} \
+         output_tokens_reported_calls=1/1 cache_creation_input_tokens=unreported \
+         cache_creation_input_tokens_reported_calls=0/1 \
+         cache_read_input_tokens={REPORTED_CACHE_READ_INPUT_TOKENS} \
+         cache_read_input_tokens_reported_calls=1/1"
+    )));
+    assert!(transcript.contains(
+        "terminal_calls=1 input_tokens=unreported input_tokens_reported_calls=0/1 \
+         output_tokens=unreported output_tokens_reported_calls=0/1 \
+         cache_creation_input_tokens=unreported \
+         cache_creation_input_tokens_reported_calls=0/1 \
+         cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/1"
+    ));
+    assert!(transcript.contains(&format!(
+        "usage_total scope=session terminal_calls={EXPECTED_TERMINAL_CALLS} \
+         input_tokens={REPORTED_INPUT_TOKENS} input_tokens_reported_calls=1/2 \
+         output_tokens={REPORTED_OUTPUT_TOKENS} output_tokens_reported_calls=1/2 \
+         cache_creation_input_tokens=unreported \
+         cache_creation_input_tokens_reported_calls=0/2 \
+         cache_read_input_tokens={REPORTED_CACHE_READ_INPUT_TOKENS} \
+         cache_read_input_tokens_reported_calls=1/2"
+    )));
 
     shutdown.send(true)?;
     assert_eq!(
