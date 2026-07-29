@@ -816,6 +816,33 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testContextCompactedRequestsSideSnapshotRefresh() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.contextCompactedEvent(
+          cursor: SynchronizationFixture.contextCompactedCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(
+      SynchronizationFixture.effectNames(effects),
+      ["publish_event", "request_side_snapshot", "arm_deadline"]
+    )
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.steady(
+        cursor: SynchronizationFixture.contextCompactedCursor,
+        refreshID: SynchronizationFixture.firstRefreshID
+      )
+    )
+  }
+
   func testTurnReconciliationRequiredRequestsSideSnapshotRefresh() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor
@@ -1662,6 +1689,7 @@ private enum SynchronizationFixture {
   static let liveDuringReplaySideRefreshCursor: UInt64 = 23
   static let refusedCursor: UInt64 = 24
   static let reconciliationCursor: UInt64 = 25
+  static let contextCompactedCursor: UInt64 = 26
   static let recoveredCursor: UInt64 = 30
   static let capacityBelowEncodedFutureEvent: UInt = 32
   static let session = "11111111-1111-4111-8111-111111111111"
@@ -2231,6 +2259,26 @@ private enum SynchronizationFixture {
     )
   }
 
+  static func contextCompactedEvent(cursor: UInt64) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"session_event",
+        "cursor":"\(cursor)",
+        "session_id":"\(session)",
+        "event":{
+          "type":"context_compacted",
+          "context_compaction_id":"\(acceptedInput)",
+          "model_call_id":"\(modelCall)",
+          "through_position":"19",
+          "summary_entry_id":"\(entry)",
+          "result_frontier_id":"\(frontier)"
+        }
+      }
+      """
+    )
+  }
+
   static func turnRefusedEvent(cursor: UInt64) throws -> SignalboxProcessServerMessage {
     try message(
       """
@@ -2421,7 +2469,7 @@ private enum SynchronizationFixture {
   static func message(_ object: String) throws -> SignalboxProcessServerMessage {
     let data = Data(
       """
-      {"version":21,"request_id":"1","message":\(object)}
+      {"version":1,"request_id":"1","message":\(object)}
       """.utf8
     )
     return try SignalboxProcessServerFrame.decode(from: data).message

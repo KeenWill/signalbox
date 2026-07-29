@@ -18,208 +18,20 @@ use serde::{
 use serde_json::value::RawValue;
 use uuid::Uuid;
 
-/// The baseline protocol version retained for existing clients.
+/// The single admitted process-protocol version.
 pub const PROTOCOL_VERSION: u64 = 1;
-
-/// The imported-transcript snapshot protocol version.
-pub const IMPORTED_TRANSCRIPT_PROTOCOL_VERSION: u64 = 2;
-
-/// The tool-bearing projection protocol version.
-pub const TOOL_LOOP_PROTOCOL_VERSION: u64 = 3;
-
-/// The session-metadata protocol version.
-pub const SESSION_METADATA_PROTOCOL_VERSION: u64 = 4;
-
-/// The one-source conversation-import protocol version.
-pub const CONVERSATION_IMPORT_PROTOCOL_VERSION: u64 = 5;
-
-/// The forward-only session-defaults replacement protocol version.
-pub const MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION: u64 = 6;
-
-/// The owner turn-reconciliation protocol version.
-pub const TURN_RECONCILIATION_PROTOCOL_VERSION: u64 = 7;
-
-/// The client turn-control protocol version.
-pub const TURN_CONTROL_PROTOCOL_VERSION: u64 = 8;
-
-/// The session system-prompt protocol version.
-pub const SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION: u64 = 9;
-
-/// The imported-frontier session-creation protocol version.
-pub const IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION: u64 = 10;
-
-/// The review-workflow protocol version.
-pub const REVIEW_WORKFLOW_PROTOCOL_VERSION: u64 = 11;
-
-/// The ephemeral provider-text streaming protocol version.
-pub const PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION: u64 = 12;
-
-/// The client-selectable input-delivery protocol version.
-pub const INPUT_DELIVERY_PROTOCOL_VERSION: u64 = 13;
-
-/// The unified conversation-listing protocol version.
-///
-/// Version thirteen is allocated by input delivery; versions fourteen and
-/// fifteen were reserved by concurrent protocol work that had not yet shipped
-/// when this version claimed sixteen. That establishes a standing convention:
-/// once any version ships, every lower number still unshipped is retired
-/// permanently, not merely skipped, because admitting it later would
-/// retroactively widen an already-closed vocabulary underneath a version
-/// already in use (admission is numeric, version >= minimum, and a closed
-/// enum decodes a version's frames against exactly its own vocabulary, never
-/// a gap's). Fourteen and fifteen are retired under this rule and are never
-/// admitted; a later surface always claims the next number above the
-/// highest already shipped, never a lower gap. Twenty was later reserved for
-/// the context-compaction protocol stack, but the two stacks landed out of
-/// their originally planned order and the model-alias-catalog stack shipped
-/// twenty-one to main first, before twenty ever shipped. Twenty is retired
-/// under the identical rule, alongside fourteen and fifteen, and is never
-/// admitted either.
-pub const UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION: u64 = 16;
-
-/// The imported-conversation inspection protocol version.
-///
-/// This surface reserved fifteen while sixteen was still unclaimed, but sixteen
-/// shipped first. Numbering the inspection request below an already-closed
-/// vocabulary would retroactively admit it in version-sixteen frames, so this
-/// version sits above sixteen instead, per the retirement convention sixteen's
-/// comment states. Fourteen and fifteen remain retired and unadmitted here.
-pub const IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION: u64 = 17;
-
-/// The daemon-resolved session-template protocol version.
-pub const SESSION_TEMPLATE_PROTOCOL_VERSION: u64 = 18;
-
-/// The provider-reported model-call token-usage protocol version.
-///
-/// This surface originally reserved fourteen, but versions sixteen, seventeen,
-/// and eighteen all shipped first while it was still in flight. Numbering it
-/// below their already-closed vocabularies would retroactively admit
-/// `transcript_model_call_usage` frames under those versions, so this version
-/// sits above eighteen instead, per the retirement convention sixteen's
-/// comment states. Fourteen is retired under that convention alongside
-/// fifteen and is never admitted.
-pub const MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION: u64 = 19;
-
-/// The deployment model-alias catalog read protocol version.
-///
-/// This surface originally reserved eighteen, but the session-template surface
-/// shipped that number first while this one was still in flight. Version
-/// twenty was separately allocated to the concurrent context-compaction
-/// protocol stack, also still in flight at the time. Numbering this request
-/// under either already-spoken-for number would collide with a sibling
-/// stack's closed vocabulary rather than the version-sixteen-style
-/// retroactive widening the retirement convention above guards against, but
-/// the same rule of taking the next genuinely free number applies, so this
-/// version sits above both instead. The two stacks went on to land out of
-/// their originally planned order, and this version reached main before
-/// twenty did; twenty is retired under the standing convention rather than
-/// reallocated beneath this already-shipped vocabulary.
-pub const MODEL_ALIAS_CATALOG_PROTOCOL_VERSION: u64 = 21;
-
-/// The append-only context-compaction protocol version.
-///
-/// This surface originally reserved seventeen, but versions sixteen,
-/// seventeen (imported-conversation inspection), and eighteen all shipped
-/// first while it was still in flight; it was then assigned twenty, above
-/// nineteen's already-shipped token-usage vocabulary. Before this version
-/// shipped, the model-alias-catalog stack landed to main out of the two
-/// stacks' originally planned order and claimed twenty-one, so twenty now
-/// sits below an already-closed version-twenty-one vocabulary. Twenty is
-/// retired under the standing convention, alongside fourteen and fifteen,
-/// and this version claims the next genuinely free number above the shipped
-/// maximum instead.
-pub const CONTEXT_COMPACTION_PROTOCOL_VERSION: u64 = 22;
 
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProtocolVersion {
-    /// Baseline native-only transcript vocabulary.
+    /// The complete process-protocol vocabulary.
     One,
-    /// Conservative imported-transcript snapshot vocabulary.
-    Two,
-    /// Tool-bearing projection vocabulary.
-    Three,
-    /// Session-metadata reads, pages, and replacement vocabulary.
-    Four,
-    /// One-source conversation-import vocabulary.
-    Five,
-    /// Forward-only session-defaults replacement vocabulary.
-    Six,
-    /// Owner turn-reconciliation vocabulary.
-    Seven,
-    /// Client turn-control vocabulary.
-    Eight,
-    /// Session system-prompt vocabulary.
-    Nine,
-    /// Imported-frontier session-creation vocabulary.
-    Ten,
-    /// Review-workflow command and read vocabulary.
-    Eleven,
-    /// Ephemeral provider-text presentation events on follow streams.
-    Twelve,
-    /// Client-selectable input delivery.
-    Thirteen,
-    /// Unified conversation-listing vocabulary.
-    Sixteen,
-    /// Imported-conversation inspection vocabulary.
-    Seventeen,
-    /// Daemon-resolved session-template creation and listing vocabulary.
-    Eighteen,
-    /// Provider-reported model-call token-usage vocabulary.
-    Nineteen,
-    /// Deployment model-alias catalog vocabulary.
-    TwentyOne,
-    /// Explicit context compaction and summary provenance.
-    TwentyTwo,
 }
 
 impl ProtocolVersion {
-    /// Returns the integer carried in every wire frame.
-    pub const fn as_u64(self) -> u64 {
-        match self {
-            Self::One => PROTOCOL_VERSION,
-            Self::Two => IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
-            Self::Three => TOOL_LOOP_PROTOCOL_VERSION,
-            Self::Four => SESSION_METADATA_PROTOCOL_VERSION,
-            Self::Five => CONVERSATION_IMPORT_PROTOCOL_VERSION,
-            Self::Six => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
-            Self::Seven => TURN_RECONCILIATION_PROTOCOL_VERSION,
-            Self::Eight => TURN_CONTROL_PROTOCOL_VERSION,
-            Self::Nine => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
-            Self::Ten => IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION,
-            Self::Eleven => REVIEW_WORKFLOW_PROTOCOL_VERSION,
-            Self::Twelve => PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
-            Self::Thirteen => INPUT_DELIVERY_PROTOCOL_VERSION,
-            Self::Sixteen => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
-            Self::Seventeen => IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
-            Self::Eighteen => SESSION_TEMPLATE_PROTOCOL_VERSION,
-            Self::Nineteen => MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
-            Self::TwentyOne => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
-            Self::TwentyTwo => CONTEXT_COMPACTION_PROTOCOL_VERSION,
-        }
-    }
-
     const fn from_u64(value: u64) -> Option<Self> {
         match value {
             PROTOCOL_VERSION => Some(Self::One),
-            IMPORTED_TRANSCRIPT_PROTOCOL_VERSION => Some(Self::Two),
-            TOOL_LOOP_PROTOCOL_VERSION => Some(Self::Three),
-            SESSION_METADATA_PROTOCOL_VERSION => Some(Self::Four),
-            CONVERSATION_IMPORT_PROTOCOL_VERSION => Some(Self::Five),
-            MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION => Some(Self::Six),
-            TURN_RECONCILIATION_PROTOCOL_VERSION => Some(Self::Seven),
-            TURN_CONTROL_PROTOCOL_VERSION => Some(Self::Eight),
-            SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION => Some(Self::Nine),
-            IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION => Some(Self::Ten),
-            REVIEW_WORKFLOW_PROTOCOL_VERSION => Some(Self::Eleven),
-            PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION => Some(Self::Twelve),
-            INPUT_DELIVERY_PROTOCOL_VERSION => Some(Self::Thirteen),
-            UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION => Some(Self::Sixteen),
-            IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION => Some(Self::Seventeen),
-            SESSION_TEMPLATE_PROTOCOL_VERSION => Some(Self::Eighteen),
-            MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION => Some(Self::Nineteen),
-            MODEL_ALIAS_CATALOG_PROTOCOL_VERSION => Some(Self::TwentyOne),
-            CONTEXT_COMPACTION_PROTOCOL_VERSION => Some(Self::TwentyTwo),
             _ => None,
         }
     }
@@ -233,7 +45,7 @@ impl Serialize for ProtocolVersion {
     where
         SerializerT: Serializer,
     {
-        serializer.serialize_u64(self.as_u64())
+        serializer.serialize_u64(PROTOCOL_VERSION)
     }
 }
 
@@ -864,24 +676,20 @@ impl From<SystemPromptText> for String {
     }
 }
 
-/// Presence-checked optional system-prompt member.
+/// Presence-checked required system-prompt member.
 ///
-/// Versions nine and above require the member: JSON null states explicitly
-/// that the complete defaults carry no prompt, and a string carries the exact
-/// bounded prompt. Versions one through eight omit the member entirely; frame
-/// validation rejects a present member below version nine and an absent
-/// member at version nine and above.
+/// JSON null states explicitly that no prompt is configured and a JSON string
+/// states the complete checked bounded prompt.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SystemPromptMember(Option<Option<SystemPromptText>>);
 
 impl SystemPromptMember {
-    /// Omits the member for a frame at versions one through eight.
+    /// Marks a missing member during deserialization.
     pub const fn absent() -> Self {
         Self(None)
     }
 
-    /// Carries the explicit null-or-text member required at versions nine and
-    /// above.
+    /// Carries the explicit required null-or-text member.
     pub const fn present(value: Option<SystemPromptText>) -> Self {
         Self(Some(value))
     }
@@ -984,7 +792,7 @@ impl fmt::Display for CanonicalValueError {
             Self::CommandId => "command identity is a reserved sentinel",
             Self::Decimal => "unsigned integer is not canonical decimal text",
             Self::RequestId => "client request identity must be nonzero",
-            Self::Content => "content fragment exceeds the version-one UTF-8 byte bound",
+            Self::Content => "content fragment exceeds the process-protocol UTF-8 byte bound",
             Self::Metadata => "session metadata value is invalid",
             Self::SystemPrompt => "session system prompt is empty, oversized, or contains U+0000",
         })
@@ -1652,8 +1460,7 @@ pub enum ClientRequest {
         command_id: CommandId,
         /// Initial session model-selection defaults.
         initial_model_selection: ModelSelection,
-        /// Optional initial system prompt; required null-or-text member at
-        /// version nine, absent below it.
+        /// Optional initial system prompt; required null-or-text member.
         #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
         system_prompt: SystemPromptMember,
     },
@@ -1680,8 +1487,7 @@ pub enum ClientRequest {
         /// steering.
         #[serde(deserialize_with = "deserialize_required_nullable")]
         expected_defaults_version: Option<CanonicalU64>,
-        /// Version-thirteen delivery treatment. Absence is the retained
-        /// start-when-idle default.
+        /// Optional delivery treatment; absence selects the start-when-idle default.
         #[serde(
             default,
             deserialize_with = "deserialize_present_input_delivery",
@@ -1769,8 +1575,7 @@ pub enum ClientRequest {
         model_selection: ModelSelection,
         /// Complete replacement dangerous-tool blanket-auto posture.
         dangerous_tool_auto_approval: bool,
-        /// Complete replacement system prompt; required null-or-text member
-        /// at version nine, absent below it.
+        /// Complete replacement system prompt; required null-or-text member.
         #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
         system_prompt: SystemPromptMember,
     },
@@ -1958,50 +1763,6 @@ pub enum ToolDecision {
 }
 
 impl ClientRequest {
-    const fn minimum_protocol_version(&self) -> u64 {
-        match self {
-            Self::ListSessionMetadata { .. }
-            | Self::ReadSessionMetadata { .. }
-            | Self::ReplaceSessionMetadata { .. } => SESSION_METADATA_PROTOCOL_VERSION,
-            Self::ImportConversation { .. } => CONVERSATION_IMPORT_PROTOCOL_VERSION,
-            Self::ReplaceSessionDefaults { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
-            Self::ReconcileTurn { .. } => TURN_RECONCILIATION_PROTOCOL_VERSION,
-            Self::CreateReviewTarget { .. }
-            | Self::StartReviewRun { .. }
-            | Self::RecordReviewFindings { .. }
-            | Self::ActivateReviewPass { .. }
-            | Self::RecordReviewFindingDisposition { .. }
-            | Self::ReserveReviewExternalLink { .. }
-            | Self::AttachReviewExternalLink { .. }
-            | Self::ReadReviewTarget { .. }
-            | Self::ReadReviewRun { .. }
-            | Self::ReadReviewFinding { .. }
-            | Self::ListReviewFindings { .. } => REVIEW_WORKFLOW_PROTOCOL_VERSION,
-            Self::StopTurn { .. } | Self::DecideToolRequest { .. } => TURN_CONTROL_PROTOCOL_VERSION,
-            Self::CreateSessionFromTemplate { .. } | Self::ListTemplates {} => {
-                SESSION_TEMPLATE_PROTOCOL_VERSION
-            }
-            Self::ListConversations { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
-            Self::CompactSession { .. } => CONTEXT_COMPACTION_PROTOCOL_VERSION,
-            Self::ListModelAliases {} => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
-            Self::ReadSessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
-            Self::CreateSessionFromImportedFrontier { .. } => {
-                IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION
-            }
-            Self::ReadImportedConversation { .. } => {
-                IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
-            }
-            Self::SubmitInput {
-                delivery: Some(_), ..
-            } => INPUT_DELIVERY_PROTOCOL_VERSION,
-            Self::CreateSession { .. }
-            | Self::ListSessions {}
-            | Self::SubmitInput { delivery: None, .. }
-            | Self::ReadTranscript { .. }
-            | Self::FollowSession { .. } => PROTOCOL_VERSION,
-        }
-    }
-
     fn validate(&self) -> Result<(), FrameValidationError> {
         if let Self::SubmitInput {
             expected_defaults_version,
@@ -2093,7 +1854,7 @@ pub struct ClientFrame {
 }
 
 impl ClientFrame {
-    /// Constructs a current-version frame with a correlated request identity.
+    /// Constructs a single-version frame with a correlated request identity.
     pub fn try_new(
         request_id: RequestId,
         request: ClientRequest,
@@ -2141,36 +1902,19 @@ impl ClientFrame {
         if !self.request_id.is_correlated() {
             return Err(FrameValidationError::UncorrelatedClientRequest);
         }
-        if self.version.as_u64() < self.request.minimum_protocol_version() {
-            return Err(FrameValidationError::RequestRequiresNewerVersion);
-        }
         if let ClientRequest::CreateSession { system_prompt, .. }
         | ClientRequest::ReplaceSessionDefaults { system_prompt, .. } = &self.request
         {
-            validate_system_prompt_member(
-                self.version,
-                system_prompt,
-                FrameValidationError::RequestRequiresNewerVersion,
-            )?;
+            validate_system_prompt_member(system_prompt)?;
         }
         self.request.validate()
     }
 }
 
-/// Requires the presence-checked system-prompt member exactly at version nine
-/// and above: an absent member there is a missing required field, while a
-/// present member below version nine belongs to a newer closed vocabulary.
-fn validate_system_prompt_member(
-    version: ProtocolVersion,
-    member: &SystemPromptMember,
-    requires_newer: FrameValidationError,
-) -> Result<(), FrameValidationError> {
-    if version.as_u64() >= SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION {
-        if member.is_absent() {
-            return Err(FrameValidationError::SystemPromptShape);
-        }
-    } else if !member.is_absent() {
-        return Err(requires_newer);
+/// Requires the presence-checked system-prompt member.
+fn validate_system_prompt_member(member: &SystemPromptMember) -> Result<(), FrameValidationError> {
+    if member.is_absent() {
+        return Err(FrameValidationError::SystemPromptShape);
     }
     Ok(())
 }
@@ -2205,7 +1949,7 @@ impl<'de> Deserialize<'de> for ClientFrame {
 pub enum ErrorCode {
     /// JSON, UTF-8, framing, field, or size validation failed.
     MalformedFrame,
-    /// Client version is not retained by this implementation.
+    /// Frame version is not admitted by this implementation.
     UnsupportedVersion,
     /// A boundary value cannot construct the application input.
     InvalidRequest,
@@ -2377,33 +2121,6 @@ pub enum RejectionDetail {
     },
 }
 
-impl RejectionDetail {
-    const fn minimum_protocol_version(self) -> u64 {
-        match self {
-            Self::DefaultsVersionExhausted { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
-            Self::ActiveTurnMismatch { .. }
-            | Self::NoActiveTurn { .. }
-            | Self::TurnNotAwaitingReconciliation { .. } => TURN_RECONCILIATION_PROTOCOL_VERSION,
-            Self::SafePointUnavailableWhileStopping { .. } => INPUT_DELIVERY_PROTOCOL_VERSION,
-            Self::InterruptAlreadyApplied { .. }
-            | Self::InterruptUnavailableWhileAwaitingApproval { .. }
-            | Self::ToolRequestNotFound { .. }
-            | Self::ToolRequestAlreadyResolved { .. }
-            | Self::ToolRequestNotEarliestUndecided { .. }
-            | Self::ToolRequestNotInSession { .. } => TURN_CONTROL_PROTOCOL_VERSION,
-            Self::ImportedConversationNotFound { .. }
-            | Self::ImportedFrontierPositionOutOfRange { .. } => {
-                IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
-            }
-            Self::SessionNotFound { .. }
-            | Self::ActiveTurnPresent { .. }
-            | Self::DefaultsVersionMismatch { .. }
-            | Self::UnknownModelAlias { .. }
-            | Self::AcceptancePositionExhausted { .. } => 1,
-        }
-    }
-}
-
 /// Presence-checked rejection detail on an error message.
 ///
 /// An absent value omits the JSON member. A present JSON `null` is rejected
@@ -2429,13 +2146,6 @@ impl ErrorDetail {
 
     const fn is_absent(&self) -> bool {
         self.0.is_none()
-    }
-
-    const fn minimum_protocol_version(self) -> u64 {
-        match self.0 {
-            Some(detail) => detail.minimum_protocol_version(),
-            None => 1,
-        }
     }
 }
 
@@ -2802,22 +2512,6 @@ impl<'de> Deserialize<'de> for TurnState {
 }
 
 impl TurnState {
-    const fn minimum_protocol_version(&self) -> u64 {
-        match self {
-            Self::ActiveAwaitingToolApproval { .. }
-            | Self::ActiveAwaitingToolRecovery { .. }
-            | Self::ToolReconciliationRequired { .. } => 3,
-            Self::Queued { .. }
-            | Self::ActiveRunning { .. }
-            | Self::ActiveAwaitingModelCallRecovery { .. }
-            | Self::Failed { .. }
-            | Self::Completed { .. }
-            | Self::Refused { .. }
-            | Self::Cancelled { .. }
-            | Self::ReconciliationRequired { .. } => 1,
-        }
-    }
-
     fn validate(&self) -> Result<(), FrameValidationError> {
         if let Self::Failed {
             terminal_attempt_id: None,
@@ -3045,20 +2739,6 @@ pub enum TranscriptEntry {
     },
 }
 
-impl TranscriptEntry {
-    const fn minimum_protocol_version(&self) -> u64 {
-        match self {
-            Self::ModelIdentityChanged { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
-            Self::AssistantToolUse { .. }
-            | Self::ToolExecutionResult { .. }
-            | Self::ToolDenied { .. }
-            | Self::ToolClosed { .. } => TOOL_LOOP_PROTOCOL_VERSION,
-            Self::Imported { .. } => IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
-            Self::TurnCompleted { .. } | Self::TurnFailed { .. } | Self::TurnCancelled { .. } => 1,
-        }
-    }
-}
-
 /// Metadata for a text-bearing semantic transcript entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -3099,16 +2779,6 @@ pub enum TranscriptTextEntry {
         /// Exact source-speaker attestation.
         source_speaker: ImportedSourceSpeaker,
     },
-}
-
-impl TranscriptTextEntry {
-    const fn minimum_protocol_version(&self) -> u64 {
-        match self {
-            Self::Imported { .. } => IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
-            Self::ContextSummary { .. } => CONTEXT_COMPACTION_PROTOCOL_VERSION,
-            Self::User { .. } | Self::Assistant { .. } => PROTOCOL_VERSION,
-        }
-    }
 }
 
 /// Durable model-call terminal disposition.
@@ -3278,24 +2948,6 @@ pub enum SessionEvent {
     },
 }
 
-impl SessionEvent {
-    const fn minimum_protocol_version(&self) -> u64 {
-        match self {
-            Self::ToolBatchTransition { .. } | Self::TurnToolReconciliationRequired { .. } => 3,
-            Self::ContextCompacted { .. } => CONTEXT_COMPACTION_PROTOCOL_VERSION,
-            Self::SessionCreated {}
-            | Self::InputAccepted { .. }
-            | Self::TurnActivated { .. }
-            | Self::ModelCallTransition { .. }
-            | Self::TurnCompleted { .. }
-            | Self::TurnFailed { .. }
-            | Self::TurnRefused { .. }
-            | Self::TurnCancelled { .. }
-            | Self::TurnReconciliationRequired { .. } => 1,
-        }
-    }
-}
-
 /// Closed versioned server message family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -3449,8 +3101,7 @@ pub enum ServerMessage {
         model_selection: ModelSelection,
         /// Complete committed dangerous-tool blanket-auto posture.
         dangerous_tool_auto_approval: bool,
-        /// Complete committed system prompt; required null-or-text member at
-        /// version nine, absent below it.
+        /// Complete committed system prompt; required null-or-text member.
         #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
         system_prompt: SystemPromptMember,
     },
@@ -3723,71 +3374,6 @@ pub enum ServerMessage {
 }
 
 impl ServerMessage {
-    /// Returns the oldest protocol version whose closed vocabulary contains
-    /// this exact message.
-    pub const fn minimum_protocol_version(&self) -> u64 {
-        match self {
-            Self::TranscriptTurn { state, .. } => state.minimum_protocol_version(),
-            Self::TranscriptModelCallUsage { .. } | Self::TranscriptModelCallsEnd { .. } => {
-                MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION
-            }
-            Self::TranscriptEntry { entry, .. } => entry.minimum_protocol_version(),
-            Self::TranscriptTextEntry { entry, .. } => entry.minimum_protocol_version(),
-            Self::SessionEvent { event, .. } => event.minimum_protocol_version(),
-            Self::ProviderTextDelta { .. } => PROVIDER_TEXT_STREAMING_PROTOCOL_VERSION,
-            Self::SessionMetadataPageStart {}
-            | Self::SessionMetadataSummary { .. }
-            | Self::SessionMetadataPageEnd { .. }
-            | Self::SessionMetadata { .. }
-            | Self::SessionMetadataReplaced { .. } => SESSION_METADATA_PROTOCOL_VERSION,
-            Self::ConversationImportInserted { .. }
-            | Self::ConversationImportAlreadyImported { .. } => {
-                CONVERSATION_IMPORT_PROTOCOL_VERSION
-            }
-            Self::SessionDefaultsReplaced { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
-            Self::ReviewTargetCreated { .. }
-            | Self::ReviewRunStarted { .. }
-            | Self::ReviewFindingsRecorded { .. }
-            | Self::ReviewFindingDispositionRecorded { .. }
-            | Self::ReviewExternalLinkReserved { .. }
-            | Self::ReviewPassActivated { .. }
-            | Self::ReviewExternalLinkAttached { .. }
-            | Self::ReviewTarget { .. }
-            | Self::ReviewRun { .. }
-            | Self::ReviewFinding { .. }
-            | Self::ReviewFindingsStart { .. }
-            | Self::ReviewFindingItem { .. }
-            | Self::ReviewFindingsEnd { .. } => REVIEW_WORKFLOW_PROTOCOL_VERSION,
-            Self::ImportedConversationStart { .. }
-            | Self::ImportedConversationEntry { .. }
-            | Self::ImportedConversationEnd { .. } => {
-                IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
-            }
-            Self::ToolRequestDecided { .. } => TURN_CONTROL_PROTOCOL_VERSION,
-            Self::TemplatesStart {} | Self::TemplateSummary { .. } | Self::TemplatesEnd { .. } => {
-                SESSION_TEMPLATE_PROTOCOL_VERSION
-            }
-            Self::ConversationPageStart {}
-            | Self::ConversationSummary { .. }
-            | Self::ConversationPageEnd { .. } => UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION,
-            Self::SessionCompacted { .. } => CONTEXT_COMPACTION_PROTOCOL_VERSION,
-            Self::ModelAliasesStart {}
-            | Self::ModelAliasSummary { .. }
-            | Self::ModelAliasesEnd { .. } => MODEL_ALIAS_CATALOG_PROTOCOL_VERSION,
-            Self::SessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
-            Self::SteeringSubmitted { .. } => INPUT_DELIVERY_PROTOCOL_VERSION,
-            Self::Error { detail, .. } => detail.minimum_protocol_version(),
-            Self::SessionCreated { .. }
-            | Self::InputSubmitted { .. }
-            | Self::SessionsStart {}
-            | Self::SessionSummary { .. }
-            | Self::SessionsEnd { .. }
-            | Self::TranscriptSnapshotStart { .. }
-            | Self::TranscriptContent { .. }
-            | Self::TranscriptSnapshotEnd { .. } => 1,
-        }
-    }
-
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
             Self::SessionMetadataSummary {
@@ -3896,7 +3482,7 @@ pub struct ServerFrame {
 }
 
 impl ServerFrame {
-    /// Constructs a current-version response frame.
+    /// Constructs a single-version response frame.
     pub fn try_new(
         request_id: RequestId,
         message: ServerMessage,
@@ -3935,18 +3521,11 @@ impl ServerFrame {
     }
 
     fn validate(&self) -> Result<(), FrameValidationError> {
-        if self.version.as_u64() < self.message.minimum_protocol_version() {
-            return Err(FrameValidationError::MessageRequiresNewerVersion);
-        }
         if let ServerMessage::TranscriptTurn { state, .. } = &self.message {
             state.validate()?;
         }
         if let ServerMessage::SessionDefaultsReplaced { system_prompt, .. } = &self.message {
-            validate_system_prompt_member(
-                self.version,
-                system_prompt,
-                FrameValidationError::MessageRequiresNewerVersion,
-            )?;
+            validate_system_prompt_member(system_prompt)?;
         }
         self.message.validate()?;
         match &self.message {
@@ -4017,10 +3596,6 @@ impl<'de> Deserialize<'de> for ServerFrame {
 pub enum FrameValidationError {
     /// In-memory frame used another version.
     UnsupportedVersion,
-    /// A retained old version cannot encode a newer closed message variant.
-    MessageRequiresNewerVersion,
-    /// A retained old version cannot carry a newer closed request variant.
-    RequestRequiresNewerVersion,
     /// A client request used reserved correlation identity zero.
     UncorrelatedClientRequest,
     /// A success response used reserved correlation identity zero.
@@ -4035,7 +3610,6 @@ pub enum FrameValidationError {
     MetadataShape,
     /// A unified conversation-listing frame carried an invalid shape.
     ConversationListShape,
-    /// A version-nine frame omitted its required system-prompt member.
     SystemPromptShape,
     /// An imported-frontier request carried a nonpositive position.
     ImportedFrontierShape,
@@ -4059,8 +3633,6 @@ impl fmt::Display for FrameValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::UnsupportedVersion => "frame version is unsupported",
-            Self::MessageRequiresNewerVersion => "server message requires a newer protocol version",
-            Self::RequestRequiresNewerVersion => "client request requires a newer protocol version",
             Self::UncorrelatedClientRequest => "client request identity is uncorrelated",
             Self::UncorrelatedSuccess => "successful server message is uncorrelated",
             Self::UncorrelatedApplicationError => "application server error is uncorrelated",
@@ -4070,7 +3642,7 @@ impl fmt::Display for FrameValidationError {
             Self::ConversationListShape => {
                 "unified conversation-listing frame shape is inconsistent"
             }
-            Self::SystemPromptShape => "version-nine frame omits its required system-prompt member",
+            Self::SystemPromptShape => "frame omits its required system-prompt member",
             Self::ImportedFrontierShape => "imported frontier position is not positive",
             Self::ContextCompactionShape => "compaction through position is not positive",
             Self::ImportedConversationEntryShape => {
@@ -4132,16 +3704,15 @@ impl fmt::Display for FrameDecodeError {
             FrameDecodeErrorKind::MalformedFrame => {
                 formatter.write_str("process-protocol frame is malformed")
             }
-            FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1 through 13, 16 through 19, 21, and 22",
-            ),
+            FrameDecodeErrorKind::UnsupportedVersion => formatter
+                .write_str("process-protocol version is unsupported; supported version is 1"),
         }
     }
 }
 
 impl Error for FrameDecodeError {}
 
-/// Outgoing frame could not be encoded within the admitted version boundary.
+/// Outgoing frame could not be encoded within the protocol boundary.
 #[derive(Debug)]
 pub enum FrameEncodeError {
     /// In-memory value violated its closed frame shape.
@@ -4342,27 +3913,7 @@ fn probe_header(
     if integer_spelling.is_empty() || !integer_spelling.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(FrameDecodeError::malformed(request_id));
     }
-    if !matches!(
-        version_spelling,
-        "1" | "2"
-            | "3"
-            | "4"
-            | "5"
-            | "6"
-            | "7"
-            | "8"
-            | "9"
-            | "10"
-            | "11"
-            | "12"
-            | "13"
-            | "16"
-            | "17"
-            | "18"
-            | "19"
-            | "21"
-            | "22"
-    ) {
+    if version_spelling != "1" {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
             request_id,
@@ -4466,24 +4017,6 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
     }
     match probe.version?.get() {
         "1" => Some(ProtocolVersion::One),
-        "2" => Some(ProtocolVersion::Two),
-        "3" => Some(ProtocolVersion::Three),
-        "4" => Some(ProtocolVersion::Four),
-        "5" => Some(ProtocolVersion::Five),
-        "6" => Some(ProtocolVersion::Six),
-        "7" => Some(ProtocolVersion::Seven),
-        "8" => Some(ProtocolVersion::Eight),
-        "9" => Some(ProtocolVersion::Nine),
-        "10" => Some(ProtocolVersion::Ten),
-        "11" => Some(ProtocolVersion::Eleven),
-        "12" => Some(ProtocolVersion::Twelve),
-        "13" => Some(ProtocolVersion::Thirteen),
-        "16" => Some(ProtocolVersion::Sixteen),
-        "17" => Some(ProtocolVersion::Seventeen),
-        "18" => Some(ProtocolVersion::Eighteen),
-        "19" => Some(ProtocolVersion::Nineteen),
-        "21" => Some(ProtocolVersion::TwentyOne),
-        "22" => Some(ProtocolVersion::TwentyTwo),
         _ => None,
     }
 }
@@ -4524,28 +4057,24 @@ pub fn recover_bounded_client_protocol_version(content: &[u8]) -> Option<Protoco
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTEXT_COMPACTION_PROTOCOL_VERSION, CanonicalU64, CanonicalUuid, ClientFrame,
-        ClientRequest, CommandId, ContentFragment, ConversationCursor, ConversationImportFormat,
-        ConversationImportSource, ConversationOrigin, ConversationOriginFilter,
-        ConversationSummary, CurrentModelCall, CurrentModelCallState, ErrorCode, ErrorDetail,
-        FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
-        FrameEncodeError, FrameValidationError, IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION,
-        ImportedContentKind, ImportedConversationSourceFormat, ImportedSessionRelationship,
-        ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+        CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
+        ConversationCursor, ConversationImportFormat, ConversationImportSource, ConversationOrigin,
+        ConversationOriginFilter, ConversationSummary, CurrentModelCall, CurrentModelCallState,
+        ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
+        FrameDecodeErrorKind, FrameEncodeError, FrameValidationError, ImportedContentKind,
+        ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
+        ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
         MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
         MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
-        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
-        MODEL_ALIAS_CATALOG_PROTOCOL_VERSION, MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION,
-        MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState,
-        ModelCallTokenUsage, ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail,
-        RequestId, ReviewTargetSubject, SESSION_METADATA_PROTOCOL_VERSION,
-        SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, SESSION_TEMPLATE_PROTOCOL_VERSION, ServerFrame,
-        ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
-        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-        UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION, decode_client_line, decode_server_line,
-        encode_client_line, encode_server_line,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
+        MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
+        ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId,
+        ReviewTargetSubject, ServerFrame, ServerMessage, SessionEvent, SessionMetadata,
+        SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TranscriptEntry,
+        TranscriptTextEntry, TurnState, decode_client_line, decode_server_line, encode_client_line,
+        encode_server_line,
     };
     use uuid::Uuid;
 
@@ -4624,11 +4153,7 @@ mod tests {
         let error = decode_client_line(&line(&json)).expect_err("version must be unsupported");
         assert_eq!(error.kind(), FrameDecodeErrorKind::UnsupportedVersion);
         assert_eq!(error.request_id().value(), 9);
-        assert!(
-            error
-                .to_string()
-                .contains("supported versions are 1 through 13, 16 through 19, 21, and 22")
-        );
+        assert!(error.to_string().contains("supported version is 1"));
     }
 
     fn unsupported_version_with_nested_object_payload(payload_depth: usize) -> String {
@@ -4660,19 +4185,33 @@ mod tests {
     }
 
     #[track_caller]
+    fn assert_client_request_round_trip(
+        request_id: RequestId,
+        request: ClientRequest,
+        expected_request_json: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let request_id_value = request_id.value();
+        let frame = ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, request)?;
+        let encoded = encode_client_line(&frame)?;
+        let expected = format!(
+            "{{\"version\":{PROTOCOL_VERSION},\"request_id\":\"{request_id_value}\",\"request\":{expected_request_json}}}\n"
+        );
+        assert_eq!(String::from_utf8(encoded.clone())?, expected);
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[track_caller]
     fn assert_server_message_round_trip(
         request_id: RequestId,
         message: ServerMessage,
         expected_message_json: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let request_id_value = request_id.value();
-        let minimum = message.minimum_protocol_version();
-        let version = ProtocolVersion::from_u64(minimum)
-            .expect("every closed message names one admitted minimum version");
-        let frame = ServerFrame::try_new_for_version(version, request_id, message)?;
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request_id, message)?;
         let encoded = encode_server_line(&frame)?;
         let expected = format!(
-            "{{\"version\":{minimum},\"request_id\":\"{request_id_value}\",\"message\":{}}}\n",
+            "{{\"version\":{PROTOCOL_VERSION},\"request_id\":\"{request_id_value}\",\"message\":{}}}\n",
             expected_message_json
         );
         assert_eq!(String::from_utf8(encoded.clone())?, expected);
@@ -4708,10 +4247,10 @@ mod tests {
     }
 
     #[test]
-    fn inv033_version_two_reuses_the_closed_request_vocabulary()
+    fn inv033_read_transcript_round_trips_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Two,
+            ProtocolVersion::One,
             request(7)?,
             ClientRequest::ReadTranscript {
                 session_id: uuid(1),
@@ -4719,14 +4258,14 @@ mod tests {
         )?;
         let encoded = encode_client_line(&frame)?;
 
-        assert_eq!(frame.version(), ProtocolVersion::Two);
-        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":2,"));
+        assert_eq!(frame.version(), ProtocolVersion::One);
+        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":1,"));
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
     }
 
     #[test]
-    fn inv033_imported_text_entries_exist_only_in_version_two()
+    fn inv033_imported_text_entries_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let imported_text = ServerMessage::TranscriptTextEntry {
             entry_index: CanonicalU64::new(0),
@@ -4740,13 +4279,8 @@ mod tests {
                 },
             },
         };
-        assert_eq!(
-            ServerFrame::try_new(request(8)?, imported_text.clone())
-                .expect_err("version one must retain its native-only vocabulary"),
-            FrameValidationError::MessageRequiresNewerVersion
-        );
         let text_frame =
-            ServerFrame::try_new_for_version(ProtocolVersion::Two, request(8)?, imported_text)?;
+            ServerFrame::try_new_for_version(ProtocolVersion::One, request(8)?, imported_text)?;
         let encoded_text = encode_server_line(&text_frame)?;
         assert!(String::from_utf8(encoded_text.clone())?.contains(
             r#""entry":{"type":"imported","imported_conversation_id":"00000000-0000-0000-0000-000000000003","imported_entry_id":"00000000-0000-0000-0000-000000000004","source_speaker":{"type":"attested","speaker":"user"}}"#
@@ -4756,7 +4290,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_imported_conservative_entries_exist_only_in_version_two()
+    fn inv033_imported_conservative_entries_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let imported_conservative = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(1),
@@ -4769,13 +4303,8 @@ mod tests {
                 content_kind: ImportedContentKind::ToolResult,
             },
         };
-        assert_eq!(
-            ServerFrame::try_new(request(9)?, imported_conservative.clone())
-                .expect_err("version one must retain its native-only vocabulary"),
-            FrameValidationError::MessageRequiresNewerVersion
-        );
         let conservative = ServerFrame::try_new_for_version(
-            ProtocolVersion::Two,
+            ProtocolVersion::One,
             request(9)?,
             imported_conservative,
         )?;
@@ -4827,7 +4356,7 @@ mod tests {
     #[test]
     fn inv033_unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
-        assert_unsupported_version("15");
+        assert_unsupported_version("2");
         assert_unsupported_version("18446744073709551616");
         assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
@@ -4855,7 +4384,7 @@ mod tests {
     #[test]
     fn inv033_nested_duplicates_are_malformed_before_unsupported_version() {
         let error = decode_client_line(&line(
-            r#"{"version":3,"request_id":"9","request":{"future":1,"future":2}}"#,
+            r#"{"version":1,"request_id":"9","request":{"future":1,"future":2}}"#,
         ))
         .expect_err("nested duplicate members are malformed for every version");
         assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
@@ -4865,7 +4394,7 @@ mod tests {
     #[test]
     fn inv033_duplicate_top_level_members_are_malformed_before_classification() {
         let duplicate_version = decode_client_line(&line(
-            r#"{"version":1,"version":2,"request_id":"9","request":{"type":"list_sessions"}}"#,
+            r#"{"version":1,"version":1,"request_id":"9","request":{"type":"list_sessions"}}"#,
         ))
         .expect_err("a duplicate version is malformed");
         assert_eq!(
@@ -4875,7 +4404,7 @@ mod tests {
         assert_eq!(duplicate_version.request_id().value(), 9);
 
         let reversed_version = decode_client_line(&line(
-            r#"{"version":2,"version":1,"request_id":"9","request":{"type":"list_sessions"}}"#,
+            r#"{"version":1,"version":1,"request_id":"9","request":{"type":"list_sessions"}}"#,
         ))
         .expect_err("version order cannot alter duplicate classification");
         assert_eq!(
@@ -5338,7 +4867,7 @@ mod tests {
             ClientRequest::CreateSession {
                 command_id: command(4)?,
                 initial_model_selection: model,
-                system_prompt: SystemPromptMember::absent(),
+                system_prompt: SystemPromptMember::present(None),
             },
         )?;
         assert_client_request_current_version(request(2)?, ClientRequest::ListSessions {})?;
@@ -5368,68 +4897,50 @@ mod tests {
     }
 
     #[test]
-    fn inv033_version_four_metadata_requests_have_exact_closed_shapes()
+    fn inv033_metadata_list_request_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
-        let cases = [
-            (
-                ClientRequest::ListSessionMetadata {
-                    required_tags: vec![String::from("daily"), String::from("work")],
-                    title_contains: Some(String::from("Plan")),
-                    include_archived: true,
-                    page_size: CanonicalU64::new(25),
-                    after_session_id: Some(uuid(6)),
-                },
-                r#"{"type":"list_session_metadata","required_tags":["daily","work"],"title_contains":"Plan","include_archived":true,"page_size":"25","after_session_id":"00000000-0000-0000-0000-000000000006"}"#,
-            ),
-            (
-                ClientRequest::ReadSessionMetadata {
-                    session_id: uuid(6),
-                },
-                r#"{"type":"read_session_metadata","session_id":"00000000-0000-0000-0000-000000000006"}"#,
-            ),
-            (
-                ClientRequest::ReplaceSessionMetadata {
-                    command_id: command(5)?,
-                    session_id: uuid(6),
-                    metadata: metadata(true)?,
-                },
-                r#"{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":"Planning","tags":["daily","work"],"attributes":{"run":"17","trigger":""},"archived":true}}"#,
-            ),
-        ];
-
-        for (index, (request_value, request_json)) in cases.into_iter().enumerate() {
-            for retained in [
-                ProtocolVersion::One,
-                ProtocolVersion::Two,
-                ProtocolVersion::Three,
-            ] {
-                assert_eq!(
-                    ClientFrame::try_new_for_version(
-                        retained,
-                        request(u64::try_from(index + 1)?)?,
-                        request_value.clone(),
-                    ),
-                    Err(FrameValidationError::RequestRequiresNewerVersion)
-                );
-            }
-            let request_id = request(u64::try_from(index + 1)?)?;
-            let frame =
-                ClientFrame::try_new_for_version(ProtocolVersion::Four, request_id, request_value)?;
-            let encoded = encode_client_line(&frame)?;
-            let expected = format!(
-                "{{\"version\":{SESSION_METADATA_PROTOCOL_VERSION},\"request_id\":\"{}\",\"request\":{request_json}}}\n",
-                request_id.value()
-            );
-            assert_eq!(String::from_utf8(encoded.clone())?, expected);
-            assert_eq!(decode_client_line(&encoded)?, frame);
-        }
-        Ok(())
+        assert_client_request_round_trip(
+            request(1)?,
+            ClientRequest::ListSessionMetadata {
+                required_tags: vec![String::from("daily"), String::from("work")],
+                title_contains: Some(String::from("Plan")),
+                include_archived: true,
+                page_size: CanonicalU64::new(25),
+                after_session_id: Some(uuid(6)),
+            },
+            r#"{"type":"list_session_metadata","required_tags":["daily","work"],"title_contains":"Plan","include_archived":true,"page_size":"25","after_session_id":"00000000-0000-0000-0000-000000000006"}"#,
+        )
     }
 
-    /// INV-033: the unified listing request is admitted only from version
-    /// sixteen and keeps its exact closed shape across one round trip.
     #[test]
-    fn inv033_version_sixteen_list_conversations_request_has_an_exact_closed_shape()
+    fn inv033_metadata_read_request_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_client_request_round_trip(
+            request(2)?,
+            ClientRequest::ReadSessionMetadata {
+                session_id: uuid(6),
+            },
+            r#"{"type":"read_session_metadata","session_id":"00000000-0000-0000-0000-000000000006"}"#,
+        )
+    }
+
+    #[test]
+    fn inv033_metadata_replacement_request_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_client_request_round_trip(
+            request(3)?,
+            ClientRequest::ReplaceSessionMetadata {
+                command_id: command(5)?,
+                session_id: uuid(6),
+                metadata: metadata(true)?,
+            },
+            r#"{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":"Planning","tags":["daily","work"],"attributes":{"run":"17","trigger":""},"archived":true}}"#,
+        )
+    }
+
+    /// INV-033: the unified listing request has one exact closed shape.
+    #[test]
+    fn inv033_list_conversations_request_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::ListConversations {
@@ -5442,22 +4953,14 @@ mod tests {
                 uuid(6),
             )),
         };
-        assert_eq!(
-            ClientFrame::try_new_for_version(
-                ProtocolVersion::Twelve,
-                request_id,
-                request_value.clone(),
-            ),
-            Err(FrameValidationError::RequestRequiresNewerVersion)
-        );
 
         let frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::Sixteen, request_id, request_value)?;
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, request_value)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
             format!(
-                "{{\"version\":{UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION},\"request_id\":\"1\",\
+                "{{\"version\":{PROTOCOL_VERSION},\"request_id\":\"1\",\
                  \"request\":{{\"type\":\"list_conversations\",\"title_contains\":\"Plan\",\
                  \"origin\":\"all\",\"include_archived\":true,\"page_size\":\"25\",\
                  \"after\":{{\"origin\":\"imported_conversation\",\
@@ -5473,16 +4976,16 @@ mod tests {
     #[test]
     fn inv033_list_conversations_members_are_required_and_closed() {
         assert_client_malformed(
-            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
         );
         assert_client_malformed(
-            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50"}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50"}}"#,
         );
         assert_client_malformed(
-            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"everything","include_archived":false,"page_size":"50","after":null}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"everything","include_archived":false,"page_size":"50","after":null}}"#,
         );
         assert_client_malformed(
-            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50","after":{"origin":"native_session","conversation_id":"00000000-0000-0000-0000-000000000006","extra":true}}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50","after":{"origin":"native_session","conversation_id":"00000000-0000-0000-0000-000000000006","extra":true}}}"#,
         );
     }
 
@@ -5491,35 +4994,23 @@ mod tests {
     #[test]
     fn inv033_list_conversations_validates_title_and_page_size() {
         assert_client_malformed(
-            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":"","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","title_contains":"","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
         );
         assert_client_malformed(
-            "{\"version\":16,\"request_id\":\"1\",\"request\":{\"type\":\"list_conversations\",\"title_contains\":\"a\\u0000b\",\"origin\":\"all\",\"include_archived\":false,\"page_size\":\"50\",\"after\":null}}",
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"list_conversations\",\"title_contains\":\"a\\u0000b\",\"origin\":\"all\",\"include_archived\":false,\"page_size\":\"50\",\"after\":null}}",
         );
         assert_client_malformed(
-            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"0","after":null}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"0","after":null}}"#,
         );
         assert_client_malformed(
-            r#"{"version":16,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"101","after":null}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"101","after":null}}"#,
         );
     }
 
-    /// INV-033: a listing request carried under any retained version one
-    /// through twelve is malformed rather than reinterpreted.
+    /// INV-033: the three unified page messages keep their exact closed
+    /// shapes across round trips.
     #[test]
-    fn inv033_list_conversations_is_rejected_below_version_sixteen() {
-        assert_client_malformed(
-            r#"{"version":12,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
-        );
-        assert_client_malformed(
-            r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
-        );
-    }
-
-    /// INV-033: the three unified page messages exist only from version
-    /// sixteen and keep their exact closed shapes across round trips.
-    #[test]
-    fn inv033_version_sixteen_conversation_page_messages_have_exact_closed_shapes()
+    fn inv033_conversation_page_messages_have_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
@@ -5589,10 +5080,10 @@ mod tests {
     #[test]
     fn inv033_conversation_page_end_shape_is_bounded() {
         assert_server_malformed(
-            r#"{"version":16,"request_id":"1","message":{"type":"conversation_page_end","conversation_count":"0","next_after":{"origin":"native_session","conversation_id":"00000000-0000-0000-0000-000000000001"}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"conversation_page_end","conversation_count":"0","next_after":{"origin":"native_session","conversation_id":"00000000-0000-0000-0000-000000000001"}}}"#,
         );
         assert_server_malformed(
-            r#"{"version":16,"request_id":"1","message":{"type":"conversation_page_end","conversation_count":"101","next_after":null}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"conversation_page_end","conversation_count":"101","next_after":null}}"#,
         );
     }
 
@@ -5601,19 +5092,19 @@ mod tests {
     #[test]
     fn inv033_conversation_summary_shapes_are_validated() {
         assert_server_malformed(
-            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"native_session","session_id":"00000000-0000-0000-0000-000000000001","title":"","archived":false,"defaults_version":"1"}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"native_session","session_id":"00000000-0000-0000-0000-000000000001","title":"","archived":false,"defaults_version":"1"}}}"#,
         );
         assert_server_malformed(
-            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":"line\nbreak","entry_count":"1","source_format":"codex_rollout_jsonl_v1"}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":"line\nbreak","entry_count":"1","source_format":"codex_rollout_jsonl_v1"}}}"#,
         );
         assert_server_malformed(
-            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":" padded","entry_count":"1","source_format":"codex_rollout_jsonl_v1"}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":" padded","entry_count":"1","source_format":"codex_rollout_jsonl_v1"}}}"#,
         );
         assert_server_malformed(
-            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":null,"entry_count":"0","source_format":"codex_rollout_jsonl_v1"}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"00000000-0000-0000-0000-000000000004","title":null,"entry_count":"0","source_format":"codex_rollout_jsonl_v1"}}}"#,
         );
         assert_server_malformed(
-            r#"{"version":16,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"native_session","session_id":"00000000-0000-0000-0000-000000000001","title":null,"archived":false,"defaults_version":"0"}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"native_session","session_id":"00000000-0000-0000-0000-000000000001","title":null,"archived":false,"defaults_version":"0"}}}"#,
         );
     }
 
@@ -5631,66 +5122,37 @@ mod tests {
             },
         };
         assert_eq!(
-            ServerFrame::try_new_for_version(ProtocolVersion::Sixteen, request(1)?, message)
+            ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message)
                 .expect_err("oversized imported title must fail validation"),
             FrameValidationError::ConversationListShape
         );
         Ok(())
     }
 
-    /// INV-033: the unified page messages are rejected under every retained
-    /// version below sixteen.
     #[test]
-    fn inv033_conversation_page_messages_require_version_sixteen()
-    -> Result<(), Box<dyn std::error::Error>> {
-        assert_eq!(
-            ServerFrame::try_new_for_version(
-                ProtocolVersion::Twelve,
-                request(1)?,
-                ServerMessage::ConversationPageStart {},
-            )
-            .expect_err("a retained version must reject the newer message"),
-            FrameValidationError::MessageRequiresNewerVersion
-        );
-        assert_server_malformed(
-            r#"{"version":12,"request_id":"1","message":{"type":"conversation_page_start"}}"#,
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn inv033_version_five_import_request_preserves_exact_bytes_and_format()
+    fn inv033_import_request_preserves_exact_bytes_and_format()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::ImportConversation {
             format: ConversationImportFormat::ClaudeCodeSessionJsonlV2,
             source: ConversationImportSource::new(vec![0, 255]),
         };
-        assert_eq!(
-            ClientFrame::try_new_for_version(
-                ProtocolVersion::Four,
-                request_id,
-                request_value.clone(),
-            ),
-            Err(FrameValidationError::RequestRequiresNewerVersion)
-        );
 
         let frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::Five, request_id, request_value)?;
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, request_value)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":5,\"request_id\":\"1\",\"request\":{\"type\":\"import_conversation\",\
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"import_conversation\",\
              \"format\":\"claude_code_session_jsonl_v2\",\"source\":\"AP8=\"}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
     }
 
-    /// INV-033: version ten admits imported-frontier session creation with its
-    /// exact closed request shape while the reserved gap remains unsupported.
+    /// INV-033: imported-frontier creation has one exact closed request shape.
     #[test]
-    fn inv033_version_ten_imported_frontier_creation_has_an_exact_closed_shape()
+    fn inv033_imported_frontier_creation_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::CreateSessionFromImportedFrontier {
@@ -5702,32 +5164,22 @@ mod tests {
                 selection_id: uuid(6),
             },
         };
-        assert_eq!(
-            ClientFrame::try_new_for_version(
-                ProtocolVersion::Seven,
-                request_id,
-                request_value.clone(),
-            ),
-            Err(FrameValidationError::RequestRequiresNewerVersion)
-        );
 
         let frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::Ten, request_id, request_value)?;
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, request_value)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":10,\"request_id\":\"1\",\"request\":{\"type\":\"create_session_from_imported_frontier\",\"command_id\":\"00000000-0000-0000-0000-000000000004\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\",\"through_position\":\"2\",\"relationship\":\"resume\",\"initial_model_selection\":{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000006\"}}}\n"
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"create_session_from_imported_frontier\",\"command_id\":\"00000000-0000-0000-0000-000000000004\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\",\"through_position\":\"2\",\"relationship\":\"resume\",\"initial_model_selection\":{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000006\"}}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
     }
 
-    /// INV-033: version eleven retains version ten's imported-frontier request.
     #[test]
-    fn inv033_version_eleven_retains_version_ten_imported_frontier_vocabulary()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_imported_frontier_vocabulary_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Eleven,
+            ProtocolVersion::One,
             request(1)?,
             ClientRequest::CreateSessionFromImportedFrontier {
                 command_id: command(4)?,
@@ -5741,16 +5193,15 @@ mod tests {
         )?;
         let encoded = encode_client_line(&frame)?;
 
-        assert_eq!(frame.version(), ProtocolVersion::Eleven);
+        assert_eq!(frame.version(), ProtocolVersion::One);
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
     }
 
-    /// INV-033: version nineteen adds exact required-nullable token evidence
-    /// without admitting it in the preceding retained vocabulary.
+    /// INV-033: model-call usage has one exact closed shape.
     #[test]
-    fn inv033_version_nineteen_model_call_usage_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_model_call_usage_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
         let request_id = request(1)?;
         let message = ServerMessage::TranscriptModelCallUsage {
             model_call_index: CanonicalU64::new(0),
@@ -5763,18 +5214,13 @@ mod tests {
                 cache_read_input_tokens: Some(CanonicalU64::new(4)),
             },
         };
-        assert_eq!(
-            ServerFrame::try_new_for_version(ProtocolVersion::Twelve, request_id, message.clone()),
-            Err(FrameValidationError::MessageRequiresNewerVersion)
-        );
 
-        let frame =
-            ServerFrame::try_new_for_version(ProtocolVersion::Nineteen, request_id, message)?;
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request_id, message)?;
         let encoded = encode_server_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
             format!(
-                "{{\"version\":{MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION},\"request_id\":\"1\",\"message\":{{\"type\":\"transcript_model_call_usage\",\"model_call_index\":\"0\",\"turn_id\":\"00000000-0000-0000-0000-000000000002\",\"model_call_id\":\"00000000-0000-0000-0000-000000000003\",\"usage\":{{\"input_tokens\":\"10\",\"output_tokens\":\"0\",\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":\"4\"}}}}}}\n"
+                "{{\"version\":{PROTOCOL_VERSION},\"request_id\":\"1\",\"message\":{{\"type\":\"transcript_model_call_usage\",\"model_call_index\":\"0\",\"turn_id\":\"00000000-0000-0000-0000-000000000002\",\"model_call_id\":\"00000000-0000-0000-0000-000000000003\",\"usage\":{{\"input_tokens\":\"10\",\"output_tokens\":\"0\",\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":\"4\"}}}}}}\n"
             )
         );
         assert_eq!(decode_server_line(&encoded)?, frame);
@@ -5782,20 +5228,18 @@ mod tests {
     }
 
     #[test]
-    fn version_nineteen_usage_rejects_an_omitted_evidence_field() {
+    fn usage_rejects_an_omitted_evidence_field() {
         let error = decode_server_line(&line(
-            r#"{"version":19,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null}}}"#,
         ))
         .expect_err("required-nullable evidence fields cannot be omitted");
         assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
     }
 
-    /// INV-033: a version-ten imported-frontier request rejects position zero.
     #[test]
-    fn inv033_version_ten_imported_frontier_rejects_zero_position()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_imported_frontier_rejects_zero_position() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Ten,
+            ProtocolVersion::One,
             request(2)?,
             ClientRequest::CreateSessionFromImportedFrontier {
                 command_id: command(4)?,
@@ -5812,33 +5256,20 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: version seventeen admits the imported-conversation read with its
-    /// exact closed request shape, and version eleven does not.
     #[test]
-    fn inv033_version_seventeen_imported_conversation_read_has_an_exact_closed_shape()
+    fn inv033_imported_conversation_read_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::ReadImportedConversation {
             imported_conversation_id: uuid(5),
         };
-        assert_eq!(
-            ClientFrame::try_new_for_version(
-                ProtocolVersion::Eleven,
-                request_id,
-                request_value.clone(),
-            ),
-            Err(FrameValidationError::RequestRequiresNewerVersion)
-        );
 
-        let frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Seventeen,
-            request_id,
-            request_value,
-        )?;
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, request_value)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":17,\"request_id\":\"1\",\"request\":{\"type\":\"read_imported_conversation\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\"}}\n"
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"read_imported_conversation\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\"}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
@@ -5847,7 +5278,7 @@ mod tests {
     /// INV-033: an imported-conversation entry carries its position, exact
     /// attestation, content kind, and bounded preview in one closed shape.
     #[test]
-    fn inv033_version_seventeen_imported_conversation_entry_has_an_exact_closed_shape()
+    fn inv033_imported_conversation_entry_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::ImportedConversationEntry {
             position: CanonicalU64::new(2),
@@ -5858,17 +5289,12 @@ mod tests {
             content_kind: ImportedContentKind::Text,
             text_preview: Some(ImportedTextPreview::of_exact_text("imported answer")),
         };
-        assert_eq!(
-            ServerFrame::try_new_for_version(ProtocolVersion::Eleven, request(1)?, message.clone()),
-            Err(FrameValidationError::MessageRequiresNewerVersion)
-        );
 
-        let frame =
-            ServerFrame::try_new_for_version(ProtocolVersion::Seventeen, request(1)?, message)?;
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message)?;
         let encoded = encode_server_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":17,\"request_id\":\"1\",\"message\":{\"type\":\"imported_conversation_entry\",\"position\":\"2\",\"imported_entry_id\":\"00000000-0000-0000-0000-000000000006\",\"source_speaker\":{\"type\":\"attested\",\"speaker\":\"assistant\"},\"content_kind\":\"text\",\"text_preview\":{\"preview\":\"imported answer\",\"truncated\":false}}}\n"
+            "{\"version\":1,\"request_id\":\"1\",\"message\":{\"type\":\"imported_conversation_entry\",\"position\":\"2\",\"imported_entry_id\":\"00000000-0000-0000-0000-000000000006\",\"source_speaker\":{\"type\":\"attested\",\"speaker\":\"assistant\"},\"content_kind\":\"text\",\"text_preview\":{\"preview\":\"imported answer\",\"truncated\":false}}}\n"
         );
         assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
@@ -5880,7 +5306,7 @@ mod tests {
     fn inv033_imported_conversation_entry_states_an_absent_preview_as_null()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Seventeen,
+            ProtocolVersion::One,
             request(1)?,
             ServerMessage::ImportedConversationEntry {
                 position: CanonicalU64::new(1),
@@ -5903,7 +5329,7 @@ mod tests {
     fn inv033_imported_conversation_entry_rejects_zero_position()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Seventeen,
+            ProtocolVersion::One,
             request(1)?,
             ServerMessage::ImportedConversationEntry {
                 position: CanonicalU64::new(0),
@@ -5984,7 +5410,7 @@ mod tests {
     fn inv033_imported_text_preview_rejects_truncated_empty_text()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Seventeen,
+            ProtocolVersion::One,
             request(1)?,
             ServerMessage::ImportedConversationEntry {
                 position: CanonicalU64::new(1),
@@ -6009,7 +5435,7 @@ mod tests {
     fn inv033_imported_conversation_entry_rejects_a_preview_on_nontext_content()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Seventeen,
+            ProtocolVersion::One,
             request(1)?,
             ServerMessage::ImportedConversationEntry {
                 position: CanonicalU64::new(1),
@@ -6033,7 +5459,7 @@ mod tests {
     fn inv033_imported_range_rejection_refuses_a_selectable_requested_position()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Seventeen,
+            ProtocolVersion::One,
             request(1)?,
             ServerMessage::Error {
                 code: ErrorCode::Rejected,
@@ -6058,7 +5484,7 @@ mod tests {
     fn inv033_imported_range_rejection_refuses_an_empty_selectable_range()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Seventeen,
+            ProtocolVersion::One,
             request(1)?,
             ServerMessage::Error {
                 code: ErrorCode::Rejected,
@@ -6080,8 +5506,7 @@ mod tests {
     /// INV-033: an out-of-range imported position is a rejection naming the
     /// conversation's selectable range, never the absent-session `not_found`.
     #[test]
-    fn inv033_version_seventeen_names_the_imported_position_range()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_names_the_imported_position_range() -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::Error {
             code: ErrorCode::Rejected,
             message: String::from("the command was rejected by current durable state"),
@@ -6091,17 +5516,12 @@ mod tests {
                 last_position: CanonicalU64::new(2),
             }),
         };
-        assert_eq!(
-            ServerFrame::try_new_for_version(ProtocolVersion::Eleven, request(1)?, message.clone()),
-            Err(FrameValidationError::MessageRequiresNewerVersion)
-        );
 
-        let frame =
-            ServerFrame::try_new_for_version(ProtocolVersion::Seventeen, request(1)?, message)?;
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message)?;
         let encoded = encode_server_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":17,\"request_id\":\"1\",\"message\":{\"type\":\"error\",\"code\":\"rejected\",\"message\":\"the command was rejected by current durable state\",\"detail\":{\"type\":\"imported_frontier_position_out_of_range\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\",\"requested_position\":\"999999\",\"last_position\":\"2\"}}}\n"
+            "{\"version\":1,\"request_id\":\"1\",\"message\":{\"type\":\"error\",\"code\":\"rejected\",\"message\":\"the command was rejected by current durable state\",\"detail\":{\"type\":\"imported_frontier_position_out_of_range\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\",\"requested_position\":\"999999\",\"last_position\":\"2\"}}}\n"
         );
         assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
@@ -6110,10 +5530,9 @@ mod tests {
     /// INV-033: an absent imported conversation names an imported conversation
     /// as the missing target.
     #[test]
-    fn inv033_version_seventeen_names_the_absent_imported_conversation()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_names_the_absent_imported_conversation() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Seventeen,
+            ProtocolVersion::One,
             request(1)?,
             ServerMessage::Error {
                 code: ErrorCode::Rejected,
@@ -6133,12 +5552,11 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: version ten retains every earlier request unchanged.
     #[test]
-    fn inv033_version_ten_retains_the_earlier_request_vocabulary()
+    fn inv033_submit_request_round_trips_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Ten,
+            ProtocolVersion::One,
             request(1)?,
             ClientRequest::SubmitInput {
                 command_id: command(4)?,
@@ -6150,17 +5568,15 @@ mod tests {
         )?;
         let encoded = encode_client_line(&frame)?;
 
-        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":10,"));
+        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":1,"));
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
     }
 
-    /// INV-033: version ten retains version eight's turn-control vocabulary.
     #[test]
-    fn inv033_version_ten_retains_version_eight_turn_control_vocabulary()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_turn_control_vocabulary_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Ten,
+            ProtocolVersion::One,
             request(1)?,
             ClientRequest::StopTurn {
                 command_id: command(4)?,
@@ -6172,15 +5588,14 @@ mod tests {
         )?;
         let encoded = encode_client_line(&frame)?;
 
-        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":10,"));
+        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":1,"));
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
     }
 
-    /// INV-033: the reconciliation request is admitted only by version seven
-    /// and keeps its exact closed shape across one encode/decode round trip.
+    /// INV-033: reconciliation has one exact closed request shape.
     #[test]
-    fn inv033_version_seven_reconcile_turn_request_has_an_exact_closed_shape()
+    fn inv033_reconcile_turn_request_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::ReconcileTurn {
@@ -6190,49 +5605,19 @@ mod tests {
             content: InputContent::new(String::from("continue after reconciliation")),
             expected_defaults_version: CanonicalU64::new(1),
         };
-        assert_eq!(
-            ClientFrame::try_new_for_version(
-                ProtocolVersion::Six,
-                request_id,
-                request_value.clone(),
-            ),
-            Err(FrameValidationError::RequestRequiresNewerVersion)
-        );
 
         let frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::Seven, request_id, request_value)?;
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, request_value)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":7,\"request_id\":\"1\",\"request\":{\"type\":\"reconcile_turn\",\
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"reconcile_turn\",\
              \"command_id\":\"00000000-0000-0000-0000-000000000004\",\
              \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
              \"expected_active_turn_id\":\"00000000-0000-0000-0000-000000000007\",\
              \"content\":\"continue after reconciliation\",\
              \"expected_defaults_version\":\"1\"}}\n"
         );
-        assert_eq!(decode_client_line(&encoded)?, frame);
-        Ok(())
-    }
-
-    /// INV-033: version seven retains every earlier request unchanged.
-    #[test]
-    fn inv033_version_seven_retains_the_earlier_request_vocabulary()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Seven,
-            request(1)?,
-            ClientRequest::SubmitInput {
-                command_id: command(4)?,
-                session_id: uuid(6),
-                content: InputContent::new(String::from("ordinary work")),
-                expected_defaults_version: Some(CanonicalU64::new(1)),
-                delivery: None,
-            },
-        )?;
-        let encoded = encode_client_line(&frame)?;
-
-        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":7,"));
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
     }
@@ -6282,24 +5667,23 @@ mod tests {
     }
 
     #[test]
-    fn inv033_version_five_import_source_requires_canonical_padded_base64() {
+    fn inv033_import_source_requires_canonical_padded_base64() {
         assert_client_malformed(
-            r#"{"version":5,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AA"}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AA"}}"#,
         );
         assert_client_malformed(
-            r#"{"version":5,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AB=="}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AB=="}}"#,
         );
         assert_client_malformed(
-            r#"{"version":5,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AA==="}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AA==="}}"#,
         );
     }
 
     #[test]
-    fn inv033_version_eleven_retains_baseline_submit_exchange()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_submit_exchange_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Eleven,
+            ProtocolVersion::One,
             request_id,
             ClientRequest::SubmitInput {
                 command_id: command(2)?,
@@ -6312,7 +5696,7 @@ mod tests {
         let encoded_request = encode_client_line(&request_frame)?;
         assert_eq!(decode_client_line(&encoded_request)?, request_frame);
         let response_frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Eleven,
+            ProtocolVersion::One,
             request_id,
             ServerMessage::InputSubmitted {
                 session_id: uuid(3),
@@ -6326,18 +5710,16 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: version twelve retains version eleven's request vocabulary and
-    /// admits the cursorless provider-text message only at its new boundary.
+    /// INV-033: the cursorless provider-text message round trips exactly.
     #[test]
-    fn inv033_version_twelve_adds_only_the_provider_text_message()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_provider_text_message_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
-        let retained_request = ClientFrame::try_new_for_version(
-            ProtocolVersion::Twelve,
+        let request_frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
             request_id,
             ClientRequest::ReadReviewTarget { target_id: uuid(2) },
         )?;
-        let encoded_request = encode_client_line(&retained_request)?;
+        let encoded_request = encode_client_line(&request_frame)?;
         let delta = ServerMessage::ProviderTextDelta {
             session_id: uuid(3),
             turn_id: uuid(4),
@@ -6346,21 +5728,16 @@ mod tests {
             content: ContentFragment::try_new(String::from("already [redacted]"))?,
         };
 
-        assert_eq!(decode_client_line(&encoded_request)?, retained_request);
-        assert_eq!(
-            ServerFrame::try_new_for_version(ProtocolVersion::Eleven, request_id, delta.clone(),),
-            Err(FrameValidationError::MessageRequiresNewerVersion)
-        );
-        let frame = ServerFrame::try_new_for_version(ProtocolVersion::Twelve, request_id, delta)?;
+        assert_eq!(decode_client_line(&encoded_request)?, request_frame);
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request_id, delta)?;
         let encoded_delta = encode_server_line(&frame)?;
         assert_eq!(decode_server_line(&encoded_delta)?, frame);
         Ok(())
     }
 
-    /// INV-033: review target registration enters the closed vocabulary only
-    /// at version eleven and retains its exact nullable snapshot shape.
+    /// INV-033: review target registration has one exact closed shape.
     #[test]
-    fn inv033_version_eleven_review_target_exchange_has_an_exact_closed_shape()
+    fn inv033_review_target_exchange_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::CreateReviewTarget {
@@ -6375,20 +5752,12 @@ mod tests {
             base_revision: Some(String::from("base-revision")),
             stack_parent_target_id: None,
         };
-        assert_eq!(
-            ClientFrame::try_new_for_version(
-                ProtocolVersion::Ten,
-                request_id,
-                request_value.clone(),
-            ),
-            Err(FrameValidationError::RequestRequiresNewerVersion)
-        );
         let frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::Eleven, request_id, request_value)?;
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, request_value)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":11,\"request_id\":\"1\",\"request\":{\"type\":\"create_review_target\",\
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"create_review_target\",\
              \"command_id\":\"00000000-0000-0000-0000-000000000002\",\
              \"target_id\":\"00000000-0000-0000-0000-000000000003\",\
              \"provider\":\"example-host\",\"repository\":\"owner/repository\",\
@@ -6405,20 +5774,8 @@ mod tests {
     }
 
     #[test]
-    fn inv033_inv046_version_six_adds_forward_only_defaults_replacement()
+    fn inv033_inv046_adds_forward_only_defaults_replacement()
     -> Result<(), Box<dyn std::error::Error>> {
-        assert_client_malformed(
-            r#"{"version":5,"request_id":"6","request":{"type":"replace_session_defaults","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","expected_defaults_version":"3","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true}}"#,
-        );
-        assert_server_malformed(
-            r#"{"version":5,"request_id":"7","message":{"type":"session_defaults_replaced","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"4","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true}}"#,
-        );
-        assert_server_malformed(
-            r#"{"version":5,"request_id":"8","message":{"type":"transcript_entry","entry_index":"5","source_session_id":"00000000-0000-0000-0000-000000000002","entry_id":"00000000-0000-0000-0000-000000000006","entry":{"type":"model_identity_changed","turn_id":"00000000-0000-0000-0000-000000000007","defaults_version":"4","selected_model_id":"00000000-0000-0000-0000-000000000004"}}}"#,
-        );
-        assert_server_malformed(
-            r#"{"version":5,"request_id":"9","message":{"type":"error","code":"rejected","message":"defaults version exhausted","detail":{"type":"defaults_version_exhausted","session_id":"00000000-0000-0000-0000-000000000002","current":"18446744073709551615"}}}"#,
-        );
         let request_id = request(6)?;
         let request_value = ClientRequest::ReplaceSessionDefaults {
             command_id: command(1)?,
@@ -6428,27 +5785,19 @@ mod tests {
                 selection_id: uuid(4),
             },
             dangerous_tool_auto_approval: true,
-            system_prompt: SystemPromptMember::absent(),
+            system_prompt: SystemPromptMember::present(None),
         };
-        assert_eq!(
-            ClientFrame::try_new_for_version(
-                ProtocolVersion::Five,
-                request_id,
-                request_value.clone(),
-            ),
-            Err(FrameValidationError::RequestRequiresNewerVersion)
-        );
         let frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::Six, request_id, request_value)?;
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, request_value)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":6,\"request_id\":\"6\",\"request\":{\"type\":\"replace_session_defaults\",\
+            "{\"version\":1,\"request_id\":\"6\",\"request\":{\"type\":\"replace_session_defaults\",\
              \"command_id\":\"00000000-0000-0000-0000-000000000001\",\
              \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
              \"expected_defaults_version\":\"3\",\"model_selection\":{\"kind\":\"direct\",\
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
-             \"dangerous_tool_auto_approval\":true}}\n"
+             \"dangerous_tool_auto_approval\":true,\"system_prompt\":null}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
 
@@ -6459,20 +5808,12 @@ mod tests {
                 selection_id: uuid(4),
             },
             dangerous_tool_auto_approval: true,
-            system_prompt: SystemPromptMember::absent(),
+            system_prompt: SystemPromptMember::present(None),
         };
-        assert_eq!(
-            ServerFrame::try_new_for_version(
-                ProtocolVersion::Five,
-                request(7)?,
-                replacement_receipt.clone(),
-            ),
-            Err(FrameValidationError::MessageRequiresNewerVersion)
-        );
         assert_server_message_round_trip(
             request(7)?,
             replacement_receipt,
-            r#"{"type":"session_defaults_replaced","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"4","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true}"#,
+            r#"{"type":"session_defaults_replaced","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"4","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true,"system_prompt":null}"#,
         )?;
         let model_identity_entry = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(5),
@@ -6484,14 +5825,6 @@ mod tests {
                 selected_model_id: uuid(4),
             },
         };
-        assert_eq!(
-            ServerFrame::try_new_for_version(
-                ProtocolVersion::Five,
-                request(8)?,
-                model_identity_entry.clone(),
-            ),
-            Err(FrameValidationError::MessageRequiresNewerVersion)
-        );
         assert_server_message_round_trip(
             request(8)?,
             model_identity_entry,
@@ -6505,14 +5838,6 @@ mod tests {
                 current: CanonicalU64::new(u64::MAX),
             }),
         };
-        assert_eq!(
-            ServerFrame::try_new_for_version(
-                ProtocolVersion::Five,
-                request(9)?,
-                exhaustion.clone(),
-            ),
-            Err(FrameValidationError::MessageRequiresNewerVersion)
-        );
         assert_server_message_round_trip(
             request(9)?,
             exhaustion,
@@ -6522,36 +5847,26 @@ mod tests {
     }
 
     #[test]
-    fn inv033_inv046_version_nine_adds_the_bounded_session_system_prompt()
+    fn inv033_inv046_adds_the_bounded_session_system_prompt()
     -> Result<(), Box<dyn std::error::Error>> {
-        // The member is not admitted below version nine.
+        // The system-prompt member is required.
+        // Every admitted frame must carry the member explicitly.
         assert_client_malformed(
-            r#"{"version":6,"request_id":"1","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"system_prompt":"exact prompt text"}}"#,
+            r#"{"version":1,"request_id":"3","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"}}}"#,
         );
         assert_client_malformed(
-            r#"{"version":6,"request_id":"2","request":{"type":"replace_session_defaults","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","expected_defaults_version":"3","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true,"system_prompt":null}}"#,
+            r#"{"version":1,"request_id":"4","request":{"type":"replace_session_defaults","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","expected_defaults_version":"3","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true}}"#,
         );
-        // A version-nine frame must carry the member explicitly.
+        // The defaults read version member is required and nullable.
         assert_client_malformed(
-            r#"{"version":9,"request_id":"3","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"}}}"#,
-        );
-        assert_client_malformed(
-            r#"{"version":9,"request_id":"4","request":{"type":"replace_session_defaults","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","expected_defaults_version":"3","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true}}"#,
-        );
-        // The defaults read is not admitted below version nine, and its
-        // version member is required nullable.
-        assert_client_malformed(
-            r#"{"version":6,"request_id":"5","request":{"type":"read_session_defaults","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":null}}"#,
-        );
-        assert_client_malformed(
-            r#"{"version":9,"request_id":"5","request":{"type":"read_session_defaults","session_id":"00000000-0000-0000-0000-000000000002"}}"#,
+            r#"{"version":1,"request_id":"5","request":{"type":"read_session_defaults","session_id":"00000000-0000-0000-0000-000000000002"}}"#,
         );
         // A present prompt is nonempty and rejects U+0000.
         assert_client_malformed(
-            r#"{"version":9,"request_id":"6","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"system_prompt":""}}"#,
+            r#"{"version":1,"request_id":"6","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"system_prompt":""}}"#,
         );
         assert_client_malformed(
-            "{\"version\":9,\"request_id\":\"7\",\"request\":{\"type\":\"create_session\",\"command_id\":\"00000000-0000-0000-0000-000000000001\",\"initial_model_selection\":{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\"system_prompt\":\"a\\u0000b\"}}",
+            "{\"version\":1,\"request_id\":\"7\",\"request\":{\"type\":\"create_session\",\"command_id\":\"00000000-0000-0000-0000-000000000001\",\"initial_model_selection\":{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\"system_prompt\":\"a\\u0000b\"}}",
         );
 
         let request_id = request(8)?;
@@ -6564,15 +5879,11 @@ mod tests {
                 "exact prompt text".to_owned(),
             )?)),
         };
-        assert_eq!(
-            ClientFrame::try_new_for_version(ProtocolVersion::Six, request_id, create.clone()),
-            Err(FrameValidationError::RequestRequiresNewerVersion)
-        );
-        let frame = ClientFrame::try_new_for_version(ProtocolVersion::Nine, request_id, create)?;
+        let frame = ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, create)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":9,\"request_id\":\"8\",\"request\":{\"type\":\"create_session\",\
+            "{\"version\":1,\"request_id\":\"8\",\"request\":{\"type\":\"create_session\",\
              \"command_id\":\"00000000-0000-0000-0000-000000000001\",\
              \"initial_model_selection\":{\"kind\":\"direct\",\
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
@@ -6588,11 +5899,11 @@ mod tests {
             system_prompt: SystemPromptMember::present(None),
         };
         let promptless_frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::Nine, request_id, promptless_create)?;
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, promptless_create)?;
         let promptless_encoded = encode_client_line(&promptless_frame)?;
         assert_eq!(
             String::from_utf8(promptless_encoded.clone())?,
-            "{\"version\":9,\"request_id\":\"8\",\"request\":{\"type\":\"create_session\",\
+            "{\"version\":1,\"request_id\":\"8\",\"request\":{\"type\":\"create_session\",\
              \"command_id\":\"00000000-0000-0000-0000-000000000001\",\
              \"initial_model_selection\":{\"kind\":\"direct\",\
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
@@ -6600,7 +5911,7 @@ mod tests {
         );
         assert_eq!(decode_client_line(&promptless_encoded)?, promptless_frame);
         let decoded_null = decode_client_line(&line(
-            r#"{"version":9,"request_id":"8","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"system_prompt":null}}"#,
+            r#"{"version":1,"request_id":"8","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"system_prompt":null}}"#,
         ))?;
         let ClientRequest::CreateSession { system_prompt, .. } = decoded_null.request() else {
             panic!("decoded frame must be a create request");
@@ -6619,11 +5930,11 @@ mod tests {
                 "exact prompt text".to_owned(),
             )?)),
         };
-        let frame = ClientFrame::try_new_for_version(ProtocolVersion::Nine, request(9)?, replace)?;
+        let frame = ClientFrame::try_new_for_version(ProtocolVersion::One, request(9)?, replace)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":9,\"request_id\":\"9\",\"request\":{\"type\":\"replace_session_defaults\",\
+            "{\"version\":1,\"request_id\":\"9\",\"request\":{\"type\":\"replace_session_defaults\",\
              \"command_id\":\"00000000-0000-0000-0000-000000000001\",\
              \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
              \"expected_defaults_version\":\"3\",\"model_selection\":{\"kind\":\"direct\",\
@@ -6637,20 +5948,12 @@ mod tests {
             session_id: uuid(2),
             defaults_version: None,
         };
-        assert_eq!(
-            ClientFrame::try_new_for_version(
-                ProtocolVersion::Six,
-                request(10)?,
-                read_current.clone()
-            ),
-            Err(FrameValidationError::RequestRequiresNewerVersion)
-        );
         let frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::Nine, request(10)?, read_current)?;
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(10)?, read_current)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":9,\"request_id\":\"10\",\"request\":{\"type\":\"read_session_defaults\",\
+            "{\"version\":1,\"request_id\":\"10\",\"request\":{\"type\":\"read_session_defaults\",\
              \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
              \"defaults_version\":null}}\n"
         );
@@ -6661,11 +5964,11 @@ mod tests {
             defaults_version: Some(CanonicalU64::new(3)),
         };
         let frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::Nine, request(11)?, read_named)?;
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(11)?, read_named)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":9,\"request_id\":\"11\",\"request\":{\"type\":\"read_session_defaults\",\
+            "{\"version\":1,\"request_id\":\"11\",\"request\":{\"type\":\"read_session_defaults\",\
              \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
              \"defaults_version\":\"3\"}}\n"
         );
@@ -6682,15 +5985,11 @@ mod tests {
                 "exact prompt text".to_owned(),
             )?)),
         };
-        assert_eq!(
-            ServerFrame::try_new_for_version(ProtocolVersion::Six, request(12)?, receipt.clone()),
-            Err(FrameValidationError::MessageRequiresNewerVersion)
-        );
-        let frame = ServerFrame::try_new_for_version(ProtocolVersion::Nine, request(12)?, receipt)?;
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(12)?, receipt)?;
         let encoded = encode_server_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":9,\"request_id\":\"12\",\"message\":{\"type\":\"session_defaults_replaced\",\
+            "{\"version\":1,\"request_id\":\"12\",\"message\":{\"type\":\"session_defaults_replaced\",\
              \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
              \"defaults_version\":\"4\",\"model_selection\":{\"kind\":\"direct\",\
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
@@ -6698,9 +5997,8 @@ mod tests {
              \"system_prompt\":\"exact prompt text\"}}\n"
         );
         assert_eq!(decode_server_line(&encoded)?, frame);
-        // A version-nine receipt without the member is rejected.
         assert_server_malformed(
-            r#"{"version":9,"request_id":"12","message":{"type":"session_defaults_replaced","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"4","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true}}"#,
+            r#"{"version":1,"request_id":"12","message":{"type":"session_defaults_replaced","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"4","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true}}"#,
         );
 
         let defaults_read = ServerMessage::SessionDefaults {
@@ -6712,14 +6010,6 @@ mod tests {
             dangerous_tool_auto_approval: false,
             system_prompt: Some(SystemPromptText::try_new("exact prompt text".to_owned())?),
         };
-        assert_eq!(
-            ServerFrame::try_new_for_version(
-                ProtocolVersion::Six,
-                request(13)?,
-                defaults_read.clone(),
-            ),
-            Err(FrameValidationError::MessageRequiresNewerVersion)
-        );
         assert_server_message_round_trip(
             request(13)?,
             defaults_read,
@@ -6756,13 +6046,12 @@ mod tests {
         assert!(SystemPromptText::try_new("a\u{0}b".to_owned()).is_err());
     }
 
-    /// INV-033 / INV-047: version eighteen gives template creation and listing
-    /// exact closed request and response shapes.
+    /// INV-033 / INV-047: template frames have exact closed shapes.
     #[test]
-    fn inv033_inv047_version_eighteen_template_frames_have_exact_closed_shapes()
+    fn inv033_inv047_template_frames_have_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         let create = ClientFrame::try_new_for_version(
-            ProtocolVersion::Eighteen,
+            ProtocolVersion::One,
             request(1)?,
             ClientRequest::CreateSessionFromTemplate {
                 command_id: command(2)?,
@@ -6772,20 +6061,20 @@ mod tests {
         let encoded_create = encode_client_line(&create)?;
         assert_eq!(
             String::from_utf8(encoded_create.clone())?,
-            r#"{"version":18,"request_id":"1","request":{"type":"create_session_from_template","command_id":"00000000-0000-0000-0000-000000000002","template_name":"reviewer"}}
+            r#"{"version":1,"request_id":"1","request":{"type":"create_session_from_template","command_id":"00000000-0000-0000-0000-000000000002","template_name":"reviewer"}}
 "#
         );
         assert_eq!(decode_client_line(&encoded_create)?, create);
 
         let list = ClientFrame::try_new_for_version(
-            ProtocolVersion::Eighteen,
+            ProtocolVersion::One,
             request(2)?,
             ClientRequest::ListTemplates {},
         )?;
         let encoded_list = encode_client_line(&list)?;
         assert_eq!(
             String::from_utf8(encoded_list.clone())?,
-            r#"{"version":18,"request_id":"2","request":{"type":"list_templates"}}
+            r#"{"version":1,"request_id":"2","request":{"type":"list_templates"}}
 "#
         );
         assert_eq!(decode_client_line(&encoded_list)?, list);
@@ -6813,29 +6102,15 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: template vocabulary is rejected below eighteen and invalid
-    /// names or versions cannot enter admitted frames.
+    /// INV-033: invalid template names or versions cannot enter admitted frames.
     #[test]
-    fn inv033_template_frames_require_version_eighteen_and_valid_values()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_template_frames_require_valid_values() -> Result<(), Box<dyn std::error::Error>> {
         assert_client_malformed(
-            r#"{"version":16,"request_id":"1","request":{"type":"list_templates"}}"#,
-        );
-        assert_client_malformed(
-            r#"{"version":18,"request_id":"1","request":{"type":"create_session_from_template","command_id":"00000000-0000-0000-0000-000000000002","template_name":"Reviewer"}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"create_session_from_template","command_id":"00000000-0000-0000-0000-000000000002","template_name":"Reviewer"}}"#,
         );
         assert_eq!(
             ServerFrame::try_new_for_version(
-                ProtocolVersion::Sixteen,
-                request(1)?,
-                ServerMessage::TemplatesStart {},
-            )
-            .expect_err("version sixteen must reject template messages"),
-            FrameValidationError::MessageRequiresNewerVersion
-        );
-        assert_eq!(
-            ServerFrame::try_new_for_version(
-                ProtocolVersion::Eighteen,
+                ProtocolVersion::One,
                 request(1)?,
                 ServerMessage::TemplateSummary {
                     name: "reviewer".to_owned(),
@@ -6848,103 +6123,48 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the admitted set is one through thirteen, sixteen through
-    /// nineteen, twenty-one, and twenty-two; fourteen, fifteen, and twenty
-    /// remain retired and unsupported here.
+    /// INV-033: a frame at the single version is admitted unchanged.
     #[test]
-    fn inv033_version_twenty_two_completes_the_admitted_set() {
-        assert_eq!(
-            ProtocolVersion::Nine.as_u64(),
-            SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
-        );
-        assert_eq!(
-            ProtocolVersion::Seventeen.as_u64(),
-            IMPORTED_CONVERSATION_INSPECTION_PROTOCOL_VERSION
-        );
-        assert_eq!(
-            ProtocolVersion::Sixteen.as_u64(),
-            UNIFIED_CONVERSATION_LISTING_PROTOCOL_VERSION
-        );
-        assert_eq!(
-            ProtocolVersion::Eighteen.as_u64(),
-            SESSION_TEMPLATE_PROTOCOL_VERSION
-        );
-        assert_eq!(
-            ProtocolVersion::Nineteen.as_u64(),
-            MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION
-        );
-        assert_eq!(ProtocolVersion::from_u64(8), Some(ProtocolVersion::Eight));
-        assert_eq!(ProtocolVersion::from_u64(9), Some(ProtocolVersion::Nine));
-        assert_eq!(ProtocolVersion::from_u64(10), Some(ProtocolVersion::Ten));
-        assert_eq!(ProtocolVersion::from_u64(11), Some(ProtocolVersion::Eleven));
-        assert_eq!(ProtocolVersion::from_u64(12), Some(ProtocolVersion::Twelve));
-        assert_eq!(
-            ProtocolVersion::from_u64(13),
-            Some(ProtocolVersion::Thirteen)
-        );
-        assert_eq!(ProtocolVersion::from_u64(14), None);
-        assert_eq!(ProtocolVersion::from_u64(15), None);
-        assert_eq!(
-            ProtocolVersion::from_u64(16),
-            Some(ProtocolVersion::Sixteen)
-        );
-        assert_eq!(
-            ProtocolVersion::from_u64(17),
-            Some(ProtocolVersion::Seventeen)
-        );
-        assert_eq!(
-            ProtocolVersion::from_u64(18),
-            Some(ProtocolVersion::Eighteen)
-        );
-        assert_eq!(
-            ProtocolVersion::from_u64(19),
-            Some(ProtocolVersion::Nineteen)
-        );
-        assert_eq!(ProtocolVersion::from_u64(20), None);
-        assert_eq!(
-            ProtocolVersion::TwentyOne.as_u64(),
-            MODEL_ALIAS_CATALOG_PROTOCOL_VERSION
-        );
-        assert_eq!(
-            ProtocolVersion::from_u64(21),
-            Some(ProtocolVersion::TwentyOne)
-        );
-        assert_eq!(
-            ProtocolVersion::TwentyTwo.as_u64(),
-            CONTEXT_COMPACTION_PROTOCOL_VERSION
-        );
-        assert_eq!(
-            ProtocolVersion::from_u64(22),
-            Some(ProtocolVersion::TwentyTwo)
-        );
-        assert_eq!(ProtocolVersion::from_u64(23), None);
+    fn inv033_single_protocol_version_is_admitted() -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new(request(1)?, ClientRequest::ListSessions {})?;
+        let encoded = encode_client_line(&frame)?;
+
+        assert_eq!(frame.version(), ProtocolVersion::One);
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
     }
 
-    /// INV-033: version twenty-one's alias-catalog request and messages have
-    /// exact closed shapes.
+    /// INV-033: the integer immediately below the single version is refused.
     #[test]
-    fn inv033_version_twenty_one_model_alias_catalog_has_exact_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_version_below_single_version_is_refused() {
+        assert_unsupported_version("0");
+    }
+
+    /// INV-033: closed-enum decoding refuses an unknown version member.
+    #[test]
+    fn inv033_unknown_protocol_version_member_is_refused() {
+        let error = serde_json::from_str::<ProtocolVersion>("2")
+            .expect_err("an unknown protocol version must be refused");
+
+        assert!(error.to_string().contains("frame version is unsupported"));
+    }
+
+    /// INV-033: the model-alias catalog has exact closed shapes.
+    #[test]
+    fn inv033_model_alias_catalog_has_exact_closed_shapes() -> Result<(), Box<dyn std::error::Error>>
+    {
         let request_id = request(1)?;
         let frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::TwentyOne,
+            ProtocolVersion::One,
             request_id,
             ClientRequest::ListModelAliases {},
         )?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":21,\"request_id\":\"1\",\"request\":{\"type\":\"list_model_aliases\"}}\n"
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"list_model_aliases\"}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
-        assert_eq!(
-            ClientFrame::try_new_for_version(
-                ProtocolVersion::Sixteen,
-                request_id,
-                ClientRequest::ListModelAliases {},
-            ),
-            Err(FrameValidationError::RequestRequiresNewerVersion)
-        );
         assert_server_message_round_trip(
             request(2)?,
             ServerMessage::ModelAliasesStart {},
@@ -6968,32 +6188,22 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: explicit context compaction has one closed version-twenty-two
     /// request shape, and a requested semantic position must be nonzero.
     #[test]
-    fn inv033_version_twenty_two_compaction_request_has_an_exact_closed_shape()
+    fn inv033_compaction_request_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let compact = ClientRequest::CompactSession {
             command_id: command(1)?,
             session_id: uuid(2),
             through_position: Some(CanonicalU64::new(7)),
         };
-        assert_eq!(
-            ClientFrame::try_new_for_version(
-                ProtocolVersion::Sixteen,
-                request(3)?,
-                compact.clone(),
-            ),
-            Err(FrameValidationError::RequestRequiresNewerVersion)
-        );
 
-        let frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::TwentyTwo, request(3)?, compact)?;
+        let frame = ClientFrame::try_new_for_version(ProtocolVersion::One, request(3)?, compact)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
             concat!(
-                "{\"version\":22,\"request_id\":\"3\",\"request\":{",
+                "{\"version\":1,\"request_id\":\"3\",\"request\":{",
                 "\"type\":\"compact_session\",",
                 "\"command_id\":\"00000000-0000-0000-0000-000000000001\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
@@ -7008,15 +6218,15 @@ mod tests {
             through_position: Some(CanonicalU64::new(0)),
         };
         assert_eq!(
-            ClientFrame::try_new_for_version(ProtocolVersion::TwentyTwo, request(6)?, zero,),
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(6)?, zero,),
             Err(FrameValidationError::ContextCompactionShape)
         );
         Ok(())
     }
 
     #[test]
-    fn inv033_version_five_import_outcomes_have_distinct_closed_shapes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_import_outcomes_have_distinct_closed_shapes() -> Result<(), Box<dyn std::error::Error>>
+    {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::ConversationImportInserted {
@@ -7034,11 +6244,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the stop request is admitted only by version eight and keeps
     /// its exact closed shape across one encode/decode round trip.
     #[test]
-    fn inv033_version_eight_stop_turn_request_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_stop_turn_request_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
         let request_id = request(1)?;
         let request_value = ClientRequest::StopTurn {
             command_id: command(4)?,
@@ -7047,21 +6256,13 @@ mod tests {
             content: InputContent::new(String::from("continue after the stop")),
             expected_defaults_version: CanonicalU64::new(1),
         };
-        assert_eq!(
-            ClientFrame::try_new_for_version(
-                ProtocolVersion::Six,
-                request_id,
-                request_value.clone(),
-            ),
-            Err(FrameValidationError::RequestRequiresNewerVersion)
-        );
 
         let frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::Eight, request_id, request_value)?;
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, request_value)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":8,\"request_id\":\"1\",\"request\":{\"type\":\"stop_turn\",\
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"stop_turn\",\
              \"command_id\":\"00000000-0000-0000-0000-000000000004\",\
              \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
              \"expected_active_turn_id\":\"00000000-0000-0000-0000-000000000007\",\
@@ -7072,10 +6273,9 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: both closed decision shapes are admitted only by version eight
-    /// and keep their exact wire forms across one encode/decode round trip.
+    /// INV-033: tool decisions keep exact wire forms across one round trip.
     #[test]
-    fn inv033_version_eight_decide_tool_request_has_exact_closed_decision_shapes()
+    fn inv033_decide_tool_request_has_exact_closed_decision_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         let approval = ClientRequest::DecideToolRequest {
             command_id: command(4)?,
@@ -7083,16 +6283,12 @@ mod tests {
             tool_request_id: uuid(7),
             decision: ToolDecision::Approve {},
         };
-        assert_eq!(
-            ClientFrame::try_new_for_version(ProtocolVersion::Six, request(1)?, approval.clone()),
-            Err(FrameValidationError::RequestRequiresNewerVersion)
-        );
         let approval_frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::Eight, request(1)?, approval)?;
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, approval)?;
         let encoded_approval = encode_client_line(&approval_frame)?;
         assert_eq!(
             String::from_utf8(encoded_approval.clone())?,
-            "{\"version\":8,\"request_id\":\"1\",\"request\":{\"type\":\"decide_tool_request\",\
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"decide_tool_request\",\
              \"command_id\":\"00000000-0000-0000-0000-000000000004\",\
              \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
              \"tool_request_id\":\"00000000-0000-0000-0000-000000000007\",\
@@ -7101,7 +6297,7 @@ mod tests {
         assert_eq!(decode_client_line(&encoded_approval)?, approval_frame);
 
         let denial_frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Eight,
+            ProtocolVersion::One,
             request(2)?,
             ClientRequest::DecideToolRequest {
                 command_id: command(5)?,
@@ -7115,7 +6311,7 @@ mod tests {
         let encoded_denial = encode_client_line(&denial_frame)?;
         assert_eq!(
             String::from_utf8(encoded_denial.clone())?,
-            "{\"version\":8,\"request_id\":\"2\",\"request\":{\"type\":\"decide_tool_request\",\
+            "{\"version\":1,\"request_id\":\"2\",\"request\":{\"type\":\"decide_tool_request\",\
              \"command_id\":\"00000000-0000-0000-0000-000000000005\",\
              \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
              \"tool_request_id\":\"00000000-0000-0000-0000-000000000007\",\
@@ -7124,33 +6320,11 @@ mod tests {
         assert_eq!(decode_client_line(&encoded_denial)?, denial_frame);
 
         assert_client_malformed(
-            r#"{"version":8,"request_id":"3","request":{"type":"decide_tool_request","command_id":"00000000-0000-0000-0000-000000000004","session_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007","decision":{"type":"approve","reason":"approve carries no reason"}}}"#,
+            r#"{"version":1,"request_id":"3","request":{"type":"decide_tool_request","command_id":"00000000-0000-0000-0000-000000000004","session_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007","decision":{"type":"approve","reason":"approve carries no reason"}}}"#,
         );
         assert_client_malformed(
-            r#"{"version":8,"request_id":"4","request":{"type":"decide_tool_request","command_id":"00000000-0000-0000-0000-000000000004","session_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007","decision":{"type":"deny"}}}"#,
+            r#"{"version":1,"request_id":"4","request":{"type":"decide_tool_request","command_id":"00000000-0000-0000-0000-000000000004","session_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007","decision":{"type":"deny"}}}"#,
         );
-        Ok(())
-    }
-
-    /// INV-033: version eight retains every earlier request unchanged.
-    #[test]
-    fn inv033_version_eight_retains_the_earlier_request_vocabulary()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Eight,
-            request(1)?,
-            ClientRequest::SubmitInput {
-                command_id: command(4)?,
-                session_id: uuid(6),
-                content: InputContent::new(String::from("ordinary work")),
-                expected_defaults_version: Some(CanonicalU64::new(1)),
-                delivery: None,
-            },
-        )?;
-        let encoded = encode_client_line(&frame)?;
-
-        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":8,"));
-        assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
     }
 
@@ -7213,7 +6387,6 @@ mod tests {
     }
 
     /// INV-033: the decision receipt and every decision rejection carry their
-    /// exact closed wire shapes, admitted only by version eight.
     #[test]
     fn inv033_tool_decision_responses_have_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7221,14 +6394,6 @@ mod tests {
             tool_request_id: uuid(7),
             decision: ToolDecision::Approve {},
         };
-        assert_eq!(
-            ServerFrame::try_new_for_version(
-                ProtocolVersion::Six,
-                request(1)?,
-                approval_receipt.clone(),
-            ),
-            Err(FrameValidationError::MessageRequiresNewerVersion)
-        );
         assert_server_message_round_trip(
             request(1)?,
             approval_receipt,
@@ -7295,70 +6460,70 @@ mod tests {
     #[test]
     fn inv033_metadata_list_requires_title_query_member() {
         assert_client_malformed(
-            r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"include_archived":false,"page_size":"50","after_session_id":null}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"include_archived":false,"page_size":"50","after_session_id":null}}"#,
         );
     }
 
     #[test]
     fn inv033_metadata_list_requires_cursor_member() {
         assert_client_malformed(
-            r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"50"}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"50"}}"#,
         );
     }
 
     #[test]
     fn inv033_metadata_list_rejects_duplicate_required_tags() {
         assert_client_malformed(
-            r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":["same","same"],"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":["same","same"],"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}"#,
         );
     }
 
     #[test]
     fn inv033_metadata_list_rejects_empty_title_query() {
         assert_client_malformed(
-            r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":"","include_archived":false,"page_size":"50","after_session_id":null}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":"","include_archived":false,"page_size":"50","after_session_id":null}}"#,
         );
     }
 
     #[test]
     fn inv033_metadata_list_rejects_zero_page_size() {
         assert_client_malformed(
-            r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"0","after_session_id":null}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"0","after_session_id":null}}"#,
         );
     }
 
     #[test]
     fn inv033_metadata_list_rejects_page_size_over_bound() {
         assert_client_malformed(
-            r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"101","after_session_id":null}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"101","after_session_id":null}}"#,
         );
     }
 
     #[test]
     fn inv033_metadata_replacement_rejects_empty_title() {
         assert_client_malformed(
-            r#"{"version":4,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":"","tags":[],"attributes":{},"archived":false}}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":"","tags":[],"attributes":{},"archived":false}}}"#,
         );
     }
 
     #[test]
     fn inv033_metadata_replacement_requires_title_member() {
         assert_client_malformed(
-            r#"{"version":4,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"tags":[],"attributes":{},"archived":false}}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"tags":[],"attributes":{},"archived":false}}}"#,
         );
     }
 
     #[test]
     fn inv033_metadata_replacement_rejects_duplicate_tags() {
         assert_client_malformed(
-            r#"{"version":4,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":null,"tags":["same","same"],"attributes":{},"archived":false}}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":null,"tags":["same","same"],"attributes":{},"archived":false}}}"#,
         );
     }
 
     #[test]
     fn inv033_duplicate_metadata_attribute_member_is_malformed() {
         assert_client_malformed(
-            r#"{"version":4,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":null,"tags":[],"attributes":{"same":"first","\u0073ame":"second"},"archived":false}}}"#,
+            r#"{"version":1,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":null,"tags":[],"attributes":{"same":"first","\u0073ame":"second"},"archived":false}}}"#,
         );
     }
 
@@ -7369,7 +6534,7 @@ mod tests {
             MAX_SESSION_METADATA_REQUIRED_TAGS + 1,
         ))?;
         let json = format!(
-            r#"{{"version":4,"request_id":"1","request":{{"type":"list_session_metadata","required_tags":{required_tags},"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}}}"#
+            r#"{{"version":1,"request_id":"1","request":{{"type":"list_session_metadata","required_tags":{required_tags},"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}}}"#
         );
         assert_client_malformed(&json);
         Ok(())
@@ -7382,7 +6547,7 @@ mod tests {
             MAX_SESSION_METADATA_REQUIRED_TAGS,
         ))?;
         let json = format!(
-            r#"{{"version":4,"request_id":"1","request":{{"type":"list_session_metadata","required_tags":{required_tags},"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}}}"#
+            r#"{{"version":1,"request_id":"1","request":{{"type":"list_session_metadata","required_tags":{required_tags},"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}}}"#
         );
         decode_client_line(&line(&json))?;
         Ok(())
@@ -7394,7 +6559,7 @@ mod tests {
         let tags =
             serde_json::to_string(&numbered_metadata_strings(MAX_SESSION_METADATA_TAGS + 1))?;
         let json = format!(
-            r#"{{"version":4,"request_id":"1","message":{{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"}},"dangerous_tool_auto_approval":false,"title":null,"tags":{tags},"archived":false,"last_writer":{{"updated_at_unix_micros":"1","actor":{{"type":"owner"}}}}}}}}"#
+            r#"{{"version":1,"request_id":"1","message":{{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"}},"dangerous_tool_auto_approval":false,"title":null,"tags":{tags},"archived":false,"last_writer":{{"updated_at_unix_micros":"1","actor":{{"type":"owner"}}}}}}}}"#
         );
         assert_server_malformed(&json);
         Ok(())
@@ -7407,7 +6572,7 @@ mod tests {
         exact_tags.sort();
         let tags = serde_json::to_string(&exact_tags)?;
         let json = format!(
-            r#"{{"version":4,"request_id":"1","message":{{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"}},"dangerous_tool_auto_approval":false,"title":null,"tags":{tags},"archived":false,"last_writer":{{"updated_at_unix_micros":"1","actor":{{"type":"owner"}}}}}}}}"#
+            r#"{{"version":1,"request_id":"1","message":{{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"}},"dangerous_tool_auto_approval":false,"title":null,"tags":{tags},"archived":false,"last_writer":{{"updated_at_unix_micros":"1","actor":{{"type":"owner"}}}}}}}}"#
         );
         decode_server_line(&line(&json))?;
         Ok(())
@@ -7416,7 +6581,7 @@ mod tests {
     #[test]
     fn inv033_metadata_writer_actor_is_owner_only() {
         assert_server_malformed(
-            r#"{"version":4,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"model","turn_id":"00000000-0000-0000-0000-000000000002"}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"model","turn_id":"00000000-0000-0000-0000-000000000002"}}}}"#,
         );
     }
 
@@ -7479,7 +6644,7 @@ mod tests {
         );
 
         let encoded = encode_server_line(&ServerFrame::try_new_for_version(
-            ProtocolVersion::Four,
+            ProtocolVersion::One,
             request(1)?,
             ServerMessage::SessionMetadataReplaced {
                 session_id: uuid(1),
@@ -7501,7 +6666,7 @@ mod tests {
             page_size: CanonicalU64::new(50),
             after_session_id: None,
         };
-        ClientFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, exact)?;
+        ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, exact)?;
 
         let over_total = ClientRequest::ListSessionMetadata {
             required_tags: Vec::new(),
@@ -7511,7 +6676,7 @@ mod tests {
             after_session_id: None,
         };
         assert_eq!(
-            ClientFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, over_total),
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, over_total),
             Err(FrameValidationError::MetadataShape)
         );
 
@@ -7523,7 +6688,7 @@ mod tests {
             after_session_id: None,
         };
         assert_eq!(
-            ClientFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, over_indexed),
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, over_indexed),
             Err(FrameValidationError::MetadataShape)
         );
 
@@ -7535,7 +6700,7 @@ mod tests {
             after_session_id: None,
         };
         assert_eq!(
-            ClientFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, over_cardinality,),
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, over_cardinality,),
             Err(FrameValidationError::MetadataShape)
         );
         Ok(())
@@ -7562,7 +6727,7 @@ mod tests {
 
         assert_eq!(
             ServerFrame::try_new_for_version(
-                ProtocolVersion::Four,
+                ProtocolVersion::One,
                 request(1)?,
                 individually_valid_but_oversized,
             ),
@@ -7574,41 +6739,52 @@ mod tests {
     #[test]
     fn inv033_metadata_summary_requires_nullable_title_member() {
         assert_server_malformed(
-            r#"{"version":4,"request_id":"1","message":{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"},"dangerous_tool_auto_approval":false,"tags":[],"archived":false,"last_writer":null}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"},"dangerous_tool_auto_approval":false,"tags":[],"archived":false,"last_writer":null}}"#,
         );
     }
 
     #[test]
     fn inv033_metadata_summary_requires_nullable_last_writer_member() {
         assert_server_malformed(
-            r#"{"version":4,"request_id":"1","message":{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"},"dangerous_tool_auto_approval":false,"title":null,"tags":[],"archived":false}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"},"dangerous_tool_auto_approval":false,"title":null,"tags":[],"archived":false}}"#,
         );
     }
 
     #[test]
     fn inv033_metadata_page_end_requires_nullable_cursor_member() {
         assert_server_malformed(
-            r#"{"version":4,"request_id":"1","message":{"type":"session_metadata_page_end","session_count":"0"}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_page_end","session_count":"0"}}"#,
         );
     }
 
     #[test]
     fn inv033_metadata_point_read_requires_nullable_last_writer_member() {
         assert_server_malformed(
-            r#"{"version":4,"request_id":"1","message":{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false}}}"#,
         );
     }
 
     #[test]
     fn inv033_metadata_point_read_requires_nullable_title_member() {
         assert_server_malformed(
-            r#"{"version":4,"request_id":"1","message":{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"tags":[],"attributes":{},"archived":false},"last_writer":null}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"tags":[],"attributes":{},"archived":false},"last_writer":null}}"#,
         );
     }
 
+    #[track_caller]
+    fn assert_metadata_message_rejected(
+        message: ServerMessage,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message),
+            Err(FrameValidationError::MetadataShape)
+        );
+        Ok(())
+    }
+
     #[test]
-    fn inv033_metadata_response_shapes_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
-        let summary = ServerMessage::SessionMetadataSummary {
+    fn inv033_metadata_summary_rejects_unsorted_tags() -> Result<(), Box<dyn std::error::Error>> {
+        assert_metadata_message_rejected(ServerMessage::SessionMetadataSummary {
             session_id: uuid(1),
             defaults_version: CanonicalU64::new(1),
             model_selection: ModelSelection::Direct {
@@ -7616,73 +6792,62 @@ mod tests {
             },
             dangerous_tool_auto_approval: false,
             title: None,
-            tags: Vec::new(),
+            tags: vec![String::from("z"), String::from("a")],
             archived: false,
-            last_writer: None,
-        };
-        for retained in [
-            ProtocolVersion::One,
-            ProtocolVersion::Two,
-            ProtocolVersion::Three,
-        ] {
-            assert_eq!(
-                ServerFrame::try_new_for_version(retained, request(1)?, summary.clone()),
-                Err(FrameValidationError::MessageRequiresNewerVersion)
-            );
-        }
-        let invalid = [
-            ServerMessage::SessionMetadataSummary {
-                session_id: uuid(1),
-                defaults_version: CanonicalU64::new(1),
-                model_selection: ModelSelection::Direct {
-                    selection_id: uuid(2),
-                },
-                dangerous_tool_auto_approval: false,
-                title: None,
-                tags: vec![String::from("z"), String::from("a")],
-                archived: false,
-                last_writer: Some(MetadataLastWriter::new(
-                    CanonicalU64::new(1),
-                    MetadataActor::Owner {},
-                )),
-            },
-            ServerMessage::SessionMetadataSummary {
-                session_id: uuid(1),
-                defaults_version: CanonicalU64::new(1),
-                model_selection: ModelSelection::Direct {
-                    selection_id: uuid(2),
-                },
-                dangerous_tool_auto_approval: false,
-                title: Some(String::from("unwritten")),
-                tags: Vec::new(),
-                archived: false,
-                last_writer: None,
-            },
-            ServerMessage::SessionMetadata {
-                session_id: uuid(1),
-                metadata: metadata(false)?,
-                last_writer: None,
-            },
-            ServerMessage::SessionMetadataPageEnd {
-                session_count: CanonicalU64::new(0),
-                next_after_session_id: Some(uuid(1)),
-            },
-            ServerMessage::SessionMetadataPageEnd {
-                session_count: CanonicalU64::new(101),
-                next_after_session_id: None,
-            },
-        ];
-        for message in invalid {
-            assert_eq!(
-                ServerFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, message,),
-                Err(FrameValidationError::MetadataShape)
-            );
-        }
-        Ok(())
+            last_writer: Some(MetadataLastWriter::new(
+                CanonicalU64::new(1),
+                MetadataActor::Owner {},
+            )),
+        })
     }
 
     #[test]
-    fn inv033_retained_versions_keep_model_reconciliation_and_gate_tool_shapes()
+    fn inv033_metadata_summary_rejects_unwritten_nondefault_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_metadata_message_rejected(ServerMessage::SessionMetadataSummary {
+            session_id: uuid(1),
+            defaults_version: CanonicalU64::new(1),
+            model_selection: ModelSelection::Direct {
+                selection_id: uuid(2),
+            },
+            dangerous_tool_auto_approval: false,
+            title: Some(String::from("unwritten")),
+            tags: Vec::new(),
+            archived: false,
+            last_writer: None,
+        })
+    }
+
+    #[test]
+    fn inv033_metadata_read_rejects_written_content_without_a_writer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_metadata_message_rejected(ServerMessage::SessionMetadata {
+            session_id: uuid(1),
+            metadata: metadata(false)?,
+            last_writer: None,
+        })
+    }
+
+    #[test]
+    fn inv033_metadata_page_rejects_a_cursor_after_an_empty_page()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_metadata_message_rejected(ServerMessage::SessionMetadataPageEnd {
+            session_count: CanonicalU64::new(0),
+            next_after_session_id: Some(uuid(1)),
+        })
+    }
+
+    #[test]
+    fn inv033_metadata_page_rejects_a_count_above_the_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_metadata_message_rejected(ServerMessage::SessionMetadataPageEnd {
+            session_count: CanonicalU64::new(101),
+            next_after_session_id: None,
+        })
+    }
+
+    #[test]
+    fn inv033_single_vocabulary_admits_reconciliation_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         let model_reconciliation = ServerMessage::TranscriptTurn {
             turn_id: uuid(3),
@@ -7693,19 +6858,14 @@ mod tests {
                 terminal_model_call_id: uuid(8),
             },
         };
-        for version in [ProtocolVersion::One, ProtocolVersion::Two] {
-            let frame = ServerFrame::try_new_for_version(
-                version,
-                request(1)?,
-                model_reconciliation.clone(),
-            )?;
-            let encoded = encode_server_line(&frame)?;
-            assert!(
-                String::from_utf8(encoded.clone())?
-                    .starts_with(&format!("{{\"version\":{},", version.as_u64()))
-            );
-            assert_eq!(decode_server_line(&encoded)?, frame);
-        }
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(1)?,
+            model_reconciliation,
+        )?;
+        let encoded = encode_server_line(&frame)?;
+        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":1,"));
+        assert_eq!(decode_server_line(&encoded)?, frame);
 
         let tool_reconciliation = ServerMessage::TranscriptTurn {
             turn_id: uuid(3),
@@ -7716,14 +6876,8 @@ mod tests {
                 terminal_tool_attempt_id: uuid(9),
             },
         };
-        for version in [ProtocolVersion::One, ProtocolVersion::Two] {
-            assert_eq!(
-                ServerFrame::try_new_for_version(version, request(2)?, tool_reconciliation.clone(),),
-                Err(FrameValidationError::MessageRequiresNewerVersion)
-            );
-        }
         let frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Three,
+            ProtocolVersion::One,
             request(2)?,
             tool_reconciliation,
         )?;
@@ -7732,7 +6886,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_version_four_inherits_imported_transcript_and_tool_event_shapes()
+    fn inv033_inherits_imported_transcript_and_tool_event_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         let imported = ServerMessage::TranscriptTextEntry {
             entry_index: CanonicalU64::new(0),
@@ -7747,7 +6901,7 @@ mod tests {
             },
         };
         let imported_frame =
-            ServerFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, imported)?;
+            ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, imported)?;
         assert_eq!(
             decode_server_line(&encode_server_line(&imported_frame)?)?,
             imported_frame
@@ -7763,7 +6917,7 @@ mod tests {
             },
         };
         let tool_frame =
-            ServerFrame::try_new_for_version(ProtocolVersion::Four, request(2)?, tool_event)?;
+            ServerFrame::try_new_for_version(ProtocolVersion::One, request(2)?, tool_event)?;
         assert_eq!(
             decode_server_line(&encode_server_line(&tool_frame)?)?,
             tool_frame
@@ -7771,23 +6925,17 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: an explicit null is not a member of the closed delivery
-    /// vocabulary in either a retained or current protocol version.
+    /// INV-033: an explicit null is not a member of the closed delivery vocabulary.
     #[test]
-    fn inv033_submit_delivery_rejects_explicit_null_in_retained_and_current_versions() {
+    fn inv033_submit_delivery_rejects_explicit_null() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","content":"content","expected_defaults_version":"1","delivery":null}}"#,
         );
-        assert_client_malformed(
-            r#"{"version":13,"request_id":"2","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000003","session_id":"00000000-0000-0000-0000-000000000004","content":"content","expected_defaults_version":"1","delivery":null}}"#,
-        );
     }
 
-    /// INV-033: version thirteen adds steering without widening a retained
-    /// version or carrying independent defaults configuration.
+    /// INV-033: steering has one exact closed shape.
     #[test]
-    fn inv033_version_thirteen_steering_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_steering_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let steering_request = ClientRequest::SubmitInput {
             command_id: command(1)?,
             session_id: uuid(2),
@@ -7797,24 +6945,13 @@ mod tests {
                 expected_active_turn_id: uuid(3),
             }),
         };
-        assert_eq!(
-            ClientFrame::try_new_for_version(
-                ProtocolVersion::Eleven,
-                request(1)?,
-                steering_request.clone(),
-            ),
-            Err(FrameValidationError::RequestRequiresNewerVersion)
-        );
-        let steering_frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Thirteen,
-            request(1)?,
-            steering_request,
-        )?;
+        let steering_frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, steering_request)?;
         let encoded = encode_client_line(&steering_frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
             concat!(
-                "{\"version\":13,\"request_id\":\"1\",\"request\":{",
+                "{\"version\":1,\"request_id\":\"1\",\"request\":{",
                 "\"type\":\"submit_input\",",
                 "\"command_id\":\"00000000-0000-0000-0000-000000000001\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
@@ -7828,13 +6965,11 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: version thirteen queueing carries both the exact active target
-    /// and the queued turn's defaults guard.
+    /// INV-033: queueing carries its exact active-turn and defaults guards.
     #[test]
-    fn inv033_version_thirteen_queueing_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_queueing_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>> {
         let queue_frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Thirteen,
+            ProtocolVersion::One,
             request(2)?,
             ClientRequest::SubmitInput {
                 command_id: command(4)?,
@@ -7850,7 +6985,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(encoded.clone())?,
             concat!(
-                "{\"version\":13,\"request_id\":\"2\",\"request\":{",
+                "{\"version\":1,\"request_id\":\"2\",\"request\":{",
                 "\"type\":\"submit_input\",",
                 "\"command_id\":\"00000000-0000-0000-0000-000000000004\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
@@ -7864,13 +6999,12 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: version thirteen can spell the retained start-when-idle intent
-    /// explicitly while the absent member remains the legacy default.
+    /// INV-033: explicit start-when-idle has one closed shape.
     #[test]
-    fn inv033_version_thirteen_explicit_start_when_idle_has_a_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_explicit_start_when_idle_has_a_closed_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
         let frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Thirteen,
+            ProtocolVersion::One,
             request(3)?,
             ClientRequest::SubmitInput {
                 command_id: command(5)?,
@@ -7884,7 +7018,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(encoded.clone())?,
             concat!(
-                "{\"version\":13,\"request_id\":\"3\",\"request\":{",
+                "{\"version\":1,\"request_id\":\"3\",\"request\":{",
                 "\"type\":\"submit_input\",",
                 "\"command_id\":\"00000000-0000-0000-0000-000000000005\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
@@ -7902,7 +7036,7 @@ mod tests {
     fn inv033_configured_delivery_rejects_missing_defaults()
     -> Result<(), Box<dyn std::error::Error>> {
         let start = ClientFrame::try_new_for_version(
-            ProtocolVersion::Thirteen,
+            ProtocolVersion::One,
             request(4)?,
             ClientRequest::SubmitInput {
                 command_id: command(6)?,
@@ -7915,7 +7049,7 @@ mod tests {
         assert_eq!(start, Err(FrameValidationError::InputDeliveryShape));
 
         let queue = ClientFrame::try_new_for_version(
-            ProtocolVersion::Thirteen,
+            ProtocolVersion::One,
             request(5)?,
             ClientRequest::SubmitInput {
                 command_id: command(7)?,
@@ -7937,7 +7071,7 @@ mod tests {
     fn inv033_steering_rejects_independent_defaults_configuration()
     -> Result<(), Box<dyn std::error::Error>> {
         let invalid = ClientFrame::try_new_for_version(
-            ProtocolVersion::Thirteen,
+            ProtocolVersion::One,
             request(3)?,
             ClientRequest::SubmitInput {
                 command_id: command(5)?,
@@ -7952,7 +7086,7 @@ mod tests {
         assert_eq!(invalid, Err(FrameValidationError::InputDeliveryShape));
 
         let zero = ClientFrame::try_new_for_version(
-            ProtocolVersion::Thirteen,
+            ProtocolVersion::One,
             request(4)?,
             ClientRequest::SubmitInput {
                 command_id: command(6)?,
@@ -7969,9 +7103,8 @@ mod tests {
     }
 
     /// INV-033: steering against an already-stopping turn carries the exact
-    /// stop proof through one closed version-thirteen rejection shape.
     #[test]
-    fn inv033_version_thirteen_stopping_steering_rejection_has_exact_closed_shape()
+    fn inv033_stopping_steering_rejection_has_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(4)?,
@@ -7988,35 +7121,23 @@ mod tests {
         )
     }
 
-    /// INV-033: pending steering has one version-thirteen typed receipt naming
     /// its accepted input, position, and exact source turn.
     #[test]
-    fn inv033_version_thirteen_steering_receipt_has_an_exact_closed_shape()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_steering_receipt_has_an_exact_closed_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
         let steering_response = ServerMessage::SteeringSubmitted {
             session_id: uuid(2),
             accepted_input_id: uuid(6),
             acceptance_position: CanonicalU64::new(8),
             source_turn_id: uuid(3),
         };
-        assert_eq!(
-            ServerFrame::try_new_for_version(
-                ProtocolVersion::Eleven,
-                request(4)?,
-                steering_response.clone(),
-            ),
-            Err(FrameValidationError::MessageRequiresNewerVersion)
-        );
-        let response_frame = ServerFrame::try_new_for_version(
-            ProtocolVersion::Thirteen,
-            request(4)?,
-            steering_response,
-        )?;
+        let response_frame =
+            ServerFrame::try_new_for_version(ProtocolVersion::One, request(4)?, steering_response)?;
         let encoded = encode_server_line(&response_frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
             concat!(
-                "{\"version\":13,\"request_id\":\"4\",\"message\":{",
+                "{\"version\":1,\"request_id\":\"4\",\"message\":{",
                 "\"type\":\"steering_submitted\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
                 "\"accepted_input_id\":",

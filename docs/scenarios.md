@@ -1070,8 +1070,8 @@ those tests.
   frontier context, and the terminal client reports only the acknowledged
   replacement receipt.
 - **Owning component:** The domain owns epoch and frontier laws; Postgres stores
-  and constrains them; the daemon validates against its read-only catalog;
-  protocol version six and the terminal model verb expose the owner command.
+  and constrains them; the daemon validates against its read-only catalog; the
+  process protocol and terminal model verb expose the owner command.
 - **Failure behavior:** Missing session, stale or exhausted epoch, conflicting
   command reuse, unknown catalog selection, and commit ambiguity retain their
   distinct typed outcomes. Exact replay returns the first recorded result.
@@ -1095,13 +1095,12 @@ those tests.
 - **Transient updates:** None.
 - **Owning component:** The domain owns the bounded prompt value and epoch laws;
   Postgres stores and constrains it, including digest-keyed command/defaults
-  agreement; protocol version nine and the terminal create/model verbs expose
-  the owner surface.
-- **Failure behavior:** An empty, U+0000-bearing, or over-bound prompt fails
-  before any command identity is claimed. A pre-version-nine replacement
-  targeting a session whose current epoch carries a prompt is refused as
-  requiring version nine before mutation. Stale epochs, conflicting reuse,
-  unknown catalog selections, and commit ambiguity retain their S33 outcomes.
+  agreement; the process protocol and terminal create/model verbs expose the
+  owner surface.
+- **Failure behavior:** An empty, U+0000-bearing, over-bound, or omitted prompt
+  member fails before any command identity is claimed. Stale epochs, conflicting
+  reuse, unknown catalog selections, and commit ambiguity retain their S33
+  outcomes.
 - **Required invariants:** INV-008, INV-012, INV-033, INV-046.
 - **Remaining questions:** Prompt composition from base, per-use-case, and
   instruction-file contributions remains an open configuration-category
@@ -1125,8 +1124,7 @@ those tests.
   configuration work, not session state.
 - **Owning component:** The daemon owns static configuration and resolution; the
   domain owns provenance and command equality; Postgres stores the copied
-  defaults and provenance; protocol version eighteen exposes creation and
-  listing.
+  defaults and provenance; the process protocol exposes creation and listing.
 - **Failure behavior:** Unknown names and invalid request composition fail after
   durable-command lookup and before a new command claim. Unreadable prompt
   files, invalid paths or prompts, duplicate names, unknown model selections,

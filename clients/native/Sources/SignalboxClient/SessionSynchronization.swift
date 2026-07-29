@@ -1306,7 +1306,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       case .recoveryRequired, .unknown:
         return false
       }
-    case .turnCompleted, .turnFailed, .turnRefused, .turnCancelled,
+    case .contextCompacted, .turnCompleted, .turnFailed, .turnRefused, .turnCancelled,
       .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
       return true
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition:
@@ -1620,7 +1620,7 @@ extension SignalboxTranscriptTextEntry {
       return sourceSpeaker.hasUnknownStoredVariant
     case .unknown:
       return true
-    case .user, .assistant:
+    case .user, .assistant, .contextSummary:
       return false
     }
   }
@@ -1632,7 +1632,7 @@ extension SignalboxTranscriptTextEntry {
     case .unknown(_, let payload, let diagnostic):
       return payload.encodedUTF8Bytes
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
-    case .user, .assistant:
+    case .user, .assistant, .contextSummary:
       return 0
     }
   }
@@ -1663,8 +1663,8 @@ extension SignalboxProcessSessionEvent {
       return state.isUnknown
     case .toolBatchTransition(_, _, let state):
       return state.isUnknown
-    case .sessionCreated, .inputAccepted, .turnActivated, .turnCompleted, .turnFailed,
-      .turnRefused, .turnCancelled, .turnReconciliationRequired,
+    case .sessionCreated, .inputAccepted, .turnActivated, .contextCompacted, .turnCompleted,
+      .turnFailed, .turnRefused, .turnCancelled, .turnReconciliationRequired,
       .turnToolReconciliationRequired, .unknown:
       return false
     }
@@ -1688,8 +1688,9 @@ extension SignalboxProcessSessionEvent {
     case .unknown(_, let payload, let diagnostic):
       return payload.encodedUTF8Bytes
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
-    case .sessionCreated, .turnActivated, .turnCompleted, .turnFailed, .turnRefused,
-      .turnCancelled, .turnReconciliationRequired, .turnToolReconciliationRequired:
+    case .sessionCreated, .turnActivated, .contextCompacted, .turnCompleted, .turnFailed,
+      .turnRefused, .turnCancelled, .turnReconciliationRequired,
+      .turnToolReconciliationRequired:
       return 0
     }
   }

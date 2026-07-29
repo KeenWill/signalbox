@@ -7,7 +7,7 @@ final class ProcessProtocolTests: XCTestCase {
   private let sessionID = "11111111-1111-4111-8111-111111111111"
   private let turnID = "22222222-2222-4222-8222-222222222222"
 
-  func testClientFrameUsesVersionTwentyOneAndCanonicalStringScalars() throws {
+  func testClientFrameUsesVersionOneAndCanonicalStringScalars() throws {
     let frame = SignalboxProcessClientFrame(
       requestID: try SignalboxRequestID(validating: 7),
       request: .readTranscript(
@@ -19,11 +19,11 @@ final class ProcessProtocolTests: XCTestCase {
 
     XCTAssertEqual(
       String(decoding: encoded, as: UTF8.self),
-      #"{"request":{"session_id":"\#(sessionID)","type":"read_transcript"},"request_id":"7","version":21}"#
+      #"{"request":{"session_id":"\#(sessionID)","type":"read_transcript"},"request_id":"7","version":1}"#
     )
   }
 
-  func testModelAliasCatalogRequestAndSummaryUseClosedVersionTwentyOneShapes() throws {
+  func testModelAliasCatalogRequestAndSummaryUseClosedVersionOneShapes() throws {
     let requestFrame = SignalboxProcessClientFrame(
       requestID: try SignalboxRequestID(validating: 8),
       request: .listModelAliases
@@ -31,13 +31,13 @@ final class ProcessProtocolTests: XCTestCase {
     let encodedRequest = try SignalboxJSONCoding.encoder().encode(requestFrame)
     XCTAssertEqual(
       String(decoding: encodedRequest, as: UTF8.self),
-      #"{"request":{"type":"list_model_aliases"},"request_id":"8","version":21}"#
+      #"{"request":{"type":"list_model_aliases"},"request_id":"8","version":1}"#
     )
 
     let encodedSummary = Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"8",
         "message":{
           "type":"model_alias_summary",
@@ -85,7 +85,7 @@ final class ProcessProtocolTests: XCTestCase {
     let encoded = Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"9",
         "message":{
           "type":"session_event",
@@ -120,11 +120,100 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testContextCompactionFramesDecodeTheirCurrentShapes() throws {
+    let contextCompactionID = "33333333-3333-4333-8333-333333333333"
+    let modelCallID = "44444444-4444-4444-8444-444444444444"
+    let firstEntryID = "55555555-5555-4555-8555-555555555555"
+    let summaryEntryID = "66666666-6666-4666-8666-666666666666"
+    let frontierID = "77777777-7777-4777-8777-777777777777"
+    let summaryFrame = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"9",
+          "message":{
+            "type":"transcript_text_entry",
+            "entry_index":"0",
+            "source_session_id":"\(sessionID)",
+            "entry_id":"\(summaryEntryID)",
+            "entry":{
+              "type":"context_summary",
+              "model_call_id":"\(modelCallID)",
+              "first_source_session_id":"\(sessionID)",
+              "first_entry_id":"\(firstEntryID)",
+              "through_source_session_id":"\(sessionID)",
+              "through_entry_id":"\(firstEntryID)"
+            }
+          }
+        }
+        """.utf8
+      )
+    )
+    let compactedFrame = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"9",
+          "message":{
+            "type":"session_event",
+            "cursor":"12",
+            "session_id":"\(sessionID)",
+            "event":{
+              "type":"context_compacted",
+              "context_compaction_id":"\(contextCompactionID)",
+              "model_call_id":"\(modelCallID)",
+              "through_position":"11",
+              "summary_entry_id":"\(summaryEntryID)",
+              "result_frontier_id":"\(frontierID)"
+            }
+          }
+        }
+        """.utf8
+      )
+    )
+
+    XCTAssertEqual(
+      summaryFrame.message,
+      .transcriptTextEntry(
+        SignalboxTranscriptTextEntryMessage(
+          entryIndex: SignalboxCanonicalUInt64(rawValue: 0),
+          sourceSessionID: try SignalboxCanonicalUUID(validating: sessionID),
+          entryID: try SignalboxCanonicalUUID(validating: summaryEntryID),
+          entry: .contextSummary(
+            modelCallID: try SignalboxCanonicalUUID(validating: modelCallID),
+            firstSourceSessionID: try SignalboxCanonicalUUID(validating: sessionID),
+            firstEntryID: try SignalboxCanonicalUUID(validating: firstEntryID),
+            throughSourceSessionID: try SignalboxCanonicalUUID(validating: sessionID),
+            throughEntryID: try SignalboxCanonicalUUID(validating: firstEntryID)
+          )
+        )
+      )
+    )
+    XCTAssertEqual(
+      compactedFrame.message,
+      .sessionEvent(
+        SignalboxFollowedSessionEvent(
+          cursor: SignalboxCanonicalUInt64(rawValue: 12),
+          sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+          event: .contextCompacted(
+            contextCompactionID: try SignalboxCanonicalUUID(validating: contextCompactionID),
+            modelCallID: try SignalboxCanonicalUUID(validating: modelCallID),
+            throughPosition: SignalboxCanonicalUInt64(rawValue: 11),
+            summaryEntryID: try SignalboxCanonicalUUID(validating: summaryEntryID),
+            resultFrontierID: try SignalboxCanonicalUUID(validating: frontierID)
+          )
+        )
+      )
+    )
+  }
+
   func testUnknownSessionEventDoesNotDiscardItsFrame() throws {
     let encoded = Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"9",
         "message":{
           "type":"session_event",
@@ -161,7 +250,7 @@ final class ProcessProtocolTests: XCTestCase {
     let encoded = Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"9",
         "message":{"type":"session_created","session_id":17}
       }
@@ -189,7 +278,7 @@ final class ProcessProtocolTests: XCTestCase {
     let encoded = Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"9",
         "message":{
           "type":"transcript_snapshot_start",
@@ -213,7 +302,7 @@ final class ProcessProtocolTests: XCTestCase {
     let encoded = Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"9",
         "unexpected":true,
         "message":{"type":"sessions_start"}
@@ -228,7 +317,7 @@ final class ProcessProtocolTests: XCTestCase {
     let encoded = Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"9",
         "message":{
           "type":"session_event",
@@ -468,7 +557,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"9",
         "message":{
           "type":"error",
@@ -487,7 +576,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"9",
         "message":{
           "type":"error",
@@ -508,7 +597,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"9",
         "message":{
           "type":"error",
@@ -524,7 +613,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"9",
         "message":{
           "type":"error",
@@ -541,7 +630,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"9",
         "message":{
           "type":"error",
@@ -558,7 +647,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"9",
         "message":{
           "type":"error",
@@ -670,7 +759,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"9",
         "message":{
           "type":"error",
@@ -687,7 +776,7 @@ private enum ProcessProtocolFixture {
     Data(
       """
       {
-        "version":21,
+        "version":1,
         "request_id":"9",
         "message":{
           "type":"conversation_summary",

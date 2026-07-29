@@ -127,7 +127,7 @@ An owner decision is the canonical `DecideToolRequest` command: owner-global
 `Deny { reason }`. A denial reason is absent or 1–1024 bytes of non-control
 Unicode with no leading/trailing POSIX whitespace; it is therefore safe to
 render without copying unbounded or terminal-control content. Equality excludes
-only the command identifier. The version-eight `decide_tool_request` request in
+only the command identifier. The `decide_tool_request` request in
 [process-protocol](process-protocol.md#client-requests) is the client surface
 that issues this command; its wire posture requires a denial reason even though
 the command admits an absent one. Registry lookup precedes current-state

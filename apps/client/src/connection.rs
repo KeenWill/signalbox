@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use signalbox_process_protocol::{
-    ClientFrame, ClientRequest, ErrorCode, FrameEncodeError, MAX_FRAME_BYTES, ProtocolVersion,
-    RequestId, ServerFrame, ServerMessage, decode_server_line, encode_client_line,
+    ClientFrame, ClientRequest, FrameEncodeError, MAX_FRAME_BYTES, ProtocolVersion, RequestId,
+    ServerFrame, ServerMessage, decode_server_line, encode_client_line,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -79,7 +79,7 @@ impl Connection {
         delivery: RequestDelivery,
     ) -> Result<Self, ClientError> {
         let import_request = matches!(&request, ClientRequest::ImportConversation { .. });
-        let version = ProtocolVersion::TwentyTwo;
+        let version = ProtocolVersion::One;
         let frame = ClientFrame::try_new_for_version(version, request_id, request)
             .map_err(FrameEncodeError::Validation)?;
         let encoded = encode_client_line(&frame).map_err(|error| match error {
@@ -109,10 +109,6 @@ impl Connection {
         Ok(connection)
     }
 
-    pub(crate) const fn version(&self) -> ProtocolVersion {
-        self.version
-    }
-
     pub(crate) async fn message(&mut self) -> Result<ServerMessage, ClientError> {
         Ok(self.frame().await?.message().clone())
     }
@@ -132,16 +128,6 @@ impl Connection {
 
 fn response_version_is_admitted(expected: ProtocolVersion, frame: &ServerFrame) -> bool {
     frame.version() == expected
-        || matches!(
-            (frame.version(), frame.message()),
-            (
-                ProtocolVersion::One,
-                ServerMessage::Error {
-                    code: ErrorCode::MalformedFrame | ErrorCode::UnsupportedVersion,
-                    ..
-                }
-            )
-        )
 }
 
 async fn read_frame_line(
@@ -179,7 +165,7 @@ async fn read_frame_line(
 mod tests {
     use std::{error::Error, time::Duration};
 
-    use signalbox_process_protocol::{ErrorDetail, encode_server_line};
+    use signalbox_process_protocol::{ErrorCode, ErrorDetail, encode_server_line};
     use tokio::{io::AsyncWriteExt as _, time::timeout};
 
     use super::*;
@@ -189,14 +175,14 @@ mod tests {
 
     #[tokio::test]
     async fn frame_read_is_cancellation_safe() -> Result<(), Box<dyn Error>> {
-        let frame = error_frame(ProtocolVersion::Sixteen, ErrorCode::InvalidRequest)?;
+        let frame = error_frame(ProtocolVersion::One, ErrorCode::InvalidRequest)?;
         let expected = frame.message().clone();
         let encoded = encode_server_line(&frame)?;
         let (server, client) = UnixStream::pair()?;
         let (reader, writer) = client.into_split();
         let (_, mut server_writer) = server.into_split();
         let mut connection = Connection {
-            version: ProtocolVersion::Sixteen,
+            version: ProtocolVersion::One,
             request_id: frame.request_id(),
             reader: BufReader::new(reader),
             writer,
@@ -220,76 +206,6 @@ mod tests {
             .await?;
 
         assert_eq!(connection.message().await?, expected);
-        Ok(())
-    }
-
-    #[test]
-    fn inv033_newer_version_client_admits_version_one_pre_admission_errors()
-    -> Result<(), Box<dyn Error>> {
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Two)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Three)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Four)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Five)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Six)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Seven)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Eight)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Nine)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Ten)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Eleven)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Twelve)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Thirteen)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Sixteen)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Seventeen)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Eighteen)?;
-        assert_pre_admission_errors_are_admitted(ProtocolVersion::Nineteen)?;
-        Ok(())
-    }
-
-    #[test]
-    fn inv033_newer_version_client_rejects_version_one_application_errors()
-    -> Result<(), Box<dyn Error>> {
-        assert_application_error_is_rejected(ProtocolVersion::Two)?;
-        assert_application_error_is_rejected(ProtocolVersion::Three)?;
-        assert_application_error_is_rejected(ProtocolVersion::Four)?;
-        assert_application_error_is_rejected(ProtocolVersion::Five)?;
-        assert_application_error_is_rejected(ProtocolVersion::Six)?;
-        assert_application_error_is_rejected(ProtocolVersion::Seven)?;
-        assert_application_error_is_rejected(ProtocolVersion::Eight)?;
-        assert_application_error_is_rejected(ProtocolVersion::Nine)?;
-        assert_application_error_is_rejected(ProtocolVersion::Ten)?;
-        assert_application_error_is_rejected(ProtocolVersion::Eleven)?;
-        assert_application_error_is_rejected(ProtocolVersion::Twelve)?;
-        assert_application_error_is_rejected(ProtocolVersion::Thirteen)?;
-        assert_application_error_is_rejected(ProtocolVersion::Sixteen)?;
-        assert_application_error_is_rejected(ProtocolVersion::Seventeen)?;
-        assert_application_error_is_rejected(ProtocolVersion::Eighteen)?;
-        assert_application_error_is_rejected(ProtocolVersion::Nineteen)?;
-        Ok(())
-    }
-
-    #[track_caller]
-    fn assert_pre_admission_errors_are_admitted(
-        expected: ProtocolVersion,
-    ) -> Result<(), Box<dyn Error>> {
-        assert!(response_version_is_admitted(
-            expected,
-            &error_frame(ProtocolVersion::One, ErrorCode::MalformedFrame)?
-        ));
-        assert!(response_version_is_admitted(
-            expected,
-            &error_frame(ProtocolVersion::One, ErrorCode::UnsupportedVersion)?
-        ));
-        Ok(())
-    }
-
-    #[track_caller]
-    fn assert_application_error_is_rejected(
-        expected: ProtocolVersion,
-    ) -> Result<(), Box<dyn Error>> {
-        assert!(!response_version_is_admitted(
-            expected,
-            &error_frame(ProtocolVersion::One, ErrorCode::InvalidRequest)?
-        ));
         Ok(())
     }
 

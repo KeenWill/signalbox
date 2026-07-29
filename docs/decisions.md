@@ -10,6 +10,39 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-28 — Collapse the undeployed process protocol to one version
+
+**Context.** Per-feature protocol numbers protected mixed client and daemon
+builds, but Signalbox has none: one user builds every process from one tree and
+nothing is durably deployed. In one development night the unused compatibility
+scheme created four retroactive-widening hazards, retired one number after an
+out-of-order merge, left stale tests or prose after three renumberings, and made
+the process specification name the wrong version twice. No domain or persistence
+record stores `ProtocolVersion`, so resetting the vocabulary has no data or
+migration consequence.
+
+**Decision.** Reset every implemented request, response, event, and required
+field to the single closed process-protocol version `1`, modified in place. Keep
+the required wire version field, exact admission check, unsupported-version
+failure, and closed-enum decoding. Remove per-feature constants, variants,
+minimum-version gates, and retired-number history. Before durable deployment,
+future protocol changes continue to modify version `1` in place, matching the
+correct-current-shape and owner-checkpoint baseline discipline used for schema.
+
+Numbering freezes and becomes permanent at the first durable deployment: the
+first client that cannot be rebuilt at will, concretely a macOS app installed on
+a device or a daemon reached remotely rather than from this tree. After that
+condition, incompatible changes allocate permanent new numbers and require an
+explicit compatibility decision.
+
+**Rejected alternatives.** Retaining per-feature numbers preserves complexity
+for mixed builds that cannot occur. Removing versioning entirely discards the
+fail-closed boundary needed after deployment. Resetting to the former maximum
+would preserve accidental history without preserving a deployed contract.
+
+**Affects.** [process-protocol](spec/process-protocol.md), INV-033, the Rust
+protocol crate, `signalboxd`, the terminal client, and the native Swift client.
+
 ## 2026-07-28 — Compact model visibility without rewriting the transcript
 
 **Context.** Long sessions eventually exceed a selected model's context window,

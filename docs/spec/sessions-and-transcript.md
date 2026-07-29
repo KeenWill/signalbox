@@ -10,13 +10,13 @@ model-identity boundary were additionally verified through PR #272
 (`agent/mid-session-model`); the imported-frontier process surface was verified
 through PR #294 (`agent/continue-imported-conversation`); the session system
 prompt was verified through PR #286 (`agent/session-system-prompt`); and the
-version-thirteen input-delivery surface and its user-reachable steering boundary
-were verified through PR #302 (`agent/mid-turn-steering`). The copy-on-create
-session-template provenance and creation mode were verified through PR #311
+input-delivery surface and its user-reachable steering boundary were verified
+through PR #302 (`agent/mid-turn-steering`). The copy-on-create session-template
+provenance and creation mode were verified through PR #311
 (`agent/session-templates-spec`). The append-only context-compaction record and
-projection were verified through this PR (`agent/context-compaction-core`); the
-command path and canonical visible-range selection were verified against
-`agent/context-compaction-protocol`. The runner placement-entry paragraphs are
+projection were verified through PR #312 (`agent/context-compaction-core`); the
+command path and canonical visible-range selection were verified through PR #314
+(`agent/context-compaction-protocol`). The runner placement-entry paragraphs are
 the foundation proposal at the bottom of their implementing stack and become
 verified only with those child pull requests. The imported-conversation record
 and converter are owned by [conversation-import](conversation-import.md). Where
@@ -146,7 +146,7 @@ Import never chooses this relationship or a frontier. At any later time, and
 more than once, a client may invoke this session-creation command against any
 entry boundary of any imported conversation.
 
-Protocol version ten exposes that command as
+The process protocol exposes that command as
 `create_session_from_imported_frontier`. Its wire address is the imported
 conversation identity plus a positive inclusive imported position; the daemon
 resolves the immutable aggregate to the canonical sealed frontier before
@@ -698,18 +698,18 @@ provider projection resolves that record to the exact injected placement event
 owned by [model-call execution](model-call-execution.md#frontier-rendering)
 (INV-015, INV-044).
 
-Pending steering has a separate safe-point boundary (INV-036). A
-version-thirteen `steer` submit accepted while its exact source turn is active
-returns the accepted-input identity, immutable acceptance position, and source
-turn immediately; it creates no origin turn or semantic entry at acceptance.
-Immediately before an initial or continuation call is prepared, the transaction
-appends one `SteeringAcceptedInput` per pending input in ascending acceptance
-position, derives one frontier extending the starting frontier for the admitted
-initial call, changes every input to `ConsumedAsSteering { call }`, and inserts
-that exact `Prepared` call against the extended frontier. All four effects
-commit or roll back together. The entry therefore becomes semantic history only
-with the call that first observes it; the immutable accepted-input row remains
-the content authority.
+Pending steering has a separate safe-point boundary (INV-036). A `steer` submit
+accepted while its exact source turn is active returns the accepted-input
+identity, immutable acceptance position, and source turn immediately; it creates
+no origin turn or semantic entry at acceptance. Immediately before an initial or
+continuation call is prepared, the transaction appends one
+`SteeringAcceptedInput` per pending input in ascending acceptance position,
+derives one frontier extending the starting frontier for the admitted initial
+call, changes every input to `ConsumedAsSteering { call }`, and inserts that
+exact `Prepared` call against the extended frontier. All four effects commit or
+roll back together. The entry therefore becomes semantic history only with the
+call that first observes it; the immutable accepted-input row remains the
+content authority.
 
 Tool-use entries become history with the producing call's completed observation;
 tool-result entries become history only at the all-resolved continuation or
@@ -772,8 +772,8 @@ content ownership. An accepted omitted or explicit `start_when_idle` submit and
 a `queue` submit create an accepted origin turn with frozen configuration;
 `queue` binds its acceptance to the exact active turn it follows. A `steer`
 submit instead creates configuration-free pending steering bound to that exact
-source turn. The closed version-thirteen wire spelling and typed receipts are
-owned by [process-protocol](process-protocol.md#client-requests).
+source turn. The closed wire spelling and typed receipts are owned by
+[process-protocol](process-protocol.md#client-requests).
 
 The accepted input owns the one immutable authoritative content value; the
 `accepted_input` row admits exactly two guarded updates from pending steering:

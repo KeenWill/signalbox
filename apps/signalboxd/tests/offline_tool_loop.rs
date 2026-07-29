@@ -3133,7 +3133,7 @@ async fn s02_s10_inv006_refused_continuation_call_admits_and_runs_later_turn()
 }
 
 /// S02 / S08 / S10 / INV-016 / INV-036: a NextSafePoint input accepted through
-/// process protocol version thirteen while a tool round is parked is consumed by the
+/// while a tool round is parked is consumed by the
 /// continuation call, the
 /// steering-bearing continuation completes the turn, and the committed shape
 /// reloads through the scheduling projection — the startup scan completes and
@@ -3164,7 +3164,7 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_completes()
 
     let steering_content = InputContent::new(String::from("steer the parked tool round"));
     let steering_frame = ClientFrame::try_new_for_version(
-        ProtocolVersion::Thirteen,
+        ProtocolVersion::One,
         RequestId::try_new(1)?,
         ClientRequest::SubmitInput {
             command_id: CommandId::try_from_uuid(Uuid::from_u128(0x3610))?,

@@ -6,9 +6,8 @@ use std::{
 #[cfg(test)]
 use signalbox_process_protocol::ProtocolVersion;
 use signalbox_process_protocol::{
-    CanonicalUuid, ContentFragment, MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION, ModelCallTokenUsage,
-    ServerFrame, ServerMessage, TranscriptEntry, TranscriptTextEntry, TurnState,
-    decode_server_line, encode_server_line,
+    CanonicalUuid, ContentFragment, ModelCallTokenUsage, ServerFrame, ServerMessage,
+    TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
 };
 
 use crate::{connection::Connection, error::ClientError};
@@ -91,9 +90,8 @@ impl TranscriptSnapshot {
             .map_err(|_| ClientError::Protocol("test request identity was invalid"))?;
         let mut spool = tempfile::tempfile()?;
         for message in messages {
-            let frame =
-                ServerFrame::try_new_for_version(ProtocolVersion::Nineteen, request_id, message)
-                    .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
+            let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request_id, message)
+                .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
             append_frame(&mut spool, &frame)?;
         }
         spool.flush()?;
@@ -213,10 +211,8 @@ pub(crate) async fn read_snapshot(
     let mut turn_count = 0_u64;
     let mut model_call_count = 0_u64;
     let mut entry_count = 0_u64;
-    let requires_model_call_usage =
-        connection.version().as_u64() >= MODEL_CALL_TOKEN_USAGE_PROTOCOL_VERSION;
     let mut model_calls_started = false;
-    let mut model_calls_ended = !requires_model_call_usage;
+    let mut model_calls_ended = false;
     let mut entries_started = false;
     loop {
         let frame = connection.frame().await?;

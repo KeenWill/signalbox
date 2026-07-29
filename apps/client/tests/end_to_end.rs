@@ -328,8 +328,7 @@ async fn create_fixture_session(socket: PathBuf) -> Result<String, Box<dyn Error
     Ok(session_id)
 }
 
-/// Installs one complete metadata snapshot through the version-four process
-/// request, which no terminal verb exposes.
+/// Installs one complete metadata snapshot through the process request, which no terminal verb exposes.
 async fn replace_fixture_metadata(
     socket: &Path,
     session_id: &str,
@@ -339,7 +338,7 @@ async fn replace_fixture_metadata(
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let frame = ClientFrame::try_new_for_version(
-        ProtocolVersion::Four,
+        ProtocolVersion::One,
         RequestId::try_new(1)?,
         ClientRequest::ReplaceSessionMetadata {
             command_id: CommandId::try_from_uuid(Uuid::now_v7())?,
