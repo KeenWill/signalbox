@@ -1,7 +1,7 @@
 # Signalbox schema audit refresh
 
-> Dated research intake (2026-07-25), non-normative. Decisions live in the
-> [decision log](../decisions.md), and current requirements live in the
+> Dated research intake (2026-07-25), non-normative. Historical decisions live
+> in git history, and current requirements live in the
 > [living specification](../spec/README.md); those sources supersede anything
 > stated here.
 
@@ -57,9 +57,7 @@ duplicate constraints, prefix-conversion history, and history-pinning tests
 while paying nearly all reset risk.
 
 The governing authority already permits a clean baseline while every database is
-disposable:
-[Pre-production schema discipline](../decisions.md#2026-07-24--pre-production-schema-discipline).
-The
+disposable: Pre-production schema discipline. The
 [backlog entry](../agents/backlog.md#migration-baseline-reset-blocked-on-schema-audit-verdict-owner-checkpoint-call-size-s-m)
 adds the remaining owner checkpoint gate.
 
@@ -303,7 +301,7 @@ bound by foreign key and command transaction behavior.
 - The prior diseased column is fixed. Migration `240007` makes
   `model_call.credential_reference` NOT NULL and non-empty, and the store no
   longer carries the NULL-read branch. This matches the superseding
-  [credential-reference decision](../decisions.md#2026-07-24--make-the-model-call-credential-reference-total).
+  credential-reference decision.
 - The former stale migration inventory is fixed:
   [persistence-protocol](../spec/persistence-protocol.md#migrations) says 27
   files through `202607280001`.

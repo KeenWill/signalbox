@@ -1,9 +1,9 @@
 # ModelRuntime adapter conformance template
 
 > Dated research intake (2026-07-23), non-normative. This page records study
-> findings as input to future adapter work; it states no requirements. Decisions
-> live in the [decision ledger](../decisions.md); current requirements live in
-> the [living specification](../spec/README.md) — in particular the
+> findings as input to future adapter work; it states no requirements.
+> Historical decisions live in git history; current requirements live in the
+> [living specification](../spec/README.md) — in particular the
 > [model-runtime substrate](../spec/runtime-substrate.md) page — which
 > supersedes anything stated here.
 
@@ -20,8 +20,8 @@
   adapter-PR versus wiring-PR split, and the loopback test pattern with a
   minimum test matrix. Per the one-owning-source rule in
   [AGENTS.md](../../AGENTS.md), the checklist names each obligation and cites
-  its owning spec section or invariant row instead of restating the requirement,
-  so reuse of this page cannot age into a divergent second contract
+  its owning spec section or INV-tagged test instead of restating the
+  requirement, so reuse of this page cannot age into a divergent second contract
 - Intended use: reusable body for the subscription-runtime tracks in the
   [backlog](../agents/backlog.md), with one scoping caveat: the stability
   verdict (§1), the PR split (§3), and the test-matrix obligations apply to any
@@ -115,10 +115,10 @@ At the study date the runtime layer was about three days old (first
 
 Everything a conforming adapter must satisfy is owned by the
 [runtime-substrate spec](../spec/runtime-substrate.md) and the
-[invariant catalog](../invariants.md); this checklist restates none of it. What
-the study adds is the build order — which file to write first, what each file's
-single job is, and which exemplar to copy — with each step citing the owning
-section for its rules.
+[invariant test index](../invariants.md); this checklist restates none of it.
+What the study adds is the build order — which file to write first, what each
+file's single job is, and which exemplar to copy — with each step citing the
+owning section for its rules.
 
 Build a new adapter as a self-contained crate
 `crates/model-runtime-<provider>/`. Its `[dependencies]` are
@@ -213,7 +213,7 @@ unless noted.
     [Two-stage execution](../spec/runtime-substrate.md#two-stage-execution) and
     the
     [credential-access boundary](../spec/runtime-substrate.md#credential-access-boundary)
-    (INV-035 in the [invariant catalog](../invariants.md)). The exemplar's
+    (INV-035 in the [invariant test index](../invariants.md)). The exemplar's
     internal order (clone correlation → `build_request` → serialize → resolve
     the credential raced work-first against cancellation → sensitivity-marked
     header → build the `reqwest::Request`) is a faithful sequencing of those
@@ -239,9 +239,9 @@ one-operation-one-physical-request rule and typed-evidence-never-exceptions
 ([Two-stage execution](../spec/runtime-substrate.md#two-stage-execution)); the
 credential-hygiene rules (the
 [credential-access boundary](../spec/runtime-substrate.md#credential-access-boundary);
-INV-035 in the [invariant catalog](../invariants.md)). A goal prompt built from
-this page should cite those sections rather than copy them: the copies age, the
-sections do not.
+INV-035 in the [invariant test index](../invariants.md)). A goal prompt built
+from this page should cite those sections rather than copy them: the copies age,
+the sections do not.
 
 ## 3. Clean split — adapter PR vs. wiring PR
 
@@ -258,9 +258,9 @@ sections do not.
   describes the implemented adapters, so the same PR updates its adapter
   coverage — or the bottom specification diff of the PR's stack supplies it —
   per the living-specification rule in [AGENTS.md](../../AGENTS.md). Enforcement
-  columns in the [invariant catalog](../invariants.md) that gain the new crate's
-  tests (INV-035 lists each existing adapter's loopback suite) are updated in
-  the same change.
+  generated [invariant test index](../invariants.md) after adding the new
+  crate's tests (INV-035 lists each existing adapter's loopback suite) are
+  updated in the same change.
 
 It does **NOT** touch: `model-provider-runtime` (the bridge is generic),
 `crates/application` (the `ModelCallProvider` port is provider-agnostic),
@@ -325,12 +325,12 @@ add a match arm. Introducing that mechanism is also a *decision*, not mere
 implementation: it chooses a dispatch architecture the specification does not
 fix and closes the recorded multi-provider open question in
 [configuration-and-credentials](../spec/configuration-and-credentials.md), so
-the wiring PR carries the dated `docs/decisions.md` entry and is weighed under
-the decision process in [AGENTS.md](../../AGENTS.md) (foundation weight if its
-resolution moves a boundary) before implementation. Adapter PRs after that just
-slot into whatever mechanism that PR establishes. This distinction is worth
-stating in a track's goal prompt so the adapter author does not assume a
-registry exists.
+the wiring PR carries the owning specification diff and records the choice in
+its description under the decision process in [AGENTS.md](../../AGENTS.md)
+(foundation weight if its resolution moves a boundary) before implementation.
+Adapter PRs after that just slot into whatever mechanism that PR establishes.
+This distinction is worth stating in a track's goal prompt so the adapter author
+does not assume a registry exists.
 
 ## 4. Per-adapter test pattern to replicate
 

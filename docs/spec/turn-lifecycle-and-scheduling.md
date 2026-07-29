@@ -30,9 +30,9 @@ owner reconciliation decision that releases an ambiguity wait, together with the
 startup scan's separate report of sessions holding their slot for that decision,
 were verified through PR #281 (`agent/turn-reconciliation-recovery`). The finite
 startup scan and removal of the superseded steering blocker were verified
-through PR #291 (`agent/turn-control-verbs`).
-[docs/invariants.md](../invariants.md) remains the law catalog; INV tags below
-reference its rows without restating them. Designed lifecycle behavior that has
+through PR #291 (`agent/turn-control-verbs`). INV-tagged tests are the
+enforcement of record; tags below resolve through the generated
+[invariant test index](../invariants.md). Designed lifecycle behavior that has
 no committed code path appears only under [Open edges](#open-edges). The
 runner-loss recovery and runner-socket startup paragraphs are the foundation
 proposal at the bottom of their implementing stack and become verified only with

@@ -19,7 +19,7 @@ item. The spine is parsed per `## crate: module` section, taking column-0
    exporting module has no Inventory row, or a section declares the same
    name twice.
 
-Known limitation, accepted in the decision log: signatures, associated
+Known limitation of this mechanical check: signatures, associated
 items, and enum variant lists inside a declaration are not validated —
 keeping those faithful is a review responsibility (cargo public-api is the
 upgrade path if name/count tripwires prove insufficient).

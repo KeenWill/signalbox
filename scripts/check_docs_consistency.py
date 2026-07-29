@@ -9,9 +9,7 @@ The check is deterministic and offline. It verifies:
    tag, and every Rust test file carrying an INV tag is cited by that row,
 2. every relative Markdown link in ``docs/**/*.md`` and the root ``AGENTS.md``
    resolves inside the repository, including GitHub-style heading fragments,
-3. every H2 in ``docs/decisions.md`` is a valid dated entry and entry dates are
-   non-increasing, and
-4. every subsystem page under ``docs/spec/`` has an offline verification
+3. every subsystem page under ``docs/spec/`` has an offline verification
    reference whose PR token uses ``PR #N (`branch-ref`)``, optionally narrowed
    to the surface that PR settled by a semicolon tail: ``PR #N (`branch-ref`;
    <scope>)``. The scope tail is free-form prose: its content is not validated,
@@ -51,14 +49,12 @@ import sys
 import tomllib
 import unicodedata
 from dataclasses import dataclass
-from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 INVARIANTS = Path("docs/invariants.md")
-DECISIONS = Path("docs/decisions.md")
 SPEC_DIR = Path("docs/spec")
 
 ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$")
@@ -129,7 +125,6 @@ REFERENCE_DEFINITION = re.compile(
 )
 LIST_ITEM = re.compile(r"^[ \t]*(?:[-+*]|\d+[.)])[ \t]+")
 FENCE_LIST_CONTAINER = re.compile(r"^ {0,3}(?:[-+*]|\d+[.)])[ \t]+")
-DECISION_HEADING = re.compile(r"^(\d{4}-\d{2}-\d{2}) — (\S.*)$")
 # Block boundaries also occur in block-quoted form: inside a quote a blank line
 # is written ``>`` and a sibling list item ``> -``, at any nesting depth. Both
 # boundaries therefore admit the same repeated quote prefix the container
@@ -210,10 +205,6 @@ VERIFICATION_NEGATION = re.compile(
 EMPHASIS_DELIMITER = re.compile(r"[*_~]+")
 THEMATIC_BREAK = re.compile(
     r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"
-)
-DECISION_ENTRY_HEADING = re.compile(r"^ {0,3}##(?!#)(?:[ \t]+|$)(?P<title>.*)$")
-LIST_WRAPPED_ENTRY_HEADING = re.compile(
-    r"^ {0,3}(?:(?:[-+*]|\d+[.)])[ \t]+)+##(?!#)(?:[ \t]|$)"
 )
 TEST_GROUP = re.compile(
     r"\btests?[ \t]+"
@@ -2614,18 +2605,21 @@ def check_invariant_citations(
         if not re.match(r"^\|[ \t]*INV-[0-9]{3}[ \t]*\|", line):
             continue
         cells = split_table_row(line)
-        if len(cells) != 5:
+        if len(cells) not in (2, 5):
             violations.append(
                 Violation(
                     INVARIANTS.as_posix(),
                     number,
                     "invariant-citation",
-                    f"expected 5 table cells, found {len(cells)}",
+                    f"expected 2 generated-index cells, found {len(cells)}",
                 )
             )
             continue
         invariant = cells[0]
-        enforcement = cells[4]
+        # Five-cell rows remain accepted by focused parser fixtures. The
+        # repository file itself is exact-checked as a generated two-cell
+        # index by scripts/generate_invariants.py.
+        enforcement = cells[-1]
         tagged_marker = re.compile(
             rf"(?i)(?<![A-Za-z0-9]){re.escape(invariant)}-tagged(?![A-Za-z0-9])",
         )
@@ -2840,113 +2834,6 @@ def check_relative_links(
                     f"`{repository_path(root, target)}`",
                 )
             )
-    return violations
-
-
-def check_decision_order(root: Path) -> list[Violation]:
-    source = root / DECISIONS
-    text = mask_block_content(source.read_text(encoding="utf-8"))
-    lines = text.splitlines()
-    violations: list[Violation] = []
-    previous: tuple[date, int] | None = None
-    entries = 0
-
-    for number, line in enumerate(lines, start=1):
-        if (
-            number < len(lines)
-            and line.strip()
-            and ATX_HEADING.match(line) is None
-            and LIST_ITEM.match(line) is None
-            and BLOCK_QUOTE_CONTAINER.match(line) is None
-            and re.match(r"^ {0,3}-+[ \t]*$", lines[number])
-        ):
-            entries += 1
-            violations.append(
-                Violation(
-                    DECISIONS.as_posix(),
-                    number,
-                    "decision-order",
-                    "entry heading must be `## YYYY-MM-DD — <title>`; "
-                    "Setext H2 headings are not permitted",
-                )
-            )
-            continue
-        if LIST_WRAPPED_ENTRY_HEADING.match(line):
-            entries += 1
-            violations.append(
-                Violation(
-                    DECISIONS.as_posix(),
-                    number,
-                    "decision-order",
-                    "entry heading must be `## YYYY-MM-DD — <title>`; H2 "
-                    "headings nested inside a list are not permitted",
-                )
-            )
-            continue
-        if BLOCK_QUOTE_CONTAINER.match(line) and DECISION_ENTRY_HEADING.match(
-            strip_heading_containers(line)
-        ):
-            entries += 1
-            violations.append(
-                Violation(
-                    DECISIONS.as_posix(),
-                    number,
-                    "decision-order",
-                    "entry heading must be `## YYYY-MM-DD — <title>`; H2 "
-                    "headings nested inside a block quote are not permitted",
-                )
-            )
-            continue
-        heading = DECISION_ENTRY_HEADING.match(line)
-        if heading is None:
-            continue
-        entries += 1
-        title = heading.group("title").strip()
-        match = DECISION_HEADING.fullmatch(title)
-        if not match:
-            violations.append(
-                Violation(
-                    DECISIONS.as_posix(),
-                    number,
-                    "decision-order",
-                    "entry heading must be `## YYYY-MM-DD — <title>`",
-                )
-            )
-            continue
-        try:
-            entry_date = date.fromisoformat(match.group(1))
-        except ValueError:
-            violations.append(
-                Violation(
-                    DECISIONS.as_posix(),
-                    number,
-                    "decision-order",
-                    f"invalid ISO date `{match.group(1)}`",
-                )
-            )
-            continue
-        if previous is not None and entry_date > previous[0]:
-            violations.append(
-                Violation(
-                    DECISIONS.as_posix(),
-                    number,
-                    "decision-order",
-                    f"entry date {entry_date.isoformat()} is newer than the "
-                    f"preceding {previous[0].isoformat()} entry at line "
-                    f"{previous[1]}",
-                )
-            )
-        previous = (entry_date, number)
-
-    if entries == 0:
-        violations.append(
-            Violation(
-                DECISIONS.as_posix(),
-                1,
-                "decision-order",
-                "no dated decision entries found",
-            )
-        )
     return violations
 
 
@@ -3258,7 +3145,6 @@ def run_checks(root: Path = ROOT) -> list[Violation]:
     )
     failures = invariant_failures
     failures.extend(check_relative_links(root, enforcement_links))
-    failures.extend(check_decision_order(root))
     failures.extend(check_spec_verification_references(root))
     failures.extend(check_rust_test_generation(sources))
     return sorted(set(failures))

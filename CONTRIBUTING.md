@@ -7,20 +7,19 @@ implying that undecided implementation choices are settled.
 ## Before proposing a change
 
 Read the [vision](docs/vision.md), [architecture](docs/architecture.md),
-[living specification](docs/spec/README.md), [invariants](docs/invariants.md),
-[decision log](docs/decisions.md), and [open questions](docs/open-questions.md).
-Check the specification and the decision log before revisiting a decision.
-Ordinary decisions, including closing an ordinary open question, are made in the
-pull request and recorded in the decision log. A foundation-weight change —
-changing normative semantics in a specification page beyond recording
-implemented behavior, moving a boundary between domain, storage, wire, or
-framework representations, weakening an invariant, introducing a technology that
-constrains several components, or closing a foundation-weight open question — is
-proposed, per the owning rule in [AGENTS.md](AGENTS.md), as a specification diff
-reviewed at the bottom of its implementing stack, with a
-[decision log](docs/decisions.md) entry recording the choice; the record is
-under review while the pull request is open, and the owner's merge is its
-acceptance.
+[living specification](docs/spec/README.md),
+[invariant test index](docs/invariants.md), and
+[open questions](docs/open-questions.md). Check the specification and git
+history before revisiting a decision. Ordinary decisions, including closing an
+ordinary open question, are made and recorded in the pull request. A
+foundation-weight change — changing normative semantics in a specification page
+beyond recording implemented behavior, moving a boundary between domain,
+storage, wire, or framework representations, weakening an invariant, introducing
+a technology that constrains several components, or closing a foundation-weight
+open question — is proposed, per the owning rule in [AGENTS.md](AGENTS.md), as a
+specification diff reviewed at the bottom of its implementing stack; the
+contract and pull-request description are under review while the pull request is
+open, and the owner's merge is acceptance.
 
 ## Contribution rules
 
@@ -107,7 +106,8 @@ the root [AGENTS.md](AGENTS.md). For documentation changes, also:
 1. Check Markdown links and headings. Markdown prose is machine-wrapped at 80
    columns; `mdformat --check *.md docs/` (see [AGENTS.md](AGENTS.md)) must
    pass.
-2. Search for contradictions with the invariant catalog and decision records.
+2. Check changed contracts against INV-tagged tests and the owning
+   specification.
 3. Confirm that examples do not present provisional terminology or behavior as
    stable API.
 4. Review `git diff --check` and the complete diff.

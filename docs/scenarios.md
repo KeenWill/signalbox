@@ -8,14 +8,13 @@ event-sourcing design. Invariant identifiers link to
 
 The scenarios are frozen design fixtures. New or changed normative behavior
 belongs in the record that owns it (the owning [spec page](spec/README.md) or
-the [decision log](decisions.md)); a scenario's normative content changes or is
-added only alongside the decision that motivates it, and a decision introducing
+implemented test); a scenario's normative content changes or is added only
+alongside the owner-accepted change that motivates it, and a change introducing
 a new lifecycle edge adds or amends its scenario fixture in the same change.
 Test coverage is recorded outside this document: tests name the scenario
 identifiers they enforce under the rules in [AGENTS.md](../AGENTS.md) and
 [testing-style.md](agents/testing-style.md), and the
-[invariant catalog](invariants.md)'s enforcement column accumulates the links to
-those tests.
+[invariant test index](invariants.md) is generated from those tests.
 
 ## S01 — Create a new interactive session
 

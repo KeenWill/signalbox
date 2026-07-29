@@ -329,18 +329,16 @@ cannot be normalized after the fact. ADR-0047 remains authoritative for its
 accepted substrate posture, while these commands document this audit's
 reproducible pinned-clone measurement; the discrepancy does not change the
 shared concentration signal or reopen the later recorded hand-roll decision in
-the
-[decision log](../decisions.md#2026-07-20--hand-roll-the-typed-model-runtime-substrate).
-Repo-health facts from the handoff (checked 2026-07-20, not re-verified here):
-20 stars, 4 forks, crates.io `serdes-ai` 0.2.6 published 2026-02-20 — five
-months behind repo activity — with 2,105 lifetime downloads. In-repo signals
-verified directly: README quick-start pins `serdes-ai = "0.1"` while the
-workspace is 0.2.6; no integration-test binaries; no live-provider tests;
-per-adapter unit coverage averages roughly seven tests across 15 adapters;
-`serdes-ai-macros` has zero unit tests; the Anthropic streaming path received
-recent integrity-hardening work (the pinned commit is that merge) that was not
-mirrored to the OpenAI chat path. No API-stability policy or deprecation process
-is documented.
+the git history. Repo-health facts from the handoff (checked 2026-07-20, not
+re-verified here): 20 stars, 4 forks, crates.io `serdes-ai` 0.2.6 published
+2026-02-20 — five months behind repo activity — with 2,105 lifetime downloads.
+In-repo signals verified directly: README quick-start pins `serdes-ai = "0.1"`
+while the workspace is 0.2.6; no integration-test binaries; no live-provider
+tests; per-adapter unit coverage averages roughly seven tests across 15
+adapters; `serdes-ai-macros` has zero unit tests; the Anthropic streaming path
+received recent integrity-hardening work (the pinned commit is that merge) that
+was not mirrored to the OpenAI chat path. No API-stability policy or deprecation
+process is documented.
 
 ### Q10 — PydanticAI-derived behaviors: valuable vs conflicting
 
@@ -389,9 +387,8 @@ usage-limit enforcement via in-process counters rather than durable budgets.
 
 **Hand-roll a thin provider layer inside Signalbox, using SerdesAI strictly as a
 design reference and copying no code, rather than vendoring SerdesAI crates
-wholesale.** This audit recommendation is now recorded by the
-[hand-roll decision](../decisions.md#2026-07-20--hand-roll-the-typed-model-runtime-substrate),
-which is authoritative.
+wholesale.** This audit recommendation is now recorded by the hand-roll
+decision, which is authoritative.
 
 "Depend on upstream releases" stays out on the maintenance signals (Q9: 90 of 92
 human-authored commits concentrated in two contributors, stale crates.io

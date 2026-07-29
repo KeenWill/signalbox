@@ -1,5 +1,4 @@
-// Configuration for the policy recorded in docs/decisions.md at
-// #2026-07-20--conservative-renovate-policy-with-release-age-gates.
+// Explicit dependency-update policy; git history retains its adoption context.
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   // Renovate's maintained baseline: monorepo groupings, replacement rules for

@@ -11,7 +11,7 @@ registry's common declarations remain owned by [tool loop](tool-loop.md);
 session transcript and frontier mechanics remain owned by
 [sessions and transcript](sessions-and-transcript.md); physical tool attempts
 remain owned by [tool loop](tool-loop.md). Invariant tags cite
-[the invariant catalog](../invariants.md).
+[the invariant test index](../invariants.md).
 
 The executable runner build-out is a foundation proposal at the bottom of its
 implementing stack. The domain and Postgres foundation above remain the verified

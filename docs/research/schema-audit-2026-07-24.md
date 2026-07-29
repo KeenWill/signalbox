@@ -1,13 +1,13 @@
 # Signalbox schema audit: production-brain compromises
 
-> Dated research intake (2026-07-24). Decision citations refer to entries in the
-> [decision log](../decisions.md). Current requirements live in the
+> Dated research intake (2026-07-24). Decision citations refer to the former
+> ledger as it existed at the audited snapshot. Current requirements live in the
 > [living specification](../spec/README.md), which supersedes any requirement
 > stated here.
 
 - Date: 2026-07-24
 - Status: research intake, point-in-time and non-normative; where this document
-  and the decision log or living specification disagree, those records win
+  and the current living specification disagree, the specification wins
 - Audited snapshot: `origin/main` @ `2092c41` — the composed final schema across
   all 18 migration files, the persistence store, and the relevant specification
   pages
@@ -50,7 +50,7 @@ one column (`model_call.credential_reference`) and — more interestingly — in
 *migration discipline itself*, which performs full production-deployment
 choreography (guarded backfills, fail-closed ambiguity checks,
 `NOT VALID`/`VALIDATE`, "historical rows" reasoning) against databases the
-repo's own decision log certifies have never held production data. That ritual
+repository history certifies have never held production data. That ritual
 inflated 18 files/11,464 lines to roughly double what a baseline needs, but it
 left almost no residue in the final schema, so a rewrite pass of the *schema* is
 not warranted; a squash of the *files* is optional hygiene.

@@ -3,8 +3,8 @@
 > Dated research intake (2026-07-25), non-normative. This page is the read-only
 > inventory required by the [Owner-to-user backlog entry](../agents/backlog.md);
 > it performs no rename and decides no terminology, compatibility, or migration
-> policy. Decisions live in the [decision log](../decisions.md), and current
-> requirements live in the [living specification](../spec/README.md).
+> policy. Historical decisions live in git history, and current requirements
+> live in the [living specification](../spec/README.md).
 
 - Date: 2026-07-25
 - Status: complete point-in-time inventory; proposal-grade input to a later

@@ -34,25 +34,24 @@ companion pages. This page also owns the shared
 
 ## Boundary and crate layout
 
-The runtime layer is four library crates, hand-rolled per the 2026-07-20
-[decision-ledger entry](../decisions.md) that closed the substrate's
-vendor-versus-hand-roll question: one provider-neutral core crate plus
-separately named provider adapters, with SerdesAI as a design reference only.
-`signalbox-model-runtime` is the shared vocabulary; the Anthropic and OpenAI
-adapters additionally own their HTTP, TLS, and serde dependencies, while the
-Codex CLI adapter owns only its subprocess, temporary-schema-file, signal, and
-serde dependencies. Test helpers ship in no built library artifact.
-`crates/domain`, `crates/application`, and `crates/persistence` declare no
-dependency on any runtime crate, and no runtime type appears in a domain or
-application signature (INV-002, INV-005); the approved runtime consumers are the
-adapter crates, the `crates/model-provider-runtime` bridge — whose
-`RuntimeModelCallProvider` implements the application's `ModelCallProvider` port
-over any `ModelRuntime<ModelCallId>`, depending on both crates so the dependency
-arrow points from the bridge into application, never from application into the
-runtime — and the daemon composition root (see Open edges). The Cargo manifest
-is the enforcement mechanism: an undeclared dependency fails the workspace
-build. Why: manifest-visible boundaries make a boundary violation a reviewable
-diff instead of a silent import.
+The runtime layer is four hand-rolled library crates: one provider-neutral core
+crate plus separately named provider adapters, with SerdesAI as a design
+reference only. `signalbox-model-runtime` is the shared vocabulary; the
+Anthropic and OpenAI adapters additionally own their HTTP, TLS, and serde
+dependencies, while the Codex CLI adapter owns only its subprocess,
+temporary-schema-file, signal, and serde dependencies. Test helpers ship in no
+built library artifact. `crates/domain`, `crates/application`, and
+`crates/persistence` declare no dependency on any runtime crate, and no runtime
+type appears in a domain or application signature (INV-002, INV-005); the
+approved runtime consumers are the adapter crates, the
+`crates/model-provider-runtime` bridge — whose `RuntimeModelCallProvider`
+implements the application's `ModelCallProvider` port over any
+`ModelRuntime<ModelCallId>`, depending on both crates so the dependency arrow
+points from the bridge into application, never from application into the runtime
+— and the daemon composition root (see Open edges). The Cargo manifest is the
+enforcement mechanism: an undeclared dependency fails the workspace build. Why:
+manifest-visible boundaries make a boundary violation a reviewable diff instead
+of a silent import.
 
 Caller identity crosses the boundary as an opaque correlation parameter `C`
 threaded through `ModelOperation<C>`, every `Observation<C>`, and the final

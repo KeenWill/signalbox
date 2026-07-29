@@ -135,13 +135,6 @@ class DocsConsistencyTests(unittest.TestCase):
         (self.root / "src/tests.rs").write_text(
             "#[test]\nfn named_test() {}\n", encoding="utf-8"
         )
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-25 — New\n\n"
-            "## 2026-07-25 — Same day\n\n"
-            "## 2026-07-24 — Old\n",
-            encoding="utf-8",
-        )
         (self.root / "docs/spec/example.md").write_text(
             "# Example\n\n"
             "Verified against the implementing stack through PR #12 "
@@ -2476,148 +2469,6 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
-    def test_newer_decision_after_older_entry_is_reported(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-24 — Old\n\n"
-            "## 2026-07-25 — New\n",
-            encoding="utf-8",
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertEqual(
-            failure_categories(failures),
-            ["decision-order"],
-        )
-        self.assertIn("newer than the preceding", failures[0].message)
-
-    def test_invalid_decision_date_is_reported(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n## 2026-13-40 — Invalid\n",
-            encoding="utf-8",
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertEqual(
-            failure_categories(failures),
-            ["decision-order"],
-        )
-        self.assertIn("invalid ISO date", failures[0].message)
-
-    def test_setext_h2_decision_entry_is_rejected(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-24 — Old\n\n"
-            "2026-07-26 — New\n"
-            "----------------\n",
-            encoding="utf-8",
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertEqual(
-            failure_categories(failures),
-            ["decision-order"],
-        )
-        self.assertIn(
-            "Setext H2 headings are not permitted",
-            failures[0].message,
-        )
-
-    def test_list_wrapped_h2_decision_entry_is_rejected(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-24 — Old\n\n"
-            "- ## 2026-07-25 — Hidden newer\n",
-            encoding="utf-8",
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertEqual(
-            failure_categories(failures),
-            ["decision-order"],
-        )
-        self.assertIn(
-            "H2 headings nested inside a list are not permitted",
-            failures[0].message,
-        )
-
-    def test_block_quoted_h2_decision_entry_is_rejected(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-24 — Old\n\n"
-            "> ## 2026-07-25 — Hidden newer\n",
-            encoding="utf-8",
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertEqual(
-            failure_categories(failures),
-            ["decision-order"],
-        )
-        self.assertIn(
-            "H2 headings nested inside a block quote are not permitted",
-            failures[0].message,
-        )
-
-    def test_thematic_break_after_list_item_is_not_a_decision_entry(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-25 — Entry\n\n"
-            "- first point\n"
-            "---\n",
-            encoding="utf-8",
-        )
-
-        self.assertEqual(run_checks(self.root), [])
-
-    def test_thematic_break_after_block_quote_is_not_a_decision_entry(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-25 — Entry\n\n"
-            "> A quoted remark.\n"
-            "---\n",
-            encoding="utf-8",
-        )
-
-        self.assertEqual(run_checks(self.root), [])
-
-    def test_indented_atx_decision_heading_is_validated(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-24 — Old\n\n"
-            "  ## 2026-07-30 — Indented newer entry\n",
-            encoding="utf-8",
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertEqual(failure_categories(failures), ["decision-order"])
-        self.assertIn(
-            "entry date 2026-07-30 is newer than the preceding 2026-07-24",
-            failures[0].message,
-        )
-
-    def test_indented_malformed_decision_heading_is_reported(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-24 — Old\n\n"
-            "   ## Untitled entry\n",
-            encoding="utf-8",
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertEqual(failure_categories(failures), ["decision-order"])
-        self.assertIn(
-            "entry heading must be `## YYYY-MM-DD — <title>`",
-            failures[0].message,
-        )
-
     def test_missing_and_malformed_verification_refs_are_reported(self) -> None:
         (self.root / "docs/spec/example.md").write_text(
             "# Example\n\n"
@@ -3690,7 +3541,7 @@ class DocsConsistencyTests(unittest.TestCase):
     def test_verification_clause_stops_at_markup_sentence_start(self) -> None:
         (self.root / "docs/spec/example.md").write_text(
             "# Example\n\n"
-            "The checksum is verified. [Historical context](../decisions.md) "
+            "The checksum is verified. [Historical context](../invariants.md) "
             "describes a change made through PR #12 (`agent/example`).\n\n"
             "## Provider bridge and `current_time`\n\n"
             "## Repeat\n",
