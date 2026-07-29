@@ -15,7 +15,7 @@ continuation steering were verified through PR #302 (`agent/mid-turn-steering`);
 the template-specific home requirement and template-catalog startup order were
 verified through PR #311 (`agent/session-templates-spec`); exact start-frontier
 reconstitution across a validated compaction boundary was verified through PR
-#312 (`agent/context-compaction-core`); and the corresponding persistent
+`#312` (`agent/context-compaction-core`); and the corresponding persistent
 final-state gate was verified through PR #314
 (`agent/context-compaction-protocol`). Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
