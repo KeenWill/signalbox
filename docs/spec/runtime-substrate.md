@@ -689,7 +689,11 @@ malformed JSON prevents the structural JSON scanner from claiming it.
 
 For a delta fragmentation of one text stream, including Unicode-escaped markers,
 the concatenated streamed output is never less redacted than the stateless scan
-of the concatenated provider text. Every committed corpus line is cut at every
+of the concatenated provider text, except for the fragmentations the defect
+ledger names. That exception is not a covered limit: it is thirty splits of one
+shape — a quoted credential key at a position JSON would not admit, reached
+after an earlier delta released a clean prefix — and it is a defect awaiting a
+fix in the emitted-context path. Every committed corpus line is cut at every
 UTF-8 boundary on the default test path, and the enumeration matches the leaking
 splits against a named ledger exactly: a new one is a regression and a repaired
 one must shrink the ledger, so the set cannot drift in either direction. A shape
