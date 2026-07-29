@@ -1398,7 +1398,14 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
 
     /// Flushes already-decoded text when no later provider text can extend it.
     pub(crate) fn finish(&mut self) {
-        self.suppressing = false;
+        // Suppression is NOT cleared here. Fail-closed suppression is absorbing
+        // for the sink's lifetime — usage reports, other fact boundaries, and
+        // terminal flushes never re-enable provider-controlled bytes
+        // (docs/spec/runtime-substrate.md), and the Codex adapter's sink never
+        // resets the flag either. Clearing it here let a terminal error's
+        // subtype and message be judged by the stateless scan alone, which
+        // cannot see a marker that began in the suppressed content, so a
+        // credential continued into `NativeErrorFacts` crossed the boundary.
         // Terminal: judged on each chain's joined form so held text
         // completing a credential begun in an already-emitted field (the
         // thread id) or in dropped provider text is suppressed; no chain

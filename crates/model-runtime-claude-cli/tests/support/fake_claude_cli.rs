@@ -42,6 +42,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         return Ok(());
     }
+    if scenario == "suppressed_state_survives_the_usage_barrier" {
+        // Two live identifier chains (the model prefix seeded at init, then a
+        // message id ending in its own marker prefix) drive the sink into
+        // fail-closed suppression, then a terminal error carries a value that
+        // continues the suppressed marker.
+        system_init_with_identity(
+            &arguments,
+            fixtures::SESSION_ID,
+            fixtures::MODEL_CREDENTIAL_PREFIX,
+        )?;
+        assistant_text_with_identity(
+            fixtures::CREDENTIAL_PREFIX_MESSAGE_ID,
+            fixtures::MODEL_CREDENTIAL_PREFIX,
+            fixtures::ANSWER,
+        )?;
+        error_result_with_message(fixtures::OPAQUE_CREDENTIAL_CONTINUATION)?;
+        return Ok(());
+    }
     if scenario == "model_prefix_redaction" {
         system_init_with_identity(
             &arguments,
@@ -291,6 +309,18 @@ fn generic_error_result() -> std::io::Result<()> {
         "type": "result", "subtype": "error_during_execution", "is_error": true,
         "session_id": fixtures::SESSION_ID, "stop_reason": null,
         "terminal_reason": null, "result": "synthetic provider error",
+        "errors": [], "api_error_status": null,
+        "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}
+    }))
+}
+
+/// A terminal error whose provider-controlled message is caller supplied, so a
+/// test can drive a specific continuation into `NativeErrorFacts`.
+fn error_result_with_message(message: &str) -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "result", "subtype": "error_during_execution", "is_error": true,
+        "session_id": fixtures::SESSION_ID, "stop_reason": null,
+        "terminal_reason": null, "result": message,
         "errors": [], "api_error_status": null,
         "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}
     }))

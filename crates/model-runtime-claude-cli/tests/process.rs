@@ -281,6 +281,34 @@ async fn reported_usage_precedes_the_finish_fact_from_the_same_result() {
     );
 }
 
+/// INV-035: fail-closed suppression is absorbing for the sink's lifetime. The
+/// usage barrier flushes held text, but it must not re-enable
+/// provider-controlled bytes: a terminal error whose message continues a marker
+/// that began in suppressed content would otherwise be judged by the stateless
+/// scan alone, which cannot see that marker, and the continuation would reach
+/// `NativeErrorFacts`.
+///
+/// This is the ordering the usage fix makes reachable on the common path —
+/// `UsageReported` is now emitted as the `result` event is processed, ahead of
+/// the error branch that sanitizes the native facts.
+#[tokio::test]
+async fn inv_035_suppression_survives_the_usage_barrier_into_terminal_error_facts() {
+    let result = execute_scenario(
+        "suppressed_state_survives_the_usage_barrier",
+        OperationShape::Text,
+    )
+    .await;
+    let failure = provider_error(&result.evidence);
+    let native = format!(
+        "{:?}{:?}",
+        failure.native.message, failure.native.error_token
+    );
+
+    assert!(!native.contains(fixtures::OPAQUE_CREDENTIAL_CONTINUATION));
+    assert!(native.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
 #[tokio::test]
 async fn inv_035_credential_shaped_tool_ids_receive_distinct_safe_surrogates() {
     let result = execute_scenario("redacted_tool_ids", OperationShape::Tool).await;
