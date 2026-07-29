@@ -8167,7 +8167,7 @@ impl ProtocolError {
                 3 => "the selected session requires protocol version 3",
                 6 => "the selected session requires protocol version 6",
                 9 => "the selected session requires protocol version 9",
-                17 => "the selected session requires protocol version 17",
+                22 => "the selected session requires protocol version 22",
                 _ => "the protocol version is unsupported",
             },
             detail: ErrorDetail::none(),

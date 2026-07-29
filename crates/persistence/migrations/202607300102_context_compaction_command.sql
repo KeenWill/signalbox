@@ -2,6 +2,13 @@
 -- exact caller payload while the append-only compaction tables remain the
 -- authority for model-call, summary, range, and frontier provenance.
 
+-- The session-template-provenance migration (202607300101) already widened
+-- create_session's admitted storage versions to include four and dropped and
+-- reissued durable_command_storage_version_supported without knowledge of
+-- compact_session, which had not landed yet; this drops and reissues both
+-- durable_command constraints again from that migration's actual current
+-- shape, adding compact_session rather than reverting create_session's
+-- widened range.
 ALTER TABLE durable_command
     DROP CONSTRAINT durable_command_kind_closed,
     DROP CONSTRAINT durable_command_storage_version_supported;
@@ -23,8 +30,11 @@ ALTER TABLE durable_command
     ADD CONSTRAINT durable_command_storage_version_supported
         CHECK (
             (
+                command_kind = 'create_session'
+                AND storage_version IN (1, 2, 3, 4)
+            )
+            OR (
                 command_kind IN (
-                    'create_session',
                     'create_session_from_imported_frontier',
                     'replace_session_defaults'
                 )

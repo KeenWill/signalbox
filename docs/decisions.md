@@ -50,7 +50,7 @@ truth.
 [model-call-execution](spec/model-call-execution.md),
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md),
 migrations `202607290401_context_compaction.sql` and
-`202607290402_context_compaction_command.sql`, model-catalog configuration, and
+`202607300102_context_compaction_command.sql`, model-catalog configuration, and
 process protocol version twenty-two.
 
 ## 2026-07-28 — Bound the native ephemeral provider-text overlay

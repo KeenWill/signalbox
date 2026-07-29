@@ -5114,13 +5114,14 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     let first_probe =
         execute_streamed_turn(&mut runtime, first_model, session_id, first_turn).await?;
     assert_eq!(first_probe.received_operations().len(), 1);
-    let (mut version_seventeen_follow, version_seventeen_cursor) = attach_follower_after_snapshot(
-        runtime.socket(),
-        ProtocolVersion::Seventeen,
-        30,
-        session_id,
-    )
-    .await?;
+    let (mut version_twenty_two_follow, version_twenty_two_cursor) =
+        attach_follower_after_snapshot(
+            runtime.socket(),
+            ProtocolVersion::TwentyTwo,
+            30,
+            session_id,
+        )
+        .await?;
     let (mut version_sixteen_follow, _) =
         attach_follower_after_snapshot(runtime.socket(), ProtocolVersion::Sixteen, 31, session_id)
             .await?;
@@ -5141,7 +5142,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     let compaction_command = command()?;
     connection
         .request_version(
-            ProtocolVersion::Seventeen,
+            ProtocolVersion::TwentyTwo,
             3,
             ClientRequest::CompactSession {
                 command_id: compaction_command,
@@ -5167,7 +5168,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     };
     assert_eq!(*compacted_session, session_id);
     assert_eq!(through_position.value(), before_members.len() as u64);
-    let followed = response_within(&mut version_seventeen_follow).await?;
+    let followed = response_within(&mut version_twenty_two_follow).await?;
     let ServerMessage::SessionEvent {
         cursor: followed_cursor,
         session_id: followed_session,
@@ -5182,11 +5183,11 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     } = followed.message()
     else {
         panic!(
-            "the established version-seventeen follower expected a compaction event, got {:?}",
+            "the established version-twenty-two follower expected a compaction event, got {:?}",
             followed.message()
         );
     };
-    assert!(followed_cursor.value() > version_seventeen_cursor);
+    assert!(followed_cursor.value() > version_twenty_two_cursor);
     assert_eq!(*followed_session, session_id);
     assert_eq!(*followed_compaction, *context_compaction_id);
     assert_eq!(*followed_call, *model_call_id);
@@ -5208,7 +5209,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     assert_eq!(*legacy_follow_code, ErrorCode::UnsupportedVersion);
     assert_eq!(
         legacy_follow_message,
-        "the selected session requires protocol version 17"
+        "the selected session requires protocol version 22"
     );
     connection
         .request_version(
@@ -5224,7 +5225,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             code: ErrorCode::UnsupportedVersion,
             message,
             ..
-        } if message == "the selected session requires protocol version 17"
+        } if message == "the selected session requires protocol version 22"
     ));
     let gated_command = command()?;
     connection
@@ -5324,7 +5325,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     let mut successor = Connection::connect(runtime.socket()).await?;
     successor
         .request_version(
-            ProtocolVersion::Seventeen,
+            ProtocolVersion::TwentyTwo,
             4,
             ClientRequest::CompactSession {
                 command_id: compaction_command,
@@ -5347,7 +5348,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     let second_user = String::from("post-restart suffix request");
     successor
         .request_version(
-            ProtocolVersion::Seventeen,
+            ProtocolVersion::TwentyTwo,
             5,
             ClientRequest::SubmitInput {
                 command_id: command()?,
