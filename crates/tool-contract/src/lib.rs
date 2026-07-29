@@ -100,23 +100,39 @@ macro_rules! impl_scalar_schema {
 impl_scalar_schema! {
     String => "string",
     bool => "boolean",
-    i8 => "integer",
-    i16 => "integer",
-    i32 => "integer",
-    i64 => "integer",
-    isize => "integer",
-    u8 => "integer",
-    u16 => "integer",
-    u32 => "integer",
-    u64 => "integer",
-    usize => "integer",
     f32 => "number",
     f64 => "number",
 }
 
+macro_rules! impl_integer_schema {
+    ($($type:ty),+ $(,)?) => {
+        $(
+            impl ToolSchema for $type {
+                fn schema() -> serde_json::Value {
+                    serde_json::json!({
+                        "maximum": <$type>::MAX,
+                        "minimum": <$type>::MIN,
+                        "type": "integer",
+                    })
+                }
+            }
+        )+
+    }
+}
+
+impl_integer_schema! {
+    i8, i16, i32, i64, isize,
+    u8, u16, u32, u64, usize,
+}
+
 impl<Value: ToolSchema> ToolSchema for Option<Value> {
     fn schema() -> serde_json::Value {
-        Value::schema()
+        serde_json::json!({
+            "anyOf": [
+                Value::schema(),
+                { "type": "null" },
+            ],
+        })
     }
 }
 
@@ -147,8 +163,144 @@ impl<Value: ToolSchema> ToolSchema for std::collections::BTreeMap<String, Value>
 /// Implementation details used by the derive expansion.
 #[doc(hidden)]
 pub mod __private {
+    use std::cell::RefCell;
+    use std::collections::{BTreeMap, BTreeSet};
+
     pub use schemars;
     pub use serde_json;
+
+    thread_local! {
+        static RENDER_STATE: RefCell<Option<RenderState>> = const { RefCell::new(None) };
+    }
+
+    #[derive(Default)]
+    struct RenderState {
+        definitions: BTreeMap<&'static str, serde_json::Value>,
+        referenced: BTreeSet<&'static str>,
+        stack: Vec<&'static str>,
+    }
+
+    struct NamedSchemaGuard {
+        finished: bool,
+        name: &'static str,
+        root: bool,
+    }
+
+    impl NamedSchemaGuard {
+        #[expect(
+            clippy::expect_used,
+            reason = "named schema rendering establishes state before constructing its guard"
+        )]
+        fn finish(
+            mut self,
+            schema: &serde_json::Value,
+        ) -> Option<BTreeMap<&'static str, serde_json::Value>> {
+            let definitions = RENDER_STATE.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                if self.root {
+                    let mut state = slot.take().expect("root schema rendering state must exist");
+                    complete_named_schema(&mut state, self.name, schema);
+                    return Some(state.definitions);
+                }
+                let state = slot
+                    .as_mut()
+                    .expect("nested schema rendering state must exist");
+                complete_named_schema(state, self.name, schema);
+                None
+            });
+            self.finished = true;
+            definitions
+        }
+    }
+
+    impl Drop for NamedSchemaGuard {
+        fn drop(&mut self) {
+            if !self.finished {
+                RENDER_STATE.with(|slot| {
+                    *slot.borrow_mut() = None;
+                });
+            }
+        }
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "every named schema guard pushes exactly one rendering stack entry"
+    )]
+    fn complete_named_schema(
+        state: &mut RenderState,
+        name: &'static str,
+        schema: &serde_json::Value,
+    ) {
+        let rendered_name = state
+            .stack
+            .pop()
+            .expect("schema rendering stack must contain the current type");
+        assert_eq!(
+            rendered_name, name,
+            "schema rendering stack must unwind in declaration order"
+        );
+        if state.referenced.contains(name) {
+            state.definitions.insert(name, schema.clone());
+        }
+    }
+
+    /// Renders a derived named schema with cycle-aware `$defs` references.
+    #[expect(
+        clippy::expect_used,
+        reason = "the derive always supplies an object-valued root schema"
+    )]
+    pub fn named_schema<Schema, Build>(build: Build) -> serde_json::Value
+    where
+        Build: FnOnce() -> serde_json::Value,
+    {
+        let name = std::any::type_name::<Schema>();
+        let (recursive, root) = RENDER_STATE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let root = slot.is_none();
+            let state = slot.get_or_insert_default();
+            if state.stack.contains(&name) {
+                state.referenced.insert(name);
+                return (true, root);
+            }
+            state.stack.push(name);
+            (false, root)
+        });
+        if recursive {
+            return serde_json::json!({
+                "$ref": format!("#/$defs/{}", json_pointer_segment(name)),
+            });
+        }
+
+        let guard = NamedSchemaGuard {
+            finished: false,
+            name,
+            root,
+        };
+        let mut schema = build();
+        let Some(definitions) = guard.finish(&schema) else {
+            return schema;
+        };
+        if definitions.is_empty() {
+            return schema;
+        }
+        let definitions = definitions
+            .into_iter()
+            .map(|(name, schema)| (String::from(name), schema))
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+        schema
+            .as_object_mut()
+            .expect("ToolSchema derive must render an object schema")
+            .insert(
+                String::from("$defs"),
+                serde_json::Value::Object(definitions),
+            );
+        schema
+    }
+
+    fn json_pointer_segment(value: &str) -> String {
+        value.replace('~', "~0").replace('/', "~1")
+    }
 
     /// Attaches one required field description to its value schema.
     pub fn described_schema(

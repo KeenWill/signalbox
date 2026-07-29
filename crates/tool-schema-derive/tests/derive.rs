@@ -54,6 +54,14 @@ struct RenamedFields {
 }
 
 #[derive(serde::Deserialize, ToolSchema)]
+#[serde(rename_all = "UPPERCASE")]
+#[expect(dead_code, reason = "schema fixture renders only")]
+struct NonAsciiRenamedField {
+    #[tool_schema(description = "ASCII-only renamed field.")]
+    über_name: String,
+}
+
+#[derive(serde::Deserialize, ToolSchema)]
 #[serde(deny_unknown_fields)]
 #[expect(dead_code, reason = "schema fixture renders only")]
 struct DefaultAndSkippedFields {
@@ -92,6 +100,24 @@ struct CustomDecoderField {
     value: String,
 }
 
+fn optional_string_from_number<'de, Deserializer>(
+    deserializer: Deserializer,
+) -> Result<Option<String>, Deserializer::Error>
+where
+    Deserializer: serde::Deserializer<'de>,
+{
+    let value = <u64 as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(Some(value.to_string()))
+}
+
+#[derive(serde::Deserialize, ToolSchema)]
+#[expect(dead_code, reason = "schema fixture renders only")]
+struct CustomOptionalDecoderField {
+    #[serde(deserialize_with = "optional_string_from_number")]
+    #[tool_schema(description = "Required numeric wire value.", with = u64)]
+    value: Option<String>,
+}
+
 struct AnyValue;
 
 impl signalbox_tool_contract::ToolSchema for AnyValue {
@@ -105,6 +131,14 @@ impl signalbox_tool_contract::ToolSchema for AnyValue {
 struct BooleanSchemaField {
     #[tool_schema(description = "Any JSON value.")]
     value: AnyValue,
+}
+
+#[derive(serde::Deserialize, ToolSchema)]
+#[serde(deny_unknown_fields)]
+#[expect(dead_code, reason = "schema fixture renders only")]
+struct RecursiveNode {
+    #[tool_schema(description = "Next node.")]
+    child: Option<Box<RecursiveNode>>,
 }
 
 #[test]
@@ -124,11 +158,20 @@ fn scalar_shapes_and_option_requiredness_render_exactly() {
               "type": "number"
             },
             "optional_value": {
-              "description": "An optional field.",
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "An optional field."
             },
             "signed_value": {
               "description": "A signed integer field.",
+              "maximum": 9223372036854775807,
+              "minimum": -9223372036854775808,
               "type": "integer"
             },
             "string_value": {
@@ -137,6 +180,8 @@ fn scalar_shapes_and_option_requiredness_render_exactly() {
             },
             "unsigned_value": {
               "description": "An unsigned integer field.",
+              "maximum": 18446744073709551615,
+              "minimum": 0,
               "type": "integer"
             }
           },
@@ -226,6 +271,26 @@ fn serde_and_checked_schema_names_render_exactly() {
 }
 
 #[test]
+fn serde_non_ascii_rename_uses_ascii_case_conversion() {
+    let schema = NonAsciiRenamedField::schema();
+
+    expect![[r#"
+        {
+          "properties": {
+            "üBER_NAME": {
+              "description": "ASCII-only renamed field.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "üBER_NAME"
+          ],
+          "type": "object"
+        }"#]]
+    .assert_eq(&format!("{schema:#}"));
+}
+
+#[test]
 fn serde_default_and_skip_control_property_presence() {
     let schema = DefaultAndSkippedFields::schema();
 
@@ -253,6 +318,8 @@ fn serde_container_default_makes_every_field_optional() {
           "properties": {
             "count": {
               "description": "Defaulted count.",
+              "maximum": 18446744073709551615,
+              "minimum": 0,
               "type": "integer"
             },
             "text": {
@@ -275,6 +342,30 @@ fn custom_decoder_uses_declared_wire_shape() {
           "properties": {
             "value": {
               "description": "Numeric wire value.",
+              "maximum": 18446744073709551615,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "value"
+          ],
+          "type": "object"
+        }"#]]
+    .assert_eq(&format!("{schema:#}"));
+}
+
+#[test]
+fn custom_decoder_option_without_default_remains_required() {
+    let schema = CustomOptionalDecoderField::schema();
+
+    expect![[r#"
+        {
+          "properties": {
+            "value": {
+              "description": "Required numeric wire value.",
+              "maximum": 18446744073709551615,
+              "minimum": 0,
               "type": "integer"
             }
           },
@@ -305,5 +396,49 @@ fn boolean_custom_schema_retains_its_description() {
           ],
           "type": "object"
         }"#]]
+    .assert_eq(&format!("{schema:#}"));
+}
+
+#[test]
+fn recursive_structures_render_finite_definitions_and_references() {
+    let schema = RecursiveNode::schema();
+
+    expect![[r##"
+        {
+          "$defs": {
+            "derive::RecursiveNode": {
+              "additionalProperties": false,
+              "properties": {
+                "child": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/derive::RecursiveNode"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Next node."
+                }
+              },
+              "type": "object"
+            }
+          },
+          "additionalProperties": false,
+          "properties": {
+            "child": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/derive::RecursiveNode"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Next node."
+            }
+          },
+          "type": "object"
+        }"##]]
     .assert_eq(&format!("{schema:#}"));
 }

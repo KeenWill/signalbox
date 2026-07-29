@@ -14,11 +14,11 @@ use syn::{
 /// Every admitted field requires `#[tool_schema(description = "...")]`.
 /// Property names follow serde's `rename` and `rename_all` declarations. A
 /// checked `name = "..."` may repeat the effective serde name, but cannot
-/// contradict it. `Option<T>`, fields carrying `#[serde(default)]`, and fields
-/// in a struct carrying `#[serde(default)]` are omitted from `required`; `skip`
-/// and `skip_deserializing` omit a property. A `with = Type` override declares
-/// the schema-bearing type for a custom
-/// serde decoder changes the field's wire shape.
+/// contradict it. Plain `Option<T>` fields, fields carrying `#[serde(default)]`,
+/// and fields in a struct carrying `#[serde(default)]` are omitted from
+/// `required`; a custom-decoded `Option<T>` remains required without a default.
+/// `skip` and `skip_deserializing` omit a property. A `with = Type` override
+/// declares the schema-bearing type for a custom serde decoder.
 #[proc_macro_derive(ToolSchema, attributes(tool_schema, serde))]
 pub fn derive_tool_schema(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -74,11 +74,13 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
     Ok(quote! {
         impl ::signalbox_tool_contract::ToolSchema for #ident {
             fn schema() -> ::signalbox_tool_contract::__private::serde_json::Value {
-                ::signalbox_tool_contract::__private::object_schema(
-                    ::std::vec![#(#properties),*],
-                    ::std::vec![#(#required),*],
-                    #deny_unknown_fields,
-                )
+                ::signalbox_tool_contract::__private::named_schema::<Self, _>(|| {
+                    ::signalbox_tool_contract::__private::object_schema(
+                        ::std::vec![#(#properties),*],
+                        ::std::vec![#(#required),*],
+                        #deny_unknown_fields,
+                    )
+                })
             }
         }
 
@@ -239,7 +241,8 @@ fn derive_field(
             },
         )
     };
-    let optional = container_default || serde.default || option_inner(&field.ty).is_some();
+    let implicit_option = option_inner(&field.ty).is_some() && !serde.custom_decoder;
+    let optional = container_default || serde.default || implicit_option;
     Ok(Some(DerivedField {
         property,
         required_name: (!optional).then_some(property_name),
@@ -450,14 +453,14 @@ fn apply_rename_rule(field_name: &str, rule: Option<&str>) -> syn::Result<String
     };
     validate_rename_rule(rule, Span::call_site())?;
     Ok(match rule {
-        "lowercase" => field_name.to_lowercase(),
-        "UPPERCASE" => field_name.to_uppercase(),
+        "lowercase" => field_name.to_ascii_lowercase(),
+        "UPPERCASE" => field_name.to_ascii_uppercase(),
         "PascalCase" => pascal_case(field_name),
         "camelCase" => lower_first(&pascal_case(field_name)),
         "snake_case" => String::from(field_name),
-        "SCREAMING_SNAKE_CASE" => field_name.to_uppercase(),
+        "SCREAMING_SNAKE_CASE" => field_name.to_ascii_uppercase(),
         "kebab-case" => field_name.replace('_', "-"),
-        "SCREAMING-KEBAB-CASE" => field_name.replace('_', "-").to_uppercase(),
+        "SCREAMING-KEBAB-CASE" => field_name.replace('_', "-").to_ascii_uppercase(),
         _ => String::from(field_name),
     })
 }
@@ -485,7 +488,7 @@ fn pascal_case(value: &str) -> String {
         .map(|word| {
             let mut characters = word.chars();
             match characters.next() {
-                Some(first) => first.to_uppercase().chain(characters).collect(),
+                Some(first) => first.to_ascii_uppercase().to_string() + characters.as_str(),
                 None => String::new(),
             }
         })
@@ -495,7 +498,7 @@ fn pascal_case(value: &str) -> String {
 fn lower_first(value: &str) -> String {
     let mut characters = value.chars();
     match characters.next() {
-        Some(first) => first.to_lowercase().chain(characters).collect(),
+        Some(first) => first.to_ascii_lowercase().to_string() + characters.as_str(),
         None => String::new(),
     }
 }
