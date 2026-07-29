@@ -9,6 +9,7 @@ pub(crate) const REDACTED: &str = "[redacted]";
 /// `arguments_json` raw-JSON contract is never broken by a bare sentinel.
 const REDACTED_JSON_OBJECT: &str = r#"{"redacted":"[redacted]"}"#;
 const MAX_PENDING_STREAM_BYTES: usize = 64 * 1024;
+const MAX_PENDING_RESCAN_BYTES: usize = 6 * MAX_PENDING_STREAM_BYTES;
 const LINE_CREDENTIAL_MARKERS: &[&str] =
     &["authorization=", "authorization:", "cookie=", "cookie:"];
 const VALUE_CREDENTIAL_MARKERS: &[&str] = &[
@@ -47,6 +48,8 @@ const VALUE_CREDENTIAL_MARKERS: &[&str] = &[
     "\"session_token\":",
 ];
 const TOKEN_PREFIXES: &[&str] = &["sk-", "eyJ"];
+const SPACE_SEPARATED_CREDENTIAL_FLAGS: &[&str] = &["--password", "--api-key", "--passphrase"];
+const CURL_USER_FLAGS: &[&str] = &["-u", "--user"];
 /// PEM armor opening a block, and the label substring that makes the block a
 /// private key of any type (`PRIVATE KEY`, `RSA PRIVATE KEY`, `OPENSSH PRIVATE
 /// KEY`, `ENCRYPTED PRIVATE KEY`). Such a block is an unambiguous credential on
@@ -109,10 +112,23 @@ const CREDENTIAL_INDICATORS: &[&str] = &[
     "private-key",
     "privatekey",
     "password",
+    "passphrase",
+    "passwd",
+    "_pwd",
     "secret",
     "credential",
+    "token",
+    "signing",
+    "encryption",
+    "ssh",
+    "hmac",
+    "license",
     "sk-",
     "eyJ",
+    "://",
+    "-u ",
+    "-u\t",
+    "--user",
     // Space-separated labels a diagnostic prints (`API key: …`): the JSON key
     // policy normalizes across punctuation, so the plaintext spellings must be
     // recognized here too or the fast path releases them unscanned.
@@ -138,6 +154,42 @@ fn text_might_contain_credential(text: &str) -> bool {
     CREDENTIAL_INDICATORS
         .iter()
         .any(|indicator| find_ascii_case_insensitive(text, indicator).is_some())
+        || has_normalized_pwd_assignment_name(text)
+}
+
+/// Whether a bare ASCII assignment name normalizes to a name ending in `pwd`.
+/// Checking backward from assignment separators keeps the no-match gate
+/// allocation-free and admits `_`/`-`-separated spellings such as `mysql-p-w-d`
+/// within the identifier grammar the assignment scanner covers.
+fn has_normalized_pwd_assignment_name(text: &str) -> bool {
+    text.bytes().enumerate().any(|(separator, byte)| {
+        matches!(byte, b'=' | b':') && bare_name_ends_with_normalized_pwd(&text[..separator])
+    })
+}
+
+fn bare_name_ends_with_normalized_pwd(before_separator: &str) -> bool {
+    let bytes = before_separator.as_bytes();
+    let mut index = bytes.len();
+    while index > 0 && matches!(bytes[index - 1], b' ' | b'\t') {
+        index -= 1;
+    }
+    let expected = b"dwp";
+    let mut matched = 0;
+    while index > 0 {
+        let byte = bytes[index - 1];
+        index -= 1;
+        if matches!(byte, b'_' | b'-') {
+            continue;
+        }
+        if !byte.is_ascii_alphanumeric() || byte.to_ascii_lowercase() != expected[matched] {
+            return false;
+        }
+        matched += 1;
+        if matched == expected.len() {
+            return true;
+        }
+    }
+    false
 }
 
 fn redact_text_literal(text: &str) -> String {
@@ -163,6 +215,9 @@ fn redact_text_literal(text: &str) -> String {
     for prefix in TOKEN_PREFIXES {
         sanitized = redact_prefixed_token(&sanitized, prefix);
     }
+    sanitized = redact_space_separated_flags(&sanitized);
+    sanitized = redact_url_userinfo_passwords(&sanitized);
+    sanitized = redact_curl_userinfo_passwords(&sanitized);
     for name in LINE_CREDENTIAL_NAMES {
         sanitized = redact_spaced_credential(&sanitized, name, ValueTermination::Line);
     }
@@ -185,20 +240,26 @@ fn credential_key_is_free_form(key: &str) -> bool {
     [
         "authorization",
         "password",
+        "passphrase",
+        "passwd",
         "secret",
         "credential",
         "cookie",
     ]
     .iter()
     .any(|shape| normalized.contains(shape))
+        // A normalized `pwd` name is a password under another spelling, so it
+        // takes the same line-consuming value shape. Token termination would
+        // cut `MYSQL_PWD=correct horse battery staple` at its first word and
+        // emit the rest, which is most of the secret.
+        || normalized == "pwd"
+        || normalized.ends_with("pwd")
 }
 
 /// The credential identifier immediately before an assignment separator: a
 /// bare `[A-Za-z0-9_-]+` run or a quoted key, whichever ends the text. Returns
 /// the identifier content for the `credential_key` contains-policy check, plus
-/// the opening quote (`Some('"')` / `Some('\'')`) when the key was quoted so the
-/// caller can distinguish a double-quoted JSON member from a single-quoted or
-/// bare plaintext assignment.
+/// the opening quote (`Some('"')` / `Some('\'')`) when the key was quoted.
 fn trailing_identifier(before_separator: &str) -> Option<(&str, Option<char>)> {
     let trimmed = before_separator.trim_end_matches([' ', '\t']);
     for quote in ['"', '\''] {
@@ -301,29 +362,27 @@ fn partial_triple_open(text: &str, value_start: usize) -> bool {
 fn redact_identifier_assignment(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut remaining = text;
+    let json_claims = JsonCredentialKeyClaims::new(text);
+    let mut json_claim_cursor = json_claims.cursor();
     while let Some(separator) = remaining
         .bytes()
         .position(|byte| matches!(byte, b'=' | b':'))
     {
-        let is_colon = remaining.as_bytes()[separator] == b':';
-        // A *double*-quoted key before `:` is exempt only where the JSON
-        // scanner actually owns it — after `{`, `,`, or at the scan start. A
-        // quoted key embedded after prose (`detail: "client_secret":"v"`) is
-        // one the JSON scanner rejects, so this scanner must take it or a
-        // composite credential name leaks. A single-quoted key before `:`
-        // (`'api_key': value`) is never JSON, and a `=` after any quoted key
-        // (TOML) or any separator after a bare key is a plaintext credential
-        // assignment this scanner owns outright.
+        // The JSON scanner runs first, but malformed quote pairing or an
+        // invalid encoded key can make it decline a position whose raw
+        // identifier still carries a credential name. Rechecking the already
+        // redacted well-formed case is idempotent; exempting it would create a
+        // gap where both scanners decline the same key.
         if let Some((identifier, quote)) = trailing_identifier(&remaining[..separator])
-            && !(quote == Some('"')
-                && is_colon
-                && json_key_can_start_at(
-                    text,
-                    identifier.as_ptr() as usize - text.as_ptr() as usize - 1,
-                ))
             && credential_key(identifier)
         {
-            let termination = if credential_key_is_free_form(identifier) {
+            let content = identifier.as_ptr() as usize - text.as_ptr() as usize;
+            let json_scanner_owns_key = quote == Some('"')
+                && content > 0
+                && json_claim_cursor.claims_in_source_order(content - 1);
+            let termination = if json_scanner_owns_key {
+                ValueTermination::Token
+            } else if credential_key_is_free_form(identifier) {
                 ValueTermination::Line
             } else {
                 ValueTermination::Token
@@ -422,6 +481,140 @@ fn redact_spaced_credential(text: &str, name: &str, termination: ValueTerminatio
             output.push_str(&remaining[..after_name]);
             remaining = &remaining[after_name..];
         }
+    }
+    output.push_str(remaining);
+    output
+}
+
+/// Redacts the value of a credential-bearing long option whose argument is
+/// separated by horizontal whitespace (`--password value`). Assignment forms
+/// with `=` remain owned by the ordinary marker and identifier scanners.
+fn redact_space_separated_flags(text: &str) -> String {
+    let mut sanitized = text.to_string();
+    for flag in SPACE_SEPARATED_CREDENTIAL_FLAGS {
+        sanitized = redact_space_separated_flag(&sanitized, flag);
+    }
+    sanitized
+}
+
+fn redact_space_separated_flag(text: &str, flag: &str) -> String {
+    let mut remaining = text;
+    let mut output = String::with_capacity(text.len());
+    while let Some(index) = find_ascii_case_insensitive(remaining, flag) {
+        let after_flag = index + flag.len();
+        let boundary_before = index == 0
+            || remaining[..index]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace);
+        let whitespace = remaining[after_flag..]
+            .bytes()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        if boundary_before && whitespace > 0 {
+            output.push_str(&remaining[..after_flag]);
+            let (prefix, token_start, value_end) =
+                credential_value_bounds(remaining, after_flag, ValueTermination::Token);
+            output.push_str(prefix);
+            output.push_str(REDACTED);
+            remaining = &remaining[value_end.max(token_start)..];
+        } else {
+            output.push_str(&remaining[..after_flag]);
+            remaining = &remaining[after_flag..];
+        }
+    }
+    output.push_str(remaining);
+    output
+}
+
+/// Redacts the password component of URL userinfo while retaining the scheme,
+/// username, authority delimiter, host, and path byte-for-byte.
+fn redact_url_userinfo_passwords(text: &str) -> String {
+    let mut remaining = text;
+    let mut output = String::with_capacity(text.len());
+    while let Some(separator) = remaining.find("://") {
+        let authority_start = separator + 3;
+        let authority_end = remaining[authority_start..]
+            .find(is_url_authority_boundary)
+            .map_or(remaining.len(), |length| authority_start + length);
+        let authority = &remaining[authority_start..authority_end];
+        let Some(at) = authority.rfind('@') else {
+            output.push_str(&remaining[..authority_start]);
+            remaining = &remaining[authority_start..];
+            continue;
+        };
+        let Some(colon) = authority[..at].find(':') else {
+            output.push_str(&remaining[..authority_start + at + 1]);
+            remaining = &remaining[authority_start + at + 1..];
+            continue;
+        };
+        let password_start = authority_start + colon + 1;
+        let password_end = authority_start + at;
+        output.push_str(&remaining[..password_start]);
+        output.push_str(REDACTED);
+        remaining = &remaining[password_end..];
+    }
+    output.push_str(remaining);
+    output
+}
+
+fn is_url_authority_boundary(character: char) -> bool {
+    character.is_whitespace() || matches!(character, '/' | '?' | '#' | '"' | '\'' | ',' | ';')
+}
+
+/// Redacts the password inside curl's `-u user:password` and
+/// `--user user:password` arguments while retaining the user name and option
+/// spelling. Quoted arguments consume through their matching quote.
+fn redact_curl_userinfo_passwords(text: &str) -> String {
+    let mut sanitized = text.to_string();
+    for flag in CURL_USER_FLAGS {
+        sanitized = redact_curl_userinfo_password(&sanitized, flag);
+    }
+    sanitized
+}
+
+fn redact_curl_userinfo_password(text: &str, flag: &str) -> String {
+    let mut remaining = text;
+    let mut output = String::with_capacity(text.len());
+    while let Some(index) = remaining.find(flag) {
+        let after_flag = index + flag.len();
+        let boundary_before = index == 0
+            || remaining[..index]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace);
+        let whitespace = remaining[after_flag..]
+            .bytes()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        if !boundary_before || whitespace == 0 {
+            output.push_str(&remaining[..after_flag]);
+            remaining = &remaining[after_flag..];
+            continue;
+        }
+        let argument_start = after_flag + whitespace;
+        let opening_quote = remaining[argument_start..]
+            .chars()
+            .next()
+            .filter(|character| matches!(character, '"' | '\''));
+        let body_start = argument_start + opening_quote.map_or(0, char::len_utf8);
+        let argument_end = opening_quote.map_or_else(
+            || {
+                remaining[body_start..]
+                    .find(char::is_whitespace)
+                    .map_or(remaining.len(), |length| body_start + length)
+            },
+            |quote| quoted_value_end(remaining, body_start, quote),
+        );
+        let Some(colon) = remaining[body_start..argument_end].find(':') else {
+            output.push_str(&remaining[..argument_end]);
+            remaining = &remaining[argument_end..];
+            continue;
+        };
+        let password_start = body_start + colon + 1;
+        output.push_str(&remaining[..password_start]);
+        output.push_str(REDACTED);
+        remaining = &remaining[argument_end..];
     }
     output.push_str(remaining);
     output
@@ -552,6 +745,100 @@ fn next_json_credential_value(text: &str) -> Option<(usize, usize)> {
     None
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static JSON_CLAIM_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_json_claim_scan_bytes() {
+    JSON_CLAIM_SCAN_BYTES.set(0);
+}
+
+#[cfg(test)]
+fn json_claim_scan_bytes() -> usize {
+    JSON_CLAIM_SCAN_BYTES.get()
+}
+
+/// Credential-bearing JSON key offsets claimed by one source-order scan.
+///
+/// Both identifier scanners ask about separators in ascending source order.
+/// Caching the structural scanner's claimed key offsets once lets those queries
+/// advance one shared cursor instead of restarting quote parsing at byte zero
+/// for every separator. A malformed or undecodable key is deliberately absent:
+/// the raw identifier scanner must retain ownership and fail closed for it.
+struct JsonCredentialKeyClaims {
+    claimed_offsets: Vec<usize>,
+}
+
+struct JsonCredentialKeyClaimCursor<'a> {
+    claimed_offsets: &'a [usize],
+    cursor: usize,
+    last_target: Option<usize>,
+}
+
+impl JsonCredentialKeyClaims {
+    fn new(text: &str) -> Self {
+        #[cfg(test)]
+        JSON_CLAIM_SCAN_BYTES.set(JSON_CLAIM_SCAN_BYTES.get().saturating_add(text.len()));
+
+        let mut claimed_offsets = Vec::new();
+        let mut offset = 0;
+        while let Some(relative_start) = text[offset..].find('"') {
+            let key_start = offset + relative_start;
+            if !json_key_can_start_at(text, key_start) {
+                offset = key_start + 1;
+                continue;
+            }
+            let key_end = quoted_value_end(text, key_start + 1, '"');
+            if key_end == text.len() {
+                break;
+            }
+            let encoded_key = &text[key_start..=key_end];
+            let Ok(key) = serde_json::from_str::<String>(encoded_key) else {
+                offset = key_end + 1;
+                continue;
+            };
+            let whitespace_end = key_end
+                + 1
+                + text[key_end + 1..]
+                    .chars()
+                    .take_while(|character| character.is_whitespace())
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+            if text.as_bytes().get(whitespace_end) == Some(&b':') && credential_key(&key) {
+                claimed_offsets.push(key_start);
+            }
+            offset = key_end + 1;
+        }
+
+        Self { claimed_offsets }
+    }
+
+    fn cursor(&self) -> JsonCredentialKeyClaimCursor<'_> {
+        JsonCredentialKeyClaimCursor {
+            claimed_offsets: &self.claimed_offsets,
+            cursor: 0,
+            last_target: None,
+        }
+    }
+}
+
+impl JsonCredentialKeyClaimCursor<'_> {
+    fn claims_in_source_order(&mut self, target: usize) -> bool {
+        debug_assert!(self.last_target.is_none_or(|previous| target >= previous));
+        self.last_target = Some(target);
+        while self
+            .claimed_offsets
+            .get(self.cursor)
+            .is_some_and(|claimed| *claimed < target)
+        {
+            self.cursor += 1;
+        }
+        self.claimed_offsets.get(self.cursor) == Some(&target)
+    }
+}
+
 fn json_key_can_start_at(text: &str, key_start: usize) -> bool {
     text[..key_start]
         .chars()
@@ -617,7 +904,7 @@ fn redact_value(value: &mut Value) -> bool {
 }
 
 fn credential_key(key: &str) -> bool {
-    let key = key
+    let normalized = key
         .chars()
         .filter(|character| character.is_ascii_alphanumeric())
         .map(|character| character.to_ascii_lowercase())
@@ -634,11 +921,63 @@ fn credential_key(key: &str) -> bool {
         "privatekey",
         "credential",
         "password",
+        "passphrase",
+        "passwd",
         "secret",
         "cookie",
     ]
     .iter()
-    .any(|shape| key.contains(shape))
+    .any(|shape| normalized.contains(shape))
+        || normalized == "token"
+        || normalized.ends_with("token")
+        || normalized == "pwd"
+        || normalized.ends_with("pwd")
+        || [
+            "signingkey",
+            "encryptionkey",
+            "sshkey",
+            "hmackey",
+            "licensekey",
+        ]
+        .iter()
+        .any(|shape| normalized == *shape)
+}
+
+fn credential_identifier_could_extend_to_credential(identifier: &str) -> bool {
+    let lower = identifier.to_ascii_lowercase();
+    let normalized = lower
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    if [
+        "signingkey",
+        "encryptionkey",
+        "sshkey",
+        "hmackey",
+        "licensekey",
+    ]
+    .iter()
+    .any(|shape| {
+        !normalized.is_empty() && normalized.len() < shape.len() && shape.starts_with(&normalized)
+    }) {
+        return true;
+    }
+    let (qualified, tail) = lower
+        .rfind(['_', '-'])
+        .map_or((false, lower.as_str()), |separator| {
+            (true, &lower[separator + 1..])
+        });
+    // A name ending at its own separator has an empty tail but is not thereby
+    // unable to extend: normalization drops separators, so the characters
+    // before it still decide the joined name (`mysql_p_` normalizes to
+    // `mysqlp`, which the next delta can complete into `mysqlpwd`). Only the
+    // `key` test below needs a tail, since an empty one is no evidence of it.
+    ["token", "password", "passwd", "pwd", "passphrase"]
+        .iter()
+        .any(|shape| {
+            (1..shape.len()).any(|prefix_length| normalized.ends_with(&shape[..prefix_length]))
+        })
+        || (qualified && !tail.is_empty() && tail.len() < "key".len() && "key".starts_with(tail))
 }
 
 fn redact_after_marker(text: &str, marker: &str) -> String {
@@ -999,6 +1338,12 @@ enum StreamField {
     Thinking,
 }
 
+enum FlushContinuation {
+    None,
+    One(String),
+    Ambiguous,
+}
+
 struct StreamFragment<C> {
     field: StreamField,
     index: u32,
@@ -1006,9 +1351,115 @@ struct StreamFragment<C> {
     text: String,
 }
 
+#[derive(Clone, Copy)]
+enum PendingBasis {
+    RecomputableCandidate,
+    OpaqueCandidateAtStoredOrigin,
+    ContextContinuation,
+}
+
 struct PendingStreamText<C> {
     fragments: Vec<StreamFragment<C>>,
     text: String,
+    next_rescan_len: usize,
+    basis: PendingBasis,
+    candidate_start: usize,
+    rescan_bytes: usize,
+}
+
+impl<C> PendingStreamText<C> {
+    fn candidate(fragments: Vec<StreamFragment<C>>, text: String) -> Self {
+        Self::candidate_from(fragments, text, 0)
+    }
+
+    fn candidate_from(
+        fragments: Vec<StreamFragment<C>>,
+        text: String,
+        candidate_start: usize,
+    ) -> Self {
+        Self::after_scan(
+            fragments,
+            text,
+            PendingBasis::RecomputableCandidate,
+            candidate_start,
+        )
+    }
+
+    fn opaque_candidate(fragments: Vec<StreamFragment<C>>, text: String) -> Self {
+        Self::opaque_candidate_from(fragments, text, 0)
+    }
+
+    fn opaque_candidate_from(
+        fragments: Vec<StreamFragment<C>>,
+        text: String,
+        candidate_start: usize,
+    ) -> Self {
+        Self::after_scan(
+            fragments,
+            text,
+            PendingBasis::OpaqueCandidateAtStoredOrigin,
+            candidate_start,
+        )
+    }
+
+    fn context_continuation(fragments: Vec<StreamFragment<C>>, text: String) -> Self {
+        Self::after_scan(fragments, text, PendingBasis::ContextContinuation, 0)
+    }
+
+    /// Builds held state after the initial unsafe-suffix detection, or after a
+    /// later full reclassification that already received its work charge. The
+    /// initial detection is not a rescan and is intentionally outside
+    /// [`PendingRescanWork`]. A still-unresolved candidate is reclassified only
+    /// after its byte length doubles; the geometric series bounds aggregate
+    /// rescan bytes while every intervening delta remains held. `candidate_start`
+    /// preserves the unsafe suffix's origin while its whole observation is
+    /// held for fact fidelity; `basis` records whether that origin is opaque:
+    /// recomputing that fact after the candidate terminates before a clean tail
+    /// would otherwise forget why the bytes were held and release its value.
+    fn after_scan(
+        fragments: Vec<StreamFragment<C>>,
+        text: String,
+        basis: PendingBasis,
+        candidate_start: usize,
+    ) -> Self {
+        debug_assert!(candidate_start <= text.len());
+        let next_rescan_len = text.len().saturating_mul(2).max(text.len() + 1);
+        Self {
+            fragments,
+            text,
+            next_rescan_len,
+            basis,
+            candidate_start,
+            rescan_bytes: 0,
+        }
+    }
+
+    fn mark_scanned(&mut self) {
+        self.next_rescan_len = self.text.len().saturating_mul(2).max(self.text.len() + 1);
+    }
+
+    fn push(&mut self, fragment: StreamFragment<C>) {
+        self.text.push_str(&fragment.text);
+        self.fragments.push(fragment);
+    }
+
+    fn candidate_starts_at_stored_origin(&self) -> bool {
+        matches!(self.basis, PendingBasis::OpaqueCandidateAtStoredOrigin)
+            || stream_candidate_starts_at_zero(&self.text[self.candidate_start..])
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ContextRescanState {
+    continues_candidate: bool,
+    bytes: usize,
+}
+
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+struct PendingRescanWork {
+    reclassifications: usize,
+    bytes: usize,
 }
 
 /// Holds an incomplete credential shape between streamed facts.
@@ -1034,6 +1485,27 @@ pub(crate) struct RedactingSink<'a, C> {
     /// folding them into the emitted chain would break its adjacency
     /// matching. Match-state only, never emitted.
     dropped_context: String,
+    /// Rescan work already spent by the continuously unresolved candidate now
+    /// represented in match-only context across a finish or boundary barrier.
+    context_rescan_bytes: usize,
+    /// Distinguishes a carried pending candidate from fresh out-of-band
+    /// lookbehind, whose first joined classification is not a reclassification.
+    context_continues_candidate: bool,
+    /// Rescan work spent by the chronological dropped-provider chain. It is
+    /// independent of the emitted-adjacency chain because dropped bytes are
+    /// absent from that chain and can resolve one candidate but not the other.
+    dropped_context_rescan_bytes: usize,
+    /// Whether the dropped chain still represents the same candidate as its
+    /// previous geometric checkpoint, rather than a fresh unsafe suffix.
+    dropped_context_continues_candidate: bool,
+    /// Next chronological lookbehind length at which dropped provider bytes
+    /// require a full reclassification. Between geometric checkpoints the
+    /// complete suffix remains match-only state and cannot reach an output.
+    dropped_context_next_rescan_len: usize,
+    #[cfg(test)]
+    pending_rescan_work: PendingRescanWork,
+    #[cfg(test)]
+    dropped_context_clone_bytes: usize,
 }
 
 impl<'a, C: Clone> RedactingSink<'a, C> {
@@ -1045,6 +1517,18 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             terminal_text_capture: None,
             emitted_context: String::new(),
             dropped_context: String::new(),
+            context_rescan_bytes: 0,
+            context_continues_candidate: false,
+            dropped_context_rescan_bytes: 0,
+            dropped_context_continues_candidate: false,
+            dropped_context_next_rescan_len: 0,
+            #[cfg(test)]
+            pending_rescan_work: PendingRescanWork {
+                reclassifications: 0,
+                bytes: 0,
+            },
+            #[cfg(test)]
+            dropped_context_clone_bytes: 0,
         }
     }
 
@@ -1055,6 +1539,9 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     /// marker's reconstructable continuation beside it.
     pub(crate) fn seed_emitted_context(&mut self, emitted: &str) {
         self.emitted_context = trailing_credential_context(emitted).to_string();
+        self.context_rescan_bytes = 0;
+        self.context_continues_candidate = false;
+        self.refresh_dropped_context_rescan_threshold();
     }
 
     /// Extends the match-only lookbehind with provider text the adapter is
@@ -1068,33 +1555,108 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         if self.suppressing {
             return;
         }
-        // Two live match-only chains precede the held text, and the held text
-        // must be judged against BOTH (a fragment safe against one can still be
-        // unsafe against the other):
-        //   * the emitted-adjacency chain `emitted_context` (the thread id,
-        //     and suppressed held markers) — future *emitted* output sits
-        //     beside it directly, dropped bytes being invisible; and
-        //   * the full chronological chain `emitted_context ++ dropped_context
-        //     ++ pending`, which also threads the dropped bytes.
-        // The held text's clean prefix is the shorter of what each chain
-        // allows; the rest is suppressed (a released prefix would reconstruct a
-        // credential beside later output) and carried into both chains so a
-        // marker completed by future emitted output, the dropped bytes, or a
-        // later delta is caught.
-        let mut chain = self.emitted_context.clone();
-        chain.push_str(&self.dropped_context);
+        // An empty dropped item advances neither chronology nor a geometric
+        // checkpoint. In particular it must not copy a live near-cap suffix.
+        if dropped.is_empty() {
+            return;
+        }
+        // Once a chronological lookbehind is known live, dropped bytes cannot
+        // reach any output and may be accumulated without rescanning until its
+        // length doubles. The full suffix remains available to every terminal
+        // field between checkpoints; only the expensive classification waits.
+        if self.pending.is_none() && self.dropped_context_next_rescan_len > 0 {
+            if self.dropped_context.is_empty() {
+                #[cfg(test)]
+                {
+                    self.dropped_context_clone_bytes += self.emitted_context.len();
+                }
+                self.dropped_context.clone_from(&self.emitted_context);
+            }
+            let prior_context_len = self.dropped_context.len();
+            self.dropped_context.push_str(dropped);
+            let joined_len = self.dropped_context.len();
+            if joined_len < self.dropped_context_next_rescan_len
+                && joined_len <= MAX_PENDING_STREAM_BYTES
+            {
+                return;
+            }
+            if !self.record_context_rescan(joined_len) {
+                self.suppress_remaining();
+                return;
+            }
+            let unsafe_start = unsafe_stream_suffix_start(&self.dropped_context);
+            let continued = unsafe_start.is_some_and(|start| start < prior_context_len);
+            match unsafe_start {
+                Some(start) if start > 0 => {
+                    self.dropped_context.drain(..start);
+                }
+                Some(_) => {}
+                None => self.dropped_context.clear(),
+            }
+            if self.dropped_context.len() > MAX_PENDING_STREAM_BYTES {
+                self.suppress_remaining();
+                return;
+            }
+            if !continued {
+                self.dropped_context_rescan_bytes = 0;
+            }
+            self.dropped_context_continues_candidate = continued;
+            self.refresh_dropped_context_rescan_threshold();
+            self.reset_context_budget_if_spent();
+            return;
+        }
+        // `dropped_context`, when present, is already the unsafe suffix of the
+        // full chronological emitted-plus-dropped chain. Keeping that complete
+        // suffix both avoids prefix duplication on every extension and lets
+        // terminal fields match a marker split across the two sources.
+        let mut chain = if self.dropped_context.is_empty() {
+            self.emitted_context.clone()
+        } else {
+            self.dropped_context.clone()
+        };
         let pre_pending_len = chain.len();
+        let mut inherited_candidate = if self.dropped_context.is_empty() {
+            self.context_continues_candidate
+        } else {
+            self.dropped_context_continues_candidate
+        };
+        if self.dropped_context.is_empty() {
+            self.dropped_context_rescan_bytes = self
+                .dropped_context_rescan_bytes
+                .max(self.context_rescan_bytes);
+        }
         if let Some(pending) = self.pending.take() {
+            let inherited_rescan_bytes = self
+                .context_rescan_bytes
+                .max(self.dropped_context_rescan_bytes)
+                .max(pending.rescan_bytes);
+            self.context_rescan_bytes = inherited_rescan_bytes;
+            self.dropped_context_rescan_bytes = inherited_rescan_bytes;
+            self.context_continues_candidate = true;
+            self.dropped_context_continues_candidate = true;
+            inherited_candidate = true;
+            let clean_limit = if pending.candidate_starts_at_stored_origin() {
+                pending.candidate_start
+            } else {
+                pending.text.len()
+            };
             chain.push_str(&pending.text);
             let chrono_unsafe = trailing_credential_context(&chain);
-            let chrono_clean = (chain.len() - chrono_unsafe.len()).saturating_sub(pre_pending_len);
+            let chrono_clean = if pre_pending_len == 0 {
+                pending.text.len()
+            } else {
+                (chain.len() - chrono_unsafe.len()).saturating_sub(pre_pending_len)
+            };
             let mut adjacency = self.emitted_context.clone();
             let adjacency_prefix_len = adjacency.len();
             adjacency.push_str(&pending.text);
             let adjacency_unsafe = trailing_credential_context(&adjacency);
-            let adjacency_clean =
-                (adjacency.len() - adjacency_unsafe.len()).saturating_sub(adjacency_prefix_len);
-            let clean_in_pending = chrono_clean.min(adjacency_clean).min(pending.text.len());
+            let adjacency_clean = if adjacency_prefix_len == 0 {
+                pending.text.len()
+            } else {
+                (adjacency.len() - adjacency_unsafe.len()).saturating_sub(adjacency_prefix_len)
+            };
+            let clean_in_pending = chrono_clean.min(adjacency_clean).min(clean_limit);
             let (safe, unsafe_fragments) =
                 split_stream_fragments(pending.fragments, clean_in_pending);
             self.emit_original(safe);
@@ -1104,31 +1666,45 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 let mut merged = self.emitted_context.clone();
                 merged.push_str(held_unsafe);
                 let carried_emitted = trailing_credential_context(&merged);
-                // Same 64-KiB lookbehind bound as the dropped chain: an
-                // emitted marker that opens a line credential (`Authorization:`)
-                // can grow this context by a full held delta each dropped
-                // newline, so an unterminated candidate past the cap fails
-                // closed instead of pinning unbounded provider-controlled bytes.
                 if carried_emitted.len() > MAX_PENDING_STREAM_BYTES {
                     self.suppress_remaining();
                     return;
                 }
                 self.emitted_context = carried_emitted.to_string();
             }
-            // The dropped chain carries the unsafe tail of the full
-            // chronological chain (which already folds in any emitted/dropped
-            // prefix that reached into the held text).
             let chrono_unsafe_start = chain.len() - chrono_unsafe.len();
             chain = chain[chrono_unsafe_start..].to_string();
         }
+        let prior_context_len = chain.len();
         chain.push_str(dropped);
-        let context = trailing_credential_context(&chain);
+        let unsafe_start = unsafe_stream_suffix_start(&chain);
+        let context = unsafe_start.map_or("", |start| &chain[start..]);
         if context.len() > MAX_PENDING_STREAM_BYTES {
-            self.suppressing = true;
-            self.dropped_context = String::new();
+            self.suppress_remaining();
             return;
         }
+        let continued =
+            inherited_candidate && unsafe_start.is_some_and(|start| start < prior_context_len);
+        if !continued {
+            self.dropped_context_rescan_bytes = 0;
+        }
         self.dropped_context = context.to_string();
+        self.dropped_context_continues_candidate = continued;
+        self.refresh_dropped_context_rescan_threshold();
+        self.reset_context_budget_if_spent();
+    }
+
+    fn refresh_dropped_context_rescan_threshold(&mut self) {
+        let live_len = if self.dropped_context.is_empty() {
+            self.emitted_context.len()
+        } else {
+            self.dropped_context.len()
+        };
+        self.dropped_context_next_rescan_len = if live_len == 0 {
+            0
+        } else {
+            live_len.saturating_mul(2).max(live_len + 1)
+        };
     }
 
     /// Whether the sink has entered fail-closed suppression (every subsequent
@@ -1138,6 +1714,23 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         self.suppressing
     }
 
+    #[cfg(test)]
+    fn pending_rescan_work(&self) -> &PendingRescanWork {
+        &self.pending_rescan_work
+    }
+
+    #[cfg(test)]
+    fn dropped_context_clone_bytes(&self) -> usize {
+        self.dropped_context_clone_bytes
+    }
+
+    #[cfg(test)]
+    fn current_pending_rescan_bytes(&self) -> usize {
+        self.pending
+            .as_ref()
+            .map_or(0, |pending| pending.rescan_bytes)
+    }
+
     /// Fails closed: suppresses all subsequent emitted output. Used when the
     /// adapter cannot safely reason about content it does not model (an
     /// unsupported item carrying multiple independent credential markers).
@@ -1145,6 +1738,11 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         self.pending = None;
         self.dropped_context = String::new();
         self.emitted_context = String::new();
+        self.context_rescan_bytes = 0;
+        self.context_continues_candidate = false;
+        self.dropped_context_rescan_bytes = 0;
+        self.dropped_context_continues_candidate = false;
+        self.dropped_context_next_rescan_len = 0;
         self.suppressing = true;
     }
 
@@ -1230,6 +1828,8 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.emitted_context = self.resolve_context_through(emitted, text);
             let dropped = std::mem::take(&mut self.dropped_context);
             self.dropped_context = self.resolve_context_through(dropped, text);
+            self.refresh_dropped_context_rescan_threshold();
+            self.reset_context_budget_if_spent();
         }
         redacted
     }
@@ -1323,14 +1923,29 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             // A live lookbehind chain (emitted thread id, dropped provider
             // text) ties the held text to bytes outside the stream; the
             // boundary forces a decision, so a chained candidate is
-            // suppressed whole and every chain is spent by the flush. Chains
-            // with no held text survive the boundary — nothing was emitted,
-            // so adjacency is unchanged.
+            // suppressed whole. Its still-live candidate suffix is retained as
+            // match-only context, so a value following the boundary remains a
+            // continuation instead of being released after its marker was
+            // destroyed. Chains with no held text survive the boundary —
+            // nothing was emitted, so adjacency is unchanged.
+            let inherited_rescan_bytes = self
+                .context_rescan_bytes
+                .max(self.dropped_context_rescan_bytes)
+                .max(pending.rescan_bytes);
             let chained = self.pending_extends_a_chain(&pending.text);
+            let continuation = self.flush_continuation(&pending.text);
+            let candidate = pending.candidate_starts_at_stored_origin();
             self.emitted_context.clear();
             self.dropped_context.clear();
-            if chained || stream_candidate_starts_at_zero(&pending.text) {
+            self.context_rescan_bytes = 0;
+            self.context_continues_candidate = false;
+            self.dropped_context_rescan_bytes = 0;
+            self.dropped_context_continues_candidate = false;
+            self.dropped_context_next_rescan_len = 0;
+            if chained {
                 self.emit_redacted(pending.fragments);
+            } else if candidate {
+                self.emit_candidate_from_stored_origin(pending);
             } else if let Some(unsafe_start) = unsafe_stream_suffix_start(&pending.text) {
                 let (safe, unsafe_fragments) =
                     split_stream_fragments(pending.fragments, unsafe_start);
@@ -1339,6 +1954,55 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             } else {
                 self.emit_original(pending.fragments);
             }
+            self.install_flush_continuation(continuation, inherited_rescan_bytes);
+        }
+    }
+
+    fn install_flush_continuation(
+        &mut self,
+        continuation: FlushContinuation,
+        inherited_rescan_bytes: usize,
+    ) {
+        match continuation {
+            FlushContinuation::None => {}
+            FlushContinuation::One(context) => {
+                if context.len() > MAX_PENDING_STREAM_BYTES
+                    || inherited_rescan_bytes > MAX_PENDING_RESCAN_BYTES
+                {
+                    self.suppress_remaining();
+                } else {
+                    self.emitted_context = context;
+                    self.context_rescan_bytes = inherited_rescan_bytes;
+                    self.context_continues_candidate = true;
+                    self.refresh_dropped_context_rescan_threshold();
+                }
+            }
+            FlushContinuation::Ambiguous => self.suppress_remaining(),
+        }
+    }
+
+    fn flush_continuation(&self, pending_text: &str) -> FlushContinuation {
+        let mut live = Vec::new();
+        let standalone = trailing_credential_context(pending_text);
+        if !standalone.is_empty() {
+            live.push(standalone.to_string());
+        }
+        for context in [&self.emitted_context, &self.dropped_context] {
+            if context.is_empty() {
+                continue;
+            }
+            let mut joined = String::with_capacity(context.len() + pending_text.len());
+            joined.push_str(context);
+            joined.push_str(pending_text);
+            let continuation = trailing_credential_context(&joined);
+            if !continuation.is_empty() && !live.iter().any(|known| known == continuation) {
+                live.push(continuation.to_string());
+            }
+        }
+        match live.as_slice() {
+            [] => FlushContinuation::None,
+            [only] => FlushContinuation::One(only.clone()),
+            _ => FlushContinuation::Ambiguous,
         }
     }
 
@@ -1363,30 +2027,55 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         false
     }
 
-    /// Flushes already-decoded text when no later provider text can extend it.
+    /// Flushes already-decoded text while retaining any live credential
+    /// continuation. Usage reports are repeatable, and direct callers may
+    /// invoke `finish` before later deltas, so a flush cannot assume no later
+    /// provider bytes will arrive.
     pub(crate) fn finish(&mut self) {
-        self.suppressing = false;
-        // Terminal: judged on each chain's joined form so held text
-        // completing a credential begun in an already-emitted field (the
-        // thread id) or in dropped provider text is suppressed; no chain
-        // outlives the terminal either way.
-        let emitted = std::mem::take(&mut self.emitted_context);
-        let dropped = std::mem::take(&mut self.dropped_context);
         if let Some(pending) = self.pending.take() {
-            let dirty = ["", emitted.as_str(), dropped.as_str()]
-                .iter()
-                .any(|context| {
-                    let mut joined = String::with_capacity(context.len() + pending.text.len());
-                    joined.push_str(context);
-                    joined.push_str(&pending.text);
-                    redact_text(&joined) != joined
-                });
-            if dirty {
+            let inherited_rescan_bytes = self
+                .context_rescan_bytes
+                .max(self.dropped_context_rescan_bytes)
+                .max(pending.rescan_bytes);
+            let continuation = self.flush_continuation(&pending.text);
+            let chained = self.pending_extends_a_chain(&pending.text);
+            let candidate = pending.candidate_starts_at_stored_origin();
+            let unfinished_url_password =
+                unfinished_url_userinfo_contains_password(&pending.text[pending.candidate_start..]);
+            let dirty = [
+                "",
+                self.emitted_context.as_str(),
+                self.dropped_context.as_str(),
+            ]
+            .iter()
+            .any(|context| {
+                let mut joined = String::with_capacity(context.len() + pending.text.len());
+                joined.push_str(context);
+                joined.push_str(&pending.text);
+                redact_text(&joined) != joined
+            });
+            if chained || (dirty && !candidate) {
                 self.emit_redacted(pending.fragments);
+            } else if candidate && (dirty || unfinished_url_password) {
+                self.emit_candidate_from_stored_origin(pending);
             } else {
                 self.emit_original(pending.fragments);
             }
+            self.emitted_context.clear();
+            self.dropped_context.clear();
+            self.context_rescan_bytes = 0;
+            self.context_continues_candidate = false;
+            self.dropped_context_rescan_bytes = 0;
+            self.dropped_context_continues_candidate = false;
+            self.dropped_context_next_rescan_len = 0;
+            self.install_flush_continuation(continuation, inherited_rescan_bytes);
         }
+    }
+
+    fn emit_candidate_from_stored_origin(&mut self, pending: PendingStreamText<C>) {
+        let (safe, redacted) = split_stream_fragments(pending.fragments, pending.candidate_start);
+        self.emit_original(safe);
+        self.emit_redacted(redacted);
     }
 
     fn emit_original(&mut self, fragments: Vec<StreamFragment<C>>) {
@@ -1414,9 +2103,23 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     fn hold_or_suppress(&mut self, pending: PendingStreamText<C>) {
         if pending.text.len() > MAX_PENDING_STREAM_BYTES {
             self.emit_redacted(pending.fragments);
-            self.suppressing = true;
+            self.suppress_remaining();
         } else {
             self.pending = Some(pending);
+        }
+    }
+
+    fn reset_context_budget_if_spent(&mut self) {
+        if self.emitted_context.is_empty() {
+            self.context_rescan_bytes = 0;
+            self.context_continues_candidate = false;
+        }
+        if self.dropped_context.is_empty() {
+            self.dropped_context_rescan_bytes = 0;
+            self.dropped_context_continues_candidate = false;
+        }
+        if self.emitted_context.is_empty() && self.dropped_context.is_empty() {
+            self.dropped_context_next_rescan_len = 0;
         }
     }
 
@@ -1441,75 +2144,69 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.emit(field, index, correlation, REDACTED.to_string());
             return;
         }
+        if self.defer_pending_rescan(field, index, correlation.clone(), &text) {
+            return;
+        }
         // Each live chain is judged in turn; a chain that consumes the delta
         // (holding or suppressing it) protects the other implicitly, since
-        // the held text is joined with every chain again on later deltas and
-        // at flush points.
+        // the held text is joined with every chain again at its next geometric
+        // checkpoint and at flush points.
         let emitted = std::mem::take(&mut self.emitted_context);
         if !emitted.is_empty() {
-            let (consumed, live) =
-                self.delta_against_context(emitted, field, index, correlation.clone(), &text);
+            let (consumed, live) = self.delta_against_context(
+                emitted,
+                ContextRescanState {
+                    continues_candidate: self.context_continues_candidate,
+                    bytes: self.context_rescan_bytes,
+                },
+                field,
+                index,
+                correlation.clone(),
+                &text,
+            );
             self.emitted_context = live;
+            self.refresh_dropped_context_rescan_threshold();
+            self.reset_context_budget_if_spent();
             if consumed {
                 return;
             }
         }
         let dropped = std::mem::take(&mut self.dropped_context);
         if !dropped.is_empty() {
-            let (consumed, live) =
-                self.delta_against_context(dropped, field, index, correlation.clone(), &text);
+            let (consumed, live) = self.delta_against_context(
+                dropped,
+                ContextRescanState {
+                    continues_candidate: self.dropped_context_continues_candidate,
+                    bytes: self.dropped_context_rescan_bytes,
+                },
+                field,
+                index,
+                correlation.clone(),
+                &text,
+            );
             self.dropped_context = live;
+            self.refresh_dropped_context_rescan_threshold();
+            self.reset_context_budget_if_spent();
             if consumed {
                 return;
             }
         }
+        self.reset_context_budget_if_spent();
         if let Some(mut pending) = self.pending.take() {
-            if !stream_candidate_starts_at_zero(&pending.text)
-                && let Some(unsafe_start) = unsafe_stream_suffix_start(&pending.text)
-            {
-                let (safe, unsafe_fragments) =
-                    split_stream_fragments(pending.fragments, unsafe_start);
-                self.emit_original(safe);
-                pending.fragments = unsafe_fragments;
-                pending.text = pending.text[unsafe_start..].to_string();
+            if !text.is_empty() {
+                pending.push(StreamFragment {
+                    field,
+                    index,
+                    correlation,
+                    text,
+                });
             }
-            let mut combined = pending.text.clone();
-            combined.push_str(&text);
-            if stream_candidate_starts_at_zero(&combined) {
-                // An empty delta extends neither the held candidate nor any
-                // eventual emission; retaining a fragment for it would grow
-                // held metadata without bound, since the pending-byte cap
-                // below measures only text bytes.
-                if !text.is_empty() {
-                    pending.fragments.push(StreamFragment {
-                        field,
-                        index,
-                        correlation,
-                        text,
-                    });
-                }
-                if let Some(unsafe_start) = unsafe_stream_suffix_start(&combined) {
-                    if unsafe_start == 0 {
-                        pending.text = combined;
-                        self.hold_or_suppress(pending);
-                        return;
-                    }
-                    let (redacted, unsafe_fragments) =
-                        split_stream_fragments(pending.fragments, unsafe_start);
-                    self.emit_redacted(redacted);
-                    self.hold_or_suppress(PendingStreamText {
-                        fragments: unsafe_fragments,
-                        text: combined[unsafe_start..].to_string(),
-                    });
-                    return;
-                }
-                self.emit_redacted(pending.fragments);
-                return;
-            }
-            self.emit_original(pending.fragments);
+            self.resolve_scanned_pending(pending);
+            return;
         }
 
         if let Some(unsafe_start) = unsafe_stream_suffix_start(&text) {
+            let opaque_origin = unsafe_start == 0 && escaped_candidate_origin_is_opaque(&text);
             let fragment = StreamFragment {
                 field,
                 index,
@@ -1517,21 +2214,134 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 text: text.clone(),
             };
             if text.len() <= MAX_PENDING_STREAM_BYTES {
-                self.hold_or_suppress(PendingStreamText {
-                    fragments: vec![fragment],
-                    text,
-                });
+                let pending = if opaque_origin {
+                    PendingStreamText::opaque_candidate_from(vec![fragment], text, unsafe_start)
+                } else {
+                    PendingStreamText::candidate_from(vec![fragment], text, unsafe_start)
+                };
+                self.hold_or_suppress(pending);
                 return;
             }
             let (safe, unsafe_fragments) = split_stream_fragments(vec![fragment], unsafe_start);
             self.emit_original(safe);
-            self.hold_or_suppress(PendingStreamText {
-                fragments: unsafe_fragments,
-                text: text[unsafe_start..].to_string(),
-            });
+            let held_text = text[unsafe_start..].to_string();
+            let pending = if opaque_origin {
+                PendingStreamText::opaque_candidate(unsafe_fragments, held_text)
+            } else {
+                PendingStreamText::candidate(unsafe_fragments, held_text)
+            };
+            self.hold_or_suppress(pending);
         } else {
             self.emit(field, index, correlation, redact_text(&text));
         }
+    }
+
+    /// Appends an intervening delta without reclassifying the whole held
+    /// candidate. The bytes remain unavailable to every output channel; a
+    /// full decision is deferred until the held length doubles, while crossing
+    /// the hard cap always forces a final reclassification before suppression.
+    fn defer_pending_rescan(
+        &mut self,
+        field: StreamField,
+        index: u32,
+        correlation: C,
+        text: &str,
+    ) -> bool {
+        let Some(pending) = &mut self.pending else {
+            return false;
+        };
+        let combined_len = pending.text.len().saturating_add(text.len());
+        if combined_len >= pending.next_rescan_len || combined_len > MAX_PENDING_STREAM_BYTES {
+            return false;
+        }
+        if !text.is_empty() {
+            pending.push(StreamFragment {
+                field,
+                index,
+                correlation,
+                text: text.to_string(),
+            });
+        }
+        true
+    }
+
+    fn resolve_scanned_pending(&mut self, mut pending: PendingStreamText<C>) {
+        let rescan_len = pending.text.len();
+        if !self.record_pending_rescan(&mut pending, rescan_len) {
+            self.emit_redacted(pending.fragments);
+            self.suppress_remaining();
+            return;
+        }
+        let candidate = pending.candidate_starts_at_stored_origin();
+        let unsafe_start = unsafe_stream_suffix_start(&pending.text);
+        match (candidate, unsafe_start) {
+            (true, Some(_)) => {
+                // The original candidate continues to own every later suffix
+                // until it terminates. Splitting at an opening quote or other
+                // suffix inside its value would detach secret bytes from their
+                // credential marker and make the tail independently releasable.
+                pending.mark_scanned();
+                self.hold_or_suppress(pending);
+            }
+            (true, None) => {
+                let (safe, redacted) =
+                    split_stream_fragments(pending.fragments, pending.candidate_start);
+                self.emit_original(safe);
+                self.emit_redacted(redacted);
+            }
+            (false, Some(unsafe_start)) => {
+                let (safe, unsafe_fragments) =
+                    split_stream_fragments(pending.fragments, unsafe_start);
+                self.emit_original(safe);
+                self.hold_or_suppress(PendingStreamText::candidate(
+                    unsafe_fragments,
+                    pending.text[unsafe_start..].to_string(),
+                ));
+            }
+            (false, None) => self.emit_original(pending.fragments),
+        }
+    }
+
+    /// Charges the two top-level whole-buffer predicates used by one post-hold
+    /// reclassification, including any fixed lookbehind context in their joined
+    /// input. Initial unsafe-suffix detection is not a rescan. Each continuously
+    /// unresolved candidate receives at most six held-buffer caps of aggregate
+    /// classifier input; a fresh candidate receives a fresh allowance.
+    fn record_pending_rescan(&mut self, pending: &mut PendingStreamText<C>, bytes: usize) -> bool {
+        let charged = bytes.saturating_mul(2);
+        let Some(total) = pending.rescan_bytes.checked_add(charged) else {
+            return false;
+        };
+        if total > MAX_PENDING_RESCAN_BYTES {
+            return false;
+        }
+        pending.rescan_bytes = total;
+        #[cfg(test)]
+        {
+            self.pending_rescan_work.reclassifications += 1;
+            self.pending_rescan_work.bytes += charged;
+        }
+        true
+    }
+
+    /// Charges a dropped suffix reclassification at the same conservative
+    /// two-predicate rate as a streamed post-hold round. The allowance follows
+    /// the candidate across all barriers.
+    fn record_context_rescan(&mut self, bytes: usize) -> bool {
+        let charged = bytes.saturating_mul(2);
+        let Some(total) = self.dropped_context_rescan_bytes.checked_add(charged) else {
+            return false;
+        };
+        if total > MAX_PENDING_RESCAN_BYTES {
+            return false;
+        }
+        self.dropped_context_rescan_bytes = total;
+        #[cfg(test)]
+        {
+            self.pending_rescan_work.reclassifications += 1;
+            self.pending_rescan_work.bytes += charged;
+        }
+        true
     }
 
     /// Processes one delta while a lookbehind chain (the emitted thread id's
@@ -1545,43 +2355,85 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     fn delta_against_context(
         &mut self,
         context: String,
+        context_state: ContextRescanState,
         field: StreamField,
         index: u32,
         correlation: C,
         text: &str,
     ) -> (bool, String) {
         let context_length = context.len();
+        let mut pending = self.pending.take();
+        let had_pending = pending.is_some();
+        let continued_across_barrier = !had_pending && context_state.continues_candidate;
         let mut joined = context.clone();
-        if let Some(pending) = &self.pending {
+        if let Some(pending) = &pending {
             joined.push_str(&pending.text);
         }
         joined.push_str(text);
+        if had_pending || continued_across_barrier {
+            let mut rescanned = pending.take().unwrap_or_else(|| {
+                PendingStreamText::context_continuation(Vec::new(), String::new())
+            });
+            rescanned.rescan_bytes = rescanned.rescan_bytes.max(context_state.bytes);
+            let scan_len = joined.len();
+            if !self.record_pending_rescan(&mut rescanned, scan_len) {
+                if !text.is_empty() {
+                    rescanned.push(StreamFragment {
+                        field,
+                        index,
+                        correlation,
+                        text: text.to_string(),
+                    });
+                }
+                self.emit_redacted(rescanned.fragments);
+                self.suppress_remaining();
+                return (true, String::new());
+            }
+            pending = Some(rescanned);
+        }
         let unsafe_start = unsafe_stream_suffix_start(&joined);
         let candidate = stream_candidate_starts_at_zero(&joined);
-        if !candidate && !unsafe_start.is_some_and(|start| start < context_length) {
+        let dirty = redact_text(&joined) != joined;
+        if !dirty && !candidate && !unsafe_start.is_some_and(|start| start < context_length) {
             // The join resolved clean: no candidate begins inside the chain's
             // suffix anymore, so adjacency to it is no longer a hazard and
             // the context is spent.
+            if !had_pending {
+                pending = None;
+            }
+            self.pending = pending;
             return (false, String::new());
         }
-        let mut pending = self.pending.take().unwrap_or(PendingStreamText {
-            fragments: Vec::new(),
-            text: String::new(),
-        });
+        let mut pending = pending
+            .unwrap_or_else(|| PendingStreamText::context_continuation(Vec::new(), String::new()));
         if !text.is_empty() {
-            pending.fragments.push(StreamFragment {
+            pending.push(StreamFragment {
                 field,
                 index,
                 correlation,
                 text: text.to_string(),
             });
-            pending.text.push_str(text);
+        }
+        if dirty && candidate && unsafe_start.is_some_and(|start| start >= context_length) {
+            // The zero-origin context candidate owns a nested unsafe suffix in
+            // its credential value. Splitting there would detach the value and
+            // let a later barrier release it as an independent candidate.
+            self.emit_redacted(pending.fragments);
+            return (true, String::new());
+        }
+        if dirty && !candidate && unsafe_start.is_none() {
+            // A saved escaped context can complete a credential before a clean
+            // tail, leaving neither a zero-origin candidate nor an unsafe
+            // suffix. The joined redaction still proves the held bytes secret.
+            self.emit_redacted(pending.fragments);
+            return (true, String::new());
         }
         match unsafe_start {
             // A candidate begun in (or spanning) the context is still in
             // progress at the joined end; its value bytes may follow, so the
             // held text cannot be emitted or suppressed piecewise yet.
             Some(start) if start < context_length => {
+                pending.mark_scanned();
                 self.hold_or_suppress(pending);
                 (true, context)
             }
@@ -1594,10 +2446,10 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 let pending_split = start - context_length;
                 let (completed, tail) = split_stream_fragments(pending.fragments, pending_split);
                 self.emit_redacted(completed);
-                self.hold_or_suppress(PendingStreamText {
-                    fragments: tail,
-                    text: pending.text[pending_split..].to_string(),
-                });
+                self.hold_or_suppress(PendingStreamText::candidate(
+                    tail,
+                    pending.text[pending_split..].to_string(),
+                ));
                 (true, String::new())
             }
             // The whole join is a completed candidate: every held byte is the
@@ -1694,12 +2546,19 @@ fn stream_candidate_starts_at_zero(text: &str) -> bool {
             // A candidate spelled with `\uXXXX` escapes still starts at zero
             // in the form a JSON consumer reconstructs; an exhausted decode
             // budget is treated as a candidate so the fragment is held.
-            Some(decoded) => decoded != text && stream_candidate_starts_at_zero(&decoded),
+            Some(decoded) => {
+                decoded != text
+                    && (stream_candidate_starts_at_zero(&decoded)
+                        || unsafe_stream_suffix_start(&decoded).is_some())
+            }
             None => true,
         }
         || trailing_partial_unicode_escape(text) == Some(0)
         || spaced_credential_starts_at_zero(text)
-        || identifier_assignment_unsafe_start(text) == Some(0)
+        || space_separated_flag_candidate(text)
+        || url_userinfo_candidate(text)
+        || curl_userinfo_candidate(text)
+        || identifier_assignment_candidate(text)
         || pem_private_key_starts_at_zero(text)
 }
 
@@ -1726,6 +2585,228 @@ fn spaced_credential_starts_at_zero(text: &str) -> bool {
             let separator = name.len() + whitespace;
             separator == text.len() || matches!(text.as_bytes().get(separator), Some(b'=' | b':'))
         })
+}
+
+fn space_separated_flag_candidate(text: &str) -> bool {
+    space_separated_flag_unsafe_start(text) == Some(0)
+        || (redact_space_separated_flags(text) != text
+            && SPACE_SEPARATED_CREDENTIAL_FLAGS.iter().any(|flag| {
+                text.len() > flag.len()
+                    && text.as_bytes()[..flag.len()].eq_ignore_ascii_case(flag.as_bytes())
+                    && matches!(text.as_bytes()[flag.len()], b' ' | b'\t')
+            }))
+}
+
+fn space_separated_flag_unsafe_start(text: &str) -> Option<usize> {
+    let mut earliest: Option<usize> = None;
+    for flag in SPACE_SEPARATED_CREDENTIAL_FLAGS {
+        let prefix_length = trailing_marker_prefix(text, flag, true);
+        if prefix_length > 0 {
+            let start = text.len() - prefix_length;
+            earliest = Some(earliest.map_or(start, |current| current.min(start)));
+        }
+        let mut offset = 0;
+        while let Some(relative) = find_ascii_case_insensitive(&text[offset..], flag) {
+            let start = offset + relative;
+            let after_flag = start + flag.len();
+            let boundary_before = start == 0
+                || text[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace);
+            let whitespace = text[after_flag..]
+                .bytes()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            if boundary_before && after_flag + whitespace == text.len() {
+                earliest = Some(earliest.map_or(start, |current| current.min(start)));
+                break;
+            }
+            if boundary_before && whitespace > 0 {
+                let (_, token_start, value_end) =
+                    credential_value_bounds(text, after_flag, ValueTermination::Token);
+                if value_end.max(token_start) == text.len() {
+                    earliest = Some(earliest.map_or(start, |current| current.min(start)));
+                    break;
+                }
+            }
+            offset = after_flag;
+        }
+    }
+    earliest
+}
+
+/// Whether the text begins a URL whose userinfo may carry a password.
+///
+/// The scheme may be absent rather than malformed: a fragment ending in a
+/// partial `://` marker is held from that marker, so the candidate rejoined
+/// from it begins at the separator with its scheme already released. An empty
+/// scheme prefix is therefore a candidate on the same terms as a well-formed
+/// one — it is vacuously all scheme characters — and requiring at least one
+/// would release the password that arrives after it.
+fn url_userinfo_candidate(text: &str) -> bool {
+    url_userinfo_unsafe_start(text) == Some(0)
+        || (redact_url_userinfo_passwords(text) != text
+            && text.find("://").is_some_and(|separator| {
+                text[..separator]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+            }))
+}
+
+fn url_userinfo_unsafe_start(text: &str) -> Option<usize> {
+    let prefix_length = trailing_marker_prefix(text, "://", false);
+    let mut earliest = (prefix_length > 0).then_some(text.len() - prefix_length);
+    let mut offset = 0;
+    while let Some(relative) = text[offset..].find("://") {
+        let separator = offset + relative;
+        let authority_start = separator + 3;
+        let authority_end = text[authority_start..]
+            .find(is_url_authority_boundary)
+            .map_or(text.len(), |length| authority_start + length);
+        let authority = &text[authority_start..authority_end];
+        let has_password = authority
+            .rfind('@')
+            .is_some_and(|at| authority[..at].contains(':'));
+        if authority_end == text.len() && !has_password {
+            let start = text[..separator]
+                .char_indices()
+                .rev()
+                .take_while(|(_, character)| {
+                    character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+                })
+                .last()
+                .map_or(separator, |(start, _)| start);
+            earliest = Some(earliest.map_or(start, |current| current.min(start)));
+        }
+        offset = authority_end.max(authority_start);
+    }
+    earliest
+}
+
+/// Whether an unfinished URL authority already carries nonempty bytes after a
+/// user/password separator. Before `@` arrives this is structurally ambiguous
+/// with a host and port, so a forced stream barrier conservatively treats the
+/// bytes as secret while leaving a bare scheme, user, or separator releasable.
+fn unfinished_url_userinfo_contains_password(text: &str) -> bool {
+    let mut offset = 0;
+    while let Some(relative) = text[offset..].find("://") {
+        let authority_start = offset + relative + 3;
+        let authority_end = text[authority_start..]
+            .find(is_url_authority_boundary)
+            .map_or(text.len(), |length| authority_start + length);
+        let authority = &text[authority_start..authority_end];
+        if authority_end == text.len()
+            && !authority.contains('@')
+            && authority
+                .rfind(':')
+                .is_some_and(|separator| separator + 1 < authority.len())
+        {
+            return true;
+        }
+        offset = authority_end.max(authority_start);
+    }
+    false
+}
+
+fn curl_userinfo_candidate(text: &str) -> bool {
+    curl_userinfo_unsafe_start(text) == Some(0)
+        || (redact_curl_userinfo_passwords(text) != text
+            && CURL_USER_FLAGS.iter().any(|flag| {
+                text.starts_with(flag)
+                    && text
+                        .as_bytes()
+                        .get(flag.len())
+                        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+            }))
+}
+
+fn curl_userinfo_unsafe_start(text: &str) -> Option<usize> {
+    let mut earliest: Option<usize> = None;
+    for flag in CURL_USER_FLAGS {
+        let prefix_length = trailing_marker_prefix(text, flag, false);
+        if prefix_length > 0 {
+            let start = text.len() - prefix_length;
+            earliest = Some(earliest.map_or(start, |current| current.min(start)));
+        }
+        let mut offset = 0;
+        while let Some(relative) = text[offset..].find(flag) {
+            let start = offset + relative;
+            let after_flag = start + flag.len();
+            let boundary_before = start == 0
+                || text[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace);
+            let whitespace = text[after_flag..]
+                .bytes()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            if boundary_before && after_flag == text.len() {
+                earliest = Some(earliest.map_or(start, |current| current.min(start)));
+                break;
+            }
+            if !boundary_before || whitespace == 0 {
+                offset = after_flag;
+                continue;
+            }
+            let argument_start = after_flag + whitespace;
+            let opening_quote = text[argument_start..]
+                .chars()
+                .next()
+                .filter(|character| matches!(character, '"' | '\''));
+            let body_start = argument_start + opening_quote.map_or(0, char::len_utf8);
+            let argument_end = opening_quote.map_or_else(
+                || {
+                    text[body_start..]
+                        .find(char::is_whitespace)
+                        .map_or(text.len(), |length| body_start + length)
+                },
+                |quote| quoted_value_end(text, body_start, quote),
+            );
+            if argument_end == text.len() {
+                earliest = Some(earliest.map_or(start, |current| current.min(start)));
+                break;
+            }
+            offset = argument_end.max(after_flag);
+        }
+    }
+    earliest
+}
+
+/// Whether any complete credential identifier assignment occurs in `text`.
+/// The held fragment can begin before the identifier when another conservative
+/// lookbehind rule retained the prefix, so candidate recognition cannot assume
+/// the credential itself starts at byte zero.
+fn identifier_assignment_candidate(text: &str) -> bool {
+    let json_claims = JsonCredentialKeyClaims::new(text);
+    let mut unsafe_cursor = json_claims.cursor();
+    if identifier_assignment_unsafe_start_with_claims(text, &mut unsafe_cursor) == Some(0) {
+        return true;
+    }
+    let base = text.as_ptr() as usize;
+    let mut offset = 0;
+    while let Some(relative) = text[offset..]
+        .bytes()
+        .position(|byte| matches!(byte, b'=' | b':'))
+    {
+        let separator = offset + relative;
+        if let Some((identifier, quote)) = trailing_identifier(&text[..separator])
+            && credential_key(identifier)
+        {
+            let content = identifier.as_ptr() as usize - base;
+            let start = if quote.is_some() {
+                content - 1
+            } else {
+                content
+            };
+            if start == 0 {
+                return true;
+            }
+        }
+        offset = separator + 1;
+    }
+    false
 }
 
 /// The trailing portion of `text` that could begin a credential extending into
@@ -1788,6 +2869,15 @@ fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
         earliest = Some(earliest.map_or(start, |current| current.min(start)));
     }
     if let Some(start) = spaced_credential_unsafe_start(text) {
+        earliest = Some(earliest.map_or(start, |current| current.min(start)));
+    }
+    if let Some(start) = space_separated_flag_unsafe_start(text) {
+        earliest = Some(earliest.map_or(start, |current| current.min(start)));
+    }
+    if let Some(start) = url_userinfo_unsafe_start(text) {
+        earliest = Some(earliest.map_or(start, |current| current.min(start)));
+    }
+    if let Some(start) = curl_userinfo_unsafe_start(text) {
         earliest = Some(earliest.map_or(start, |current| current.min(start)));
     }
     if let Some(start) = identifier_assignment_unsafe_start(text) {
@@ -1864,6 +2954,14 @@ fn spaced_credential_unsafe_start(text: &str) -> Option<usize> {
 /// separator or with an unterminated value — so a credential split across
 /// deltas is held rather than emitted piecewise.
 fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
+    let json_claims = JsonCredentialKeyClaims::new(text);
+    identifier_assignment_unsafe_start_with_claims(text, &mut json_claims.cursor())
+}
+
+fn identifier_assignment_unsafe_start_with_claims(
+    text: &str,
+    json_claim_cursor: &mut JsonCredentialKeyClaimCursor<'_>,
+) -> Option<usize> {
     let mut earliest: Option<usize> = None;
     let mut fold = |start: usize| {
         earliest = Some(earliest.map_or(start, |current: usize| current.min(start)));
@@ -1878,16 +2976,16 @@ fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
             continue;
         }
         let separator = index;
-        let is_colon = byte == b':';
-        // The double-quoted-colon exemption mirrors the stateless scanner:
-        // only a position the JSON scanner owns is left to it.
         if let Some((identifier, quote)) = trailing_identifier(&text[..separator])
-            && !(quote == Some('"')
-                && is_colon
-                && json_key_can_start_at(text, identifier.as_ptr() as usize - base - 1))
             && credential_key(identifier)
         {
-            let termination = if credential_key_is_free_form(identifier) {
+            let content = identifier.as_ptr() as usize - base;
+            let json_scanner_owns_key = quote == Some('"')
+                && content > 0
+                && json_claim_cursor.claims_in_source_order(content - 1);
+            let termination = if json_scanner_owns_key {
+                ValueTermination::Token
+            } else if credential_key_is_free_form(identifier) {
                 ValueTermination::Line
             } else {
                 ValueTermination::Token
@@ -1896,7 +2994,6 @@ fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
                 credential_value_bounds(text, separator + 1, termination);
             let consumed = value_end.max(token_start);
             if consumed == text.len() || partial_triple_open(text, separator + 1) {
-                let content = identifier.as_ptr() as usize - base;
                 fold(if quote.is_some() {
                     content - 1
                 } else {
@@ -1918,7 +3015,8 @@ fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
     // recognized rather than emitted with the opener stripped.
     let end_trimmed = text.trim_end_matches([' ', '\t']);
     if let Some((identifier, quote)) = trailing_identifier(end_trimmed)
-        && credential_key(identifier)
+        && (credential_key(identifier)
+            || credential_identifier_could_extend_to_credential(identifier))
     {
         let content = identifier.as_ptr() as usize - base;
         let start = match quote {
@@ -1927,7 +3025,67 @@ fn identifier_assignment_unsafe_start(text: &str) -> Option<usize> {
         };
         fold(start);
     }
+    if let Some(start) = trailing_single_quoted_key_opener(text) {
+        fold(start);
+    }
     earliest
+}
+
+/// A single quote at the end of a key position may open a non-JSON quoted
+/// assignment whose name arrives in the next delta. Holding only the quote is
+/// conservative and reversible: a clean completion releases it byte-exact.
+///
+/// The opener is equally unfinished once its first name characters have
+/// arrived: `'c` is as much an open `'client_secret'` as a bare `'` is, and a
+/// delta ending there must hold from the quote so the rejoined assignment is
+/// recognized instead of emitted with its opener already released.
+fn trailing_single_quoted_key_opener(text: &str) -> Option<usize> {
+    let trimmed = text.trim_end_matches([' ', '\t']);
+    // Step back over the partial name. A closing quote is not a name
+    // character, so a key that has already closed stops this scan at its own
+    // quote and fails the opener test below rather than reopening.
+    let name_start = trimmed
+        .char_indices()
+        .rev()
+        .take_while(|(_, character)| is_quoted_key_character(*character))
+        .last()
+        .map_or(trimmed.len(), |(start, _)| start);
+    let (start, quote) = trimmed[..name_start].char_indices().next_back()?;
+    if quote != '\'' {
+        return None;
+    }
+    text[..start]
+        .chars()
+        .next_back()
+        .is_none_or(|character| {
+            // Assignment separators count as openers too: the raw scanner
+            // accepts `detail:'client_secret'` in the completed text, so the
+            // quote after a colon or equals is as much a key opener as one
+            // after whitespace or a structural bracket.
+            character.is_whitespace() || matches!(character, '{' | '[' | '(' | ',' | ':' | '=')
+        })
+        .then_some(start)
+}
+
+/// A character a quoted credential key may be spelled with. A trailing run of
+/// these after an opening quote is a name still being spelled, not a closed
+/// one, so the assignment it may begin is still in progress.
+fn is_quoted_key_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+}
+
+/// Whether escape decoding exposed an unsafe suffix away from original offset
+/// zero, so the held origin cannot be recomputed after that candidate closes.
+/// This provenance stays sticky until the candidate is suppressed; ordinary
+/// marker prefixes remain recomputable and can still release when later bytes
+/// prove they were harmless text.
+fn escaped_candidate_origin_is_opaque(text: &str) -> bool {
+    let Some(decoded) = decode_unicode_escapes(text) else {
+        return true;
+    };
+    decoded != text
+        && !stream_candidate_starts_at_zero(&decoded)
+        && unsafe_stream_suffix_start(&decoded).is_some()
 }
 
 /// Holds credential shapes that only appear once `\uXXXX` escapes are decoded,
@@ -2021,13 +3179,26 @@ fn json_credential_value_at_start(text: &str) -> Option<usize> {
         .and_then(|(start, value_start)| (start == 1).then_some(value_start - 1))
 }
 
+/// The position of the last double quote still open at the end of the text.
+///
+/// A quoted key is held wherever it appears, not only where JSON would admit
+/// one. A credential member reached through diagnostic prose — `detail: "`
+/// then `client_secret":"…"` — is claimed by the raw assignment scanner once
+/// rejoined, so gating on JSON eligibility released exactly the opener that
+/// scanner needed and let the value arrive as a clean-looking delta. Whether
+/// the quote sits after `{`, after `,`, or after prose does not change that a
+/// still-open string may be a key being spelled.
+///
+/// The earliest quote is returned, so the hold covers every later reading of
+/// the same fragment. Quote parity alone would not do: malformed text such as
+/// `{"x,"client_sec` pairs its quotes differently from the reading under
+/// which the credential key is claimed, and the earlier opener is the one
+/// that must survive.
 fn unterminated_json_key_start(text: &str) -> Option<usize> {
     let mut offset = 0;
     while let Some(relative_start) = text[offset..].find('"') {
         let start = offset + relative_start;
-        if (start == 0 || json_key_can_start_at(text, start))
-            && quoted_value_end(text, start + 1, '"') == text.len()
-        {
+        if quoted_value_end(text, start + 1, '"') == text.len() {
             return Some(start);
         }
         offset = start + 1;
@@ -2040,17 +3211,21 @@ fn unterminated_json_key_start(text: &str) -> Option<usize> {
 /// optional whitespace. The stateless member scan accepts whitespace between
 /// key and colon, so streamed text split there could otherwise release the
 /// key and let a later delta deliver the value unredacted.
+///
+/// Like the opener scan above, this does not require a JSON-eligible key
+/// position: the same key spelled after prose is still claimed by the raw
+/// assignment scanner once its value arrives, and the key must survive the
+/// split for that to happen. A quote whose string never closes ends this
+/// scan rather than the whole search, since a later quote may still open a
+/// complete key.
 fn json_credential_key_awaiting_colon(text: &str) -> Option<usize> {
     let mut offset = 0;
     while let Some(relative_start) = text[offset..].find('"') {
         let start = offset + relative_start;
-        if !(start == 0 || json_key_can_start_at(text, start)) {
-            offset = start + 1;
-            continue;
-        }
         let key_end = quoted_value_end(text, start + 1, '"');
         if key_end == text.len() {
-            return None;
+            offset = start + 1;
+            continue;
         }
         let encoded_key = &text[start..=key_end];
         if let Ok(key) = serde_json::from_str::<String>(encoded_key)
@@ -2111,12 +3286,15 @@ fn trailing_marker_prefix(text: &str, marker: &str, ascii_case_insensitive: bool
 #[cfg(test)]
 mod tests {
 
-    use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink};
+    use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink, TokenUsage};
 
     use super::{
-        MAX_PENDING_STREAM_BYTES, REDACTED, REDACTED_JSON_OBJECT, RedactingSink,
-        decode_unicode_escapes, redact_json, redact_text, stream_candidate_starts_at_zero,
-        trailing_credential_context, unsafe_stream_suffix_start, unterminated_json_key_start,
+        MAX_PENDING_RESCAN_BYTES, MAX_PENDING_STREAM_BYTES, PendingRescanWork, REDACTED,
+        REDACTED_JSON_OBJECT, RedactingSink, decode_unicode_escapes,
+        identifier_assignment_candidate, identifier_assignment_unsafe_start, json_claim_scan_bytes,
+        redact_identifier_assignment, redact_json, redact_text, reset_json_claim_scan_bytes,
+        stream_candidate_starts_at_zero, trailing_credential_context, unsafe_stream_suffix_start,
+        unterminated_json_key_start,
     };
 
     const CREDENTIAL_SHAPED_VALUE: &str = "sk-sensitive-value";
@@ -2134,6 +3312,18 @@ mod tests {
     const ESCAPED_QUOTED_SECRET_VALUE: &str = r#"sensitive \"quoted\" value"#;
     const MULTILINE_SECRET_VALUE: &str = "sensitive\nmultiline\nvalue";
     const COMPOSITE_SECRET_VALUE: &str = "sensitive-composite-value";
+    const PLANTED_SYNTHETIC_SECRET: &str = "SYNTHETIC-SECRET-SHAPE-COVERAGE";
+    /// Large enough that a whole-prefix ownership scan per member is
+    /// observably super-linear while the one-pass bound stays deterministic.
+    const REPEATED_QUOTED_CREDENTIAL_MEMBERS: usize = 512;
+
+    fn repeated_quoted_credential_members() -> String {
+        let member = format!(r#""client_secret":"{PLANTED_SYNTHETIC_SECRET}","#);
+        format!(
+            r#"{{{}"safe":"tail"}}"#,
+            member.repeat(REPEATED_QUOTED_CREDENTIAL_MEMBERS)
+        )
+    }
 
     fn observation_text(observation: Observation<u8>) -> String {
         match observation.fact {
@@ -2142,6 +3332,108 @@ mod tests {
             _ => String::new(),
         }
     }
+
+    #[track_caller]
+    fn assert_two_delta_split_redacts(first: &str, second: &str) {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: first.to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: second.to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(
+            !emitted.contains(PLANTED_SYNTHETIC_SECRET),
+            "split credential value must not survive stateful redaction: {emitted}"
+        );
+    }
+
+    #[track_caller]
+    fn assert_two_delta_split_is_byte_exact(first: &str, second: &str) {
+        let expected = format!("{first}{second}");
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: first.to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: second.to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert_eq!(emitted, expected);
+    }
+
+    #[track_caller]
+    fn assert_three_delta_split_redacts(first: &str, second: &str, third: &str) {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: first.to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: second.to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 2,
+                    text: third.to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(
+            !emitted.contains(PLANTED_SYNTHETIC_SECRET),
+            "split credential value must not survive stateful redaction: {emitted}"
+        );
+    }
+
     const STRUCTURED_OBJECT_SECRET_VALUE: &str = "sensitive-structured-object-value";
     const STRUCTURED_ARRAY_SECRET_ONE: &str = "sensitive-structured-array-one";
     const STRUCTURED_ARRAY_SECRET_TWO: &str = "sensitive-structured-array-two";
@@ -2507,14 +3799,15 @@ mod tests {
     }
 
     /// The JSON-key suffix scan stays linear on text ending in many
-    /// backslash-escaped quotes: an escaped quote cannot begin a JSON key, and
-    /// the eligibility check short-circuits before the quoted-value walk, so no
-    /// position rescans the remaining suffix. A quadratic scan would not finish.
+    /// backslash-escaped quotes. The scan no longer requires a JSON-eligible
+    /// key position, so the first quote is reported rather than none; what
+    /// keeps it linear is that it returns there instead of rescanning the
+    /// suffix from every later quote. A quadratic scan would not finish.
     #[test]
     fn json_key_suffix_scan_is_linear_on_repeated_escaped_quotes() {
         let hostile = format!("prose {}", "\\\"".repeat(500_000));
 
-        assert_eq!(unterminated_json_key_start(&hostile), None);
+        assert_eq!(unterminated_json_key_start(&hostile), Some(7));
     }
 
     /// INV-035: a private-key PEM block standing on its own — no `private_key=`
@@ -2670,6 +3963,351 @@ mod tests {
         assert!(client.contains("[redacted]"));
         assert!(!aws.contains("opaque-aws-secret"));
         assert!(aws.contains("[redacted]"));
+    }
+
+    /// INV-035: malformed JSON quote pairing cannot make the JSON member
+    /// scanner and identifier-assignment scanner both decline a covered key.
+    #[test]
+    fn inv_035_malformed_quoted_credential_keys_are_redacted_on_every_surface() {
+        let fixture = format!(r#"{{"x,"client_secret":"{PLANTED_SYNTHETIC_SECRET}"}}"#);
+        let text_output = redact_text(&fixture);
+        let json_output = redact_json(&fixture);
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let sink = RedactingSink::new(&mut observed);
+        let tool_output = sink.redact_tool_arguments("", &fixture);
+
+        assert!(!text_output.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!json_output.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!tool_output.contains(PLANTED_SYNTHETIC_SECRET));
+    }
+
+    #[test]
+    fn json_claim_lookup_is_single_pass_for_stateless_identifier_assignments() {
+        let fixture = repeated_quoted_credential_members();
+        reset_json_claim_scan_bytes();
+
+        let _ = redact_identifier_assignment(&fixture);
+
+        assert!(
+            json_claim_scan_bytes() <= fixture.len(),
+            "JSON-key ownership lookup must inspect at most one source-length"
+        );
+    }
+
+    #[test]
+    fn json_claim_lookup_is_single_pass_for_stream_identifier_assignments() {
+        let fixture = repeated_quoted_credential_members();
+        reset_json_claim_scan_bytes();
+
+        let _ = identifier_assignment_unsafe_start(&fixture);
+
+        assert!(
+            json_claim_scan_bytes() <= fixture.len(),
+            "stream JSON-key ownership lookup must inspect at most one source-length"
+        );
+    }
+
+    #[test]
+    fn json_claim_lookup_is_single_pass_for_stream_candidate_recognition() {
+        let fixture = repeated_quoted_credential_members();
+        reset_json_claim_scan_bytes();
+
+        let _ = identifier_assignment_candidate(&fixture);
+
+        assert!(
+            json_claim_scan_bytes() <= fixture.len(),
+            "stream candidate ownership lookup must inspect at most one source-length"
+        );
+    }
+
+    /// INV-035: credential-shaped JSON nested inside a JSON string remains
+    /// covered even though its member quotes are escaped in the outer text.
+    #[test]
+    fn inv_035_redacts_escaped_nested_json_credential_text() {
+        let fixture =
+            format!(r#"{{"detail":"{{\"client_secret\":\"{PLANTED_SYNTHETIC_SECRET}\"}}"}}"#);
+        let text_output = redact_text(&fixture);
+        let json_output = redact_json(&fixture);
+
+        assert!(
+            !text_output.contains(PLANTED_SYNTHETIC_SECRET),
+            "{text_output}"
+        );
+        assert!(
+            !json_output.contains(PLANTED_SYNTHETIC_SECRET),
+            "{json_output}"
+        );
+    }
+
+    /// INV-035: bare `token` and every singular `*_TOKEN` assignment are
+    /// credential-bearing, while plural usage counters remain ordinary data.
+    #[test]
+    fn inv_035_redacts_bare_and_suffix_token_assignments() {
+        let github = redact_text(&format!("GITHUB_TOKEN={PLANTED_SYNTHETIC_SECRET}"));
+        let bare = redact_text(&format!("token={PLANTED_SYNTHETIC_SECRET}"));
+        let member = redact_json(&format!(
+            r#"{{"CI_JOB_TOKEN":"{PLANTED_SYNTHETIC_SECRET}"}}"#
+        ));
+        let usage = r#"{"input_tokens":11,"output_tokens":7}"#;
+
+        assert_eq!(github, format!("GITHUB_TOKEN={REDACTED}"));
+        assert_eq!(bare, format!("token={REDACTED}"));
+        assert_eq!(member, format!(r#"{{"CI_JOB_TOKEN":"{REDACTED}"}}"#));
+        assert_eq!(redact_json(usage), usage);
+    }
+
+    /// INV-035: credential-bearing long options consume a whitespace-separated
+    /// argument exactly as their `=` assignment forms do.
+    #[test]
+    fn inv_035_redacts_space_separated_credential_flags() {
+        let password = redact_text(&format!("codex --password {PLANTED_SYNTHETIC_SECRET}"));
+        let api_key = redact_text(&format!("codex --api-key {PLANTED_SYNTHETIC_SECRET}"));
+        let passphrase = redact_text(&format!("gpg --passphrase {PLANTED_SYNTHETIC_SECRET}"));
+
+        assert_eq!(password, format!("codex --password {REDACTED}"));
+        assert_eq!(api_key, format!("codex --api-key {REDACTED}"));
+        assert_eq!(passphrase, format!("gpg --passphrase {REDACTED}"));
+    }
+
+    /// INV-035: URL userinfo passwords are redacted without rewriting their
+    /// scheme, username, host, or path.
+    #[test]
+    fn inv_035_redacts_scheme_url_userinfo_passwords() {
+        let fixture = format!("psql postgres://admin:{PLANTED_SYNTHETIC_SECRET}@db.internal/app");
+
+        assert_eq!(
+            redact_text(&fixture),
+            format!("psql postgres://admin:{REDACTED}@db.internal/app")
+        );
+    }
+
+    /// INV-035: curl's short and long userinfo options accept a tab between
+    /// the option and argument, matching the scanner's whitespace contract.
+    #[test]
+    fn inv_035_redacts_tab_separated_curl_userinfo_passwords() {
+        let short = format!("curl -u\tadmin:{QUOTED_CREDENTIAL_VALUE}");
+        let long = format!("curl --user\tadmin:{QUOTED_CREDENTIAL_VALUE}");
+        let short_output = redact_text(&short);
+        let long_output = redact_text(&long);
+
+        assert!(!short_output.contains(QUOTED_CREDENTIAL_VALUE));
+        assert!(!long_output.contains(QUOTED_CREDENTIAL_VALUE));
+    }
+
+    /// INV-035: curl's userinfo option redacts the password while retaining
+    /// the option, user name, and destination URL.
+    #[test]
+    fn inv_035_redacts_curl_userinfo_passwords() {
+        let fixture = format!("curl -u admin:{PLANTED_SYNTHETIC_SECRET} https://api.example.test");
+
+        assert_eq!(
+            redact_text(&fixture),
+            format!("curl -u admin:{REDACTED} https://api.example.test")
+        );
+    }
+
+    /// Ordinary URLs and curl user arguments without a password remain
+    /// byte-exact; userinfo redaction is not a generic URL rewrite.
+    #[test]
+    fn credential_clean_urls_and_curl_usernames_remain_byte_exact() {
+        let url = "https://example.test/path?q=one";
+        let curl = "curl -u admin https://api.example.test";
+
+        assert_eq!(redact_text(url), url);
+        assert_eq!(redact_text(curl), curl);
+    }
+
+    /// INV-035: bare ASCII assignment names ending in normalized `pwd` are
+    /// covered across `_`/`-` separators and preceding name prefixes.
+    #[test]
+    fn inv_035_redacts_every_normalized_pwd_suffix_assignment() {
+        let bare = redact_text(&format!("pwd={QUOTED_CREDENTIAL_VALUE}"));
+        let hyphenated = redact_text(&format!("mysql-pwd={QUOTED_CREDENTIAL_VALUE}"));
+        let camel = redact_text(&format!("fooPwd={QUOTED_CREDENTIAL_VALUE}"));
+        let punctuated = redact_text(&format!("mysql-p-w-d={QUOTED_CREDENTIAL_VALUE}"));
+
+        assert!(!bare.contains(QUOTED_CREDENTIAL_VALUE));
+        assert!(!hyphenated.contains(QUOTED_CREDENTIAL_VALUE));
+        assert!(!camel.contains(QUOTED_CREDENTIAL_VALUE));
+        assert!(!punctuated.contains(QUOTED_CREDENTIAL_VALUE));
+    }
+
+    /// Names merely containing an enumerated cryptographic-key name are not
+    /// credentials; those families match only the exact normalized spelling.
+    #[test]
+    fn credential_clean_security_key_substrings_remain_byte_exact() {
+        let fixture = "nonsigningkeynote=ordinary hmackeybackup=ordinary";
+
+        assert_eq!(redact_text(fixture), fixture);
+    }
+
+    /// INV-035: adjacent high-confidence password and cryptographic-key names
+    /// use the same assignment policy as the pre-existing credential names.
+    #[test]
+    fn inv_035_redacts_passwd_pwd_passphrase_and_security_key_assignments() {
+        let passwd = redact_text(&format!("passwd={PLANTED_SYNTHETIC_SECRET}"));
+        let mysql_pwd = redact_text(&format!("MYSQL_PWD={PLANTED_SYNTHETIC_SECRET}"));
+        let passphrase = redact_text(&format!("passphrase={PLANTED_SYNTHETIC_SECRET}"));
+        let signing = redact_text(&format!("signing_key={PLANTED_SYNTHETIC_SECRET}"));
+        let encryption = redact_text(&format!("encryption_key={PLANTED_SYNTHETIC_SECRET}"));
+        let ssh = redact_text(&format!("ssh_key={PLANTED_SYNTHETIC_SECRET}"));
+        let hmac = redact_text(&format!("hmac_key={PLANTED_SYNTHETIC_SECRET}"));
+        let license = redact_text(&format!("license_key={PLANTED_SYNTHETIC_SECRET}"));
+        let concatenated = redact_text(&format!("signingkey={PLANTED_SYNTHETIC_SECRET}"));
+        let hyphenated = redact_text(&format!("encryption-key={PLANTED_SYNTHETIC_SECRET}"));
+
+        assert!(!passwd.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!mysql_pwd.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!passphrase.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!signing.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!encryption.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!ssh.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!hmac.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!license.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!concatenated.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!hyphenated.contains(PLANTED_SYNTHETIC_SECRET));
+    }
+
+    /// INV-035: underscore, concatenated, and hyphenated security-key names
+    /// remain covered when their names are split across two or three deltas.
+    #[test]
+    fn inv_035_stream_redacts_a_security_key_name_split_across_three_deltas() {
+        assert_three_delta_split_redacts(
+            "pi: s",
+            "igni",
+            &format!("ng_key={PLANTED_SYNTHETIC_SECRET} tail"),
+        );
+        assert_two_delta_split_redacts(
+            "pi: signingk",
+            &format!("ey={PLANTED_SYNTHETIC_SECRET} tail"),
+        );
+        assert_three_delta_split_redacts(
+            "pi: sign",
+            "ing-",
+            &format!("key={PLANTED_SYNTHETIC_SECRET} tail"),
+        );
+    }
+
+    /// INV-035: splitting a credential flag inside its name cannot release the
+    /// later whitespace-separated value.
+    #[test]
+    fn inv_035_stream_redacts_a_flag_split_inside_its_name() {
+        assert_two_delta_split_redacts(
+            "codex --pass",
+            &format!("word {PLANTED_SYNTHETIC_SECRET} tail"),
+        );
+    }
+
+    /// INV-035: splitting URL userinfo immediately before its password cannot
+    /// release that password as a standalone clean-looking delta.
+    #[test]
+    fn inv_035_stream_redacts_a_url_userinfo_password_split() {
+        assert_two_delta_split_redacts(
+            "postgres://admin:",
+            &format!("{PLANTED_SYNTHETIC_SECRET}@db.internal/app"),
+        );
+    }
+
+    /// INV-035: an undelimited credential suffix split inside its final family
+    /// name remains held until the assignment can be judged whole.
+    #[test]
+    fn inv_035_stream_redacts_undelimited_suffix_families_split_inside_their_names() {
+        assert_two_delta_split_redacts("githubTo", &format!("ken={PLANTED_SYNTHETIC_SECRET} tail"));
+        assert_two_delta_split_redacts(
+            "accountPass",
+            &format!("wd={PLANTED_SYNTHETIC_SECRET} tail"),
+        );
+        assert_two_delta_split_redacts("databaseP", &format!("wd={PLANTED_SYNTHETIC_SECRET} tail"));
+        assert_two_delta_split_redacts(
+            "gpgPass",
+            &format!("phrase={PLANTED_SYNTHETIC_SECRET} tail"),
+        );
+    }
+
+    /// One-character `p`/`t` suffix holds that could begin a credential family
+    /// release byte-exact once the next delta proves the name harmless.
+    #[test]
+    fn broken_undelimited_suffix_prefixes_remain_byte_exact() {
+        assert_two_delta_split_is_byte_exact("ordinaryP", "lain");
+        assert_two_delta_split_is_byte_exact("auditT", "rail");
+    }
+
+    /// INV-035: malformed quoted-key ownership remains consistent across a
+    /// delta split instead of releasing the value after a conservative hold.
+    #[test]
+    fn inv_035_stream_redacts_a_split_malformed_quoted_credential_key() {
+        assert_two_delta_split_redacts(
+            r#"{"x,"client_sec"#,
+            &format!(r#"ret":"{PLANTED_SYNTHETIC_SECRET}"}}"#),
+        );
+    }
+
+    /// INV-035: a single-quoted key split after its opening quote and first
+    /// name characters stays held, so the rejoined assignment is recognized.
+    #[test]
+    fn inv_035_stream_redacts_a_partial_single_quoted_key_split() {
+        assert_two_delta_split_redacts(
+            "prefix 'c",
+            &format!("lient_secret': '{PLANTED_SYNTHETIC_SECRET}'"),
+        );
+    }
+
+    /// A single-quoted opener whose partial name proves harmless releases
+    /// byte-exact once the next delta completes it.
+    #[test]
+    fn partial_single_quoted_keys_remain_byte_exact() {
+        assert_two_delta_split_is_byte_exact("note 'lab", "el' is plain");
+    }
+
+    /// INV-035: a URL split before its `://` separator keeps the rejoined
+    /// candidate, whose scheme was released with the earlier delta.
+    #[test]
+    fn inv_035_stream_redacts_a_url_split_before_its_separator() {
+        assert_two_delta_split_redacts(
+            "postgres:",
+            &format!("//user:{PLANTED_SYNTHETIC_SECRET}@host"),
+        );
+    }
+
+    /// INV-035: a normalized credential name split at one of its separators
+    /// stays held, since normalization drops the separator and the name can
+    /// still extend into a covered family.
+    #[test]
+    fn inv_035_stream_redacts_a_name_split_at_its_separator() {
+        assert_two_delta_split_redacts(
+            "prefix MYSQL_P_",
+            &format!("W_D = {PLANTED_SYNTHETIC_SECRET} tail"),
+        );
+    }
+
+    /// A name held at its separator releases byte-exact when the next delta
+    /// proves it harmless.
+    #[test]
+    fn names_held_at_a_separator_remain_byte_exact() {
+        assert_two_delta_split_is_byte_exact("prefix REGION_", "NAME = us-east tail");
+    }
+
+    /// INV-035: a normalized `pwd` name takes the line-consuming value shape,
+    /// so a multiword passphrase is not cut at its first token.
+    #[test]
+    fn inv_035_normalized_pwd_names_consume_a_multiword_value() {
+        let mysql = redact_text(&format!(
+            "MYSQL_PWD=correct horse {PLANTED_SYNTHETIC_SECRET}"
+        ));
+        let bare = redact_text(&format!("pwd=correct horse {PLANTED_SYNTHETIC_SECRET}"));
+
+        assert!(!mysql.contains(PLANTED_SYNTHETIC_SECRET));
+        assert!(!bare.contains(PLANTED_SYNTHETIC_SECRET));
+    }
+
+    /// INV-035: a single-quoted key opened straight after an assignment
+    /// separator stays held, since the completed text is an assignment.
+    #[test]
+    fn inv_035_stream_redacts_a_single_quoted_key_after_a_separator() {
+        assert_two_delta_split_redacts(
+            "detail:'c",
+            &format!("lient_secret': '{PLANTED_SYNTHETIC_SECRET}'"),
+        );
     }
 
     /// The trailing credential context is the unsafe suffix; a clean-ending
@@ -3174,6 +4812,39 @@ safe-line"
         assert!(output.contains("tail"));
     }
 
+    /// INV-035: a single-quoted credential key opener split from its name is
+    /// held until the statelessly covered assignment can be classified whole.
+    #[test]
+    fn inv_035_stream_holds_split_single_quoted_key_opener() {
+        const PLANTED_VALUE: &str = PLANTED_SYNTHETIC_SECRET;
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "{'".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: format!("client_secret': '{PLANTED_VALUE}'}}"),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
     /// INV-035: a quoted TOML key split before its closing quote, preceded by
     /// text that keeps both the JSON-key heuristic and the `"<name>":` marker
     /// prefixes from recognizing it, is held from its opening quote so the
@@ -3474,4 +5145,877 @@ safe-line"
 
         assert_eq!(emitted, vec!["key=ordinary value.".to_string()]);
     }
+
+    /// INV-035: a decoded unsafe suffix held from escaped reasoning remains a
+    /// candidate at offset zero when final text completes it. Neither streamed
+    /// observations nor terminal capture may retain the planted value.
+    #[test]
+    fn inv_035_escaped_held_suffix_is_redacted_in_stream_and_terminal_capture() {
+        const PLANTED_VALUE: &str =
+            "AAAA-SYNTHETIC-SECRET-stream-BBBB safe-tail-that-crosses-checkpoint";
+        let raw = format!(r"thinking about \u0063afé and api_key={PLANTED_VALUE}");
+        let stateless = redact_text(&raw);
+        let mut observed = Vec::new();
+        let captured;
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::ThinkingDelta {
+                    index: 0,
+                    text: r"thinking about \u0063afé and api_key=".to_string(),
+                },
+            });
+            sink.begin_terminal_text_capture();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: PLANTED_VALUE.to_string(),
+                },
+            });
+            sink.finish();
+            captured = sink.take_terminal_text_capture();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!stateless.contains("SYNTHETIC-SECRET"));
+        assert!(!streamed.contains("SYNTHETIC-SECRET"));
+        assert!(!captured.contains("SYNTHETIC-SECRET"));
+    }
+
+    /// INV-035: once the sink fails closed, terminal flushes and repeatable
+    /// usage reports cannot re-arm provider-byte emission.
+    #[test]
+    fn inv_035_suppression_is_absorbing_across_finish_and_usage() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-after-suppression";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.suppress_remaining();
+            sink.finish();
+            assert!(sink.is_suppressing());
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::UsageReported(TokenUsage::unreported()),
+            });
+            assert!(sink.is_suppressing());
+            sink.finish();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::UsageReported(TokenUsage::unreported()),
+            });
+            assert!(sink.is_suppressing());
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: PLANTED_VALUE.to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
+    /// INV-035: a repeatable usage report flushes a held marker without
+    /// forgetting its live continuation, so a later value is still destroyed.
+    #[test]
+    fn inv_035_usage_flush_retains_a_live_credential_continuation() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-after-usage";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "api_key=".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::UsageReported(TokenUsage::unreported()),
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: PLANTED_VALUE.to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
+    /// INV-035: a direct finish flush preserves a marker assembled across
+    /// deltas, so later provider text cannot use the flush as a release seam.
+    #[test]
+    fn inv_035_direct_finish_retains_a_live_credential_continuation() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-after-finish";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "api_".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "key=".to_string(),
+                },
+            });
+            sink.finish();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: PLANTED_VALUE.to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
+    /// INV-035: an unfinished URL authority that already contains password
+    /// bytes remains secret across a finish barrier.
+    #[test]
+    fn inv_035_finish_holds_an_unfinished_url_password() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-unfinished-url";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: format!("postgres://user:{PLANTED_VALUE}"),
+                },
+            });
+            sink.finish();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: "@host/path".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
+    /// INV-035: a credential completed against an escaped saved context is
+    /// destroyed even when it is no longer an unsafe suffix.
+    #[test]
+    fn inv_035_completed_escaped_context_is_rechecked() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-escaped-context";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: r"note \u0061".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 1,
+                    fragment: String::new(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 2,
+                    text: format!("pi_key={PLANTED_VALUE} tail"),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
+    /// INV-035: suppressing a complete flag reconstructed from context keeps
+    /// its unfinished value marker live across the next barrier.
+    #[test]
+    fn inv_035_context_suppression_retains_nested_flag_value() {
+        const PLANTED_VALUE: &str = PLANTED_SYNTHETIC_SECRET;
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "co".to_string(),
+                },
+            });
+            sink.finish();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: "dex --password \t ".to_string(),
+                },
+            });
+            sink.finish();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 2,
+                    text: PLANTED_VALUE.to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
+    /// INV-035: a candidate carried across a finish barrier owns an unsafe
+    /// suffix that begins inside its value; a later finish cannot release that
+    /// value as though it were an independent clean candidate.
+    #[test]
+    fn inv_035_context_candidate_owns_a_nested_unsafe_value_suffix() {
+        const PLANTED_VALUE: &str = "synthetic_secret";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "a".to_string(),
+                },
+            });
+            sink.finish();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: format!("pi_key={PLANTED_VALUE} "),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
+    /// INV-035: an unsafe suffix inside an already recognized quoted value
+    /// remains owned by the original credential span.
+    #[test]
+    fn inv_035_inner_quoted_suffix_stays_in_the_parent_span() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-40";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "\"api_key\" = \"S".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: "YNTHETIC-SECRET-40\"".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
+    /// INV-035: forcing a held private-key marker through a non-delta boundary
+    /// retains its continuation state, so the following body is destroyed too.
+    #[test]
+    fn inv_035_flush_boundary_does_not_release_a_credential_continuation() {
+        const PLANTED_VALUE: &str = "MIIB-SYNTHETIC-SECRET-flush";
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "-----BEGIN PRIVATE KEY-----\n".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 1,
+                    fragment: String::new(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 2,
+                    text: format!("{PLANTED_VALUE}\n-----END PRIVATE KEY-----"),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+        assert!(streamed.contains(REDACTED));
+    }
+
+    /// INV-035: a forced boundary resolves a candidate from its stored origin,
+    /// preserving the clean provider prefix while destroying the planted value.
+    #[test]
+    fn inv_035_boundary_honors_the_pending_candidate_origin() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-boundary-origin";
+        let clean_prefix = "x".repeat(50);
+        let mut observed = Vec::new();
+        let captured;
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.begin_terminal_text_capture();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: format!("{clean_prefix}api_"),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: format!("key={PLANTED_VALUE}"),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 2,
+                    fragment: String::new(),
+                },
+            });
+            captured = sink.take_terminal_text_capture();
+        }
+
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: clean_prefix,
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: REDACTED.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 1,
+                        text: REDACTED.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::ToolArgumentsDelta {
+                        index: 2,
+                        fragment: String::new(),
+                    },
+                },
+            ]
+        );
+        assert!(!captured.contains(PLANTED_VALUE));
+    }
+
+    /// INV-035: dropped-context resolution cannot release a completed
+    /// candidate merely because its origin follows a clean held prefix.
+    #[test]
+    fn inv_035_dropped_context_honors_the_pending_candidate_origin() {
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-dropped-origin";
+        let clean_prefix = "x".repeat(50);
+        let mut observed = Vec::new();
+        let captured;
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.begin_terminal_text_capture();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: format!("{clean_prefix}api_"),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: format!("key={PLANTED_VALUE}"),
+                },
+            });
+            sink.extend_dropped_context("provider-safe-text");
+            captured = sink.take_terminal_text_capture();
+        }
+
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: clean_prefix,
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: REDACTED.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 1,
+                        text: REDACTED.to_string(),
+                    },
+                },
+            ]
+        );
+        assert!(!captured.contains(PLANTED_VALUE));
+    }
+
+    #[track_caller]
+    fn assert_cap_edge_destroys_planted_value(total_held_bytes: usize) {
+        const MARKER: &str = "authorization: ";
+        const PLANTED_VALUE: &str = "SYNTHETIC-SECRET-cap-edge";
+        let padding = total_held_bytes - MARKER.len() - PLANTED_VALUE.len();
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: MARKER.to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: format!("{PLANTED_VALUE}{}", "a".repeat(padding)),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert!(!streamed.contains(PLANTED_VALUE));
+    }
+
+    /// INV-035: every held-size permutation immediately around the 64-KiB
+    /// boundary destroys the planted value; none creates a release seam.
+    #[test]
+    fn inv_035_stream_redaction_covers_cap_edge_permutations() {
+        assert_cap_edge_destroys_planted_value(MAX_PENDING_STREAM_BYTES - 2);
+        assert_cap_edge_destroys_planted_value(MAX_PENDING_STREAM_BYTES - 1);
+        assert_cap_edge_destroys_planted_value(MAX_PENDING_STREAM_BYTES);
+        assert_cap_edge_destroys_planted_value(MAX_PENDING_STREAM_BYTES + 1);
+        assert_cap_edge_destroys_planted_value(MAX_PENDING_STREAM_BYTES + 2);
+    }
+
+    /// A recomputable marker prefix that later proves to be ordinary text is
+    /// released byte-exact; only an unmappable escaped origin stays sticky.
+    #[test]
+    fn broken_stream_marker_prefix_remains_byte_exact() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "s".to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "afe text".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let streamed = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+
+        assert_eq!(streamed, "safe text");
+    }
+
+    /// Plumbing for the ignored stream stress soak: starts an
+    /// unterminated line credential, then extends it one byte per delta.
+    fn observe_one_byte_credential_deltas(sink: &mut RedactingSink<'_, u8>, delta_count: u32) {
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "authorization: ".to_string(),
+            },
+        });
+        for index in 1..=delta_count {
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index,
+                    text: "a".to_string(),
+                },
+            });
+        }
+    }
+
+    /// Drives a maximum-length fixed context through geometric pending scans.
+    fn observe_long_context_candidate_deltas(sink: &mut RedactingSink<'_, u8>, delta_count: u32) {
+        const MARKER: &str = "authorization: ";
+        let context = format!(
+            "{MARKER}{}",
+            "a".repeat(MAX_PENDING_STREAM_BYTES - MARKER.len())
+        );
+        sink.seed_emitted_context(&context);
+        for index in 1..=delta_count {
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index,
+                    text: "b".to_string(),
+                },
+            });
+        }
+    }
+
+    /// Drives one continuously unresolved credential through repeated finish
+    /// barriers, which must not create fresh rescan budgets.
+    fn observe_finish_interleaved_candidate_deltas(
+        sink: &mut RedactingSink<'_, u8>,
+        delta_count: u32,
+    ) {
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "authorization: ".to_string(),
+            },
+        });
+        for index in 1..=delta_count {
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index,
+                    text: "x".to_string(),
+                },
+            });
+            sink.finish();
+        }
+    }
+
+    /// Extends a credential candidate only through provider text that the
+    /// adapter drops, exercising the match-only context's rescan schedule.
+    fn extend_one_byte_dropped_context(sink: &mut RedactingSink<'_, u8>, byte_count: u32) {
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "authorization: ".to_string(),
+            },
+        });
+        for _ in 0..byte_count {
+            sink.extend_dropped_context("x");
+        }
+    }
+
+    /// Repeats empty dropped provider items without advancing chronology.
+    fn extend_empty_dropped_context(sink: &mut RedactingSink<'_, u8>, item_count: u32) {
+        for _ in 0..item_count {
+            sink.extend_dropped_context("");
+        }
+    }
+
+    /// Repeats a benign dropped unit that ends in a fresh partial marker.
+    fn extend_repeated_dropped_unit(sink: &mut RedactingSink<'_, u8>, unit: &str, count: u32) {
+        for _ in 0..count {
+            sink.extend_dropped_context(unit);
+        }
+    }
+
+    /// Independent benign suffix candidates receive independent work budgets;
+    /// a keepalive flood cannot accumulate into fail-closed suppression.
+    #[test]
+    fn repeated_benign_dropped_prefixes_do_not_suppress_terminal_text() {
+        const EXPECTED_DETAIL: &str = "authentication failed";
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        extend_repeated_dropped_unit(&mut sink, "keepalive", 20_000);
+
+        assert_eq!(
+            sink.redact_terminal_failure_text(EXPECTED_DETAIL),
+            EXPECTED_DETAIL
+        );
+        assert!(!sink.is_suppressing());
+    }
+
+    /// INV-035: context-chain rescans charge both classifiers for the full
+    /// joined input and fail closed before exceeding the six-cap allowance.
+    #[test]
+    fn inv_035_context_chain_rescans_obey_the_full_input_budget() {
+        const EXPECTED_WORK: PendingRescanWork = PendingRescanWork {
+            reclassifications: 2,
+            bytes: 262_156,
+        };
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        observe_long_context_candidate_deltas(&mut sink, 8);
+
+        assert_eq!(sink.pending_rescan_work(), &EXPECTED_WORK);
+        assert!(sink.pending_rescan_work().bytes <= MAX_PENDING_RESCAN_BYTES);
+        assert!(sink.is_suppressing());
+    }
+
+    /// INV-035: finish barriers retain one unresolved candidate's rescan
+    /// budget and fail closed before the deterministic allowance is exceeded.
+    #[test]
+    fn inv_035_finish_barriers_preserve_the_rescan_budget() {
+        const DELTA_COUNT: u32 = 1_024;
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        observe_finish_interleaved_candidate_deltas(&mut sink, DELTA_COUNT);
+
+        assert!(sink.pending_rescan_work().bytes <= MAX_PENDING_RESCAN_BYTES);
+        assert!(sink.is_suppressing());
+    }
+
+    /// INV-035: dropped-context growth is reclassified only at geometric
+    /// length thresholds and receives the full two-classifier work charge.
+    #[test]
+    fn inv_035_dropped_context_growth_has_geometric_rescan_work() {
+        const BYTE_COUNT: u32 = 1_024;
+        const EXPECTED_WORK: PendingRescanWork = PendingRescanWork {
+            reclassifications: 6,
+            bytes: 4_032,
+        };
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        extend_one_byte_dropped_context(&mut sink, BYTE_COUNT);
+
+        assert_eq!(sink.pending_rescan_work(), &EXPECTED_WORK);
+        assert!(sink.pending_rescan_work().bytes <= MAX_PENDING_RESCAN_BYTES);
+        assert!(!sink.is_suppressing());
+    }
+
+    /// INV-035: bytes copied solely to inspect a growing dropped lookbehind
+    /// are bounded linearly rather than cloning the whole suffix per event.
+    #[test]
+    fn inv_035_dropped_context_growth_does_not_clone_per_event() {
+        const BYTE_COUNT: u32 = 1_024;
+        const MAX_CLONED_BYTES: usize = 2 * BYTE_COUNT as usize;
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        extend_one_byte_dropped_context(&mut sink, BYTE_COUNT);
+
+        let copied_after_growth = sink.dropped_context_clone_bytes();
+        extend_empty_dropped_context(&mut sink, 20_000);
+
+        assert_eq!(sink.dropped_context_clone_bytes(), copied_after_growth);
+        assert!(
+            sink.dropped_context_clone_bytes() <= MAX_CLONED_BYTES,
+            "dropped context cloned {} bytes",
+            sink.dropped_context_clone_bytes()
+        );
+    }
+
+    /// INV-035: dropped-context growth crossing the 64-KiB cap receives one
+    /// final charged classification and then fails closed within the shared
+    /// six-cap work allowance.
+    #[test]
+    fn inv_035_dropped_context_cap_crossing_fails_closed_within_budget() {
+        const BYTE_COUNT: u32 = 66_000;
+        const EXPECTED_WORK: PendingRescanWork = PendingRescanWork {
+            reclassifications: 13,
+            bytes: 393_154,
+        };
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        extend_one_byte_dropped_context(&mut sink, BYTE_COUNT);
+
+        assert_eq!(sink.pending_rescan_work(), &EXPECTED_WORK);
+        assert!(sink.pending_rescan_work().bytes <= MAX_PENDING_RESCAN_BYTES);
+        assert!(sink.is_suppressing());
+    }
+
+    /// Each independently unresolved candidate receives a fresh work budget;
+    /// completed sequential candidates do not consume a sink-lifetime quota.
+    #[test]
+    fn sequential_pending_candidates_receive_independent_rescan_budgets() {
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "authorization: ".to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 1,
+                text: "a".repeat(16),
+            },
+        });
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 2,
+                text: "\n".to_string(),
+            },
+        });
+
+        assert_eq!(sink.current_pending_rescan_bytes(), 62);
+        sink.finish();
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 3,
+                text: "authorization: ".to_string(),
+            },
+        });
+
+        assert_eq!(sink.current_pending_rescan_bytes(), 0);
+        assert!(!sink.is_suppressing());
+    }
+
+    /// INV-035: after its initial unsafe-suffix detection, the 66,000
+    /// one-byte-delta stress shape receives thirteen geometric post-hold
+    /// reclassification rounds. Charging each rescan's candidate and
+    /// unsafe-suffix predicates separately stays below six times the 64-KiB
+    /// held-byte cap instead of growing with the square of the delta count; the
+    /// one initial suffix detection is not rescan work and is not charged.
+    #[test]
+    fn inv_035_stream_redaction_bounds_66000_delta_rescan_work() {
+        const DELTA_COUNT: u32 = 66_000;
+        const EXPECTED_WORK: PendingRescanWork = PendingRescanWork {
+            reclassifications: 13,
+            bytes: 376_774,
+        };
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        observe_one_byte_credential_deltas(&mut sink, DELTA_COUNT);
+
+        assert_eq!(sink.pending_rescan_work(), &EXPECTED_WORK);
+        assert!(sink.pending_rescan_work().bytes <= 6 * MAX_PENDING_STREAM_BYTES);
+        assert!(sink.is_suppressing());
+    }
+
+    /// Manual 66,000-delta stress soak. The ordinary
+    /// deterministic regression asserts scan work rather than elapsed time.
+    #[test]
+    #[ignore = "manual 66,000-delta stream stress soak"]
+    fn inv_035_stream_redaction_soaks_66000_one_byte_deltas() {
+        const DELTA_COUNT: u32 = 66_000;
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+
+        observe_one_byte_credential_deltas(&mut sink, DELTA_COUNT);
+
+        assert!(sink.is_suppressing());
+    }
 }
+
+#[cfg(test)]
+#[path = "redaction_corpus_tests.rs"]
+mod redaction_corpus_tests;
