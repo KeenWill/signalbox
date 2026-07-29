@@ -9,9 +9,9 @@ use serde_json::Value;
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, CompletionFinish, DeliveryMode,
     ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation, ObservationFact,
-    ObservationSink, ProviderErrorEvidence, ProviderMessageId, ProviderReportedModel,
-    ProviderRequestId, RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
-    ToolName, validate_provider_json_nesting,
+    ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
+    ProviderReportedModel, ProviderRequestId, RefusalEvidence, TerminalEvidence, TokenUsage,
+    ToolCallId, ToolCallProposal, ToolName, validate_provider_json_nesting,
 };
 
 use crate::SUPPORTED_CLAUDE_CLI_VERSION;
@@ -168,6 +168,7 @@ pub(crate) struct EventDecoder<C> {
     redacted_tool_id_cursor: usize,
     next_part_index: u32,
     usage: TokenUsage,
+    usage_reported: bool,
     finish_reported: Option<FinishReason>,
     initialized: bool,
     terminal: Option<CliTerminal>,
@@ -214,10 +215,32 @@ impl<C: Clone> EventDecoder<C> {
             redacted_tool_id_cursor: 1,
             next_part_index: 0,
             usage: TokenUsage::unreported(),
+            usage_reported: false,
             finish_reported: None,
             initialized: false,
             terminal: None,
         }
+    }
+
+    /// Emits the reported usage exactly once, at the first terminal-path point
+    /// that reaches it.
+    ///
+    /// Usage is a boundary-progress fact the provider states in its `result`
+    /// event, so it is emitted when that event is processed — before the
+    /// `FinishReported` fact drawn from the same event, matching the observation
+    /// order the substrate specification enumerates and the Codex adapter
+    /// follows. The later terminal paths keep calling this so a stream that
+    /// ended without a `result` still reports its (unreported) usage exactly as
+    /// before, and so the nonzero-exit path cannot drop the fact entirely.
+    fn report_usage(&mut self, sink: &mut RedactingSink<'_, C>) {
+        if self.usage_reported {
+            return;
+        }
+        self.usage_reported = true;
+        sink.observe(Observation {
+            correlation: self.correlation.clone(),
+            fact: ObservationFact::UsageReported(self.usage),
+        });
     }
 
     pub(crate) fn push(
@@ -350,9 +373,16 @@ impl<C: Clone> EventDecoder<C> {
             ));
         }
         if self.native_message_id.is_none() {
-            self.message_id = Some(ProviderMessageId::new(
-                sink.redact_provider_id("", &event.message.id),
-            ));
+            // The id leaves the adapter inside `CompletionEvidence.message_id`,
+            // where this message's own text sits beside it. Sanitizing alone is
+            // not enough: an id ending in a credential marker prefix (`api_`)
+            // beside a first text block opening `key=value` reconstructs the
+            // credential across the two retained fields. Register the id so the
+            // continuation is suppressed, without discarding the model chain the
+            // system-init event may still have live.
+            let sanitized = sink.redact_provider_id("", &event.message.id);
+            sink.add_emitted_identifier(&sanitized);
+            self.message_id = Some(ProviderMessageId::new(sanitized));
             self.native_message_id = Some(event.message.id.clone());
         }
         if self.native_model.as_deref() != Some(event.message.model.as_str()) {
@@ -444,7 +474,13 @@ impl<C: Clone> EventDecoder<C> {
                 }
                 let index = self.take_part_index()?;
                 let arguments = sink.redact_tool_arguments("", raw_arguments);
+                // The proposal id leaves the adapter in `ToolCallProposed` and in
+                // the retained assistant content, so later text sits beside it for
+                // the same reason the message id does: an id ending `api_` next to
+                // a following text block opening `key=value` reconstructs the
+                // credential across the two emitted fields.
                 let sanitized_id = sink.redact_provider_id("", &id);
+                sink.add_emitted_identifier(&sanitized_id);
                 let proposal_id = self.unique_tool_id(&id, sanitized_id);
                 let proposal = ToolCallProposal {
                     id: ToolCallId::new(proposal_id),
@@ -513,6 +549,11 @@ impl<C: Clone> EventDecoder<C> {
         if let Some(usage) = event.usage {
             self.usage.absorb(result_usage(usage));
         }
+        // The provider stated usage in this event; emit it here so consumers see
+        // it in provider-fact order ahead of the `FinishReported` fact this same
+        // event produces, and so a nonzero process exit after this point cannot
+        // strand the progress fact.
+        self.report_usage(sink);
         if event.subtype == "success" && !event.is_error {
             if !event.errors.is_empty() || event.api_error_status.is_some() {
                 return Err(DecodeFailure::stream_protocol(
@@ -580,10 +621,7 @@ impl<C: Clone> EventDecoder<C> {
                 let kind = classify_error(status, &subtype, &message);
                 let subtype = sink.redact_retained_metadata(&subtype);
                 let message = sink.redact_retained_metadata(&message);
-                sink.observe(Observation {
-                    correlation: self.correlation.clone(),
-                    fact: ObservationFact::UsageReported(self.usage),
-                });
+                self.report_usage(sink);
                 return TerminalEvidence::ProviderError(ProviderErrorEvidence {
                     exchange: self.exchange,
                     reported_model: self.reported_model,
@@ -603,10 +641,7 @@ impl<C: Clone> EventDecoder<C> {
         };
         let (stop_reason, retained_stop_reason) = stop_reason;
         if self.proposal_indexes.len() != self.result_ids.len() {
-            sink.observe(Observation {
-                correlation: self.correlation.clone(),
-                fact: ObservationFact::UsageReported(self.usage),
-            });
+            self.report_usage(sink);
             return self.loss(LossCause::ResponseUnintelligible {
                 detail: "Claude terminal success did not include a tool_result for every tool_use"
                     .to_string(),
@@ -614,20 +649,14 @@ impl<C: Clone> EventDecoder<C> {
         }
         if stop_reason == "refusal" {
             if !self.proposal_indexes.is_empty() {
-                sink.observe(Observation {
-                    correlation: self.correlation.clone(),
-                    fact: ObservationFact::UsageReported(self.usage),
-                });
+                self.report_usage(sink);
                 return self.loss(LossCause::ResponseUnintelligible {
                     detail: "Claude refusal also proposed a tool".to_string(),
                 });
             }
             let mut capture = sink.take_terminal_text_capture();
             let content = self.redacted_content(&mut capture);
-            sink.observe(Observation {
-                correlation: self.correlation.clone(),
-                fact: ObservationFact::UsageReported(self.usage),
-            });
+            self.report_usage(sink);
             return TerminalEvidence::Refused(RefusalEvidence {
                 exchange: self.exchange,
                 message_id: self.message_id,
@@ -638,27 +667,18 @@ impl<C: Clone> EventDecoder<C> {
         }
         let has_proposals = !self.proposal_indexes.is_empty();
         if (stop_reason == "tool_use") != has_proposals {
-            sink.observe(Observation {
-                correlation: self.correlation.clone(),
-                fact: ObservationFact::UsageReported(self.usage),
-            });
+            self.report_usage(sink);
             return self.loss(LossCause::ResponseUnintelligible {
                 detail: "Claude stop reason contradicts its tool proposal content".to_string(),
             });
         }
         if let Err(detail) = self.validate_tool_requirement() {
-            sink.observe(Observation {
-                correlation: self.correlation.clone(),
-                fact: ObservationFact::UsageReported(self.usage),
-            });
+            self.report_usage(sink);
             return self.loss(LossCause::ResponseUnintelligible { detail });
         }
         let mut capture = sink.take_terminal_text_capture();
         let content = self.redacted_content(&mut capture);
-        sink.observe(Observation {
-            correlation: self.correlation.clone(),
-            fact: ObservationFact::UsageReported(self.usage),
-        });
+        self.report_usage(sink);
         if content.is_empty() {
             return self.loss(LossCause::ResponseUnintelligible {
                 detail: "Claude terminal success carried no typed assistant content".to_string(),
@@ -676,18 +696,35 @@ impl<C: Clone> EventDecoder<C> {
     }
 
     pub(crate) fn provider_error_after_exit(
-        self,
+        mut self,
         fallback: &str,
         classification: &str,
         sink: &mut RedactingSink<'_, C>,
     ) -> TerminalEvidence {
+        // Every other terminal path reports usage before returning its evidence;
+        // this one must too, or a result that stated usage and was then followed
+        // by a nonzero exit drops the progress fact from the observation stream
+        // entirely.
+        self.report_usage(sink);
         if let Some(CliTerminal::Error {
             subtype,
             status,
             message,
         }) = self.terminal
         {
-            let kind = classify_error(status, &subtype, &message);
+            // A generic structured error (`error_during_execution`) determines no
+            // kind on its own, while the process exit carries definitive stderr
+            // (`authentication failed`). Fall back to the exit classification in
+            // exactly that case so the shared provider-error vocabulary reflects
+            // all the evidence available, rather than reporting `Unrecognized`
+            // beside a stderr that names the cause. A structured error that does
+            // determine a kind still wins: it is the provider's own statement.
+            let kind = match classify_error(status, &subtype, &message) {
+                ProviderErrorKind::Unrecognized => {
+                    classify_error(None, "process_exit", classification)
+                }
+                determined => determined,
+            };
             let subtype = sink.redact_retained_metadata(&subtype);
             let message = sink.redact_retained_metadata(&message);
             TerminalEvidence::ProviderError(ProviderErrorEvidence {

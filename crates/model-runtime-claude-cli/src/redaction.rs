@@ -1108,6 +1108,44 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         self.emitted_context = trailing_credential_context(emitted).to_string();
     }
 
+    /// Registers a further provider-controlled identifier that has just left
+    /// the adapter in its own out-of-band record (the assistant message id, a
+    /// tool proposal id), so text emitted afterwards cannot complete a
+    /// credential marker ending that identifier.
+    ///
+    /// This differs from [`Self::seed_emitted_context`], which *replaces* the
+    /// chain because its caller emits the first identifier of the exchange and
+    /// there is nothing live to preserve. Here an earlier identifier's chain
+    /// may still be live, and the two are independent adjacency chains: later
+    /// text sits beside each of them separately in observations and terminal
+    /// evidence, so neither may simply overwrite the other.
+    ///
+    /// One slot cannot hold two independent chains. The cases split:
+    ///
+    /// * the new identifier has no unsafe trailing context — nothing to track,
+    ///   so the live chain is preserved unchanged;
+    /// * no chain is live — the new identifier becomes the chain;
+    /// * both are live — the sink cannot represent the pair, so it fails closed
+    ///   through [`Self::suppress_remaining`] rather than dropping either one.
+    ///
+    /// Tracking both chains exactly requires the multi-chain lookbehind the
+    /// Codex adapter's hardened redactor carries; failing closed is the
+    /// conservative subset of that behaviour, never the permissive one.
+    pub(crate) fn add_emitted_identifier(&mut self, emitted: &str) {
+        if self.suppressing {
+            return;
+        }
+        let carried = trailing_credential_context(emitted).to_string();
+        if carried.is_empty() {
+            return;
+        }
+        if self.emitted_context.is_empty() {
+            self.emitted_context = carried;
+            return;
+        }
+        self.suppress_remaining();
+    }
+
     /// Extends the match-only lookbehind with provider text the adapter is
     /// dropping (a buffered-delivery reasoning item), so a later field or the
     /// final text completing a credential begun in the dropped bytes is

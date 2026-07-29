@@ -38,6 +38,20 @@ pub const ERROR_TOKEN_SECRET: &str = "api_key=synthetic-error-secret";
 pub const REASONING_SECRET_PREFIX: &str = "sk-";
 pub const REASONING_SECRET_CONTINUATION: &str = "synthetic-reasoning-secret";
 pub const REASONING_SECRET: &str = "sk-synthetic-reasoning-secret";
+// Cross-field reconstruction probes for the emitted-context chain.
+//
+// The continuation value is deliberately OPAQUE: it contains no substring from
+// `CREDENTIAL_INDICATORS`, so the stateless fast path releases it untouched on
+// its own. A redaction that fires on these scenarios therefore proves the
+// emitted identifier seeded the lookbehind — the property under test — rather
+// than proving only that the value happened to look secret-ish. A marker
+// containing a credential word would make these tests pass without the seam
+// they exist to cover.
+pub const OPAQUE_CREDENTIAL_CONTINUATION: &str = "key=zqx7vn4m2p";
+pub const CREDENTIAL_PREFIX_MESSAGE_ID: &str = "message-synthetic-api_";
+pub const MESSAGE_ID_RECONSTRUCTED_CREDENTIAL: &str = "message-synthetic-api_key=zqx7vn4m2p";
+pub const CREDENTIAL_PREFIX_TOOL_ID: &str = "toolu_synthetic_api_";
+pub const TOOL_ID_RECONSTRUCTED_CREDENTIAL: &str = "toolu_synthetic_api_key=zqx7vn4m2p";
 pub const INPUT_TOKENS: u64 = 11;
 pub const OUTPUT_TOKENS: u64 = 7;
 pub const CACHE_CREATION_TOKENS: u64 = 2;

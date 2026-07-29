@@ -147,6 +147,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "credential_error_token" => credential_error_token()?,
         "reasoning_metadata_credential" => reasoning_metadata_credential()?,
         "redacted_reasoning_metadata_credential" => redacted_reasoning_metadata_credential()?,
+        "message_id_prefix_redaction" => {
+            assistant_text_with_id(
+                fixtures::CREDENTIAL_PREFIX_MESSAGE_ID,
+                fixtures::OPAQUE_CREDENTIAL_CONTINUATION,
+            )?;
+            success("end_turn", Some(fixtures::OPAQUE_CREDENTIAL_CONTINUATION))?;
+        }
+        "tool_id_prefix_redaction" => {
+            assistant_tool(fixtures::CREDENTIAL_PREFIX_TOOL_ID, fixtures::TOOL_NAME)?;
+            assistant_text(fixtures::OPAQUE_CREDENTIAL_CONTINUATION)?;
+            tool_result(fixtures::CREDENTIAL_PREFIX_TOOL_ID)?;
+            success("tool_use", Some(fixtures::OPAQUE_CREDENTIAL_CONTINUATION))?;
+        }
+        "generic_error_then_definitive_stderr_exit" => {
+            generic_error_result()?;
+            std::io::stderr().write_all(b"authentication failed for synthetic login\n")?;
+            std::process::exit(7);
+        }
         "truncated_stream" => assistant_text(fixtures::ANSWER)?,
         other => return Err(format!("unsupported synthetic scenario `{other}`").into()),
     }
@@ -261,6 +279,19 @@ fn api_status_error() -> std::io::Result<()> {
         "session_id": fixtures::SESSION_ID, "stop_reason": null,
         "terminal_reason": null, "result": "synthetic provider error",
         "errors": [], "api_error_status": 429,
+        "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}
+    }))
+}
+
+/// A structured error that determines no kind on its own: generic subtype, no
+/// API status, and a message naming nothing. Usage is stated so the terminal
+/// path has a progress fact it must not drop.
+fn generic_error_result() -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "result", "subtype": "error_during_execution", "is_error": true,
+        "session_id": fixtures::SESSION_ID, "stop_reason": null,
+        "terminal_reason": null, "result": "synthetic provider error",
+        "errors": [], "api_error_status": null,
         "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}
     }))
 }

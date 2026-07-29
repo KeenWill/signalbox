@@ -60,7 +60,7 @@ async fn normal_completion_requires_typed_terminal_result() {
 }
 
 #[tokio::test]
-async fn harmless_terminal_credential_prefix_remains_byte_exact() {
+async fn inv_035_harmless_terminal_credential_prefix_remains_byte_exact() {
     let result = execute_scenario("safe_terminal_prefix", OperationShape::Text).await;
 
     assert_eq!(
@@ -132,7 +132,7 @@ async fn refusal_requires_the_typed_refusal_stop_reason() {
     assert_eq!(result.spawns, 1);
 }
 #[tokio::test]
-async fn credential_shaped_cli_text_is_redacted_from_all_evidence() {
+async fn inv_035_credential_shaped_cli_text_is_redacted_from_all_evidence() {
     let result = execute_scenario("credential_redaction", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -142,7 +142,7 @@ async fn credential_shaped_cli_text_is_redacted_from_all_evidence() {
 }
 
 #[tokio::test]
-async fn fragmented_credential_is_redacted_from_observations_and_terminal_content() {
+async fn inv_035_fragmented_credential_is_redacted_from_observations_and_terminal_content() {
     let result = execute_scenario("fragmented_credential_redaction", OperationShape::Text).await;
     let observed = observation_text(&result.observations);
     let terminal = completion_text(&result.evidence);
@@ -155,7 +155,7 @@ async fn fragmented_credential_is_redacted_from_observations_and_terminal_conten
 }
 
 #[tokio::test]
-async fn control_sequence_cannot_obfuscate_a_streamed_credential() {
+async fn inv_035_control_sequence_cannot_obfuscate_a_streamed_credential() {
     let result = execute_scenario(
         "control_sequence_credential_redaction",
         OperationShape::Text,
@@ -169,7 +169,7 @@ async fn control_sequence_cannot_obfuscate_a_streamed_credential() {
 }
 
 #[tokio::test]
-async fn redacted_provider_identities_still_compare_by_native_value() {
+async fn inv_035_redacted_provider_identities_still_compare_by_native_value() {
     let result = execute_scenario("redacted_native_identity", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -184,7 +184,7 @@ async fn redacted_provider_identities_still_compare_by_native_value() {
 }
 
 #[tokio::test]
-async fn model_identifier_prefix_is_held_into_the_first_text_block() {
+async fn inv_035_model_identifier_prefix_is_held_into_the_first_text_block() {
     let result = execute_scenario("model_prefix_redaction", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -193,8 +193,96 @@ async fn model_identifier_prefix_is_held_into_the_first_text_block() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: an assistant message id ending in a credential marker prefix seeds
+/// the emitted-context lookbehind, so the first text block of that same message
+/// cannot complete the marker across the two retained completion fields.
+///
+/// The assertion joins the fields rather than searching the debug rendering:
+/// the rendering puts punctuation between `message_id` and `content`, so a
+/// `contains` over it would pass even with the seam removed. The continuation
+/// value carries no credential indicator of its own, so a pass proves the id
+/// seeded the lookbehind rather than proving the value looked secret-shaped.
 #[tokio::test]
-async fn credential_shaped_tool_ids_receive_distinct_safe_surrogates() {
+async fn inv_035_message_id_credential_prefix_is_held_into_the_first_text_block() {
+    let result = execute_scenario("message_id_prefix_redaction", OperationShape::Text).await;
+    let completion = completed(&result.evidence);
+    let message_id = completion
+        .message_id
+        .as_ref()
+        .map_or(String::new(), |id| id.as_str().to_string());
+    let joined = format!("{message_id}{}", completion_text(&result.evidence));
+
+    assert!(!joined.contains(fixtures::MESSAGE_ID_RECONSTRUCTED_CREDENTIAL));
+    assert!(
+        !observation_text(&result.observations).contains(fixtures::OPAQUE_CREDENTIAL_CONTINUATION)
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a tool proposal id ending in a credential marker prefix seeds the
+/// same lookbehind, so a following text block cannot complete the marker across
+/// the emitted proposal and the emitted text.
+#[tokio::test]
+async fn inv_035_tool_proposal_id_credential_prefix_is_held_into_following_text() {
+    let result = execute_scenario("tool_id_prefix_redaction", OperationShape::Tool).await;
+    let completion = completed(&result.evidence);
+    let [
+        AssistantPart::ToolCall(proposal),
+        AssistantPart::Text(following_text),
+    ] = completion.content.as_slice()
+    else {
+        panic!(
+            "expected a proposal then text, got {:?}",
+            completion.content
+        )
+    };
+    let joined = format!("{}{following_text}", proposal.id.as_str());
+
+    assert!(!joined.contains(fixtures::TOOL_ID_RECONSTRUCTED_CREDENTIAL));
+    assert!(
+        !observation_text(&result.observations).contains(fixtures::OPAQUE_CREDENTIAL_CONTINUATION)
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+/// A generic structured error determines no kind, so the definitive stderr the
+/// nonzero exit carries decides instead of the evidence reporting
+/// `Unrecognized` beside a stderr that names the cause. The usage the result
+/// stated still reaches the observation stream on this path.
+#[tokio::test]
+async fn definitive_exit_stderr_classifies_a_generic_structured_error() {
+    let result = execute_scenario(
+        "generic_error_then_definitive_stderr_exit",
+        OperationShape::Text,
+    )
+    .await;
+    let failure = provider_error(&result.evidence);
+
+    assert_eq!(failure.kind, ProviderErrorKind::CredentialRejected);
+    assert_eq!(reported_usage(&result.observations), vec![failure.usage]);
+    assert_eq!(result.spawns, 1);
+}
+
+/// Usage is a provider fact stated in the `result` event, so it is observed
+/// when that event is processed — ahead of the finish fact drawn from the same
+/// event, and exactly once across the whole terminal path.
+#[tokio::test]
+async fn reported_usage_precedes_the_finish_fact_from_the_same_result() {
+    let result = execute_scenario("normal_completion", OperationShape::Text).await;
+
+    assert_eq!(reported_usage(&result.observations), vec![expected_usage()]);
+    assert!(
+        observation_kinds(&result.observations)
+            .iter()
+            .position(|kind| *kind == "UsageReported")
+            < observation_kinds(&result.observations)
+                .iter()
+                .position(|kind| *kind == "FinishReported")
+    );
+}
+
+#[tokio::test]
+async fn inv_035_credential_shaped_tool_ids_receive_distinct_safe_surrogates() {
     let result = execute_scenario("redacted_tool_ids", OperationShape::Tool).await;
     let completion = completed(&result.evidence);
     let (first, second) = two_tool_calls(&completion.content);
@@ -281,7 +369,7 @@ async fn api_error_status_classifies_a_generic_terminal_error() {
 }
 
 #[tokio::test]
-async fn credential_shaped_finish_tokens_are_redacted_from_typed_evidence() {
+async fn inv_035_credential_shaped_finish_tokens_are_redacted_from_typed_evidence() {
     let result = execute_scenario("credential_finish_token", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -291,7 +379,7 @@ async fn credential_shaped_finish_tokens_are_redacted_from_typed_evidence() {
 }
 
 #[tokio::test]
-async fn credential_shaped_error_tokens_are_redacted_from_typed_evidence() {
+async fn inv_035_credential_shaped_error_tokens_are_redacted_from_typed_evidence() {
     let result = execute_scenario("credential_error_token", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -301,7 +389,7 @@ async fn credential_shaped_error_tokens_are_redacted_from_typed_evidence() {
 }
 
 #[tokio::test]
-async fn reasoning_metadata_cannot_complete_a_streamed_credential() {
+async fn inv_035_reasoning_metadata_cannot_complete_a_streamed_credential() {
     let result = execute_scenario("reasoning_metadata_credential", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -311,7 +399,7 @@ async fn reasoning_metadata_cannot_complete_a_streamed_credential() {
 }
 
 #[tokio::test]
-async fn redacted_reasoning_metadata_cannot_complete_a_streamed_credential() {
+async fn inv_035_redacted_reasoning_metadata_cannot_complete_a_streamed_credential() {
     let result = execute_scenario(
         "redacted_reasoning_metadata_credential",
         OperationShape::Text,
@@ -580,6 +668,47 @@ fn observation_text(observations: &[signalbox_model_runtime::Observation<String>
         .filter_map(|observation| match &observation.fact {
             signalbox_model_runtime::ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
             _ => None,
+        })
+        .collect()
+}
+
+/// Every reported usage fact, in observation order, so a test can assert both
+/// the value and that it is emitted exactly once.
+fn reported_usage(
+    observations: &[signalbox_model_runtime::Observation<String>],
+) -> Vec<TokenUsage> {
+    observations
+        .iter()
+        .filter_map(|observation| match &observation.fact {
+            signalbox_model_runtime::ObservationFact::UsageReported(usage) => Some(*usage),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Observation variant names in order, for ordering assertions that do not
+/// depend on the payloads.
+fn observation_kinds(
+    observations: &[signalbox_model_runtime::Observation<String>],
+) -> Vec<&'static str> {
+    observations
+        .iter()
+        .map(|observation| match &observation.fact {
+            signalbox_model_runtime::ObservationFact::SendCommenced => "SendCommenced",
+            signalbox_model_runtime::ObservationFact::ExchangeEstablished(_) => {
+                "ExchangeEstablished"
+            }
+            signalbox_model_runtime::ObservationFact::ProviderModelReported(_) => {
+                "ProviderModelReported"
+            }
+            signalbox_model_runtime::ObservationFact::TextDelta { .. } => "TextDelta",
+            signalbox_model_runtime::ObservationFact::ThinkingDelta { .. } => "ThinkingDelta",
+            signalbox_model_runtime::ObservationFact::ToolArgumentsDelta { .. } => {
+                "ToolArgumentsDelta"
+            }
+            signalbox_model_runtime::ObservationFact::ToolCallProposed(_) => "ToolCallProposed",
+            signalbox_model_runtime::ObservationFact::UsageReported(_) => "UsageReported",
+            signalbox_model_runtime::ObservationFact::FinishReported(_) => "FinishReported",
         })
         .collect()
 }
