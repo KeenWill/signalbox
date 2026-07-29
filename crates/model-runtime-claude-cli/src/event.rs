@@ -161,6 +161,8 @@ pub(crate) struct EventDecoder<C> {
     content: Vec<AssistantPart>,
     proposal_indexes: HashMap<String, usize>,
     result_ids: HashSet<String>,
+    emitted_tool_ids: HashSet<String>,
+    redacted_tool_id_cursor: usize,
     next_part_index: u32,
     usage: TokenUsage,
     finish_reported: Option<FinishReason>,
@@ -204,6 +206,8 @@ impl<C: Clone> EventDecoder<C> {
             content: Vec::new(),
             proposal_indexes: HashMap::new(),
             result_ids: HashSet::new(),
+            emitted_tool_ids: HashSet::new(),
+            redacted_tool_id_cursor: 1,
             next_part_index: 0,
             usage: TokenUsage::unreported(),
             finish_reported: None,
@@ -309,9 +313,9 @@ impl<C: Clone> EventDecoder<C> {
         });
         sink.observe(Observation {
             correlation: self.correlation.clone(),
-            fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(model)),
+            fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(model.clone())),
         });
-        sink.seed_emitted_context(&request_id);
+        sink.seed_emitted_context(&model);
         Ok(())
     }
 
@@ -424,8 +428,10 @@ impl<C: Clone> EventDecoder<C> {
                 let raw_arguments = serde_json::to_string(&input)
                     .map_err(|error| DecodeFailure::stream_protocol(error.to_string()))?;
                 let arguments = sink.redact_tool_arguments("", &raw_arguments);
+                let sanitized_id = sink.redact_provider_id("", &id);
+                let proposal_id = self.unique_tool_id(&id, sanitized_id);
                 let proposal = ToolCallProposal {
-                    id: ToolCallId::new(sink.redact_provider_id("", &id)),
+                    id: ToolCallId::new(proposal_id),
                     name: ToolName::new(name),
                     arguments_json: arguments.clone(),
                 };
@@ -492,6 +498,11 @@ impl<C: Clone> EventDecoder<C> {
             self.usage.absorb(result_usage(usage));
         }
         if event.subtype == "success" && !event.is_error {
+            if !event.errors.is_empty() || event.api_error_status.is_some() {
+                return Err(DecodeFailure::stream_protocol(
+                    "Claude success carries contradictory error facts",
+                ));
+            }
             let stop_reason = event.stop_reason.ok_or_else(|| {
                 DecodeFailure::stream_protocol("Claude success lacks a stop reason")
             })?;
@@ -573,6 +584,40 @@ impl<C: Clone> EventDecoder<C> {
                     .to_string(),
             });
         }
+        if stop_reason == "refusal" {
+            if !self.proposal_indexes.is_empty() {
+                sink.observe(Observation {
+                    correlation: self.correlation.clone(),
+                    fact: ObservationFact::UsageReported(self.usage),
+                });
+                return self.loss(LossCause::ResponseUnintelligible {
+                    detail: "Claude refusal also proposed a tool".to_string(),
+                });
+            }
+            let mut capture = sink.take_terminal_text_capture();
+            let content = self.redacted_content(&mut capture);
+            sink.observe(Observation {
+                correlation: self.correlation.clone(),
+                fact: ObservationFact::UsageReported(self.usage),
+            });
+            return TerminalEvidence::Refused(RefusalEvidence {
+                exchange: self.exchange,
+                message_id: self.message_id,
+                reported_model: self.reported_model,
+                content,
+                usage: self.usage,
+            });
+        }
+        let has_proposals = !self.proposal_indexes.is_empty();
+        if (stop_reason == "tool_use") != has_proposals {
+            sink.observe(Observation {
+                correlation: self.correlation.clone(),
+                fact: ObservationFact::UsageReported(self.usage),
+            });
+            return self.loss(LossCause::ResponseUnintelligible {
+                detail: "Claude stop reason contradicts its tool proposal content".to_string(),
+            });
+        }
         if let Err(detail) = self.validate_tool_requirement() {
             sink.observe(Observation {
                 correlation: self.correlation.clone(),
@@ -586,30 +631,12 @@ impl<C: Clone> EventDecoder<C> {
             correlation: self.correlation.clone(),
             fact: ObservationFact::UsageReported(self.usage),
         });
-        if stop_reason == "refusal" {
-            if !self.proposal_indexes.is_empty() {
-                return self.loss(LossCause::ResponseUnintelligible {
-                    detail: "Claude refusal also proposed a tool".to_string(),
-                });
-            }
-            return TerminalEvidence::Refused(RefusalEvidence {
-                exchange: self.exchange,
-                message_id: self.message_id,
-                reported_model: self.reported_model,
-                content,
-                usage: self.usage,
-            });
-        }
         if content.is_empty() {
             return self.loss(LossCause::ResponseUnintelligible {
                 detail: "Claude terminal success carried no typed assistant content".to_string(),
             });
         }
-        let finish = if self.proposal_indexes.is_empty() {
-            completion_finish(&stop_reason)
-        } else {
-            CompletionFinish::ToolUse
-        };
+        let finish = completion_finish(&stop_reason);
         TerminalEvidence::Completed(CompletionEvidence {
             exchange: self.exchange,
             message_id: self.message_id,
@@ -698,6 +725,20 @@ impl<C: Clone> EventDecoder<C> {
             DecodeFailure::stream_protocol("Claude content-part index overflowed")
         })?;
         Ok(index)
+    }
+
+    /// Preserves typed correlation when credential redaction changes native tool ids.
+    fn unique_tool_id(&mut self, native: &str, sanitized: String) -> String {
+        if sanitized == native && self.emitted_tool_ids.insert(sanitized.clone()) {
+            return sanitized;
+        }
+        loop {
+            let candidate = format!("claude-redacted-call-{}", self.redacted_tool_id_cursor);
+            self.redacted_tool_id_cursor += 1;
+            if self.emitted_tool_ids.insert(candidate.clone()) {
+                return candidate;
+            }
+        }
     }
 
     fn validate_tool_requirement(&self) -> Result<(), String> {

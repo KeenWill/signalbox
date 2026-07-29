@@ -102,7 +102,7 @@ async fn named_tool_choice_rejects_an_extra_declared_proposal() {
     let loss = boundary_loss(&result.evidence);
 
     assert!(response_unintelligible(&loss.cause).contains(fixtures::TOOL_NAME));
-    assert_eq!(loss.finish_reported, Some(FinishReason::EndTurn));
+    assert_eq!(loss.finish_reported, Some(FinishReason::ToolUse));
     assert_eq!(result.spawns, 1);
 }
 
@@ -168,6 +168,85 @@ async fn redacted_provider_identities_still_compare_by_native_value() {
     assert!(!diagnostic.contains(fixtures::CREDENTIAL_SHAPED_MODEL));
     assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn model_identifier_prefix_is_held_into_the_first_text_block() {
+    let result = execute_scenario("model_prefix_redaction", OperationShape::Text).await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::MODEL_CREDENTIAL_CONTINUATION));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn credential_shaped_tool_ids_receive_distinct_safe_surrogates() {
+    let result = execute_scenario("redacted_tool_ids", OperationShape::Tool).await;
+    let completion = completed(&result.evidence);
+    let (first, second) = two_tool_calls(&completion.content);
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert_eq!(completion.finish, CompletionFinish::ToolUse);
+    assert_ne!(first.id, second.id);
+    assert!(!diagnostic.contains(fixtures::CREDENTIAL_TOOL_ID_ONE));
+    assert!(!diagnostic.contains(fixtures::CREDENTIAL_TOOL_ID_TWO));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn refusal_precedes_the_success_only_named_tool_requirement() {
+    let result = execute_scenario("refusal", OperationShape::NamedTool).await;
+    let refusal = refused(&result.evidence);
+
+    assert_eq!(
+        refusal.content,
+        vec![AssistantPart::Text(fixtures::REFUSAL.to_string())]
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn tool_proposal_with_end_turn_is_protocol_boundary_loss() {
+    let result = execute_scenario("tool_with_end_turn", OperationShape::Tool).await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(matches!(
+        loss.cause,
+        LossCause::ResponseUnintelligible { .. }
+    ));
+    assert_eq!(loss.finish_reported, Some(FinishReason::EndTurn));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn tool_use_stop_without_a_proposal_is_protocol_boundary_loss() {
+    let result = execute_scenario("text_with_tool_use", OperationShape::Text).await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(matches!(
+        loss.cause,
+        LossCause::ResponseUnintelligible { .. }
+    ));
+    assert_eq!(loss.finish_reported, Some(FinishReason::ToolUse));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn success_rejects_every_contradictory_error_field_shape() {
+    let errors = execute_scenario("success_with_errors", OperationShape::Text).await;
+    let status = execute_scenario("success_with_api_status", OperationShape::Text).await;
+
+    assert!(matches!(
+        boundary_loss(&errors.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert!(matches!(
+        boundary_loss(&status.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(errors.spawns, 1);
+    assert_eq!(status.spawns, 1);
 }
 
 #[tokio::test]
@@ -457,6 +536,22 @@ fn completion_text(evidence: &TerminalEvidence) -> String {
             _ => None,
         })
         .collect()
+}
+
+fn two_tool_calls(
+    content: &[AssistantPart],
+) -> (
+    &signalbox_model_runtime::ToolCallProposal,
+    &signalbox_model_runtime::ToolCallProposal,
+) {
+    let [
+        AssistantPart::ToolCall(first),
+        AssistantPart::ToolCall(second),
+    ] = content
+    else {
+        panic!("expected two tool calls, got {content:?}")
+    };
+    (first, second)
 }
 
 fn tool_call(content: &[AssistantPart]) -> &signalbox_model_runtime::ToolCallProposal {

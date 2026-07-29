@@ -42,6 +42,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         return Ok(());
     }
+    if scenario == "model_prefix_redaction" {
+        system_init_with_identity(
+            &arguments,
+            fixtures::SESSION_ID,
+            fixtures::MODEL_CREDENTIAL_PREFIX,
+        )?;
+        assistant_text_with_identity(
+            fixtures::MESSAGE_ID,
+            fixtures::MODEL_CREDENTIAL_PREFIX,
+            fixtures::MODEL_CREDENTIAL_CONTINUATION,
+        )?;
+        success("end_turn", Some(fixtures::MODEL_RECONSTRUCTED_CREDENTIAL))?;
+        return Ok(());
+    }
     system_init(&arguments)?;
     match scenario.as_str() {
         "normal_completion" => {
@@ -64,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "tool_round_trip" => {
             assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
             tool_result(fixtures::TOOL_ID)?;
-            success("end_turn", Some(fixtures::TOOL_ARGUMENTS))?;
+            success("tool_use", Some(fixtures::TOOL_ARGUMENTS))?;
         }
         "refusal" => {
             assistant_text(fixtures::REFUSAL)?;
@@ -90,7 +104,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_tool(fixtures::OTHER_TOOL_ID, fixtures::OTHER_TOOL_NAME)?;
             tool_result(fixtures::TOOL_ID)?;
             tool_result(fixtures::OTHER_TOOL_ID)?;
+            success("tool_use", None)?;
+        }
+        "redacted_tool_ids" => {
+            assistant_tool(fixtures::CREDENTIAL_TOOL_ID_ONE, fixtures::TOOL_NAME)?;
+            assistant_tool(fixtures::CREDENTIAL_TOOL_ID_TWO, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::CREDENTIAL_TOOL_ID_ONE)?;
+            tool_result(fixtures::CREDENTIAL_TOOL_ID_TWO)?;
+            success("tool_use", None)?;
+        }
+        "tool_with_end_turn" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            tool_result(fixtures::TOOL_ID)?;
             success("end_turn", None)?;
+        }
+        "text_with_tool_use" => {
+            assistant_text(fixtures::ANSWER)?;
+            success("tool_use", Some(fixtures::ANSWER))?;
+        }
+        "success_with_errors" => {
+            assistant_text(fixtures::ANSWER)?;
+            contradictory_success(&[fixtures::ANSWER], None)?;
+        }
+        "success_with_api_status" => {
+            assistant_text(fixtures::ANSWER)?;
+            contradictory_success(&[], Some(500))?;
         }
         "api_status_error" => api_status_error()?,
         "truncated_stream" => assistant_text(fixtures::ANSWER)?,
@@ -170,6 +208,16 @@ fn api_status_error() -> std::io::Result<()> {
         "session_id": fixtures::SESSION_ID, "stop_reason": null,
         "terminal_reason": null, "result": "synthetic provider error",
         "errors": [], "api_error_status": 429,
+        "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}
+    }))
+}
+
+fn contradictory_success(errors: &[&str], api_error_status: Option<u16>) -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "result", "subtype": "success", "is_error": false,
+        "session_id": fixtures::SESSION_ID, "stop_reason": "end_turn",
+        "terminal_reason": "completed", "result": fixtures::ANSWER,
+        "errors": errors, "api_error_status": api_error_status,
         "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}
     }))
 }
