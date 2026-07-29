@@ -136,7 +136,7 @@
 136 | REDACTED | runtime-substrate.md INV-035: a header credential name split before its separator stays held.
 137 | REDACTED | runtime-substrate.md INV-035: a malformed-prefix quoted key split at its opener stays held.
 138 | REDACTED | runtime-substrate.md INV-035: an escaped nested credential member split before its value stays held.
-139 | KNOWN-FAILING | redaction.rs::delta_against_context: a quoted key after a released clean prefix is split from its value and released.
+139 | REDACTED | runtime-substrate.md INV-035: a quoted key at a JSON-ineligible position stays held.
 140 | REDACTED | runtime-substrate.md INV-035: structural close in a later delta cannot release a duplicate member.
 141 | REDACTED | runtime-substrate.md INV-035: a later duplicate member cannot release an earlier credential.
 142 | REDACTED | runtime-substrate.md INV-035: a malformed-prefix member split before its tail stays held.

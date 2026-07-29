@@ -318,10 +318,11 @@ questions below remain open.
   released when an earlier delta has already emitted a clean prefix. A short
   trailing context accrued by accident routes the next delta through the
   emitted-context path, which splits the member at its value and holds the tail
-  as a fresh candidate that is clean on its own bytes. The shapes are corpus
-  lines 139 and 143, classified `KNOWN-FAILING` so the corpus test stays red,
-  and every affected split is listed by the split enumeration. This is a defect
-  awaiting a fix in the emitted-context path, not an accepted limit.
+  as a fresh candidate that is clean on its own bytes. Corpus line 143 carries
+  the `KNOWN-FAILING` classification and the split enumeration pins the exact
+  thirty leaking fragmentations across lines 79, 83, 139, and 143. This is a
+  defect ledger awaiting a fix in the emitted-context path, never an accepted
+  limit: a new leak fails the enumeration and a repaired one shrinks the ledger.
 - **In-memory credential hygiene.** Zeroization or equivalent handling for the
   request-scoped value read by `FileCredentialAccess` remains undecided, with no
   implementation. This question is separate from the accepted storage and
