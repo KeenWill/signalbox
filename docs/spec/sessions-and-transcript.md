@@ -13,11 +13,13 @@ prompt was verified through PR #286 (`agent/session-system-prompt`); and the
 version-thirteen input-delivery surface and its user-reachable steering boundary
 were verified through PR #302 (`agent/mid-turn-steering`). The copy-on-create
 session-template provenance and creation mode were verified through PR #311
-(`agent/session-templates-spec`). The imported-conversation record and converter
-are owned by [conversation-import](conversation-import.md). Where a law is cited
-as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
-mechanics owned by another decision are summarized, the owning sibling page is
-linked inline.
+(`agent/session-templates-spec`). The runner placement-entry paragraphs are the
+foundation proposal at the bottom of their implementing stack and become
+verified only with those child pull requests. The imported-conversation record
+and converter are owned by [conversation-import](conversation-import.md). Where
+a law is cited as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of
+record; where mechanics owned by another decision are summarized, the owning
+sibling page is linked inline.
 
 ## Session identity and creation provenance
 
@@ -537,6 +539,8 @@ and closed:
 - `ModelIdentityChanged { turn, defaults_version, selected }` — the exact
   successor-turn boundary at which execution first observes a different frozen
   direct model identity;
+- `RunnerPlacementChanged { placement_revision }` — a reference to the complete
+  checked replacement record at the owner-explicit runner/workspace boundary;
 - `TurnFailed { turn }` — an explicit marker that the turn terminalized as
   failed;
 - `AssistantText { producing_call, value }` — exact assistant text with
@@ -567,9 +571,10 @@ content in two inputs or imports yields distinct entries. Entry construction is
 sealed inside the domain crate — checked constructors are `pub(crate)`.
 `turn_eligibility.rs` produces eligibility and recovery history;
 `model_execution.rs` produces assistant and turn-terminal history;
-imported-frontier session creation is the only producer of `Imported`; and
-sealed tool transitions produce tool-use/result references only through the
-atomic boundaries owned by [tool-loop](tool-loop.md).
+imported-frontier session creation is the only producer of `Imported`; sealed
+tool transitions produce tool-use/result references only through the atomic
+boundaries owned by [tool-loop](tool-loop.md); and the checked owner replacement
+transaction is the only producer of `RunnerPlacementChanged`.
 
 `OriginAcceptedInput` and `SteeringAcceptedInput` reference the accepted input's
 identity; neither copies content. Steering additionally names the exact active
@@ -620,6 +625,19 @@ the ordinary `OriginAcceptedInput`. Every later native frontier retains its
 predecessor terminal prefix, then appends the model-identity boundary when the
 frozen direct selection changed, and finally appends its ordinary origin
 (INV-039, INV-046).
+
+Runner replacement has a session-level frontier boundary. The atomic replacement
+transaction appends one `RunnerPlacementChanged` entry after the latest
+authoritative semantic frontier, or establishes a one-entry root when no
+frontier exists, and advances the session placement-frontier pointer with the
+placement revision. Active continuation and the next eligible origin both extend
+that exact boundary before any successor-runner execution. A same-revision,
+missing-record, non-prefix, cross-session, or second placement boundary fails
+closed. The entry copies no runner advertisement, workspace path, credential
+fact, or tool output; the placement record remains its content authority. The
+provider projection resolves that record to the exact injected placement event
+owned by [model-call execution](model-call-execution.md#frontier-rendering)
+(INV-015, INV-044).
 
 Pending steering has a separate safe-point boundary (INV-036). A
 version-thirteen `steer` submit accepted while its exact source turn is active

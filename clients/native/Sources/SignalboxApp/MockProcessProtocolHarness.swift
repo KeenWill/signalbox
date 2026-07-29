@@ -7,7 +7,7 @@ import Foundation
   import SignalboxModels
 #endif
 
-/// The app mock exercises the same v5 encoder, decoder, framing, and request
+/// The app mock exercises the same v18 encoder, decoder, framing, and request
 /// identities as the Unix-socket adapter. Only its byte transport is in memory.
 struct MockProcessProtocolConnectionFactory: SignalboxProcessConnectionFactory {
   private let state: MockProcessProtocolState
@@ -30,6 +30,8 @@ enum MockProcessProtocolFixtures {
   static let singleTurnCount = "1"
   static let transcriptEntryCount = "2"
   static let selectionID = "aaaaaaaa-0000-4000-8000-000000000001"
+  static let aliasID = "aaaaaaaa-0000-4000-8000-000000000002"
+  static let createdSessionID = "aaaaaaaa-0000-4000-8000-000000000003"
   static let submittedAcceptedInputID = "bbbbbbbb-0000-4000-8000-000000000001"
   static let submittedTurnID = "cccccccc-0000-4000-8000-000000000001"
   static let activeUserEntryID = "dddddddd-0000-4000-8000-000000000001"
@@ -188,6 +190,74 @@ private actor MockProcessProtocolState {
       throw SignalboxProcessClientError.unterminatedFrame
     }
     switch type {
+    case "list_model_aliases":
+      return try response(
+        requestID: requestID,
+        messages: [
+          ["type": "model_aliases_start"],
+          [
+            "type": "model_alias_summary",
+            "alias_id": MockProcessProtocolFixtures.aliasID,
+            "selection_id": MockProcessProtocolFixtures.selectionID,
+          ],
+          ["type": "model_aliases_end", "alias_count": "1"],
+        ],
+        keepsConnectionOpen: true
+      )
+    case "create_session":
+      let selection = request["initial_model_selection"] as? [String: Any]
+      guard
+        request["command_id"] is String,
+        selection?["kind"] as? String == "alias",
+        selection?["alias_id"] as? String == MockProcessProtocolFixtures.aliasID
+      else {
+        throw MockProcessProtocolError.invalidRequest
+      }
+      if !sessions.contains(where: { $0.id == MockProcessProtocolFixtures.createdSessionID }) {
+        sessions.append(
+          Session(
+            id: MockProcessProtocolFixtures.createdSessionID,
+            defaultsVersion: "1",
+            title: "New native session",
+            tags: [],
+            archived: false
+          )
+        )
+      }
+      return try response(
+        requestID: requestID,
+        messages: [
+          [
+            "type": "session_created",
+            "session_id": MockProcessProtocolFixtures.createdSessionID,
+          ]
+        ]
+      )
+    case "list_conversations":
+      let includeArchived = request["include_archived"] as? Bool ?? false
+      let page = sessions
+        .filter { includeArchived || !$0.archived }
+        .sorted { $0.id < $1.id }
+      var messages: [[String: Any]] = [["type": "conversation_page_start"]]
+      messages.append(
+        contentsOf: page.map { session in
+          [
+            "type": "conversation_summary",
+            "conversation": [
+              "origin": "native_session",
+              "session_id": session.id,
+              "title": session.title,
+              "archived": session.archived,
+              "defaults_version": session.defaultsVersion,
+            ],
+          ]
+        })
+      messages.append([
+        "type": "conversation_page_end",
+        "conversation_count": String(page.count),
+        "next_after": NSNull(),
+      ])
+      return try response(requestID: requestID, messages: messages)
     case "list_session_metadata":
       let page = try metadataPage(request)
       var messages: [[String: Any]] = [["type": "session_metadata_page_start"]]
@@ -209,6 +279,24 @@ private actor MockProcessProtocolState {
       return try response(
         requestID: requestID,
         messages: [metadataRead(type: "session_metadata", session: session)]
+      )
+    case "read_session_defaults":
+      let session = try requiredSession(request)
+      return try response(
+        requestID: requestID,
+        messages: [
+          [
+            "type": "session_defaults",
+            "session_id": session.id,
+            "defaults_version": session.defaultsVersion,
+            "model_selection": [
+              "kind": "direct",
+              "selection_id": MockProcessProtocolFixtures.selectionID,
+            ],
+            "dangerous_tool_auto_approval": false,
+            "system_prompt": NSNull(),
+          ]
+        ]
       )
     case "replace_session_metadata":
       let session = try requiredSession(request)

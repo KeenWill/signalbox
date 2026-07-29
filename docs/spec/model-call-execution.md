@@ -25,10 +25,12 @@ projection and identity-before-terminal-evidence precedence were verified
 through PR #288 (`agent/audit-fix-docs-coherence`); the session system prompt on
 the prepared operation was verified through PR #286
 (`agent/session-system-prompt`). Provider-reported token evidence retention and
-exact commit-ambiguity comparison were verified through this PR
+exact commit-ambiguity comparison were verified through PR #301
 (`agent/token-usage`); the empty-thinking completion rule was verified through
-PR #305 (`agent/sonnet-streamed-tool-use`). Invariant tags cite
-[docs/invariants.md](../invariants.md).
+PR #305 (`agent/sonnet-streamed-tool-use`). The runner-placement rendering and
+executable session-tool snapshot paragraphs are the foundation proposal at the
+bottom of their implementing stack and become verified only with those child
+pull requests. Invariant tags cite [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
@@ -144,6 +146,15 @@ projects the exact frontier order into provider-neutral messages:
   epoch; the provider bridge later projects it as an injected user-role message
   with the fixed `Signalbox session event: your model identity is now` prefix
   (INV-046);
+- `RunnerPlacementChanged` resolves its complete same-session successor
+  placement record and renders as a structured provider-neutral placement change
+  retaining the positive placement revision and selected sandbox profile. The
+  provider bridge projects it as an injected user-role message whose exact text
+  is
+  `Signalbox session event: runner placement changed to revision {revision} with profile {profile}; prior runner-local execution state is unavailable.`
+  The braces are replaced by the canonical decimal revision and exact
+  `workspace-restricted` or `ambient` token. Missing, stale, cross-session, or
+  non-successor placement authority fails rendering instead of inventing text;
 - `AssistantText` renders as an assistant message retaining its producing-call
   provenance;
 - imported `Text` with an attested value renders with its imported user or
@@ -160,10 +171,36 @@ projects the exact frontier order into provider-neutral messages:
   assistant tool calls and user tool results after resolving their referenced
   request, attempt, and decision records through [tool-loop](tool-loop.md).
 
-The model operation also carries the current registry declarations. The runtime
-bridge maps them to provider tool definitions and accepts `ToolCall` completion
-parts only with a matching `ToolUse` finish reason. Provider-native tool types
-remain inside the bridge.
+The prepared model operation carries one immutable `ExecutableToolSnapshot`, not
+the unfiltered process registry. Preparation includes every daemon-only tool;
+includes a combined-locus tool whenever its daemon executor is available; and
+includes a runner-only tool only when the session placement can bind that exact
+declaration to current execution authority. A pinned placement uses its frozen
+tool inventory and current matching registration. An ordinary unpinned request
+includes a runner-only definition only when a currently live registration
+satisfies its selector, sandbox, workspace, repository, and credential
+availability. An exact-identity selector binds that runner and registration
+revision for a possible first dispatch, so its loss produces
+`RunnerLostBeforePin`. A capability-class selector freezes the class and
+required availability, not a runner identity; the eventual first dispatch may
+select only a then-current satisfying registration. If none remains, the
+proposal closes known-failed as `ToolUnavailableBeforePin` without creating an
+attempt or placement, because no runner execution was authorized.
+`RunnerAbandoned` exposes daemon-executable tools only. `RunnerLost` and
+`RunnerLostBeforePin` cannot prepare a new model operation while the turn awaits
+owner recovery. An operation prepared before loss retains its frozen snapshot
+and physical-call disposition, but a runner-only proposal from it cannot
+authorize against the lost locus. A combined-locus definition remains executable
+through its daemon locus when runner availability disappears; an already frozen
+runner selection never silently falls back after the provider returns.
+
+Each snapshot entry binds the exact model definition, permission/effect policy,
+and selected executable locus used to validate and authorize a returned
+proposal. The runtime bridge maps only these entries to provider tool
+definitions and accepts `ToolCall` completion parts only with a matching
+`ToolUse` finish reason. A tool absent from the snapshot is an unknown proposal
+for that operation even if another session or a later registration can execute
+it. Provider-native tool types remain inside the bridge.
 
 Every message keeps its source-qualified semantic-entry reference and its
 content-authority provenance. Why: inherited entries need not come from a native

@@ -7,7 +7,24 @@ import Foundation
 
 enum NativeProcessConstants {
   static let socketEnvironmentKey = "SIGNALBOX_SOCKET_PATH"
+  static let runtimeEnvironmentKey = "DEVENV_RUNTIME"
   static let socketDefaultsKey = "signalbox-process-socket-path"
+
+  static func defaultSocketPath(
+    environment: [String: String]
+  ) -> String? {
+    guard
+      let runtimePath = environment[runtimeEnvironmentKey],
+      runtimePath.hasPrefix("/")
+    else {
+      return nil
+    }
+    let runtimeDirectory = URL(fileURLWithPath: runtimePath)
+    return runtimeDirectory
+      .appendingPathComponent("signalbox", isDirectory: true)
+      .appendingPathComponent("signalboxd.sock", isDirectory: false)
+      .path
+  }
 }
 
 @MainActor
@@ -25,8 +42,9 @@ final class SignalboxProcessSettingsViewModel: ObservableObject {
     socketPath =
       environment[NativeProcessConstants.socketEnvironmentKey]
       ?? userDefaults.string(forKey: NativeProcessConstants.socketDefaultsKey)
+      ?? NativeProcessConstants.defaultSocketPath(environment: environment)
       ?? ""
-    if socketPath.isEmpty {
+    if validatedSocketPath == nil {
       connectionStatus = .notConfigured
     }
   }
