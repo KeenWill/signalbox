@@ -575,6 +575,16 @@ def mask_rust_non_code(
     return "".join(buffer)
 
 
+def rust_comment_text(text: str) -> str:
+    """Return only Rust comments while preserving source offsets and lines."""
+    without_comments = mask_rust_non_code(text, preserve_literals=True)
+    comments = ["\n" if character == "\n" else " " for character in text]
+    for index, (character, visible) in enumerate(zip(text, without_comments)):
+        if character not in " \t\r\n" and visible == " ":
+            comments[index] = character
+    return "".join(comments)
+
+
 def rust_doc_comments(prefix: str) -> list[str]:
     """Return attached outer Rust doc comments, including nested block docs."""
     metadata = mask_rust_non_code(prefix, preserve_doc_comments=True)
@@ -885,6 +895,28 @@ def rust_item_is_disabled(prefix: str) -> bool:
         if rust_meta_disables_item(attribute.group("meta")):
             return True
     return False
+
+
+def rust_meta_may_ignore_test(meta: str) -> bool:
+    """Return whether active or build-dependent metadata may ignore a test."""
+    meta = meta.strip()
+    if re.fullmatch(r"ignore(?:[ \t\r\n]*=.*)?", meta, re.DOTALL):
+        return True
+    cfg_attr = RUST_CFG_ATTR_META.fullmatch(meta)
+    if cfg_attr is None:
+        return False
+    items = split_rust_meta_items(cfg_attr.group("body"))
+    if not items or rust_cfg_truth(items[0]) is False:
+        return False
+    return any(rust_meta_may_ignore_test(item) for item in items[1:])
+
+
+def rust_item_may_be_ignored(prefix: str) -> bool:
+    """Return whether attached metadata can exclude a test from an ordinary run."""
+    return any(
+        rust_meta_may_ignore_test(attribute.group("meta"))
+        for attribute in RUST_ATTRIBUTE.finditer(prefix)
+    )
 
 
 def rust_inline_module_spans(code: str) -> list[InlineModule]:
@@ -2190,7 +2222,9 @@ def rust_test_invariant_tags(
             and not rust_attributes_apply_test(code_prefix, visible)
         ):
             continue
-        if rust_item_is_disabled(code_prefix):
+        if rust_item_is_disabled(code_prefix) or rust_item_may_be_ignored(
+            code_prefix
+        ):
             continue
         enclosing = rust_enclosing_modules(module_spans, declaration.start())
         if any(module.disabled for module in enclosing):

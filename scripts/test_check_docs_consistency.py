@@ -15,7 +15,10 @@ sys.dont_write_bytecode = True
 
 import check_docs_consistency
 from check_docs_consistency import PR_TOKEN, Violation, github_slug, run_checks
-from generate_invariants import orphan_invariant_references
+from generate_invariants import (
+    orphan_invariant_references,
+    render as render_invariant_index,
+)
 
 
 def failure_categories(failures: list[Violation]) -> list[str]:
@@ -176,6 +179,24 @@ class DocsConsistencyTests(unittest.TestCase):
     def test_valid_fixture_passes(self) -> None:
         self.assertEqual(run_checks(self.root), [])
 
+    def test_generator_renders_an_empty_index_without_tagged_tests(self) -> None:
+        rendered = render_invariant_index(self.root)
+
+        self.assertIn("| ID | Enforcement |", rendered)
+        self.assertNotIn("| INV-", rendered)
+
+    def test_generator_ignores_bannered_planning_references(self) -> None:
+        planning = self.root / "docs/agents/backlog.md"
+        planning.parent.mkdir()
+        planning.write_text(
+            "# Backlog\n\n"
+            "> **Non-authoritative planning scratchpad — do not review.**\n\n"
+            "A prospective item may reserve INV-999.\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(orphan_invariant_references(self.root), {})
+
     def test_generator_rejects_an_invariant_reference_without_a_tagged_test(
         self,
     ) -> None:
@@ -197,6 +218,23 @@ class DocsConsistencyTests(unittest.TestCase):
         self.assertEqual(
             orphan_invariant_references(self.root),
             {orphan_tag: (expected_location,)},
+        )
+
+    def test_generator_rejects_rust_comment_orphans_but_not_literals(
+        self,
+    ) -> None:
+        orphan_tag = "INV-999"
+        source = self.root / "src/context.rs"
+        source.write_text(
+            'const EXAMPLE: &str = "INV-998";\n'
+            f"/// A live Rust contract cites {orphan_tag}.\n"
+            "pub fn context() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            orphan_invariant_references(self.root),
+            {orphan_tag: ("src/context.rs:2",)},
         )
 
     def test_git_fixture_commands_disable_signing_and_hooks(self) -> None:
@@ -298,6 +336,31 @@ class DocsConsistencyTests(unittest.TestCase):
             "/*** INV-001 is an ordinary block comment. */\n"
             "#[test]\n"
             "fn named_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_ignored_test_does_not_register_invariant_enforcement(self) -> None:
+        ignored = self.root / "src/ignored.rs"
+        ignored.write_text(
+            "#[test]\n"
+            '#[ignore = "requires an external service"]\n'
+            "fn inv_001_ignored_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+        self.assertNotIn(
+            ignored.relative_to(self.root).as_posix(),
+            render_invariant_index(self.root),
+        )
+
+    def test_cfg_ignored_test_does_not_register_invariant_enforcement(self) -> None:
+        (self.root / "src/ignored.rs").write_text(
+            "#[test]\n"
+            "#[cfg_attr(test, ignore)]\n"
+            "fn inv_001_ignored_test() {}\n",
             encoding="utf-8",
         )
 

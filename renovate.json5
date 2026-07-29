@@ -30,7 +30,7 @@
     },
     {
       // Activation requires branch protection to make the Rust and
-      // supply-chain checks required; see the linked decision.
+      // supply-chain checks required.
       "matchManagers": ["cargo"],
       "matchUpdateTypes": ["patch"],
       "automerge": true,
