@@ -42,7 +42,7 @@ use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
-use tokio::{sync::mpsc, task::JoinSet, time::timeout};
+use tokio::{sync::Barrier, task::JoinSet, time::timeout};
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_USER: &str = "signalbox";
@@ -53,7 +53,7 @@ const DEFAULT_POOL_SIZE: u32 = 80;
 const DEFAULT_CONCURRENCIES: [usize; 7] = [1, 2, 4, 8, 16, 32, 64];
 const SERVER_CONNECTION_HEADROOM: u32 = 4;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
-const WARMUP_COORDINATION_TIMEOUT: Duration = Duration::from_secs(65);
+const WARMUP_DURATION: Duration = Duration::from_secs(5);
 const IDENTITY_PREFIX: u128 = 0x5b00_0000_u128 << 96;
 // These synthetic fixtures provide stable, valid payloads; their wording has no
 // domain meaning.
@@ -300,15 +300,10 @@ impl PostgresEnvironment {
             .with_db_name(ADMIN_DATABASE)
             .with_user(DATABASE_USER)
             .with_password(DATABASE_PASSWORD);
-        let image = if fsync == FsyncMode::On {
-            image.with_fsync_enabled()
-        } else {
-            image
+        let (image, mut command) = match fsync {
+            FsyncMode::On => (image.with_fsync_enabled(), Vec::new()),
+            FsyncMode::Off => (image, vec![String::from("-c"), String::from("fsync=off")]),
         };
-        let mut command = Vec::new();
-        if fsync == FsyncMode::Off {
-            command.extend([String::from("-c"), String::from("fsync=off")]);
-        }
         command.extend([
             String::from("-c"),
             format!("max_connections={server_max_connections}"),
@@ -468,6 +463,7 @@ struct PointResult {
     scenario: Scenario,
     fsync: FsyncMode,
     concurrency: usize,
+    warmup_duration: Duration,
     offered_duration: Duration,
     elapsed: Duration,
     completed_during_offered_load: usize,
@@ -517,17 +513,21 @@ async fn run_point(
     identities: Arc<LoadContext>,
 ) -> HarnessResult<PointResult> {
     let window = Arc::new(OnceLock::<MeasurementWindow>::new());
-    let (warmup_ready, mut warmup_readiness) = mpsc::channel(config.concurrency);
+    let barrier_participants = config
+        .concurrency
+        .checked_add(1)
+        .ok_or_else(|| error("worker barrier participant count overflowed"))?;
+    let start_barrier = Arc::new(Barrier::new(barrier_participants));
     let mut workers = JoinSet::new();
 
     for _ in 0..config.concurrency {
         let worker_pool = pool.clone();
         let worker_window = Arc::clone(&window);
-        let worker_warmup_ready = warmup_ready.clone();
+        let worker_start_barrier = Arc::clone(&start_barrier);
         let worker_identities = Arc::clone(&identities);
         workers.spawn(async move {
             let mut measurements = WorkerMeasurements::default();
-            let mut warmup_announced = false;
+            worker_start_barrier.wait().await;
             loop {
                 let started = Instant::now();
                 if let Some(measurement) = worker_window.get().copied()
@@ -539,13 +539,6 @@ async fn run_point(
                 perform_operation_with_timeout(config.scenario, &worker_pool, operation_ids)
                     .await?;
                 let completed = Instant::now();
-
-                if !warmup_announced {
-                    worker_warmup_ready.send(()).await.map_err(|_| {
-                        error("warmup coordinator stopped before workers were ready")
-                    })?;
-                    warmup_announced = true;
-                }
 
                 if let Some(measurement) = worker_window.get().copied() {
                     if completed >= measurement.started && completed <= measurement.deadline {
@@ -561,32 +554,22 @@ async fn run_point(
             Ok::<_, Box<dyn Error + Send + Sync + 'static>>(measurements)
         });
     }
-    drop(warmup_ready);
 
-    let readiness = timeout(WARMUP_COORDINATION_TIMEOUT, async {
-        for _ in 0..config.concurrency {
-            warmup_readiness
-                .recv()
-                .await
-                .ok_or_else(|| error("a load worker stopped during warmup"))?;
-        }
-        Ok::<_, Box<dyn Error + Send + Sync + 'static>>(())
-    })
-    .await;
-    match readiness {
-        Ok(Ok(())) => {}
-        Ok(Err(readiness_error)) => {
+    start_barrier.wait().await;
+    tokio::select! {
+        () = tokio::time::sleep(WARMUP_DURATION) => {}
+        worker = workers.join_next() => {
+            let worker_error = match worker {
+                Some(Ok(Err(worker_error))) => worker_error,
+                Some(Err(join_error)) => {
+                    error(format!("load worker failed to join during warmup: {join_error}"))
+                }
+                Some(Ok(Ok(_))) => error("a load worker stopped unexpectedly during warmup"),
+                None => error("all load workers stopped unexpectedly during warmup"),
+            };
             workers.abort_all();
             while workers.join_next().await.is_some() {}
-            return Err(readiness_error);
-        }
-        Err(_) => {
-            workers.abort_all();
-            while workers.join_next().await.is_some() {}
-            return Err(error(format!(
-                "workers did not complete warmup within {} seconds",
-                WARMUP_COORDINATION_TIMEOUT.as_secs()
-            )));
+            return Err(worker_error);
         }
     }
 
@@ -615,6 +598,7 @@ async fn run_point(
         scenario: config.scenario,
         fsync: config.fsync,
         concurrency: config.concurrency,
+        warmup_duration: WARMUP_DURATION,
         offered_duration: config.duration,
         elapsed,
         completed_during_offered_load,
@@ -996,16 +980,16 @@ fn format_optional(value: Option<f64>) -> String {
 
 fn print_result_header() {
     println!(
-        "| scenario | image | host CPUs | fsync | pool | server max | concurrency | offered (s) | \
-         elapsed (s) | completed in window | latency samples | ops/s | p50 (ms) | p95 (ms) | \
-         p99 (ms) |"
+        "| scenario | image | host CPUs | fsync | pool | server max | concurrency | warmup (s) | \
+         offered (s) | elapsed (s) | completed in window | latency samples | ops/s | p50 (ms) | \
+         p95 (ms) | p99 (ms) |"
     );
-    println!("|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
 }
 
 fn print_result(result: &PointResult) {
     println!(
-        "| {} | postgres:{} | {} | {} | {} | {} | {} | {:.0} | {:.3} | {} | {} | {:.2} | {} | {} | {} |",
+        "| {} | postgres:{} | {} | {} | {} | {} | {} | {:.0} | {:.0} | {:.3} | {} | {} | {:.2} | {} | {} | {} |",
         result.scenario.label(),
         POSTGRES_IMAGE_TAG,
         result.host_cpus,
@@ -1013,6 +997,7 @@ fn print_result(result: &PointResult) {
         result.pool_size,
         result.server_max_connections,
         result.concurrency,
+        result.warmup_duration.as_secs_f64(),
         result.offered_duration.as_secs_f64(),
         result.elapsed.as_secs_f64(),
         result.completed_during_offered_load,
@@ -1055,10 +1040,11 @@ async fn main() -> HarnessResult<()> {
                 let environment =
                     PostgresEnvironment::start(fsync, config.server_max_connections).await?;
                 eprintln!(
-                    "running scenario={} fsync={} concurrency={} duration={}s pool={}",
+                    "running scenario={} fsync={} concurrency={} warmup={}s duration={}s pool={}",
                     scenario.label(),
                     fsync.label(),
                     concurrency,
+                    WARMUP_DURATION.as_secs(),
                     config.duration.as_secs(),
                     config.pool_size
                 );
