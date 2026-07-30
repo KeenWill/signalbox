@@ -11,6 +11,7 @@ mod load_session;
 mod model_execution;
 mod operator_failure;
 mod replace_session_defaults;
+mod review_orchestration;
 mod review_workflow;
 mod scheduler;
 mod session_metadata;
@@ -60,6 +61,19 @@ pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
     ReplaceSessionDefaultsService, ReplaceSessionDefaultsTransaction,
+};
+pub use review_orchestration::{
+    ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,
+    ReviewConcernWork, ReviewDurableSealOutcome, ReviewFanoutBarrierFailure,
+    ReviewImportEvidenceFailure, ReviewImportOutcome, ReviewJudgmentEffectId,
+    ReviewJudgmentEffectOutcome, ReviewJudgmentEffectWork, ReviewJudgmentPlan,
+    ReviewJudgmentPlanFailure, ReviewJudgmentPlanMember, ReviewOrchestrationAttempt,
+    ReviewOrchestrationAttemptError, ReviewOrchestrationAttemptId, ReviewOrchestrationAttemptStore,
+    ReviewOrchestrationOutcome, ReviewOrchestrationPassRunner, ReviewOrchestrationService,
+    ReviewOrchestrationServiceError, ReviewPassIncompleteStatus, ReviewPlannedDisposition,
+    ReviewPublicationMemberOutcome, ReviewPublicationWork, ReviewRepairMemberOutcome,
+    ReviewRepairWork, ReviewStageTemplateDigests, ReviewTemplateDigest,
+    ReviewTerminalBarrierFailure,
 };
 pub use review_workflow::{
     ReviewWorkflowCommand, ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult,
