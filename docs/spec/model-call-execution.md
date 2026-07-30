@@ -166,17 +166,24 @@ messages:
 - `RunnerPlacementChanged` resolves its complete same-session successor
   placement record and renders as a structured provider-neutral placement change
   retaining the positive placement revision and selected sandbox profile. The
-  provider bridge projects it as an injected user-role message whose exact text
-  is
-  `Signalbox session event: runner placement changed to revision {revision} with profile {profile}; prior runner-local execution state is unavailable.`
-  The braces are replaced by the canonical decimal revision and exact
-  `workspace-restricted` or `ambient` token. Missing, stale, cross-session, or
-  non-successor placement authority fails rendering instead of inventing text.
-  The same text renders every relocation, including a working-directory move on
-  the same runner and a later owner-directed move of a healthy session
-  ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)):
-  what the model must be told is that runner-local state from before the
-  boundary is gone, which is equally true of each;
+  provider bridge projects one of two exact injected user-role messages. For
+  `workspace-restricted` it emits
+  `Signalbox session event: runner placement changed to revision {revision} with profile workspace-restricted; the prior placement can no longer execute. The successor writable root and working directory are now active. Relocation did not delete prior files; they may still exist, but only paths exposed inside the successor restricted workspace are reachable.`
+  For `ambient` it emits
+  `Signalbox session event: runner placement changed to revision {revision} with profile ambient; the prior placement can no longer execute. The successor working directory is now active. Relocation did not delete prior files, and they may remain reachable at their previous paths through the invoking user's filesystem; check before recreating or overwriting them.`
+  The braces are replaced by the canonical decimal revision. Missing, stale,
+  cross-session, or non-successor placement authority fails rendering instead of
+  inventing text. The same profile-specific text renders every relocation,
+  including a working-directory move on the same runner and a later
+  owner-directed move of a healthy session
+  ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)).
+  What is genuinely unavailable is authority to execute through the retired
+  placement; the old path is no longer the active working directory or writable
+  root. Physical files are not reported lost: a restricted successor exposes
+  only its own namespace, while an ambient successor may still expose an old
+  path, particularly after a same-runner move. Why: reporting deletion or
+  inaccessibility the relocation did not enforce can cause the model to recreate
+  or overwrite work that still exists;
 - `AssistantText` renders as an assistant message retaining its producing-call
   provenance;
 - imported `Text` with an attested value renders with its imported user or
@@ -206,13 +213,20 @@ availability.
 The snapshot is a function of the session's actual composition, not of the
 compiled registry. A declaration whose arguments, paths, or working directory
 are defined relative to a session repository is included only for a session that
-has a repository worktree, and a declaration requiring a credential profile is
-included only for a session that was granted one — and, when that requirement
-comes from a repository entry rather than from the session's own workspace, only
-when the current advertisement pairs some repository key with exactly the
-granted profile; a session composed without a workspace therefore advertises
-exactly the tools that can execute in it and no placement combination is
-rejected merely for being workspace-free
+has a repository worktree. A declaration whose session capability itself
+requires a credential profile is included only for a session that was granted
+one. When a remote declaration's credential requirement comes from a repository
+entry instead, preparation compares that entry's advertised optional profile to
+the session's optional selection: absence equals absence and means anonymous
+access, while a present name must equal the exact grant. For a declaration that
+operates on the session's repository worktree, that entry is the exact
+repository key recorded by the workspace manifest; no other matching key can
+satisfy it. For `git_clone`, which introduces a repository into a writable root
+rather than operating on an existing worktree, any advertised entry with the
+matching optional profile satisfies preparation. No absent/present pair matches,
+and absence never selects a credential. A session composed without a workspace
+therefore advertises exactly the tools that can execute in it and no placement
+combination is rejected merely for being workspace-free
 ([runner protocol and placement](runner-protocol.md#session-composition) owns
 the composition axes, and
 [tool-loop](tool-loop.md#registry-placement-and-effect-metadata) owns which
