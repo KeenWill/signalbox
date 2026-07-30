@@ -20,8 +20,8 @@ use signalbox_persistence::{
 };
 
 use crate::{
-    ActivatedTurnExecution, HubModelConfiguration, process_runtime::compact_automatically,
-    report_ambiguous_commit,
+    ActivatedTurnExecution, HubModelConfiguration, TurnPassExecutionStage,
+    process_runtime::compact_automatically, report_ambiguous_commit,
 };
 use tracing::Instrument;
 
@@ -73,7 +73,9 @@ pub enum ContextGuardedTurnPassError<CountError, ExecutionError> {
     },
     /// Execution after exact guarded activation failed.
     Execution {
-        /// Selected turn, absent when active-turn recovery failed before selection.
+        /// Stage at which execution orchestration failed.
+        stage: TurnPassExecutionStage,
+        /// Selected turn, absent when failure occurred before selection.
         turn: Option<TurnId>,
         /// Typed execution failure.
         source: ExecutionError,
@@ -215,20 +217,7 @@ where
     type Error = ContextGuardedTurnPassError<Counter::Error, Execution::Error>;
 
     fn failure_stage(error: &Self::Error) -> &'static str {
-        match error {
-            ContextGuardedTurnPassError::Activation { turn: None, .. } => "activation_preview",
-            ContextGuardedTurnPassError::Activation { turn: Some(_), .. } => "activation_commit",
-            ContextGuardedTurnPassError::Operation { .. } => "model_operation",
-            ContextGuardedTurnPassError::Render { .. } => "frontier_rendering",
-            ContextGuardedTurnPassError::Count { .. } => "input_token_count",
-            ContextGuardedTurnPassError::CountCancelled(_) => "input_token_count",
-            ContextGuardedTurnPassError::ContextWindowUnavailable(_) => "context_window",
-            ContextGuardedTurnPassError::ContextStillExceeded(_) => "context_window",
-            ContextGuardedTurnPassError::Compaction { .. } => "context_compaction",
-            ContextGuardedTurnPassError::Execution { turn: None, .. } => "active_turn_recovery",
-            ContextGuardedTurnPassError::Execution { turn: Some(_), .. } => "execution",
-            ContextGuardedTurnPassError::ActivationSessionMismatch(_) => "activation_correlation",
-        }
+        guarded_failure_stage(error)
     }
     fn failure_turn(error: &Self::Error) -> Option<TurnId> {
         match error {
@@ -261,6 +250,7 @@ where
         async move {
             execution.resume_active(session).await.map_err(|source| {
                 ContextGuardedTurnPassError::Execution {
+                    stage: TurnPassExecutionStage::ActiveTurnRecovery,
                     turn: Execution::active_resume_failure_turn(&source),
                     source,
                 }
@@ -360,7 +350,11 @@ where
                                 .execute(activated)
                                 .instrument(guarded_turn_span(session, turn))
                                 .await
-                                .map_err(|source| ContextGuardedTurnPassError::Execution { turn: Some(turn), source });
+                                .map_err(|source| ContextGuardedTurnPassError::Execution {
+                                    stage: TurnPassExecutionStage::Execution,
+                                    turn: Some(turn),
+                                    source,
+                                });
                         }
                     }
                 }
@@ -371,6 +365,29 @@ where
             }
             outcome
         }
+    }
+}
+
+/// Returns one closed guarded-pass stage without inspecting payload-bearing
+/// errors.
+///
+/// The explicit execution marker keeps retained-turn recovery distinct even
+/// when that recovery already knows the turn identity.
+fn guarded_failure_stage<CountError, ExecutionError>(
+    error: &ContextGuardedTurnPassError<CountError, ExecutionError>,
+) -> &'static str {
+    match error {
+        ContextGuardedTurnPassError::Activation { turn: None, .. } => "activation_preview",
+        ContextGuardedTurnPassError::Activation { turn: Some(_), .. } => "activation_commit",
+        ContextGuardedTurnPassError::Operation { .. } => "model_operation",
+        ContextGuardedTurnPassError::Render { .. } => "frontier_rendering",
+        ContextGuardedTurnPassError::Count { .. } => "input_token_count",
+        ContextGuardedTurnPassError::CountCancelled(_) => "input_token_count",
+        ContextGuardedTurnPassError::ContextWindowUnavailable(_) => "context_window",
+        ContextGuardedTurnPassError::ContextStillExceeded(_) => "context_window",
+        ContextGuardedTurnPassError::Compaction { .. } => "context_compaction",
+        ContextGuardedTurnPassError::Execution { stage, .. } => stage.operator_label(),
+        ContextGuardedTurnPassError::ActivationSessionMismatch(_) => "activation_correlation",
     }
 }
 
@@ -446,10 +463,10 @@ mod tests {
         start_eligible_turn::StartEligibleTurnRepositoryError,
     };
 
-    use super::{ContextGuardedTurnPassError, report_guarded_ambiguity};
+    use super::{ContextGuardedTurnPassError, guarded_failure_stage, report_guarded_ambiguity};
     use crate::{
         ActivatedTurnExecution, FatalExecutionSignal, FatalExecutionSupervisor,
-        process_runtime::AutomaticContextCompactionError,
+        TurnPassExecutionStage, process_runtime::AutomaticContextCompactionError,
     };
 
     /// A classified failure whose durable commit outcome is unknown.
@@ -586,6 +603,7 @@ mod tests {
         let (execution, signal) = supervised();
 
         let error: GuardedFailure = ContextGuardedTurnPassError::Execution {
+            stage: TurnPassExecutionStage::Execution,
             turn: Some(turn()),
             source: CommitAmbiguousFailure,
         };
@@ -593,5 +611,19 @@ mod tests {
         report_guarded_ambiguity(&execution, &error);
 
         assert!(!signal.is_triggered());
+    }
+
+    #[test]
+    fn known_turn_recovery_failure_keeps_the_recovery_stage() {
+        let error: GuardedFailure = ContextGuardedTurnPassError::Execution {
+            stage: TurnPassExecutionStage::ActiveTurnRecovery,
+            turn: Some(turn()),
+            source: CommitAmbiguousFailure,
+        };
+
+        assert_eq!(
+            guarded_failure_stage(&error),
+            TurnPassExecutionStage::ActiveTurnRecovery.operator_label(),
+        );
     }
 }

@@ -69,10 +69,7 @@ use signalbox_persistence::{
         PrepareContextCompactionOutcome, PrepareContextCompactionRequest,
         PreparedContextCompaction,
     },
-    conversation_import::{
-        ImportedConversationIdentityCollision, ImportedConversationRepository,
-        ImportedConversationRepositoryError,
-    },
+    conversation_import::{ImportedConversationRepository, ImportedConversationRepositoryError},
     conversation_listing::{ConversationListingRepository, ConversationListingRepositoryError},
     create_session::{CreateSessionRepository, CreateSessionRepositoryError},
     create_session_from_imported_frontier::{
@@ -3024,27 +3021,12 @@ where
             )
             .await
         }
-        Err(OperationalImportError::IntegrityFailure) => {
+        Err(OperationalImportError::Internal(diagnostic)) => {
             write_error(
                 writer,
                 version,
                 request_id,
-                internal_protocol_error(
-                    None,
-                    InternalDiagnostic::ConversationImportIntegrityFailure,
-                ),
-            )
-            .await
-        }
-        Err(OperationalImportError::WorkerTerminated) => {
-            write_error(
-                writer,
-                version,
-                request_id,
-                internal_protocol_error(
-                    None,
-                    InternalDiagnostic::ConversationImportWorkerTerminated,
-                ),
+                internal_protocol_error(None, diagnostic),
             )
             .await
         }
@@ -3055,8 +3037,33 @@ where
 enum OperationalImportError {
     InvalidSource,
     Database,
-    IntegrityFailure,
-    WorkerTerminated,
+    Internal(InternalDiagnostic),
+}
+
+/// Converts typed import evidence into closed operational diagnostics.
+///
+/// Payload-bearing converter and repository errors are consumed here without
+/// formatting. Only a fixed classification crosses into the Internal log
+/// record, so source content, durable values, and database prose remain absent.
+fn operational_import_error<ConverterError>(
+    error: ImportConversationError<ConverterError, ImportedConversationRepositoryError>,
+) -> OperationalImportError {
+    match error {
+        ImportConversationError::Conversion(_) => OperationalImportError::InvalidSource,
+        ImportConversationError::Store(ImportedConversationRepositoryError::Database(_)) => {
+            OperationalImportError::Database
+        }
+        ImportConversationError::Store(error) => {
+            OperationalImportError::Internal(imported_conversation_internal_diagnostic(&error))
+        }
+        ImportConversationError::ConverterIdentityMismatch { .. }
+        | ImportConversationError::ConverterFormatMismatch { .. }
+        | ImportConversationError::ConverterEntryIdentitySequenceMismatch
+        | ImportConversationError::StoreSourceDigestMismatch { .. }
+        | ImportConversationError::StoreInsertedIdentityMismatch { .. } => {
+            OperationalImportError::Internal(InternalDiagnostic::ConversationImportContractDefect)
+        }
+    }
 }
 
 async fn execute_import<Converter>(
@@ -3075,30 +3082,16 @@ where
                 converter,
                 ImportedConversationRepository::new(pool),
             );
-            service.execute(&source).await.map_err(|error| match error {
-                ImportConversationError::Conversion(_) => OperationalImportError::InvalidSource,
-                ImportConversationError::Store(ImportedConversationRepositoryError::Database(
-                    _,
-                )) => OperationalImportError::Database,
-                ImportConversationError::Store(
-                    ImportedConversationRepositoryError::IdentityCollision(
-                        ImportedConversationIdentityCollision::Conversation
-                        | ImportedConversationIdentityCollision::TranscriptEntry,
-                    )
-                    | ImportedConversationRepositoryError::Corruption(_),
-                )
-                | ImportConversationError::ConverterIdentityMismatch { .. }
-                | ImportConversationError::ConverterFormatMismatch { .. }
-                | ImportConversationError::ConverterEntryIdentitySequenceMismatch
-                | ImportConversationError::StoreSourceDigestMismatch { .. }
-                | ImportConversationError::StoreInsertedIdentityMismatch { .. } => {
-                    OperationalImportError::IntegrityFailure
-                }
-            })
+            service
+                .execute(&source)
+                .await
+                .map_err(operational_import_error)
         })
     })
     .await
-    .map_err(|_| OperationalImportError::WorkerTerminated)?
+    .map_err(|_| {
+        OperationalImportError::Internal(InternalDiagnostic::ConversationImportWorkerTerminated)
+    })?
 }
 
 fn domain_imported_relationship(
@@ -8025,7 +8018,7 @@ where
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InternalDiagnostic {
     ReviewWorkflowProjectionCorruption,
-    ConversationImportIntegrityFailure,
+    ConversationImportContractDefect,
     ConversationImportWorkerTerminated,
     ImportedSessionDatabase,
     ImportedSessionCommitAmbiguous,
@@ -8084,7 +8077,8 @@ impl InternalDiagnostic {
             | Self::SessionDefaultsCommitAmbiguous => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: true,
             },
-            Self::ConversationImportWorkerTerminated
+            Self::ConversationImportContractDefect
+            | Self::ConversationImportWorkerTerminated
             | Self::ImportedSessionCommandKindMismatch
             | Self::ImportedSessionPreparation
             | Self::SessionCreationPreparation
@@ -8100,7 +8094,6 @@ impl InternalDiagnostic {
             | Self::SubmitInputIdentityCollision
             | Self::ToolLoopIdentityCollision => OperatorFailureClass::IdentityCollision,
             Self::ReviewWorkflowProjectionCorruption
-            | Self::ConversationImportIntegrityFailure
             | Self::ImportedSessionCorruption
             | Self::ImportedConversationCorruption
             | Self::SessionDefaultsVersionMissing
@@ -8123,7 +8116,7 @@ impl InternalDiagnostic {
     const fn cause_code(self) -> &'static str {
         match self {
             Self::ReviewWorkflowProjectionCorruption => "review_workflow_projection_corruption",
-            Self::ConversationImportIntegrityFailure => "conversation_import_integrity_failure",
+            Self::ConversationImportContractDefect => "conversation_import_contract_defect",
             Self::ConversationImportWorkerTerminated => "conversation_import_worker_terminated",
             Self::ImportedSessionDatabase => "imported_session_database",
             Self::ImportedSessionCommitAmbiguous => "imported_session_commit_ambiguous",
@@ -9013,7 +9006,7 @@ mod tests {
         thread,
     };
 
-    use signalbox_application::ImportedConversationConverter;
+    use signalbox_application::{ImportConversationError, ImportedConversationConverter};
     use signalbox_domain::{
         AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId,
         ImportedConversation, ImportedConversationFormat, ImportedConversationId,
@@ -9041,22 +9034,21 @@ mod tests {
 
     use super::{
         ContextCompactionRangeLoadError, INBOUND_READ_AHEAD_BYTES,
-        ImportedConversationIdentityCollision, ImportedConversationRepositoryError, IncomingLine,
-        InternalDiagnostic, MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES,
-        MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES,
-        MAX_SUBMITTED_INPUT_BYTES, OperationalImportError, ProcessConnectionError,
-        ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
-        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, ReviewCommandAdmission,
-        SnapshotSpoolError, acquire_import_permit, acquire_inbound_frame_permit,
-        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
-        acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
-        admitted_user_content, canonical_review_request_digest, consume_snapshot_queued_update,
-        context_compaction_failure_disposition, execute_import,
+        ImportedConversationRepositoryError, IncomingLine, InternalDiagnostic,
+        MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS,
+        MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
+        OperationalImportError, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
+        ProtocolError, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId,
+        ReviewCommandAdmission, SnapshotSpoolError, acquire_import_permit,
+        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
+        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
+        acquire_snapshot_reader_permit, admitted_user_content, canonical_review_request_digest,
+        consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
-        internal_protocol_error, map_rejection, read_frame_line, replacement_model_is_admitted,
-        retry_context_compaction_range_database_reads, run_until_shutdown,
-        snapshot_reader_capacity, wire_model_call_state, wire_tool_decision, wire_turn_state,
-        wire_uuid, write_content, write_context_compaction_repository_error,
+        internal_protocol_error, map_rejection, operational_import_error, read_frame_line,
+        replacement_model_is_admitted, retry_context_compaction_range_database_reads,
+        run_until_shutdown, snapshot_reader_capacity, wire_model_call_state, wire_tool_decision,
+        wire_turn_state, wire_uuid, write_content, write_context_compaction_repository_error,
         write_snapshot_spool_error, write_transcript_entry,
     };
     use crate::FatalExecutionSupervisor;
@@ -9064,6 +9056,9 @@ mod tests {
     use signalbox_persistence::{
         context_compaction::{
             ContextCompactionRepositoryError, FailedContextCompactionDisposition,
+        },
+        conversation_import::{
+            ImportedConversationCorruption, ImportedConversationIdentityCollision,
         },
         outbox::{
             DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEventKind,
@@ -9952,14 +9947,19 @@ context_window_tokens = 200000
     }
 
     #[tokio::test]
-    async fn import_worker_termination_remains_distinct_from_integrity_failure()
+    async fn import_worker_termination_remains_distinct_from_repository_corruption()
     -> Result<(), Box<dyn Error>> {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
 
         let outcome = execute_import(PanickingConverter, Vec::new(), pool).await;
 
-        assert_eq!(outcome, Err(OperationalImportError::WorkerTerminated));
+        assert_eq!(
+            outcome,
+            Err(OperationalImportError::Internal(
+                InternalDiagnostic::ConversationImportWorkerTerminated,
+            )),
+        );
         Ok(())
     }
 
@@ -9974,6 +9974,65 @@ context_window_tokens = 200000
         assert_eq!(
             diagnostic.cause_code(),
             "conversation_import_worker_terminated"
+        );
+    }
+
+    #[test]
+    fn import_converter_contract_defect_has_exact_operator_diagnostic() {
+        let error = ImportConversationError::<io::Error, ImportedConversationRepositoryError>::
+            ConverterEntryIdentitySequenceMismatch;
+
+        assert_eq!(
+            operational_import_error(error),
+            OperationalImportError::Internal(InternalDiagnostic::ConversationImportContractDefect,),
+        );
+        assert_eq!(
+            InternalDiagnostic::ConversationImportContractDefect.failure_class(),
+            signalbox_application::OperatorFailureClass::CallerOrHubBug,
+        );
+        assert_eq!(
+            InternalDiagnostic::ConversationImportContractDefect.cause_code(),
+            "conversation_import_contract_defect",
+        );
+    }
+
+    #[test]
+    fn import_repository_identity_collision_keeps_its_operator_class() {
+        let error =
+            ImportConversationError::<io::Error, ImportedConversationRepositoryError>::Store(
+                ImportedConversationRepositoryError::IdentityCollision(
+                    ImportedConversationIdentityCollision::Conversation,
+                ),
+            );
+
+        assert_eq!(
+            operational_import_error(error),
+            OperationalImportError::Internal(
+                InternalDiagnostic::ImportedConversationIdentityCollision,
+            ),
+        );
+        assert_eq!(
+            InternalDiagnostic::ImportedConversationIdentityCollision.failure_class(),
+            signalbox_application::OperatorFailureClass::IdentityCollision,
+        );
+    }
+
+    #[test]
+    fn import_repository_corruption_keeps_its_operator_class() {
+        let error =
+            ImportConversationError::<io::Error, ImportedConversationRepositoryError>::Store(
+                ImportedConversationRepositoryError::Corruption(
+                    ImportedConversationCorruption::Missing("fixture required field"),
+                ),
+            );
+
+        assert_eq!(
+            operational_import_error(error),
+            OperationalImportError::Internal(InternalDiagnostic::ImportedConversationCorruption,),
+        );
+        assert_eq!(
+            InternalDiagnostic::ImportedConversationCorruption.failure_class(),
+            signalbox_application::OperatorFailureClass::FailClosedCorruption,
         );
     }
 

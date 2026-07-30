@@ -412,6 +412,28 @@ impl Drop for FatalOnIncompleteExecution {
     }
 }
 
+/// Closed execution stage retained independently from optional turn evidence.
+///
+/// Recovery failures can identify the retained turn, so turn presence cannot
+/// classify the operator-visible stage. These two labels carry no model,
+/// prompt, tool, or adapter payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TurnPassExecutionStage {
+    /// Reconciliation of a turn retained from an earlier daemon run.
+    ActiveTurnRecovery,
+    /// Execution of a turn activated by the current eligibility pass.
+    Execution,
+}
+
+impl TurnPassExecutionStage {
+    const fn operator_label(self) -> &'static str {
+        match self {
+            Self::ActiveTurnRecovery => "active_turn_recovery",
+            Self::Execution => "execution",
+        }
+    }
+}
+
 /// Scheduler-pass failure retaining whether activation or execution failed.
 #[derive(Debug)]
 pub enum ActivatedTurnPassError<ActivationError, ExecutionError> {
@@ -419,7 +441,9 @@ pub enum ActivatedTurnPassError<ActivationError, ExecutionError> {
     Activation(ActivationError),
     /// A transaction, capability, or provider stage failed after activation.
     Execution {
-        /// Selected turn, absent when active-turn recovery failed before selection.
+        /// Stage at which execution orchestration failed.
+        stage: TurnPassExecutionStage,
+        /// Selected turn, absent when failure occurred before selection.
         turn: Option<TurnId>,
         /// Typed application failure.
         source: ExecutionError,
@@ -518,8 +542,7 @@ where
     fn failure_stage(error: &Self::Error) -> &'static str {
         match error {
             ActivatedTurnPassError::Activation(_) => "activation",
-            ActivatedTurnPassError::Execution { turn: None, .. } => "active_turn_recovery",
-            ActivatedTurnPassError::Execution { turn: Some(_), .. } => "execution",
+            ActivatedTurnPassError::Execution { stage, .. } => stage.operator_label(),
             ActivatedTurnPassError::ActivationSessionMismatch => "activation_correlation",
         }
     }
@@ -541,6 +564,7 @@ where
         async move {
             execution.resume_active(session).await.map_err(|source| {
                 ActivatedTurnPassError::Execution {
+                    stage: TurnPassExecutionStage::ActiveTurnRecovery,
                     turn: Execution::active_resume_failure_turn(&source),
                     source,
                 }
@@ -564,6 +588,7 @@ where
                         .instrument(turn_work_span(session, turn))
                         .await
                         .map_err(|source| ActivatedTurnPassError::Execution {
+                            stage: TurnPassExecutionStage::Execution,
                             turn: Some(turn),
                             source,
                         })
@@ -1143,8 +1168,8 @@ mod tests {
 
     use super::{
         ActivatedTurnExecution, ActivatedTurnPass, ActivatedTurnPassError, FatalExecutionSignal,
-        FatalExecutionSupervisor, activation_session_matches, reconcile_retained_once,
-        supervise_execution,
+        FatalExecutionSupervisor, TurnPassExecutionStage, activation_session_matches,
+        reconcile_retained_once, supervise_execution,
     };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1539,7 +1564,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resumed_execution_failure_preserves_the_known_turn() {
+    async fn resumed_execution_failure_preserves_the_known_turn_and_recovery_stage() {
         let (execution, _signal) =
             FatalExecutionSupervisor::new(PostMutationResumeFailureExecution);
         let mut pass = ActivatedTurnPass::new(
@@ -1559,6 +1584,14 @@ mod tests {
                 FatalExecutionSupervisor<PostMutationResumeFailureExecution>,
             > as EligibilityPass>::failure_turn(&error),
             Some(PostMutationResumeFailureExecution::failed_turn()),
+        );
+        assert_eq!(
+            <ActivatedTurnPass<
+                AdvancingIds,
+                RecordingTransaction,
+                FatalExecutionSupervisor<PostMutationResumeFailureExecution>,
+            > as EligibilityPass>::failure_stage(&error),
+            TurnPassExecutionStage::ActiveTurnRecovery.operator_label(),
         );
     }
 
