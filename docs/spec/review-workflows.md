@@ -65,13 +65,14 @@ read-only review, judgment, deduplication, external publication, finding repair,
 and stack propagation. Policy is immutable run input rather than process
 configuration: it carries an ordinal version plus minimum judge and publication
 confidence values. Confidence is an exact integer count of basis points from
-zero through 10,000. Version one's exact thresholds and ordering are fixed by
-this contract; construction and reconstitution admit only version one and
-enforce its exact thresholds and ordering. An unknown version fails closed until
-a later owner-accepted contract revision adds its exact tuple; support for that
-later version changes only later runs. Why: stored exact policy data makes the
-reason for unattended judgment and publication reconstructible without depending
-on the executing binary's defaults.
+zero through 10,000. Both thresholds apply only to a finding's confidence that
+the issue is real. Version one's exact thresholds and ordering are fixed by this
+contract; construction and reconstitution admit only version one and enforce its
+exact thresholds and ordering. An unknown version fails closed until a later
+owner-accepted contract revision adds its exact tuple; support for that later
+version changes only later runs. Why: stored exact policy data makes the reason
+for unattended judgment and publication reconstructible without depending on the
+executing binary's defaults.
 
 Runs use the closed state machine
 `Queued → Running → {Succeeded, Failed, Blocked, Cancelled}`, with
@@ -193,14 +194,17 @@ reservation.
 
 A `ReviewFinding` is immutable proposed content owned by one canonically
 succeeded read-only-review pass. It stores an exact file path, an optional
-closed positive line range and diff side, title, body, severity, confidence,
-category, and optional recommended fix. A diff side is admitted only when the
-finding's target snapshot carries an exact base revision. Its closed vocabulary
-is `Left`, identifying the base or removed side, and `Right`, identifying the
-head or added side. A file-relative line range needs no base. Its current status
-is derived from an append-only ordered event history rather than a freely
-writable status field. Severity is the closed vocabulary `Info`, `Low`,
-`Medium`, `High`, or `Critical`.
+closed positive line range and diff side, title, body, severity, two confidence
+axes, category, and optional recommended fix. The axes are independent exact
+basis-point values using the same zero-through-10,000 representation:
+`is_real_confidence` states whether the issue exists and merits attention, while
+`severity_label_confidence` states whether its severity classification is
+correct. A diff side is admitted only when the finding's target snapshot carries
+an exact base revision. Its closed vocabulary is `Left`, identifying the base or
+removed side, and `Right`, identifying the head or added side. A file-relative
+line range needs no base. Its current status is derived from an append-only
+ordered event history rather than a freely writable status field. Severity is
+the closed vocabulary `Info`, `Low`, `Medium`, `High`, or `Critical`.
 
 The producing pass's immutable `ProducedFindings` result must contain the
 finding's exact reference, and no other result inventory may contain it.
@@ -221,35 +225,38 @@ The initial state is `Open`. The nine-state machine is:
 9. `BlockedWithReason`
 
 An open finding may be judged accepted, rejected, duplicate, superseded, or
-stale. `Accepted` requires the finding's confidence to meet the frozen policy's
-minimum judgment confidence. Each judgment event names the pass that made it;
-duplicate and superseded additionally name the canonical or successor finding in
-the same run. Accepted findings may be posted, fixed, blocked with a nonempty
-reason, deduplicated, superseded, or made stale. Every `Posted` transition
-requires the finding's confidence to meet the frozen policy's minimum
-publication confidence; this foundation defines no override. Posted findings may
-be fixed, blocked, superseded, or made stale. Blocked findings may later be
-fixed, superseded, or made stale; a finding blocked by publication may also
-become posted after reconciliation attaches the exact reservation named by that
-blocking event, provided no earlier posted event for the finding consumed it.
-Each posted event consumes its link as publication evidence. Rejected,
-duplicate, superseded, stale, and fixed are terminal. Every event carries its
-owning finding reference, a contiguous one-based ordinal, and a same-target pass
-reference. The event pass's canonical run supplies its workflow and the exact
-`ReviewPolicy` frozen by the finding's producing run, so judgment,
-deduplication, and every later classification remain under one policy even
-though their one-pass workflows use separate run identities. The pass's terminal
-result commits to the event's exact finding, ordinal, and projected payload; a
-posted event is committed inside that pass's attachment result. Event and pass
-kinds are compatible only as follows: accepted, rejected, and stale events name
-a judgment pass; duplicate and superseded events name a deduplication pass;
-posted names an external-publication or external-context-import pass; fixed
-names a finding-repair pass; and blocked-with-reason names either an
-external-publication or finding-repair pass. Every event except
-blocked-with-reason names a canonically succeeded pass; blocked-with-reason
-names a canonically blocked pass. An external-publication block names one exact
-pending reservation associated with its finding; a finding-repair block names
-none.
+stale. `Accepted` requires the finding's is-real confidence to meet the frozen
+policy's minimum judgment confidence. This comparison uses `is_real_confidence`
+only. `severity_label_confidence` is input to judgment and never a filter:
+uncertainty about whether a real issue is `High` or `Medium` cannot suppress the
+issue. Each judgment event names the pass that made it; duplicate and superseded
+additionally name the canonical or successor finding in the same run. Accepted
+findings may be posted, fixed, blocked with a nonempty reason, deduplicated,
+superseded, or made stale. Every `Posted` transition requires the finding's
+`is_real_confidence` to meet the frozen policy's minimum publication confidence;
+severity-label confidence cannot suppress publication, and this foundation
+defines no override. Posted findings may be fixed, blocked, superseded, or made
+stale. Blocked findings may later be fixed, superseded, or made stale; a finding
+blocked by publication may also become posted after reconciliation attaches the
+exact reservation named by that blocking event, provided no earlier posted event
+for the finding consumed it. Each posted event consumes its link as publication
+evidence. Rejected, duplicate, superseded, stale, and fixed are terminal. Every
+event carries its owning finding reference, a contiguous one-based ordinal, and
+a same-target pass reference. The event pass's canonical run supplies its
+workflow and the exact `ReviewPolicy` frozen by the finding's producing run, so
+judgment, deduplication, and every later classification remain under one policy
+even though their one-pass workflows use separate run identities. The pass's
+terminal result commits to the event's exact finding, ordinal, and projected
+payload; a posted event is committed inside that pass's attachment result. Event
+and pass kinds are compatible only as follows: accepted, rejected, and stale
+events name a judgment pass; duplicate and superseded events name a
+deduplication pass; posted names an external-publication or
+external-context-import pass; fixed names a finding-repair pass; and
+blocked-with-reason names either an external-publication or finding-repair pass.
+Every event except blocked-with-reason names a canonically succeeded pass;
+blocked-with-reason names a canonically blocked pass. An external-publication
+block names one exact pending reservation associated with its finding; a
+finding-repair block names none.
 
 Duplicate and superseded events freeze the referenced finding's canonically
 authenticated current status at admission. That status must be `Open` or
@@ -326,6 +333,249 @@ and rejects contradictory evidence reused under one pass identity across the
 attachment or observations. Observations describe the external object's reported
 state; they do not rewrite finding status.
 
+## Review orchestration contract
+
+This section fixes the orchestration contract that is not yet implemented. It
+composes the one-pass run and finding primitives above; it does not replace
+their lifecycle, finding-state, publication-reservation, or frozen-policy
+contracts.
+
+### Attempt identity, configuration, and adapter seams
+
+One orchestration attempt names one immutable target, one complete frozen
+policy, one ordered concern-set version, and the exact template content digests
+used by its passes. Every stage retains that attempt identity. Refreshing the
+change request, changing policy, editing the concern set, or changing any
+resolved prompt template requires a new attempt; an orchestrator never mixes
+those inputs while resuming an old attempt.
+
+The concern list lives in owner-supplied, versioned review-orchestration
+configuration loaded and validated once at daemon startup. It is not inferred
+from repository contents, model output, or findings. Each entry has a unique
+closed concern key, an explicit order, and a session-template reference. The
+configured set may cover build-versus-buy, interface quality, defects, naming,
+test style, and other owner-selected concerns without changing domain
+vocabulary. The template mechanism is the natural home for the concern's model
+selection, tool-approval blanket, prompt body, version, and copy-on-create
+provenance. The orchestration configuration additionally names one shared
+review-header prompt asset. Configuration stores that header once and each
+concern body once. For a fan-out member, the orchestrator constructs the exact
+system prompt as the header bytes, two LF bytes, and that concern's body bytes,
+with no trimming or interpolation, then copies the resolved bundle into the
+session. The copied session necessarily retains the complete assembled prompt as
+execution evidence; N configuration records do not duplicate the header. The
+derived template digest commits the shared-header digest, concern-body digest,
+concern key, source template version, model selection, and approval blanket so
+an equal retry cannot silently pick up edited configuration.
+
+The provider adapter resolves the immutable target, imports external context,
+and performs reserved publication. The model adapter executes session turns and
+the structured-output contract below. The workspace adapter prepares either a
+read-only checkout for review and judgment or an explicitly writable checkout
+for repair, always at the target's exact head and comparison revision. Adapter
+success returns typed evidence naming those exact inputs. A mismatched revision,
+workspace, target, run, pass, session, template digest, or policy blocks the
+attempt; adapters never repair such a cross-wire by substitution.
+
+### Fan-out and complete-set barrier
+
+After an external-context-import pass has ingested the code host's current
+review context, the orchestrator starts exactly one concurrent read-only-review
+run and pass for every configured concern. All members name the same target and
+equal frozen policy. Each receives the shared header, exactly one
+concern-specific body, the frozen diff, and imported external context. A member
+cannot publish, mutate the workspace, or see another concurrent member's
+uncommitted output.
+
+The attempt durably records the complete expected concern inventory before any
+member starts. Judgment is eligible only after every expected member has
+succeeded and bound its complete `ProducedFindings` inventory, including an
+explicit empty inventory. If one member fails, blocks, or is cancelled while
+others succeed, the successful findings remain valid evidence but the fan-out
+set is incomplete and no judgment, repair, or publication work is eligible. The
+orchestrator may retry only the failed member against the same target, policy,
+concern-set version, and template digests; a changed input starts a new attempt.
+The eventual barrier includes exactly one successful member for every expected
+concern and rejects missing, extra, repeated, or superseded member claims. It
+therefore cannot silently present a partial review as complete.
+
+### Structured finding return
+
+Every read-only-review pass uses a structured-output contract named
+`submit_review_findings`. As realized by the model runtime, the contract is one
+forced tool call with parallel tool use disabled. Provider-independent decode
+must observe exactly one contract value. Free-form assistant text is transcript
+evidence only and never becomes a finding.
+
+The exact logical JSON Schema is below. The post-decode domain validator
+enforces `line_end >= line_start` and the UTF-8 byte rules that JSON Schema
+cannot state portably.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["findings"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "file_path",
+          "line_start",
+          "line_end",
+          "diff_side",
+          "title",
+          "body",
+          "severity",
+          "is_real_confidence",
+          "severity_label_confidence",
+          "category",
+          "recommended_fix"
+        ],
+        "properties": {
+          "file_path": { "type": "string" },
+          "line_start": {},
+          "line_end": {},
+          "diff_side": { "enum": [null, "left", "right"] },
+          "title": { "type": "string" },
+          "body": { "type": "string" },
+          "severity": {
+            "enum": ["info", "low", "medium", "high", "critical"]
+          },
+          "is_real_confidence": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          },
+          "severity_label_confidence": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          },
+          "category": { "type": "string" },
+          "recommended_fix": {
+            "type": ["string", "null"]
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "line_start": { "type": "null" },
+              "line_end": { "type": "null" }
+            }
+          },
+          {
+            "properties": {
+              "line_start": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              },
+              "line_end": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+After schema decode, ordinary finding construction enforces byte bounds,
+nonempty and U+0000 rules, target comparison evidence, and all typed
+vocabularies. The orchestrator assigns stable finding identities and admits the
+entire canonical identity-ordered inventory atomically. No structured value,
+several values, malformed JSON, schema mismatch, domain-invalid item, more than
+32 items, or failure to admit the complete inventory fails the pass; none of its
+proposed findings is retained as untyped text or as a partial inventory.
+
+### Judgment and cross-run deduplication
+
+One judgment analysis pass consumes the sealed finding inventories from all
+fan-out members, not a concern subset. Its structured result contains exactly
+one disposition for every input finding identity and no unknown or repeated
+identity. A disposition is `accepted`, `rejected { reason }`,
+`duplicate { canonical_finding }`, `superseded { successor_finding }`, or
+`stale`. Referenced findings carry their complete original finding references.
+The result is invalid unless every accepted finding meets
+`minimum_judge_confidence` on `is_real_confidence`; severity-label confidence is
+available to the judge but never filters a finding. The orchestrator seals this
+complete plan before admitting its per-finding judgment and deduplication events
+through the existing single-effect pass primitives in canonical finding order.
+Until every planned event is durably admitted, repair and publication remain
+ineligible; a crash resumes the plan rather than asking a model for a different
+partial judgment.
+
+The current implementation cannot perform the required cross-concern
+deduplication. Today a duplicate or superseded reference must name a finding
+from the same exact producing read-only-review pass; because a run admits at
+most one pass, it is necessarily also the same run. This is enforced both by
+domain reconstitution and by relational foreign keys and event guards. An
+N-concern fan-out uses N producing passes and N runs, so its findings cannot
+currently reference one another.
+
+The implementing change shall admit cross-run duplicate and superseded
+references only within one immutable target and one equal complete frozen
+policy. Each finding retains its original `ReviewFindingRef`; findings are not
+copied, reparented, or promoted into the judgment run. The event and pass result
+must carry the referenced finding's independent target, run, producing pass, and
+finding identities. Persistence must authenticate that complete ancestry with
+composite references to a canonically succeeded read-only-review producer whose
+sealed inventory contains the finding. The subject producer, referenced
+producer, and event pass must all name the same exact target and policy. Ordered
+root locks still authenticate an `Open` or `Accepted` referenced status, and
+self-reference, repeated reference, and direct or transitive cycles still fail
+closed. Missing or mismatched target/run/pass/finding evidence is corruption,
+never a best-effort match.
+
+This targeted relaxation preserves one pass per run and the original evidence
+chain. Allowing multiple passes per run would overturn the run lifecycle,
+one-to-one workflow/pass kind, and relational uniqueness and would still need
+the current exact-producing-pass restriction relaxed. Promoting findings into a
+judging run would duplicate immutable content, break the producing pass's sealed
+inventory authority, and require a second provenance mapping. Neither larger
+change is needed to authenticate a same-target, same-policy reference.
+
+### Repair, publication, import, and escalation
+
+Finding-repair passes consume the accepted, nonterminal findings after the
+complete judgment plan is applied. A repair pass alone receives a writable
+workspace. `Fixed` findings leave the publication set. A failed or cancelled
+repair leaves its finding accepted and therefore surviving; a blocked repair
+retains its explicit reason and requires reconciliation under the existing
+machine. Publication cannot begin until every selected repair attempt is
+terminal, and it never treats an unstarted or lost repair as success.
+
+External-publication passes publish the surviving findings through the existing
+reservation-then-attachment protocol. The `minimum_publication_confidence` check
+uses only `is_real_confidence`. Publication uses the target's exact head; a
+moved change request is a different target, not permission to post stale
+results. After publication, external-context-import passes ingest current code
+host comments and link state without performing an external write. Equal
+observations bind no-change evidence as already specified above.
+
+A workspace conflict, moved revision, incomplete concern barrier, malformed
+structured return, irreconcilable reservation, or adapter evidence mismatch
+blocks the orchestration attempt with a typed reason and exposes it for owner
+action. It does not drop a concern, regenerate an untracked prose answer,
+silently retarget, or publish the subset that happened to succeed.
+
+Implementing this section requires additive process-protocol operations to start
+and read an orchestration attempt, record its frozen concern/template/run
+inventory, seal the complete fan-out barrier, bind the judgment pass's complete
+disposition plan, and resume the plan's per-finding effects idempotently. Those
+wire additions are not part of the current process protocol and are not
+implemented by this specification change.
+
 ## Store and reconstitution
 
 The PostgreSQL store uses append-only target, run, pass, finding,
@@ -333,10 +583,12 @@ pass-result-inventory, finding-event, external-link reservation,
 external-object-identity, attachment, and observation records. The pass
 projection carries a nullable closed result discriminator and the exact scalar
 result payload; produced-finding result members are normalized references to the
-immutable canonical finding rows. Deferred relational validation compares their
-complete canonical identity-ordered inventory with every finding owned by that
-producing pass. The only mutable workflow columns are the current run and pass
-state projections; their evidence-bearing fields, including the one-time
+immutable canonical finding rows. Each finding row stores independent
+`is_real_confidence` and `severity_label_confidence` columns under the shared
+zero-through-10,000 bound. Deferred relational validation compares the complete
+canonical identity-ordered inventory with every finding owned by that producing
+pass. The only mutable workflow columns are the current run and pass state
+projections; their evidence-bearing fields, including the one-time
 absent-to-bound result, change atomically under row lock, and database checks
 close every nullable shape. Immutable content and history tables reject update
 and delete. Every workflow table rejects `TRUNCATE`.
@@ -403,9 +655,8 @@ the process protocol.
 
 ## Open edges
 
-- Automatic scheduling, provider/model/workspace adapter seams, prompts,
-  automatic publication and repair, conflict escalation, and merge-based stack
-  propagation remain under
+- Implementation of the orchestration contract above, its configuration and
+  process-protocol additions, and merge-based stack propagation remain under
   [review-workflow orchestration](../open-questions.md#destination-features-target-model).
 - [Artifacts](../open-questions.md#general-purpose-artifacts) remain a separate
   future aggregate; review workflow rows contain references and evidence, not
