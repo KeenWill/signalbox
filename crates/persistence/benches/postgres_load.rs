@@ -51,6 +51,7 @@ const ADMIN_DATABASE: &str = "signalbox_benchmark";
 const DEFAULT_DURATION_SECONDS: u64 = 10;
 const DEFAULT_POOL_SIZE: u32 = 80;
 const DEFAULT_CONCURRENCIES: [usize; 7] = [1, 2, 4, 8, 16, 32, 64];
+const SERVER_CONNECTION_HEADROOM: u32 = 4;
 const IDENTITY_PREFIX: u128 = 0x5b00_0000_u128 << 96;
 
 type HarnessResult<T> = Result<T, Box<dyn Error + Send + Sync + 'static>>;
@@ -109,6 +110,7 @@ struct Config {
     concurrencies: Vec<usize>,
     fsync_modes: Vec<FsyncMode>,
     scenarios: Vec<Scenario>,
+    server_max_connections: u32,
 }
 
 enum ParsedArgs {
@@ -218,6 +220,9 @@ fn parse_args() -> HarnessResult<ParsedArgs> {
             "--pool-size must be above the highest concurrency ({highest_concurrency})"
         )));
     }
+    let server_max_connections = pool_size
+        .checked_add(SERVER_CONNECTION_HEADROOM)
+        .ok_or_else(|| error("--pool-size is too large to configure PostgreSQL"))?;
 
     Ok(ParsedArgs::Run(Config {
         duration: Duration::from_secs(duration_seconds),
@@ -225,6 +230,7 @@ fn parse_args() -> HarnessResult<ParsedArgs> {
         concurrencies,
         fsync_modes,
         scenarios,
+        server_max_connections,
     }))
 }
 
@@ -259,7 +265,8 @@ fn print_help() {
            --concurrency LIST     Comma-separated positive sweep (default: \
          1,2,4,8,16,32,64)\n\
            --fsync MODE           both, on, or off (default: both)\n\
-           --scenario NAME        all, session-creation, full-path, or scheduler-lock\n\
+           --scenario NAME        all, session-creation, full-path, or scheduler-lock \
+         (default: all)\n\
            -h, --help             Show this help"
     );
 }
@@ -270,10 +277,11 @@ struct PostgresEnvironment {
     host: String,
     port: u16,
     fsync: FsyncMode,
+    server_max_connections: u32,
 }
 
 impl PostgresEnvironment {
-    async fn start(fsync: FsyncMode) -> HarnessResult<Self> {
+    async fn start(fsync: FsyncMode, server_max_connections: u32) -> HarnessResult<Self> {
         let image = Postgres::default()
             .with_db_name(ADMIN_DATABASE)
             .with_user(DATABASE_USER)
@@ -283,7 +291,19 @@ impl PostgresEnvironment {
         } else {
             image
         };
-        let container = image.with_tag(POSTGRES_IMAGE_TAG).start().await?;
+        let mut command = Vec::new();
+        if fsync == FsyncMode::Off {
+            command.extend([String::from("-c"), String::from("fsync=off")]);
+        }
+        command.extend([
+            String::from("-c"),
+            format!("max_connections={server_max_connections}"),
+        ]);
+        let container = image
+            .with_tag(POSTGRES_IMAGE_TAG)
+            .with_cmd(command)
+            .start()
+            .await?;
         let host = container.get_host().await?.to_string();
         let port = container.get_host_port_ipv4(5432).await?;
         let admin_url = database_url(&host, port, ADMIN_DATABASE);
@@ -297,6 +317,7 @@ impl PostgresEnvironment {
             host,
             port,
             fsync,
+            server_max_connections,
         })
     }
 
@@ -321,6 +342,17 @@ impl PostgresEnvironment {
             return Err(error(format!(
                 "container fsync mismatch: requested {}, observed {observed}",
                 self.fsync.label()
+            )));
+        }
+        let observed_max: String = sqlx::query_scalar("SHOW max_connections")
+            .fetch_one(&pool)
+            .await?;
+        let expected_max = self.server_max_connections.to_string();
+        if observed_max != expected_max {
+            pool.close().await;
+            return Err(error(format!(
+                "container max_connections mismatch: requested {expected_max}, observed \
+                 {observed_max}"
             )));
         }
         Ok(pool)
@@ -412,6 +444,7 @@ struct PointResult {
     offered_duration: Duration,
     elapsed: Duration,
     pool_size: u32,
+    server_max_connections: u32,
     host_cpus: usize,
     latencies: Vec<Duration>,
 }
@@ -421,6 +454,7 @@ struct PointConfig {
     scenario: Scenario,
     fsync: FsyncMode,
     pool_size: u32,
+    server_max_connections: u32,
     concurrency: usize,
     duration: Duration,
     host_cpus: usize,
@@ -451,6 +485,20 @@ async fn run_point(
     pool: PgPool,
     identities: Arc<LoadContext>,
 ) -> HarnessResult<PointResult> {
+    let mut warmups = JoinSet::new();
+    for _ in 0..config.concurrency {
+        let warmup_pool = pool.clone();
+        let warmup_identities = Arc::clone(&identities);
+        warmups.spawn(async move {
+            let operation_ids = warmup_identities.next_ids();
+            perform_operation(config.scenario, &warmup_pool, operation_ids).await
+        });
+    }
+    while let Some(warmup) = warmups.join_next().await {
+        warmup
+            .map_err(|join_error| error(format!("warmup worker failed to join: {join_error}")))??;
+    }
+
     let barrier = Arc::new(Barrier::new(config.concurrency + 1));
     let deadline = Arc::new(OnceLock::new());
     let mut workers = JoinSet::new();
@@ -501,6 +549,7 @@ async fn run_point(
         offered_duration: config.duration,
         elapsed,
         pool_size: config.pool_size,
+        server_max_connections: config.server_max_connections,
         host_cpus: config.host_cpus,
         latencies,
     })
@@ -812,30 +861,32 @@ fn format_optional(value: Option<f64>) -> String {
     value.map_or_else(|| String::from("n/a"), |number| format!("{number:.3}"))
 }
 
-fn print_results(results: &[PointResult]) {
+fn print_result_header() {
     println!(
-        "| scenario | image | host CPUs | fsync | pool | concurrency | offered (s) | elapsed (s) \
-         | completed | ops/s | p50 (ms) | p95 (ms) | p99 (ms) |"
+        "| scenario | image | host CPUs | fsync | pool | server max | concurrency | offered (s) | \
+         elapsed (s) | completed | ops/s | p50 (ms) | p95 (ms) | p99 (ms) |"
     );
-    println!("|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
-    for result in results {
-        println!(
-            "| {} | postgres:{} | {} | {} | {} | {} | {:.0} | {:.3} | {} | {:.2} | {} | {} | {} |",
-            result.scenario.label(),
-            POSTGRES_IMAGE_TAG,
-            result.host_cpus,
-            result.fsync.label(),
-            result.pool_size,
-            result.concurrency,
-            result.offered_duration.as_secs_f64(),
-            result.elapsed.as_secs_f64(),
-            result.completed(),
-            result.throughput(),
-            format_optional(result.percentile_milliseconds(50)),
-            format_optional(result.percentile_milliseconds(95)),
-            format_optional(result.percentile_milliseconds(99)),
-        );
-    }
+    println!("|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+}
+
+fn print_result(result: &PointResult) {
+    println!(
+        "| {} | postgres:{} | {} | {} | {} | {} | {} | {:.0} | {:.3} | {} | {:.2} | {} | {} | {} |",
+        result.scenario.label(),
+        POSTGRES_IMAGE_TAG,
+        result.host_cpus,
+        result.fsync.label(),
+        result.pool_size,
+        result.server_max_connections,
+        result.concurrency,
+        result.offered_duration.as_secs_f64(),
+        result.elapsed.as_secs_f64(),
+        result.completed(),
+        result.throughput(),
+        format_optional(result.percentile_milliseconds(50)),
+        format_optional(result.percentile_milliseconds(95)),
+        format_optional(result.percentile_milliseconds(99)),
+    );
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -852,20 +903,22 @@ async fn main() -> HarnessResult<()> {
         .map_err(|cpu_error| error(format!("host CPU count is unavailable: {cpu_error}")))?
         .get();
     let identities = Arc::new(LoadContext::new());
-    let mut results = Vec::new();
     let mut database_sequence = 0_u64;
+    print_result_header();
 
     for fsync in config.fsync_modes.iter().copied() {
-        eprintln!(
-            "starting postgres:{POSTGRES_IMAGE_TAG} with fsync={}",
-            fsync.label()
-        );
-        let environment = PostgresEnvironment::start(fsync).await?;
         for scenario in config.scenarios.iter().copied() {
             for concurrency in config.concurrencies.iter().copied() {
                 database_sequence = database_sequence
                     .checked_add(1)
                     .ok_or_else(|| error("benchmark database sequence exhausted"))?;
+                eprintln!(
+                    "starting isolated postgres:{POSTGRES_IMAGE_TAG} with fsync={} server_max={}",
+                    fsync.label(),
+                    config.server_max_connections
+                );
+                let environment =
+                    PostgresEnvironment::start(fsync, config.server_max_connections).await?;
                 eprintln!(
                     "running scenario={} fsync={} concurrency={} duration={}s pool={}",
                     scenario.label(),
@@ -882,6 +935,7 @@ async fn main() -> HarnessResult<()> {
                         scenario,
                         fsync,
                         pool_size: config.pool_size,
+                        server_max_connections: config.server_max_connections,
                         concurrency,
                         duration: config.duration,
                         host_cpus,
@@ -899,12 +953,10 @@ async fn main() -> HarnessResult<()> {
                     concurrency,
                     point.throughput()
                 );
-                results.push(point);
+                print_result(&point);
+                environment.admin_pool.close().await;
             }
         }
-        environment.admin_pool.close().await;
     }
-
-    print_results(&results);
     Ok(())
 }

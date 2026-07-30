@@ -2,9 +2,10 @@
 
 This on-demand Tokio harness measures the saturation curve of PostgreSQL
 persistence work. It is not a latency microbenchmark: each curve point keeps a
-fixed number of operations in flight for a fixed offered-load duration and then
-drains the operations already started. It reports completed operations per
-actual elapsed second plus uncensored p50, p95, and p99 operation latency.
+fixed number of operations in flight for a fixed offered-load duration after one
+concurrent warmup operation per worker, then drains the operations already
+started. It reports completed operations per actual elapsed second plus
+uncensored p50, p95, and p99 operation latency.
 
 Run the complete sweep in the Cargo bench profile:
 
@@ -16,10 +17,10 @@ devenv shell -- cargo bench -p signalbox-persistence \
 The defaults run all three scenarios at concurrency 1, 2, 4, 8, 16, 32, and 64
 for 10 seconds per point, first with fsync on and then with fsync off. The pool
 opens 80 connections before measurement, above the highest offered concurrency.
-Each point uses a fresh migrated database in the same mode-specific PostgreSQL
-container, so accumulated rows and connection startup do not tilt the curve. Use
-`-- --help` to select one scenario or mode, change the duration, or override the
-sweep and pool size.
+Each point uses its own freshly started PostgreSQL container and migrated
+database, so accumulated rows, cluster-wide maintenance, and connection startup
+do not tilt the curve. Use `-- --help` to select one scenario or mode, change
+the duration, or override the sweep and pool size.
 
 The scenarios are:
 
@@ -39,11 +40,13 @@ while tail latency begins climbing. Report the whole curve because the knee and
 post-knee behavior matter more than a single peak.
 
 Every output row records the PostgreSQL image tag, detected host CPU count,
-verified fsync setting, pool size, concurrency, configured offered-load
-duration, and actual elapsed duration including the final drain. Compare
-matching fsync-on and fsync-off points. A large throughput gap or latency
-reduction with fsync off points to durable-write I/O as the limiting cost; a
-small gap points instead toward schema, locking, query, or application work.
+verified fsync setting, pool size, configured server connection limit,
+concurrency, configured offered-load duration, and actual elapsed duration
+including the final drain. Completed rows print immediately, so a later point
+failure preserves earlier measurements. Compare matching fsync-on and fsync-off
+points. A large throughput gap or latency reduction with fsync off points to
+durable-write I/O as the limiting cost; a small gap points instead toward
+schema, locking, query, or application work.
 
 The harness is deliberately absent from ordinary CI. Container scheduling,
 filesystem behavior, and shared-host load make timings too noisy for a stable
