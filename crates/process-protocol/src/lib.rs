@@ -97,6 +97,12 @@ pub const MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES: usize = 256;
 /// Maximum entries in one deployment model-alias catalog.
 pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
 
+/// Maximum concerns in one frozen review-orchestration attempt.
+pub const MAX_REVIEW_ORCHESTRATION_CONCERNS: usize = 32;
+
+/// Maximum finding-indexed members in one review-orchestration request.
+pub const MAX_REVIEW_ORCHESTRATION_MEMBERS: usize = 1_024;
+
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CanonicalUuid(Uuid);
@@ -218,6 +224,49 @@ impl TryFrom<String> for CanonicalU64 {
 impl From<CanonicalU64> for String {
     fn from(value: CanonicalU64) -> Self {
         value.0.to_string()
+    }
+}
+
+/// A lowercase 32-byte digest encoded as exactly 64 hexadecimal characters.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CanonicalDigest(String);
+
+impl CanonicalDigest {
+    /// Checks the exact lowercase hexadecimal digest spelling.
+    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
+        if value.len() != 64
+            || value
+                .bytes()
+                .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
+        {
+            return Err(CanonicalValueError::Digest);
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrows the exact canonical hexadecimal spelling.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Transfers the exact canonical hexadecimal spelling.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for CanonicalDigest {
+    type Error = CanonicalValueError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl From<CanonicalDigest> for String {
+    fn from(value: CanonicalDigest) -> Self {
+        value.0
     }
 }
 
@@ -551,16 +600,208 @@ pub struct ReviewFindingSnapshot {
     pub event_count: CanonicalU64,
 }
 
-/// A basic judgment disposition recorded by one judge pass.
+/// One immutable finding-machine event recorded by a result-bearing pass.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ReviewFindingDisposition {
-    /// Accept the finding.
+pub enum ReviewFindingEvent {
     Accepted {},
-    /// Reject with an exact nonempty reason.
-    Rejected { reason: String },
-    /// Mark stale against the frozen target.
+    Rejected {
+        reason: String,
+    },
+    Duplicate {
+        canonical_finding_id: CanonicalUuid,
+    },
+    Superseded {
+        successor_finding_id: CanonicalUuid,
+    },
     Stale {},
+    Fixed {},
+    BlockedWithReason {
+        reason: String,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        external_link_id: Option<CanonicalUuid>,
+    },
+}
+
+/// Terminal outcome for a pass that does not otherwise carry typed result data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewPassTerminalOutcome {
+    Succeeded,
+    Failed,
+    Blocked,
+    Cancelled,
+}
+
+/// One concern entry in a new frozen orchestration attempt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewOrchestrationConcernInput {
+    pub key: String,
+    pub template_name: String,
+}
+
+/// Terminal imported-context stage outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewImportTerminalOutcome {
+    Succeeded,
+    Failed,
+    Blocked,
+    Cancelled,
+}
+
+/// Terminal concern-member outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewConcernTerminalOutcome {
+    Succeeded,
+    Failed,
+    Blocked,
+    Cancelled,
+}
+
+/// One closed disposition in an immutable judgment plan.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReviewJudgmentDisposition {
+    Accepted {},
+    Rejected { reason: String },
+    Duplicate { canonical_finding_id: CanonicalUuid },
+    Superseded { successor_finding_id: CanonicalUuid },
+    Stale {},
+}
+
+/// One finding member in a complete judgment plan.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewJudgmentPlanMember {
+    pub finding_id: CanonicalUuid,
+    pub disposition: ReviewJudgmentDisposition,
+}
+
+/// Terminal result of applying one judgment-plan member.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewJudgmentEffectTerminalOutcome {
+    Applied,
+    Failed,
+    Blocked,
+    Cancelled,
+}
+
+/// Terminal result of one repair member.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewRepairTerminalOutcome {
+    Fixed,
+    Failed,
+    Blocked,
+    Cancelled,
+}
+
+/// One finding-indexed repair result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewRepairOutcome {
+    pub finding_id: CanonicalUuid,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub event_pass_id: Option<CanonicalUuid>,
+    pub outcome: ReviewRepairTerminalOutcome,
+}
+
+/// Terminal result of one publication member.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewPublicationTerminalOutcome {
+    Published,
+    Failed,
+    Blocked,
+    Cancelled,
+}
+
+/// One finding-indexed publication result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewPublicationOutcome {
+    pub finding_id: CanonicalUuid,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub external_link_id: Option<CanonicalUuid>,
+    pub outcome: ReviewPublicationTerminalOutcome,
+}
+
+/// Durable stage of one client-driven review-orchestration attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewOrchestrationState {
+    AwaitingImport,
+    ImportIncomplete,
+    AwaitingConcerns,
+    FanoutIncomplete,
+    AwaitingJudgment,
+    AwaitingJudgmentEffects,
+    JudgmentIncomplete,
+    AwaitingRepair,
+    RepairIncomplete,
+    AwaitingPublication,
+    PublicationIncomplete,
+    Complete,
+}
+
+/// Durable progress of one frozen concern member.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewOrchestrationConcernStatus {
+    Pending,
+    Succeeded,
+    Failed,
+    Blocked,
+    Cancelled,
+}
+
+/// Resolved non-concern templates frozen into one attempt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewOrchestrationStageTemplateDigests {
+    pub import: CanonicalDigest,
+    pub judgment: CanonicalDigest,
+    pub repair: CanonicalDigest,
+    pub publication: CanonicalDigest,
+}
+
+/// One frozen concern and its durable progress.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewOrchestrationConcernSnapshot {
+    pub key: String,
+    pub template_digest: CanonicalDigest,
+    pub status: ReviewOrchestrationConcernStatus,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub pass_id: Option<CanonicalUuid>,
+}
+
+/// Progress counts needed to observe one orchestration attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewOrchestrationCounts {
+    pub finding_count: CanonicalU64,
+    pub judgment_member_count: CanonicalU64,
+    pub judgment_effect_applied_count: CanonicalU64,
+    pub repair_fixed_count: CanonicalU64,
+    pub publication_published_count: CanonicalU64,
+}
+
+/// Complete read projection of one review-orchestration attempt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewOrchestrationSnapshot {
+    pub attempt_id: CanonicalUuid,
+    pub target_id: CanonicalUuid,
+    pub state: ReviewOrchestrationState,
+    pub concern_set_version: String,
+    pub stage_template_digests: ReviewOrchestrationStageTemplateDigests,
+    pub concerns: Vec<ReviewOrchestrationConcernSnapshot>,
+    pub counts: ReviewOrchestrationCounts,
 }
 
 /// Provider object kind reserved for one review aggregate.
@@ -782,6 +1023,8 @@ pub enum CanonicalValueError {
     Content,
     /// Session metadata violated its exact string, set, map, or page bound.
     Metadata,
+    /// Digest was not exactly 64 lowercase hexadecimal characters.
+    Digest,
     /// A session system prompt was empty, contained U+0000, or exceeded its
     /// UTF-8 byte bound.
     SystemPrompt,
@@ -796,6 +1039,7 @@ impl fmt::Display for CanonicalValueError {
             Self::RequestId => "client request identity must be nonzero",
             Self::Content => "content fragment exceeds the process-protocol UTF-8 byte bound",
             Self::Metadata => "session metadata value is invalid",
+            Self::Digest => "digest is not canonical lowercase 64-character hexadecimal text",
             Self::SystemPrompt => "session system prompt is empty, oversized, or contains U+0000",
         })
     }
@@ -1452,7 +1696,79 @@ fn validate_session_template_name(value: &str) -> Result<(), FrameValidationErro
     Ok(())
 }
 
+fn validate_review_key(value: &str) -> Result<(), FrameValidationError> {
+    if value.is_empty() || value.len() > 1_024 || value.contains('\0') {
+        return Err(FrameValidationError::ReviewShape);
+    }
+    Ok(())
+}
+
+fn validate_review_text(value: &str) -> Result<(), FrameValidationError> {
+    if value.is_empty() || value.len() > 65_536 || value.contains('\0') {
+        return Err(FrameValidationError::ReviewShape);
+    }
+    Ok(())
+}
+
+fn validate_review_judgment_disposition(
+    disposition: &ReviewJudgmentDisposition,
+) -> Result<(), FrameValidationError> {
+    if let ReviewJudgmentDisposition::Rejected { reason } = disposition {
+        validate_review_text(reason)?;
+    }
+    Ok(())
+}
+
+fn validate_review_finding_event(event: &ReviewFindingEvent) -> Result<(), FrameValidationError> {
+    match event {
+        ReviewFindingEvent::Rejected { reason }
+        | ReviewFindingEvent::BlockedWithReason { reason, .. } => validate_review_text(reason),
+        ReviewFindingEvent::Accepted {}
+        | ReviewFindingEvent::Duplicate { .. }
+        | ReviewFindingEvent::Superseded { .. }
+        | ReviewFindingEvent::Stale {}
+        | ReviewFindingEvent::Fixed {} => Ok(()),
+    }
+}
+
+fn validate_review_orchestration_snapshot(
+    snapshot: &ReviewOrchestrationSnapshot,
+) -> Result<(), FrameValidationError> {
+    validate_review_key(&snapshot.concern_set_version)?;
+    if snapshot.concerns.is_empty() || snapshot.concerns.len() > MAX_REVIEW_ORCHESTRATION_CONCERNS {
+        return Err(FrameValidationError::ReviewShape);
+    }
+    let mut keys = HashSet::new();
+    for concern in &snapshot.concerns {
+        validate_review_key(&concern.key)?;
+        if !keys.insert(&concern.key) {
+            return Err(FrameValidationError::ReviewShape);
+        }
+        let valid_pass = match concern.status {
+            ReviewOrchestrationConcernStatus::Pending => concern.pass_id.is_none(),
+            ReviewOrchestrationConcernStatus::Succeeded
+            | ReviewOrchestrationConcernStatus::Failed
+            | ReviewOrchestrationConcernStatus::Blocked => concern.pass_id.is_some(),
+            ReviewOrchestrationConcernStatus::Cancelled => true,
+        };
+        if !valid_pass {
+            return Err(FrameValidationError::ReviewShape);
+        }
+    }
+    let counts = snapshot.counts;
+    if counts.finding_count.value() > MAX_REVIEW_ORCHESTRATION_MEMBERS as u64
+        || counts.judgment_member_count.value() > counts.finding_count.value()
+        || counts.judgment_effect_applied_count.value() > counts.judgment_member_count.value()
+        || counts.repair_fixed_count.value() > counts.judgment_member_count.value()
+        || counts.publication_published_count.value() > counts.judgment_member_count.value()
+    {
+        return Err(FrameValidationError::ReviewShape);
+    }
+    Ok(())
+}
+
 /// Closed versioned request family.
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
@@ -1669,6 +1985,17 @@ pub enum ClientRequest {
         /// Canonical active turn created from the pass's accepted input.
         turn_id: CanonicalUuid,
     },
+    /// Conclude one pass that carries no other typed result payload.
+    CompleteReviewPass {
+        command_id: CommandId,
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        turn_id: Option<CanonicalUuid>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        output_frontier_id: Option<CanonicalUuid>,
+        outcome: ReviewPassTerminalOutcome,
+    },
     RecordReviewFindings {
         command_id: CommandId,
         run_id: CanonicalUuid,
@@ -1677,8 +2004,8 @@ pub enum ClientRequest {
         output_frontier_id: CanonicalUuid,
         findings: Vec<ReviewFindingInput>,
     },
-    /// Atomically conclude a judge pass and append a finding disposition.
-    RecordReviewFindingDisposition {
+    /// Atomically conclude a result-bearing pass and append one finding event.
+    RecordReviewFindingEvent {
         command_id: CommandId,
         run_id: CanonicalUuid,
         pass_id: CanonicalUuid,
@@ -1687,7 +2014,7 @@ pub enum ClientRequest {
         finding_id: CanonicalUuid,
         /// Exact contiguous event ordinal the appended disposition occupies.
         event_ordinal: CanonicalU64,
-        disposition: ReviewFindingDisposition,
+        event: ReviewFindingEvent,
     },
     /// Reserve one provider object identity before an external write.
     ReserveReviewExternalLink {
@@ -1716,6 +2043,69 @@ pub enum ClientRequest {
     ReadReviewFinding { finding_id: CanonicalUuid },
     /// List findings produced by one exact run in identity order.
     ListReviewFindings { run_id: CanonicalUuid },
+    /// Start one immutable client-driven orchestration attempt.
+    StartReviewOrchestration {
+        command_id: CommandId,
+        attempt_id: CanonicalUuid,
+        target_id: CanonicalUuid,
+        concern_set_version: String,
+        import_template_name: String,
+        judgment_template_name: String,
+        repair_template_name: String,
+        publication_template_name: String,
+        concerns: Vec<ReviewOrchestrationConcernInput>,
+    },
+    /// Seal the import stage outcome.
+    RecordReviewImportOutcome {
+        command_id: CommandId,
+        attempt_id: CanonicalUuid,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        pass_id: Option<CanonicalUuid>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        external_link_id: Option<CanonicalUuid>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        context_digest: Option<CanonicalDigest>,
+        outcome: ReviewImportTerminalOutcome,
+    },
+    /// Seal one frozen concern member outcome.
+    RecordReviewConcernOutcome {
+        command_id: CommandId,
+        attempt_id: CanonicalUuid,
+        concern: String,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        pass_id: Option<CanonicalUuid>,
+        outcome: ReviewConcernTerminalOutcome,
+    },
+    /// Seal the complete judgment plan over a succeeded fan-out.
+    RecordReviewJudgmentPlan {
+        command_id: CommandId,
+        attempt_id: CanonicalUuid,
+        analysis_pass_id: CanonicalUuid,
+        members: Vec<ReviewJudgmentPlanMember>,
+    },
+    /// Seal the result of applying one judgment-plan member.
+    RecordReviewJudgmentEffect {
+        command_id: CommandId,
+        attempt_id: CanonicalUuid,
+        finding_id: CanonicalUuid,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        event_pass_id: Option<CanonicalUuid>,
+        outcome: ReviewJudgmentEffectTerminalOutcome,
+    },
+    /// Seal the complete repair-stage member inventory.
+    RecordReviewRepairOutcomes {
+        command_id: CommandId,
+        attempt_id: CanonicalUuid,
+        outcomes: Vec<ReviewRepairOutcome>,
+    },
+    /// Seal the complete publication-stage member inventory.
+    RecordReviewPublicationOutcomes {
+        command_id: CommandId,
+        attempt_id: CanonicalUuid,
+        outcomes: Vec<ReviewPublicationOutcome>,
+    },
+    /// Read one complete orchestration attempt projection.
+    ReadReviewOrchestration { attempt_id: CanonicalUuid },
     /// Stop the exact active turn through the accepted interrupt treatment.
     ///
     /// The request applies the `Interrupt` delivery to the named active turn:
@@ -1842,11 +2232,172 @@ impl ClientRequest {
         if let Self::CreateSessionFromTemplate { template_name, .. } = self {
             validate_session_template_name(template_name)?;
         }
+        if let Self::CompleteReviewPass {
+            turn_id,
+            output_frontier_id,
+            outcome,
+            ..
+        } = self
+        {
+            let valid = matches!(
+                (outcome, turn_id, output_frontier_id),
+                (ReviewPassTerminalOutcome::Succeeded, Some(_), Some(_))
+                    | (
+                        ReviewPassTerminalOutcome::Failed | ReviewPassTerminalOutcome::Blocked,
+                        Some(_),
+                        None
+                    )
+                    | (ReviewPassTerminalOutcome::Cancelled, _, None)
+            );
+            if !valid {
+                return Err(FrameValidationError::ReviewShape);
+            }
+        }
+        if let Self::RecordReviewFindings { findings, .. } = self
+            && findings.len() > 32
+        {
+            return Err(FrameValidationError::ReviewShape);
+        }
+        if let Self::RecordReviewFindingEvent {
+            finding_id, event, ..
+        } = self
+        {
+            validate_review_finding_event(event)?;
+            let self_reference = match event {
+                ReviewFindingEvent::Duplicate {
+                    canonical_finding_id,
+                } => *canonical_finding_id == *finding_id,
+                ReviewFindingEvent::Superseded {
+                    successor_finding_id,
+                } => *successor_finding_id == *finding_id,
+                _ => false,
+            };
+            if self_reference {
+                return Err(FrameValidationError::ReviewShape);
+            }
+        }
+        if let Self::StartReviewOrchestration {
+            concern_set_version,
+            import_template_name,
+            judgment_template_name,
+            repair_template_name,
+            publication_template_name,
+            concerns,
+            ..
+        } = self
+        {
+            validate_review_key(concern_set_version)?;
+            validate_session_template_name(import_template_name)?;
+            validate_session_template_name(judgment_template_name)?;
+            validate_session_template_name(repair_template_name)?;
+            validate_session_template_name(publication_template_name)?;
+            if concerns.is_empty() || concerns.len() > MAX_REVIEW_ORCHESTRATION_CONCERNS {
+                return Err(FrameValidationError::ReviewShape);
+            }
+            let mut keys = HashSet::new();
+            let mut templates = HashSet::new();
+            for concern in concerns {
+                validate_review_key(&concern.key)?;
+                validate_session_template_name(&concern.template_name)?;
+                if !keys.insert(&concern.key) || !templates.insert(&concern.template_name) {
+                    return Err(FrameValidationError::ReviewShape);
+                }
+            }
+        }
+        if let Self::RecordReviewImportOutcome {
+            pass_id,
+            external_link_id,
+            context_digest,
+            outcome,
+            ..
+        } = self
+        {
+            let valid = match outcome {
+                ReviewImportTerminalOutcome::Succeeded => {
+                    pass_id.is_some() && context_digest.is_some()
+                }
+                ReviewImportTerminalOutcome::Failed | ReviewImportTerminalOutcome::Blocked => {
+                    pass_id.is_some() && external_link_id.is_none() && context_digest.is_none()
+                }
+                ReviewImportTerminalOutcome::Cancelled => {
+                    external_link_id.is_none() && context_digest.is_none()
+                }
+            };
+            if !valid
+                || (*outcome != ReviewImportTerminalOutcome::Succeeded
+                    && external_link_id.is_some())
+            {
+                return Err(FrameValidationError::ReviewShape);
+            }
+        }
+        if let Self::RecordReviewConcernOutcome {
+            concern,
+            pass_id,
+            outcome,
+            ..
+        } = self
+        {
+            validate_review_key(concern)?;
+            if *outcome != ReviewConcernTerminalOutcome::Cancelled && pass_id.is_none() {
+                return Err(FrameValidationError::ReviewShape);
+            }
+        }
+        if let Self::RecordReviewJudgmentPlan { members, .. } = self {
+            if members.len() > MAX_REVIEW_ORCHESTRATION_MEMBERS {
+                return Err(FrameValidationError::ReviewShape);
+            }
+            let mut findings = HashSet::new();
+            for member in members {
+                validate_review_judgment_disposition(&member.disposition)?;
+                if !findings.insert(member.finding_id) {
+                    return Err(FrameValidationError::ReviewShape);
+                }
+            }
+        }
+        if let Self::RecordReviewJudgmentEffect {
+            event_pass_id,
+            outcome,
+            ..
+        } = self
+        {
+            let valid = (*outcome == ReviewJudgmentEffectTerminalOutcome::Applied)
+                == event_pass_id.is_some();
+            if !valid {
+                return Err(FrameValidationError::ReviewShape);
+            }
+        }
+        if let Self::RecordReviewRepairOutcomes { outcomes, .. } = self {
+            if outcomes.len() > MAX_REVIEW_ORCHESTRATION_MEMBERS {
+                return Err(FrameValidationError::ReviewShape);
+            }
+            let mut findings = HashSet::new();
+            for outcome in outcomes {
+                let valid = (outcome.outcome == ReviewRepairTerminalOutcome::Fixed)
+                    == outcome.event_pass_id.is_some();
+                if !valid || !findings.insert(outcome.finding_id) {
+                    return Err(FrameValidationError::ReviewShape);
+                }
+            }
+        }
+        if let Self::RecordReviewPublicationOutcomes { outcomes, .. } = self {
+            if outcomes.len() > MAX_REVIEW_ORCHESTRATION_MEMBERS {
+                return Err(FrameValidationError::ReviewShape);
+            }
+            let mut findings = HashSet::new();
+            for outcome in outcomes {
+                let valid = (outcome.outcome == ReviewPublicationTerminalOutcome::Published)
+                    == outcome.external_link_id.is_some();
+                if !valid || !findings.insert(outcome.finding_id) {
+                    return Err(FrameValidationError::ReviewShape);
+                }
+            }
+        }
         Ok(())
     }
 }
 
 /// One validated client frame.
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientFrame {
@@ -3391,6 +3942,12 @@ pub enum ServerMessage {
         /// Activated pass.
         pass_id: CanonicalUuid,
     },
+    /// One pass without another typed result was terminalized.
+    ReviewPassCompleted {
+        run_id: CanonicalUuid,
+        pass_id: CanonicalUuid,
+        state: ReviewPassLifecycle,
+    },
     /// One read-only result and complete finding inventory were committed.
     ReviewFindingsRecorded {
         /// Concluding run.
@@ -3401,7 +3958,7 @@ pub enum ServerMessage {
         finding_count: CanonicalU64,
     },
     /// One finding disposition was committed.
-    ReviewFindingDispositionRecorded {
+    ReviewFindingEventRecorded {
         /// Updated finding.
         finding_id: CanonicalUuid,
         /// Current derived status.
@@ -3451,6 +4008,17 @@ pub enum ServerMessage {
     ReviewFindingsEnd {
         /// Number of preceding items.
         finding_count: CanonicalU64,
+    },
+    /// One orchestration attempt was admitted or equally replayed.
+    ReviewOrchestrationStarted { attempt_id: CanonicalUuid },
+    /// One orchestration attempt advanced or equally replayed.
+    ReviewOrchestrationAdvanced {
+        attempt_id: CanonicalUuid,
+        state: ReviewOrchestrationState,
+    },
+    /// One complete orchestration attempt read.
+    ReviewOrchestration {
+        snapshot: ReviewOrchestrationSnapshot,
     },
     /// Stable, sanitized failure.
     Error {
@@ -3505,6 +4073,15 @@ impl ServerMessage {
                 }
             }
             Self::ConversationSummary { conversation } => conversation.validate()?,
+            Self::ReviewPassCompleted {
+                state: ReviewPassLifecycle::Queued | ReviewPassLifecycle::Running,
+                ..
+            } => {
+                return Err(FrameValidationError::ReviewShape);
+            }
+            Self::ReviewOrchestration { snapshot } => {
+                validate_review_orchestration_snapshot(snapshot)?;
+            }
             Self::TemplateSummary { name, version } => {
                 validate_session_template_name(name)?;
                 if version.value() == 0 {
@@ -3718,6 +4295,8 @@ pub enum FrameValidationError {
     InputDeliveryShape,
     /// A template name or positive version carried an invalid shape.
     TemplateShape,
+    /// A review lifecycle or orchestration frame carried an invalid shape.
+    ReviewShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -3743,6 +4322,7 @@ impl fmt::Display for FrameValidationError {
             Self::ImportedFrontierRangeShape => "imported frontier rejection range is inconsistent",
             Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
             Self::TemplateShape => "session-template frame shape is inconsistent",
+            Self::ReviewShape => "review workflow frame shape is inconsistent",
         })
     }
 }
@@ -4148,13 +4728,14 @@ pub fn recover_bounded_client_protocol_version(content: &[u8]) -> Option<Protoco
 #[cfg(test)]
 mod tests {
     use super::{
-        CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ConversationCursor, ConversationImportFormat, ConversationImportSource, ConversationOrigin,
-        ConversationOriginFilter, ConversationSummary, CurrentModelCall, CurrentModelCallState,
-        ErrorCode, ErrorDetail, FailedModelCallCause, FailedModelCallDisposition,
-        FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
-        ImportedContentKind, ImportedConversationSourceFormat, ImportedSessionRelationship,
-        ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+        CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId,
+        ContentFragment, ConversationCursor, ConversationImportFormat, ConversationImportSource,
+        ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
+        CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallCause,
+        FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
+        FrameEncodeError, FrameValidationError, ImportedContentKind,
+        ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
+        ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
         MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
         MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
@@ -4162,10 +4743,16 @@ mod tests {
         MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
         MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
         ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId,
-        ReviewTargetSubject, ServerFrame, ServerMessage, SessionEvent, SessionMetadata,
-        SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TranscriptEntry,
-        TranscriptTextEntry, TurnState, decode_client_line, decode_server_line, encode_client_line,
-        encode_server_line,
+        ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
+        ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+        ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
+        ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
+        ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
+        ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
+        ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject, ServerFrame,
+        ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
+        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
     };
     use uuid::Uuid;
 
@@ -5905,6 +6492,369 @@ mod tests {
             ServerMessage::ReviewTargetCreated { target_id: uuid(3) },
             r#"{"type":"review_target_created","target_id":"00000000-0000-0000-0000-000000000003"}"#,
         )
+    }
+
+    #[test]
+    fn review_orchestration_start_has_one_exact_v1_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let request_id = request(11)?;
+        let frame = ClientFrame::try_new(
+            request_id,
+            ClientRequest::StartReviewOrchestration {
+                command_id: command(2)?,
+                attempt_id: uuid(3),
+                target_id: uuid(4),
+                concern_set_version: String::from("initial-five"),
+                import_template_name: String::from("review.import"),
+                judgment_template_name: String::from("review.judgment"),
+                repair_template_name: String::from("review.repair"),
+                publication_template_name: String::from("review.publication"),
+                concerns: vec![ReviewOrchestrationConcernInput {
+                    key: String::from("correctness"),
+                    template_name: String::from("review.concern.correctness"),
+                }],
+            },
+        )?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":1,\"request_id\":\"11\",\"request\":{\"type\":\"start_review_orchestration\",\"command_id\":\"00000000-0000-0000-0000-000000000002\",\"attempt_id\":\"00000000-0000-0000-0000-000000000003\",\"target_id\":\"00000000-0000-0000-0000-000000000004\",\"concern_set_version\":\"initial-five\",\"import_template_name\":\"review.import\",\"judgment_template_name\":\"review.judgment\",\"repair_template_name\":\"review.repair\",\"publication_template_name\":\"review.publication\",\"concerns\":[{\"key\":\"correctness\",\"template_name\":\"review.concern.correctness\"}]}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        assert_server_message_round_trip(
+            request_id,
+            ServerMessage::ReviewOrchestrationStarted {
+                attempt_id: uuid(3),
+            },
+            r#"{"type":"review_orchestration_started","attempt_id":"00000000-0000-0000-0000-000000000003"}"#,
+        )
+    }
+
+    #[test]
+    fn review_finding_event_request_round_trips_under_its_generalized_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new(
+            request(12)?,
+            ClientRequest::RecordReviewFindingEvent {
+                command_id: command(2)?,
+                run_id: uuid(3),
+                pass_id: uuid(4),
+                turn_id: uuid(5),
+                output_frontier_id: uuid(6),
+                finding_id: uuid(7),
+                event_ordinal: CanonicalU64::new(2),
+                event: ReviewFindingEvent::Duplicate {
+                    canonical_finding_id: uuid(8),
+                },
+            },
+        )?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":1,\"request_id\":\"12\",\"request\":{\"type\":\"record_review_finding_event\",\"command_id\":\"00000000-0000-0000-0000-000000000002\",\"run_id\":\"00000000-0000-0000-0000-000000000003\",\"pass_id\":\"00000000-0000-0000-0000-000000000004\",\"turn_id\":\"00000000-0000-0000-0000-000000000005\",\"output_frontier_id\":\"00000000-0000-0000-0000-000000000006\",\"finding_id\":\"00000000-0000-0000-0000-000000000007\",\"event_ordinal\":\"2\",\"event\":{\"kind\":\"duplicate\",\"canonical_finding_id\":\"00000000-0000-0000-0000-000000000008\"}}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn review_pass_success_round_trips_with_terminal_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let succeeded = ClientFrame::try_new(
+            request(13)?,
+            ClientRequest::CompleteReviewPass {
+                command_id: command(2)?,
+                run_id: uuid(3),
+                pass_id: uuid(4),
+                turn_id: Some(uuid(5)),
+                output_frontier_id: Some(uuid(6)),
+                outcome: ReviewPassTerminalOutcome::Succeeded,
+            },
+        )?;
+        assert_eq!(
+            decode_client_line(&encode_client_line(&succeeded)?)?,
+            succeeded
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn review_pass_completion_rejects_evidence_for_another_outcome() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"13","request":{"type":"complete_review_pass","command_id":"00000000-0000-0000-0000-000000000002","run_id":"00000000-0000-0000-0000-000000000003","pass_id":"00000000-0000-0000-0000-000000000004","turn_id":"00000000-0000-0000-0000-000000000005","output_frontier_id":null,"outcome":"succeeded"}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"13","request":{"type":"complete_review_pass","command_id":"00000000-0000-0000-0000-000000000002","run_id":"00000000-0000-0000-0000-000000000003","pass_id":"00000000-0000-0000-0000-000000000004","turn_id":"00000000-0000-0000-0000-000000000005","output_frontier_id":"00000000-0000-0000-0000-000000000006","outcome":"failed"}}"#,
+        );
+    }
+
+    #[test]
+    fn review_pass_completion_requires_the_nullable_turn_member() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"13","request":{"type":"complete_review_pass","command_id":"00000000-0000-0000-0000-000000000002","run_id":"00000000-0000-0000-0000-000000000003","pass_id":"00000000-0000-0000-0000-000000000004","output_frontier_id":null,"outcome":"cancelled"}}"#,
+        );
+    }
+
+    #[test]
+    fn review_orchestration_stage_requests_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+        let digest = CanonicalDigest::try_new("cd".repeat(32))?;
+        let import = ClientFrame::try_new(
+            request(19)?,
+            ClientRequest::RecordReviewImportOutcome {
+                command_id: command(2)?,
+                attempt_id: uuid(3),
+                pass_id: Some(uuid(4)),
+                external_link_id: None,
+                context_digest: Some(digest),
+                outcome: ReviewImportTerminalOutcome::Succeeded,
+            },
+        )?;
+        assert_eq!(decode_client_line(&encode_client_line(&import)?)?, import);
+        let concern = ClientFrame::try_new(
+            request(20)?,
+            ClientRequest::RecordReviewConcernOutcome {
+                command_id: command(2)?,
+                attempt_id: uuid(3),
+                concern: String::from("correctness"),
+                pass_id: Some(uuid(5)),
+                outcome: ReviewConcernTerminalOutcome::Succeeded,
+            },
+        )?;
+        assert_eq!(decode_client_line(&encode_client_line(&concern)?)?, concern);
+        let plan = ClientFrame::try_new(
+            request(21)?,
+            ClientRequest::RecordReviewJudgmentPlan {
+                command_id: command(2)?,
+                attempt_id: uuid(3),
+                analysis_pass_id: uuid(6),
+                members: vec![ReviewJudgmentPlanMember {
+                    finding_id: uuid(7),
+                    disposition: ReviewJudgmentDisposition::Accepted {},
+                }],
+            },
+        )?;
+        assert_eq!(decode_client_line(&encode_client_line(&plan)?)?, plan);
+        let effect = ClientFrame::try_new(
+            request(22)?,
+            ClientRequest::RecordReviewJudgmentEffect {
+                command_id: command(2)?,
+                attempt_id: uuid(3),
+                finding_id: uuid(7),
+                event_pass_id: Some(uuid(8)),
+                outcome: ReviewJudgmentEffectTerminalOutcome::Applied,
+            },
+        )?;
+        assert_eq!(decode_client_line(&encode_client_line(&effect)?)?, effect);
+        let repairs = ClientFrame::try_new(
+            request(23)?,
+            ClientRequest::RecordReviewRepairOutcomes {
+                command_id: command(2)?,
+                attempt_id: uuid(3),
+                outcomes: vec![ReviewRepairOutcome {
+                    finding_id: uuid(7),
+                    event_pass_id: Some(uuid(9)),
+                    outcome: ReviewRepairTerminalOutcome::Fixed,
+                }],
+            },
+        )?;
+        assert_eq!(decode_client_line(&encode_client_line(&repairs)?)?, repairs);
+        let publications = ClientFrame::try_new(
+            request(24)?,
+            ClientRequest::RecordReviewPublicationOutcomes {
+                command_id: command(2)?,
+                attempt_id: uuid(3),
+                outcomes: vec![ReviewPublicationOutcome {
+                    finding_id: uuid(7),
+                    external_link_id: Some(uuid(10)),
+                    outcome: ReviewPublicationTerminalOutcome::Published,
+                }],
+            },
+        )?;
+        assert_eq!(
+            decode_client_line(&encode_client_line(&publications)?)?,
+            publications
+        );
+        let read = ClientFrame::try_new(
+            request(25)?,
+            ClientRequest::ReadReviewOrchestration {
+                attempt_id: uuid(3),
+            },
+        )?;
+        assert_eq!(decode_client_line(&encode_client_line(&read)?)?, read);
+        assert_server_message_round_trip(
+            request(26)?,
+            ServerMessage::ReviewOrchestrationAdvanced {
+                attempt_id: uuid(3),
+                state: ReviewOrchestrationState::AwaitingPublication,
+            },
+            r#"{"type":"review_orchestration_advanced","attempt_id":"00000000-0000-0000-0000-000000000003","state":"awaiting_publication"}"#,
+        )
+    }
+
+    #[test]
+    fn review_import_success_requires_pass_and_context_evidence() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"14","request":{"type":"record_review_import_outcome","command_id":"00000000-0000-0000-0000-000000000002","attempt_id":"00000000-0000-0000-0000-000000000003","pass_id":null,"external_link_id":null,"context_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","outcome":"succeeded"}}"#,
+        );
+    }
+
+    #[test]
+    fn review_concern_failure_requires_pass_evidence() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"14","request":{"type":"record_review_concern_outcome","command_id":"00000000-0000-0000-0000-000000000002","attempt_id":"00000000-0000-0000-0000-000000000003","concern":"correctness","pass_id":null,"outcome":"failed"}}"#,
+        );
+    }
+
+    #[test]
+    fn review_incomplete_judgment_effect_rejects_pass_evidence() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"14","request":{"type":"record_review_judgment_effect","command_id":"00000000-0000-0000-0000-000000000002","attempt_id":"00000000-0000-0000-0000-000000000003","finding_id":"00000000-0000-0000-0000-000000000004","event_pass_id":"00000000-0000-0000-0000-000000000005","outcome":"blocked"}}"#,
+        );
+    }
+
+    #[test]
+    fn review_fixed_repair_requires_event_pass_evidence() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"14","request":{"type":"record_review_repair_outcomes","command_id":"00000000-0000-0000-0000-000000000002","attempt_id":"00000000-0000-0000-0000-000000000003","outcomes":[{"finding_id":"00000000-0000-0000-0000-000000000004","event_pass_id":null,"outcome":"fixed"}]}}"#,
+        );
+    }
+
+    #[test]
+    fn review_published_outcome_requires_external_link_evidence() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"14","request":{"type":"record_review_publication_outcomes","command_id":"00000000-0000-0000-0000-000000000002","attempt_id":"00000000-0000-0000-0000-000000000003","outcomes":[{"finding_id":"00000000-0000-0000-0000-000000000004","external_link_id":null,"outcome":"published"}]}}"#,
+        );
+    }
+
+    #[test]
+    fn review_finding_event_refuses_unknown_members() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"14","request":{"type":"record_review_finding_event","command_id":"00000000-0000-0000-0000-000000000002","run_id":"00000000-0000-0000-0000-000000000003","pass_id":"00000000-0000-0000-0000-000000000004","turn_id":"00000000-0000-0000-0000-000000000005","output_frontier_id":"00000000-0000-0000-0000-000000000006","finding_id":"00000000-0000-0000-0000-000000000007","event_ordinal":"1","event":{"kind":"accepted","future":true}}}"#,
+        );
+    }
+
+    #[test]
+    fn review_concern_outcome_refuses_unknown_tokens() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"14","request":{"type":"record_review_concern_outcome","command_id":"00000000-0000-0000-0000-000000000002","attempt_id":"00000000-0000-0000-0000-000000000003","concern":"correctness","pass_id":null,"outcome":"future"}}"#,
+        );
+    }
+
+    #[test]
+    fn review_import_refuses_noncanonical_digest() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"15","request":{"type":"record_review_import_outcome","command_id":"00000000-0000-0000-0000-000000000002","attempt_id":"00000000-0000-0000-0000-000000000003","pass_id":"00000000-0000-0000-0000-000000000004","external_link_id":null,"context_digest":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","outcome":"succeeded"}}"#,
+        );
+    }
+
+    #[test]
+    fn review_orchestration_read_refuses_noncanonical_identity() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"15","request":{"type":"read_review_orchestration","attempt_id":"00000000-0000-0000-0000-00000000000A"}}"#,
+        );
+    }
+
+    #[test]
+    fn review_orchestration_refuses_oversized_concern_inventory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let concern = ReviewOrchestrationConcernInput {
+            key: String::from("correctness"),
+            template_name: String::from("correctness"),
+        };
+        let oversized = ClientFrame::try_new(
+            request(15)?,
+            ClientRequest::StartReviewOrchestration {
+                command_id: command(2)?,
+                attempt_id: uuid(3),
+                target_id: uuid(4),
+                concern_set_version: String::from("initial"),
+                import_template_name: String::from("import"),
+                judgment_template_name: String::from("judgment"),
+                repair_template_name: String::from("repair"),
+                publication_template_name: String::from("publication"),
+                concerns: vec![concern; 33],
+            },
+        );
+        assert_eq!(oversized, Err(FrameValidationError::ReviewShape));
+        Ok(())
+    }
+
+    #[test]
+    fn review_orchestration_refuses_oversized_judgment_inventory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let oversized = ClientFrame::try_new(
+            request(16)?,
+            ClientRequest::RecordReviewJudgmentPlan {
+                command_id: command(2)?,
+                attempt_id: uuid(3),
+                analysis_pass_id: uuid(4),
+                members: vec![
+                    ReviewJudgmentPlanMember {
+                        finding_id: uuid(5),
+                        disposition: ReviewJudgmentDisposition::Accepted {},
+                    };
+                    1_025
+                ],
+            },
+        );
+        assert_eq!(oversized, Err(FrameValidationError::ReviewShape));
+        Ok(())
+    }
+
+    #[test]
+    fn review_orchestration_snapshot_round_trips_with_frozen_inventory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let digest = CanonicalDigest::try_new("ab".repeat(32))?;
+        let snapshot = ReviewOrchestrationSnapshot {
+            attempt_id: uuid(3),
+            target_id: uuid(4),
+            state: ReviewOrchestrationState::AwaitingJudgment,
+            concern_set_version: String::from("initial-five"),
+            stage_template_digests: ReviewOrchestrationStageTemplateDigests {
+                import: digest.clone(),
+                judgment: digest.clone(),
+                repair: digest.clone(),
+                publication: digest.clone(),
+            },
+            concerns: vec![ReviewOrchestrationConcernSnapshot {
+                key: String::from("correctness"),
+                template_digest: digest,
+                status: ReviewOrchestrationConcernStatus::Succeeded,
+                pass_id: Some(uuid(5)),
+            }],
+            counts: ReviewOrchestrationCounts {
+                finding_count: CanonicalU64::new(2),
+                judgment_member_count: CanonicalU64::new(0),
+                judgment_effect_applied_count: CanonicalU64::new(0),
+                repair_fixed_count: CanonicalU64::new(0),
+                publication_published_count: CanonicalU64::new(0),
+            },
+        };
+        let frame = ServerFrame::try_new(
+            request(17)?,
+            ServerMessage::ReviewOrchestration { snapshot },
+        )?;
+        let encoded = encode_server_line(&frame)?;
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn review_pass_completed_receipt_round_trips_terminal_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let terminal = ServerFrame::try_new(
+            request(18)?,
+            ServerMessage::ReviewPassCompleted {
+                run_id: uuid(6),
+                pass_id: uuid(7),
+                state: ReviewPassLifecycle::Blocked,
+            },
+        )?;
+        assert_eq!(
+            decode_server_line(&encode_server_line(&terminal)?)?,
+            terminal
+        );
+        Ok(())
     }
 
     #[test]
