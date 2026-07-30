@@ -1868,13 +1868,19 @@ mod tests {
 
     #[test]
     fn provider_controlled_truncation_suffix_cannot_bypass_native_message_bound() {
-        const PROVIDER_BODY_BYTES: usize = super::MAX_NATIVE_MESSAGE_BYTES + 200;
         const FALLBACK_STATUS: u16 = 502;
+        const RETAINED_BYTES_AFTER_CREDENTIAL: usize = 32;
+        const PROVIDER_OVERFLOW_BYTES: usize = 200;
         let credential_text = "fixture_provider_key";
         let credential = CredentialValue::new(credential_text.as_bytes().to_vec());
+        let prefix_bytes = super::MAX_NATIVE_MESSAGE_BYTES
+            - credential_text.len()
+            - RETAINED_BYTES_AFTER_CREDENTIAL;
+        let tail_bytes = RETAINED_BYTES_AFTER_CREDENTIAL + PROVIDER_OVERFLOW_BYTES;
         let body = format!(
-            "{}{credential_text}{}",
-            "x".repeat(PROVIDER_BODY_BYTES),
+            "{}{credential_text}{}{}",
+            "x".repeat(prefix_bytes),
+            "y".repeat(tail_bytes),
             super::NATIVE_MESSAGE_TRUNCATION_SUFFIX
         );
 

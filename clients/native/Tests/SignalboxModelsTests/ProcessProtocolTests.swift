@@ -285,7 +285,7 @@ final class ProcessProtocolTests: XCTestCase {
       )
     )
 
-    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
+    XCTAssertNotNil(ProcessProtocolFixture.turnStateDecodingDiagnostic(in: frame.message))
   }
 
   func testMalformedKnownMessageDegradesWithDiagnostic() throws {
@@ -935,6 +935,18 @@ private enum ProcessProtocolFixture {
       repeating: 0x20,
       count: SignalboxProcessProtocol.maximumFrameBytes + 1
     )
+  }
+
+  static func turnStateDecodingDiagnostic(
+    in message: SignalboxProcessServerMessage
+  ) -> SignalboxDecodingDiagnostic? {
+    guard
+      case .transcriptTurn(let turn) = message,
+      case .unknown(_, _, let diagnostic) = turn.state
+    else {
+      return nil
+    }
+    return diagnostic
   }
 
   static func decodingDiagnostic(

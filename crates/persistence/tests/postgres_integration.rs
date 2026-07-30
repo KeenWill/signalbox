@@ -5185,6 +5185,37 @@ async fn inv006_unsent_model_call_usage_is_unreported() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+/// INV-006: a call terminalized directly from Prepared cannot carry a
+/// provider-failure cause because no provider send was authorized.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv006_unsent_model_call_provider_failure_cause_is_absent() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x6e80, false).await?;
+
+    let error = sqlx::query(
+        "UPDATE model_call
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'known_failed',
+                terminal_provider_failure_cause = 'quota_exhausted'
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("an unsent call cannot carry a provider-failure cause");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("model_call_unsent_provider_failure_cause_absent")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-014: a reference pinned on a new model call cannot be replaced or
 /// cleared.
 #[tokio::test(flavor = "multi_thread")]

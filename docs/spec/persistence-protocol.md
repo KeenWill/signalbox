@@ -140,12 +140,13 @@ Implemented table families (across the forward-only migrations):
   input without rounding. A nonterminal row must keep all four null, and a
   direct Prepared-to-terminal transition likewise requires all four null because
   no send occurred; the `cancelled` terminal disposition also requires all four
-  null because cancellation evidence reports no usage. Migration `202607310001`
+  null because cancellation evidence reports no usage. Migration `202607310002`
   adds nullable `terminal_provider_failure_cause`, constrained to the closed
-  provider taxonomy and present only on `known_failed` terminal rows. The
-  ordinary sent-call terminal update installs the exact provider-reported fields
-  and optional classification alongside the disposition before terminal-row
-  immutability applies;
+  provider taxonomy and present only on `known_failed` terminal rows. Migration
+  `202607310003` rejects a cause on a direct Prepared-to-terminal transition
+  because no provider send occurred. The ordinary sent-call terminal update
+  installs the exact provider-reported fields and optional classification
+  alongside the disposition before terminal-row immutability applies;
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_delta`,
   plus the resolved `context_frontier_member` compatibility projection;
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
