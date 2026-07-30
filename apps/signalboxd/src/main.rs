@@ -401,6 +401,8 @@ const fn combine_runtime_stop_cause(
         (RuntimeStopCause::RuntimeDefect, _) | (_, RuntimeTaskCompletion::Defect) => {
             RuntimeStopCause::RuntimeDefect
         }
+        (RuntimeStopCause::SignalListenerFailed, _) => RuntimeStopCause::SignalListenerFailed,
+        (RuntimeStopCause::ExecutionFailed, _) => RuntimeStopCause::ExecutionFailed,
         (_, RuntimeTaskCompletion::Failed) => RuntimeStopCause::ProcessRuntimeFailed,
         (cause, RuntimeTaskCompletion::Clean) => cause,
     }
@@ -1850,6 +1852,24 @@ mod tests {
                 RuntimeTaskCompletion::Defect
             ),
             RuntimeStopCause::RuntimeDefect
+        );
+    }
+
+    #[test]
+    fn initiating_failure_cause_outweighs_an_ordinary_drain_failure() {
+        assert_eq!(
+            combine_runtime_stop_cause(
+                RuntimeStopCause::SignalListenerFailed,
+                RuntimeTaskCompletion::Failed
+            ),
+            RuntimeStopCause::SignalListenerFailed
+        );
+        assert_eq!(
+            combine_runtime_stop_cause(
+                RuntimeStopCause::ExecutionFailed,
+                RuntimeTaskCompletion::Failed
+            ),
+            RuntimeStopCause::ExecutionFailed
         );
     }
 
