@@ -43,6 +43,7 @@ use signalbox_domain::{
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::{
+    commit_failure_is_ambiguous,
     mapping::{
         defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
         session_id_from_uuid, session_id_to_uuid, tool_request_id_to_uuid, turn_id_to_uuid,
@@ -4990,15 +4991,6 @@ fn identity_collision(error: &sqlx::Error) -> Option<ModelCallIdentityCollision>
             | "turn_lifecycle_pkey",
         ) => Some(ModelCallIdentityCollision::ReclassifiedTurn),
         _ => None,
-    }
-}
-
-fn commit_failure_is_ambiguous(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(database) => {
-            matches!(database.code().as_deref(), Some("08007" | "40003"))
-        }
-        _ => true,
     }
 }
 

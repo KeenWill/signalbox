@@ -15,13 +15,13 @@ use signalbox_domain::{
     RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
     RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId,
     RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
-    RunnerLeaseReconstitutionInput, RunnerSelector, RunnerToolAttemptAuthorization,
-    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
-    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
-    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest, ToolAdmissibleLoci,
-    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerSelector,
+    RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
+    RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId, SessionRunnerPin,
+    SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    SessionRunnerPlacementRequest, ToolAdmissibleLoci, ToolApprovalResolutionReconstitutionInput,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
@@ -358,8 +358,7 @@ fn lease_with_cross_wired_dispatch(
             recorded_effect: lease.effect(),
             recorded_credential_authorization: authorization,
             recorded_state: lease.state(),
-            retry_prepared: false,
-            recorded_retry_prepared: false,
+            retry_preparation: RunnerLeaseRetryPreparation::Available,
         },
         registration,
     )
@@ -384,8 +383,7 @@ fn duplicate_lease(lease: &RunnerLease, registration: &ValidatedRunnerRegistrati
             recorded_effect: lease.effect(),
             recorded_credential_authorization: authorization,
             recorded_state: lease.state(),
-            retry_prepared: false,
-            recorded_retry_prepared: false,
+            retry_preparation: RunnerLeaseRetryPreparation::Available,
         },
         registration,
     )
@@ -4463,14 +4461,13 @@ async fn s31_inv043_adapter_rejects_caller_reconstituted_no_execution_proof()
             recorded_effect: pin.lease.effect(),
             recorded_credential_authorization: credential_authorization,
             recorded_state: signalbox_domain::RunnerLeaseState::LostUnclaimed,
-            retry_prepared: false,
-            recorded_retry_prepared: false,
+            retry_preparation: RunnerLeaseRetryPreparation::Available,
         },
         registration.registration(),
     )
     .expect("the caller-controlled loss facts are internally correlated");
     let forged = reconstructed
-        .into_reconstituted_loss(Some(correlation), false)
+        .into_reconstituted_loss(Some(correlation), RunnerLeaseRetryPreparation::Available)
         .expect("the copied correlation fabricates process-local proof");
     let rejected = store
         .store_lease_loss(&forged)

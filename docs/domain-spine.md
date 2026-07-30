@@ -1419,157 +1419,106 @@ pub enum SubmitInputPreparationFailure {
 }
 
 pub struct SubmitInputTerminalSourceReconstitutionInput { /* private */ }
+pub struct SubmitInputTerminalSourceConstructionInput {
+    /* public named canonical origin, turn, and disposition facts */
+}
+pub struct SubmitInputInterruptedModelCallReconciliationConstructionInput {
+    /* public named canonical origin, turn, ambiguous call, and interrupt facts */
+}
 impl SubmitInputTerminalSourceReconstitutionInput {
-    pub fn new(
-        origin: SubmitInputTurnOriginReconstitutionInput,
-        turn: TurnId,
-        disposition: TurnDisposition,
-    ) -> Self;
+    pub fn new(input: SubmitInputTerminalSourceConstructionInput) -> Self;
     pub fn interrupted_model_call_reconciliation(
-        origin: SubmitInputTurnOriginReconstitutionInput,
-        turn: TurnId,
-        ambiguous_call: ModelCallId,
-        interrupt: AppliedInterruptProof,
+        input: SubmitInputInterruptedModelCallReconciliationConstructionInput,
     ) -> Self;
 }
 
 pub struct SubmitInputTurnOriginReconstitutionInput { /* private */ }
+pub struct SubmitInputDirectTurnOriginConstructionInput {
+    /* public named receipt, lifecycle, and queue-association facts */
+}
+pub struct SubmitInputReclassifiedTurnOriginConstructionInput {
+    /* public named receipt, lifecycle, queue-association, and terminal-source facts */
+}
 impl SubmitInputTurnOriginReconstitutionInput {
-    pub fn new(
-        receipt: ReconstitutedSubmitInput,
-        lifecycle: AcceptedInputLifecycle,
-        queue_accepted_input: AcceptedInputId,
-        queue_session: SessionId,
-        queue_turn: TurnId,
-        queue_order: AcceptedInputQueueOrder,
-    ) -> Self;
-    pub fn reclassified(
-        receipt: ReconstitutedSubmitInput,
-        lifecycle: AcceptedInputLifecycle,
-        queue_accepted_input: AcceptedInputId,
-        queue_session: SessionId,
-        queue_turn: TurnId,
-        queue_order: AcceptedInputQueueOrder,
-        source_terminal: SubmitInputTerminalSourceReconstitutionInput,
-    ) -> Self;
+    pub fn new(input: SubmitInputDirectTurnOriginConstructionInput) -> Self;
+    pub fn reclassified(input: SubmitInputReclassifiedTurnOriginConstructionInput) -> Self;
+}
+
+pub struct SubmitInputAppliedTurnOriginReconstitutionInput {
+    /* public named command, result, accepted-input, queue, and configuration facts */
+}
+pub struct SubmitInputAppliedPendingSteeringReconstitutionInput {
+    /* public named command, result, source-turn, and accepted-input facts */
+}
+pub struct SubmitInputRejectedSessionNotFoundReconstitutionInput {
+    /* public named command, actor, and absent-session facts */
+}
+pub struct SubmitInputRejectedNoActiveTurnReconstitutionInput {
+    /* public named command, actor, session, and expected-turn facts */
+}
+pub struct SubmitInputRejectedActiveTurnPresentReconstitutionInput {
+    /* public named command, result, and canonical active-turn-origin facts */
+}
+pub struct SubmitInputRejectedActiveTurnMismatchReconstitutionInput {
+    /* public named command, expected/actual turn, and canonical origin facts */
+}
+pub struct SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput {
+    /* public named command, defaults-version, and optional active-origin facts */
+}
+pub struct SubmitInputRejectedUnknownModelAliasReconstitutionInput {
+    /* public named command, alias, defaults, and optional active-origin facts */
+}
+pub struct SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput {
+    /* public named command, final-position, and optional active-origin facts */
+}
+pub struct SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput {
+    /* public named command, active-origin, and existing-interrupt facts */
+}
+pub struct SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput {
+    /* public named command, active-origin, and existing-interrupt facts */
+}
+pub struct SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput {
+    /* public named command, active-turn, and canonical origin facts */
 }
 
 pub struct SubmitInputReconstitutionInput { /* private */ }
 impl SubmitInputReconstitutionInput {
     pub fn applied_turn_origin(
-        command: SubmitInput,
-        stored_actor: Actor,
-        result_session: SessionId,
-        result_accepted_input: AcceptedInputId,
-        result_turn: TurnId,
-        predecessor_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
-        accepted_command: DurableCommandId,
-        accepted_input: AcceptedInputId,
-        accepted_session: SessionId,
-        accepted_content: UserContent,
-        accepted_delivery: DeliveryRequest,
-        accepted_position: SessionInputPosition,
-        accepted_disposition: AcceptedInputDisposition,
-        queue_session: SessionId,
-        queue_turn: TurnId,
-        queue_order: AcceptedInputQueueOrder,
-        defaults_session: SessionId,
-        defaults_version: SessionConfigurationDefaultsVersion,
-        defaults: SessionConfigurationDefaults,
-        stored_requested_model: ModelSelectionRequest,
-        stored_frozen_model: FrozenModelSelection,
+        input: SubmitInputAppliedTurnOriginReconstitutionInput,
     ) -> Self;
     pub fn applied_pending_steering(
-        command: SubmitInput,
-        stored_actor: Actor,
-        result_session: SessionId,
-        result_accepted_input: AcceptedInputId,
-        result_source_turn: TurnId,
-        source_turn_origin: SubmitInputTurnOriginReconstitutionInput,
-        accepted_command: DurableCommandId,
-        accepted_input: AcceptedInputId,
-        accepted_session: SessionId,
-        accepted_content: UserContent,
-        accepted_delivery: DeliveryRequest,
-        accepted_position: SessionInputPosition,
+        input: SubmitInputAppliedPendingSteeringReconstitutionInput,
     ) -> Self;
-    pub const fn rejected_safe_point_unavailable_while_stopping(
-        command: SubmitInput,
-        stored_actor: Actor,
-        result_session: SessionId,
-        result_active_turn: TurnId,
-        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
-        existing_interrupt: AppliedInterruptCommandResult,
+    pub fn rejected_safe_point_unavailable_while_stopping(
+        input: SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
     ) -> Self;
-    pub const fn rejected_interrupt_already_applied(
-        command: SubmitInput,
-        stored_actor: Actor,
-        result_session: SessionId,
-        result_active_turn: TurnId,
-        result_existing_command: DurableCommandId,
-        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
-        existing_interrupt: AppliedInterruptCommandResult,
+    pub fn rejected_interrupt_already_applied(
+        input: SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput,
     ) -> Self;
-    pub const fn rejected_interrupt_unavailable_while_awaiting_approval(
-        command: SubmitInput,
-        stored_actor: Actor,
-        result_session: SessionId,
-        result_active_turn: TurnId,
-        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
+    pub fn rejected_interrupt_unavailable_while_awaiting_approval(
+        input: SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
     ) -> Self;
-    pub const fn rejected_session_not_found(
-        command: SubmitInput,
-        stored_actor: Actor,
-        result_session: SessionId,
+    pub fn rejected_session_not_found(
+        input: SubmitInputRejectedSessionNotFoundReconstitutionInput,
     ) -> Self;
-    pub const fn rejected_no_active_turn(
-        command: SubmitInput,
-        stored_actor: Actor,
-        result_session: SessionId,
-        result_expected_active_turn: TurnId,
+    pub fn rejected_no_active_turn(
+        input: SubmitInputRejectedNoActiveTurnReconstitutionInput,
     ) -> Self;
-    pub const fn rejected_active_turn_present(
-        command: SubmitInput,
-        stored_actor: Actor,
-        result_session: SessionId,
-        result_active_turn: TurnId,
-        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
+    pub fn rejected_active_turn_present(
+        input: SubmitInputRejectedActiveTurnPresentReconstitutionInput,
     ) -> Self;
-    pub const fn rejected_active_turn_mismatch(
-        command: SubmitInput,
-        stored_actor: Actor,
-        result_session: SessionId,
-        result_expected_active_turn: TurnId,
-        result_actual_active_turn: TurnId,
-        actual_turn_origin: SubmitInputTurnOriginReconstitutionInput,
+    pub fn rejected_active_turn_mismatch(
+        input: SubmitInputRejectedActiveTurnMismatchReconstitutionInput,
     ) -> Self;
-    pub const fn rejected_defaults_version_mismatch(
-        command: SubmitInput,
-        stored_actor: Actor,
-        result_session: SessionId,
-        result_expected: SessionConfigurationDefaultsVersion,
-        result_current: SessionConfigurationDefaultsVersion,
-        active_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
+    pub fn rejected_defaults_version_mismatch(
+        input: SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput,
     ) -> Self;
-    pub const fn rejected_unknown_model_alias(
-        command: SubmitInput,
-        stored_actor: Actor,
-        result_session: SessionId,
-        result_alias: ModelAlias,
-        defaults_session: SessionId,
-        defaults_version: SessionConfigurationDefaultsVersion,
-        defaults: SessionConfigurationDefaults,
-        active_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
+    pub fn rejected_unknown_model_alias(
+        input: SubmitInputRejectedUnknownModelAliasReconstitutionInput,
     ) -> Self;
-    pub const fn rejected_acceptance_position_exhausted(
-        command: SubmitInput,
-        stored_actor: Actor,
-        result_session: SessionId,
-        result_last_position: SessionInputPosition,
-        active_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
+    pub fn rejected_acceptance_position_exhausted(
+        input: SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput,
     ) -> Self;
-    // no SafePointUnavailableWhileStopping replay constructor until its exact
-    // owner-correlated StopRequested evidence projection exists
     pub fn reconstitute(self)
         -> Result<ReconstitutedSubmitInput, SubmitInputReconstitutionError>;
     // accessors: command()
@@ -6088,11 +6037,15 @@ impl RunnerLease {
     pub fn into_reconstituted_loss(
         self,
         no_execution: Option<RunnerLeaseCorrelation>,
-        retry_prepared: bool,
+        retry_preparation: RunnerLeaseRetryPreparation,
     ) -> Result<RunnerLeaseLoss, RunnerDomainError>;
 }
+pub enum RunnerLeaseRetryPreparation {
+    Available,
+    Prepared,
+}
 pub struct RunnerLeaseReconstitutionInput {
-    /* public raw lease projection and independent fence */
+    /* public raw lease projection, independent fence, and retry preparation */
 }
 pub struct RunnerLeaseLoss { /* private, produced only by checked RunnerLease transitions */ }
 impl RunnerLeaseLoss {
@@ -7051,7 +7004,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: accepted_input                             | 5                    |
 | domain: delivery_request                           | 2                    |
 | domain: user_content                               | 4                    |
-| domain: submit_input                               | 15                   |
+| domain: submit_input                               | 31                   |
 | domain: queue_order                                | 5 (+1 free fn)       |
 | domain: turn_lifecycle                             | 10                   |
 | domain: turn_eligibility                           | 29                   |
@@ -7070,8 +7023,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: replace_session_defaults                   | 13                   |
 | domain: review_workflow                            | 82                   |
 | domain: session_metadata                           | 15                   |
-| domain: runner                                     | 53                   |
-| **signalbox-domain total**                         | **537 (+1 free fn)** |
+| domain: runner                                     | 54                   |
+| **signalbox-domain total**                         | **554 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
