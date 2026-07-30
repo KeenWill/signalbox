@@ -526,7 +526,9 @@ Locks per transaction, in acquisition order:
   its own transaction by locking `session_scheduler` first, then the loss head,
   placement, current lease, and guarded turn rows. Offered leases with no
   durable claim acquire exact no-execution proof; claimed leases follow effect
-  loss law. A crash resumes at the first uncommitted session, while every
+  loss law. That same session transaction retires any unacknowledged release the
+  lost connection still owed, since no successor inherits authority to complete
+  it. A crash resumes at the first uncommitted session, while every
   not-yet-projected placement is already effectively lost through the epoch
   fence.
 - **Runner replace, abandon, and release**: an unseen abandonment command owns
@@ -542,20 +544,36 @@ Locks per transaction, in acquisition order:
   result. A crash before that result leaves the immutable request and
   authorization resumable. Abandon requires an empty active-turn slot and stores
   only terminal placement state. Either transition enqueues a release for the
-  retired placement only when that placement holds a runner-managed workspace —
-  a provisioned repository worktree or the runner's own private root — because
-  only those carry the workspace-manifest identity the release frame correlates
-  against; a retired placement whose writable root is the plain directory its
-  own request named enqueues no release at all, since the runner never created
-  that directory and must never delete it
+  retired placement only when two independent conditions both hold. The
+  placement must hold a runner-managed workspace — a provisioned repository
+  worktree or the runner's own private root — because only those carry the
+  workspace-manifest identity the release frame correlates against; a retired
+  placement whose writable root is the plain directory its own request named
+  enqueues no release at all, since the runner never created that directory and
+  must never delete it. And the runner that created that workspace must still be
+  reachable on a live connection, because only a reachable runner can produce
+  the acknowledgement or cleanup-failure report a release waits on. A retirement
+  whose predecessor connection is already durably lost — heartbeat-loss
+  replacement onto a different runner or onto a pending enrollment, and every
+  abandonment — therefore enqueues nothing either, and its workspace takes the
+  recorded-leak response a retired runner's workspace already has. In version
+  one the release exchange exists only for the checked same-runner
+  re-enrollment, where registration reconciliation retired the placement while
+  the connection and enrollment stayed healthy
   ([runner protocol and placement](runner-protocol.md#workspace-provisioning-and-recovery)).
-  Release acknowledgement uses the same scheduler-then-placement order and never
-  mutates turn lifecycle. Exactly two transitions retire the durable release
-  record — the release acknowledgement itself, and durable admission of the
-  runner's `workspace_cleanup_failed` operation failure naming that same
-  release, which resolves it as refused when the runner cannot complete the
-  deletion — and no other transition does, so an unacknowledged release is
-  redelivered after restart exactly as an unacknowledged result is.
+  Why: both frames that can retire a release require the holding runner to
+  acknowledge deletion or report cleanup failure, so a release addressed to an
+  unreachable identity is a durable record redelivered after every restart with
+  no transition able to clear it. Release acknowledgement uses the same
+  scheduler-then-placement order and never mutates turn lifecycle. Three
+  transitions retire the durable release record and no other does: the release
+  acknowledgement itself; durable admission of the runner's
+  `workspace_cleanup_failed` operation failure naming that same release, which
+  resolves it as refused when the runner cannot complete the deletion; and
+  durable loss of the connection that owed it, which resolves it as unowned and
+  leaves its workspace under that same recorded-leak response. Until one of the
+  three commits, an unacknowledged release is redelivered after restart exactly
+  as an unacknowledged result is.
 - **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
   exactly `delivered_through + 1` and its typed record are read. Only an
   accepted synchronous offer advances that same singleton inside the

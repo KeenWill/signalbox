@@ -254,24 +254,68 @@ rather than retaining its journal forever, and `operation_failure_recorded` for
 that exact release correlation resolves the release as refused, retiring both
 journals — the failure and the release — and freeing the runner's single
 workspace-operation slot. It is therefore the one acknowledgement other than
-`workspace_release_recorded` that retires a release, and for any single release
-correlation exactly one of the two is ever produced, because a release either
-completed or was refused. Why: `workspace_release_recorded` follows a completed
-deletion and can never be produced for a release whose deletion failed, so
-admitting only that frame as a release's retirement would leave the reporting
-runner holding the journal and its one workspace-operation slot forever — the
-exact outcome this category exists to prevent. The undeleted placement then
-appears in the next startup report as a `cleanup_failed` leak, which is the
-version-one response to unreclaimed disk. Daemon logic keys off that category
-alone, so the set stays small and every member names a decision the daemon can
-make. The second is one runner-authored detail: a bounded runner-specific code,
-a bounded message, and a bounded structured payload, all carried as data. The
-daemon retains the detail as operator evidence and exposes it verbatim through
-owner runner inspection; it never parses, interprets, or branches on it, so a
-runner may add detail codes freely without a daemon change. A failure the daemon
-has durably recorded terminates that operation: the corresponding provisioning,
-release, or lease authority is resolved as refused, and neither side waits on it
-further.
+`workspace_release_recorded` that retires a release, and no single release
+correlation ever draws both, because a release either completed or was refused.
+A release whose owning connection becomes durably lost draws neither and is
+retired as unowned instead
+([workspace provisioning and recovery](#workspace-provisioning-and-recovery)).
+Why: `workspace_release_recorded` follows a completed deletion and can never be
+produced for a release whose deletion failed, so admitting only that frame as a
+release's retirement would leave the reporting runner holding the journal and
+its one workspace-operation slot forever — the exact outcome this category
+exists to prevent. The undeleted placement then appears in the next startup
+report as a `cleanup_failed` leak, which is the version-one response to
+unreclaimed disk. Daemon logic keys off that category alone, so the set stays
+small and every member names a decision the daemon can make. The second is one
+runner-authored detail: a runner-specific code, a message, and a structured
+payload, all carried as data. The daemon retains the detail as operator evidence
+and exposes it verbatim through owner runner inspection; it never parses,
+interprets, or branches on it, so a runner may add detail codes freely without a
+daemon change.
+
+Extensible is not unbounded, and each member's limit is exact rather than
+described as bounded. The complete detail is durable operator evidence held
+within 4,096 UTF-8 bytes, the bound this system already uses for a known
+failure's durable detail and for an exact runner value, and the three members
+are derived from that bound:
+
+- the code uses the same checked-name syntax as every other runner catalog key —
+  nonempty, U+0000-free, at most 64 UTF-8 bytes, only ASCII letters, digits,
+  dot, underscore, and hyphen, and beginning with an ASCII letter or digit
+  ([advertised catalogs and daemon authority](#advertised-catalogs-and-daemon-authority))
+  — so a new code needs no new grammar and is safe to retain and display
+  verbatim;
+- the message is exact nonempty UTF-8, excludes U+0000, and carries at most
+  1,024 UTF-8 bytes, retained with no trimming, case folding, or other
+  normalization. A runner whose captured text is longer truncates it to that cap
+  with the same head-and-tail `[signalbox: N bytes omitted]` marker a truncated
+  process stream carries
+  ([tool loop](tool-loop.md#version-one-workstation-tool-contracts)), rather
+  than emitting a frame it knows is inadmissible; and
+- the payload is one JSON object — `{}` when there is nothing structured to add,
+  never absent and never JSON null — whose complete serialized form is at most
+  2,048 UTF-8 bytes, whose member names use the code's checked-name syntax, and
+  whose values are JSON strings under the message's byte bound, unsigned
+  integers, booleans, null, or nested objects and arrays holding at most 64
+  members or elements each, with at most eight containers on any root-to-value
+  path counted exactly as
+  [conversation import](conversation-import.md#claude-code-session-jsonl-versions-1-and-2)
+  counts container depth.
+
+Those three limits together leave more than a kibibyte of the retained bound for
+the detail object's own framing and worst-case JSON escaping. A detail outside
+any of them is an oversized or malformed frame and fails closed like any other,
+so the runner checks the detail as it constructs it and never spools one it
+could not have admitted itself. Why: `operation_failed` is spooled until
+acknowledged, so a detail one side considers valid and the other rejects is not
+a cosmetic disagreement between implementations — it is resent forever, and the
+provisioning, release, or lease offer it was reporting waits permanently for an
+`operation_failure_recorded` that can never arrive. Exact limits are what make
+two independently implemented sides admit the same set.
+
+A failure the daemon has durably recorded terminates that operation: the
+corresponding provisioning, release, or lease authority is resolved as refused,
+and neither side waits on it further.
 
 After `enrolled`, `replacement_pending`, or `resumed`, startup reconciliation
 sends one leak report before any workspace provision or lease offer is
@@ -1261,16 +1305,67 @@ described by
 for a Git tool reaching a remote under a granted profile, the per-provisioning
 broker helper during provisioning, and no helper at all for an invocation that
 reaches no remote. Command-line configuration outranks the model-writable
-repository configuration, so `url.<base>.insteadOf` rewrites, a re-enabled
-external helper, and a hook cannot move the effective transport off HTTPS or
-substitute an executable for a fetch. Validating the stored `remote.<name>.url`
-remains defense in depth and is not the boundary. Why: the boundary has to hold
-over the transport Git actually uses, because the only configuration the model
-can write is exactly the configuration a pre-rewrite URL check reads as valid —
-and a repository-local `credential.helper` whose value begins with `!` is a
-shell snippet Git runs, so leaving the helper list unemptied would let an
-auto-approved, retry-classified `git_fetch` execute model-authored code while
-every transport setting still read as valid.
+repository configuration, so no repository setting can move the effective
+transport off HTTPS, and a re-enabled external helper or a hook cannot
+substitute an executable for a fetch. Why: a repository-local
+`credential.helper` whose value begins with `!` is a shell snippet Git runs, so
+leaving the helper list unemptied would let an auto-approved, retry-classified
+`git_fetch` execute model-authored code while every transport setting still read
+as valid.
+
+That forced configuration gates the transport and nothing else, and one
+repository-local key defeats every check built on it. `url.<base>.insteadOf`
+rewrites any URL beginning with the configured value to begin with `<base>`
+instead, and it rewrites a URL given on the command line exactly as it rewrites
+a stored remote. A model-written `url.<substitute>.insteadOf` whose value is the
+canonical URL therefore redirects the operation to `<substitute>` over ordinary
+HTTPS: the rewritten URL is HTTPS, so `protocol.allow=never` with
+`protocol.https.allow=always` admits it; the stored `remote.<name>.url` is
+untouched, so a check that reads it sees the canonical value; the substitute's
+hostname can stay inside the admitted transport set, so the restricted broker's
+hostname and SNI checks pass; and a public substitute needs no credential helper
+at all. Passing an explicit URL rather than a remote name closes none of it, and
+the rewrite table cannot be emptied the way the protocol and helper keys are:
+`insteadOf` is an unbounded keyspace whose bases the writer chooses, so
+command-line configuration can add entries to it but can never subtract them,
+and no highest-priority value clears it.
+
+The canonical repository binding therefore gets its own boundary, placed where
+the transport boundary cannot reach. Every invocation that reaches a remote
+first resolves the URL Git will actually use — for a remote name and for a
+literal URL alike — and requires it to equal, byte for byte, the canonical URL
+of the placement's repository entry. The runner does not compute that resolution
+itself; it asks Git for it, so the answer is the post-rewrite URL rather than an
+approximation of Git's rules. The version-one mechanism is `ls-remote --get-url`
+for a fetch or a literal URL and `remote get-url --push` for a push, each run
+under exactly the forced configuration, working directory, and repository
+selection its guarded invocation will use, so the resolution observes the same
+rewrite table, `remote.<name>.url`, and `remote.<name>.pushurl` that invocation
+would. A resolved URL that differs from the canonical value fails the operation
+before the network is touched and is reported as the mismatch it is; neither URL
+is ever treated as a correction of the other. Validating the stored
+`remote.<name>.url` remains defense in depth above this check rather than the
+check itself. Why: every pre-rewrite reading of the configuration reads exactly
+the value the model left in place to be read, so only the effective URL is
+evidence — and the canonical binding is the whole of what stands between an
+auto-approved `git_fetch` and content served by an attacker-chosen repository.
+
+What that check covers is worth stating exactly, because the root cause survives
+it. It resolves and then uses, and it holds because the two invocations are
+adjacent under the runner's one global execution permit with repository hooks
+disabled, so no model-authored code runs between them; admitting concurrent
+execution or repository hooks would break it, and preserving this adjacency is a
+condition on both. It binds the URL and not the bytes: fetching from the right
+repository is no claim about what that repository serves. It binds the URL and
+not everything else repository configuration reaches — configuration that
+changes what Git runs rather than where it connects, such as content filters
+applied on checkout or external diff and file-system-monitor programs, is
+neutralized only where one of the command-line settings above names it, which is
+a posture and not a closed set. Repository configuration is model-writable at
+all because `.git` sits inside the writable root; moving it outside the model's
+reach is the structural answer that would retire the class instead of
+enumerating it, and it is recorded as a design question under
+[tool safety](../open-questions.md#tool-safety) rather than settled here.
 
 A daemon release is accepted only for an exact retired placement revision —
 either superseded by replacement or terminal `RunnerAbandoned` — after no live
@@ -1292,6 +1387,25 @@ provisioned by the runner, so treating retirement as a reason to delete it would
 destroy a directory the system was only ever lent — and the release correlation
 has no identity it could name for it in any case, which makes an unconditional
 release unrepresentable on the wire as well as wrong.
+
+Reachability is the second precondition, and it is independent of the first: a
+release is enqueued only while the runner that holds the workspace is still
+connected. Retirement whose predecessor connection is already durably lost —
+heartbeat-loss replacement onto a different runner or onto a pending enrollment,
+and every abandonment — enqueues no release, and durable loss of a connection
+that still owed one retires that release as unowned. Either way the workspace
+takes the recorded-leak response above rather than an exchange no identity can
+complete. In version one the exchange therefore exists only for the checked
+same-runner re-enrollment, where registration reconciliation retired the
+placement while the connection and enrollment stayed healthy, so the runner
+holding the workspace is the same runner still on the wire
+([identity, enrollment, and registration](#identity-enrollment-and-registration)).
+Why: both of the frames that can retire a release require the holding runner to
+acknowledge deletion or report cleanup failure, and no cleanup authority resumes
+for a retired identity, so a release addressed to an unreachable runner is a
+durable record that is redelivered after every restart and that nothing can ever
+clear — the leak this design already accepts, converted into a queue entry that
+outlives it.
 
 For a workspace it did create, the runner journals the release before it does
 anything irreversible, following the same acknowledge-and-journal pattern that

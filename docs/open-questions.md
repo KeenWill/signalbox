@@ -407,6 +407,23 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   and the abuse and denial-of-service controls a larger bound requires. Recorded
   as a design question rather than a blocker; the truncating caps remain correct
   until it is answered.
+- **Repository configuration outside the model's writable root.** A session's
+  `.git` sits inside its writable root, so repository-local Git configuration is
+  model-writable, and version one answers that key by key: a forced transport
+  allowlist, an emptied credential-helper list, disabled repository hooks, and
+  an effective-URL check that binds every remote-reaching operation to its
+  canonical repository after Git's own rewrite expansion
+  ([runner protocol and placement](spec/runner-protocol.md#workspace-provisioning-and-recovery)).
+  That posture is not a closed set: configuration that changes what Git runs
+  rather than where it connects is neutralized only where a command-line setting
+  names it, so each new key is found rather than excluded. Putting the
+  administrative directory and its configuration outside the model's reach would
+  retire the whole class instead of enumerating it, and needs its own design —
+  where that directory lives, how every invocation names it so the worktree
+  pointer cannot be repointed, what the sandbox binds, and what a session's own
+  `git` usage sees. Recorded as a design question rather than a blocker; the
+  forced configuration and the effective-URL check remain the version-one
+  boundary.
 
 ## Identity, credentials, and resource governance
 

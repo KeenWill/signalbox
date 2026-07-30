@@ -268,17 +268,21 @@ genuinely larger than these caps need the storage architecture recorded under
 [Tool safety](../open-questions.md#tool-safety), not a wider constant here.
 
 Git `remote` is 1 through 64 ASCII bytes matching `[A-Za-z0-9][A-Za-z0-9._-]*`.
-Before network use its configured URL must equal a canonical URL from the runner
-repository map, and when the placement selected a credential profile that entry
-must name the exact granted profile. A placement that selected no profile
+Before network use, the URL Git will actually use for it — resolved by Git
+itself under the runner-forced configuration, so that every `insteadOf` and
+`pushurl` expansion is already applied — must equal a canonical URL from the
+runner repository map, and when the placement selected a credential profile that
+entry must name the exact granted profile. A placement that selected no profile
 performs no authenticated network operation: a repository entry that requires
 one fails `credential_unavailable` rather than resolving a profile the owner
 never chose. Every Git invocation additionally runs under the runner-forced
 effective configuration — neutralized system and global configuration, a
-command-line transport allowlist, and disabled repository hooks — specified by
+command-line transport allowlist, and disabled repository hooks — and that
+forced configuration is the transport boundary while the effective-URL check
+above is the repository boundary it cannot supply, both specified by
 [runner protocol and placement](runner-protocol.md#workspace-provisioning-and-recovery);
-validating the stored remote URL is defense in depth above that boundary, not
-the boundary itself. A `branch` is at most 255 bytes and is validated as the
+validating the stored remote URL is defense in depth above the pair, not a
+boundary itself. A `branch` is at most 255 bytes and is validated as the
 complete ref form `refs/heads/<input>` rather than as a branch shorthand, so a
 token Git would expand — `@{-1}` and its kin — is rejected instead of admitted
 as a literal name; a `ref` or refspec is 1 through 1,024 UTF-8 bytes, contains
@@ -326,7 +330,9 @@ The exact tools are:
   `{ "repository": checked_repository_key, "destination": path, "timeout_seconds": timeout }`.
   Destination must not exist and its parent must be real. The runner resolves
   the named entry's canonical URL and the granted credential profile that entry
-  names, clones without submodules into that destination, and returns
+  names, requires Git's own expansion of that URL under the forced configuration
+  to return it unchanged, clones without submodules into that destination, and
+  returns
   `{ "head": canonical_full_commit_hex | null, "branch": string | null, "unborn_branch": string | null }`.
   A populated repository returns its exact `head` with the nullable `branch` and
   a null `unborn_branch`. An empty repository is a success, not a failure and
