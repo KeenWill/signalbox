@@ -561,7 +561,7 @@ async fn insert_prepared(
             prefix: None,
             member_count,
             prefix_member_count: 0,
-            appended_entries: seed_snapshot.ordered_entries().collect(),
+            appended_entries: seed_snapshot.ordered_entries(),
         },
     )
     .await

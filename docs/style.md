@@ -213,12 +213,13 @@ does.
 
 ## Mechanical enforcement
 
-The workspace compiler configuration forbids unsafe code. Clippy denies
-panicking convenience paths (`expect`, `panic`, `unwrap`, `todo`,
-`unimplemented`, and `unreachable`) and denies `sqlx::Row::get` plus
-`get_unchecked`. These are whole-tree gates: CI promotes every warning to an
-error, so a lint is configured only when the whole workspace passes it at
-`deny`.
+The workspace compiler configuration forbids unsafe code. In production code,
+Clippy denies panicking convenience paths (`expect`, `panic`, `unwrap`, `todo`,
+`unimplemented`, and `unreachable`); the repository configuration permits
+`expect`, `panic`, and `unwrap` in test targets. Clippy also denies
+`sqlx::Row::get` plus `get_unchecked` in every target. These are whole-tree
+gates: CI promotes every warning to an error, so a lint is configured only when
+the whole workspace passes it at `deny`.
 
 `missing_docs` is not configured yet. A whole-workspace probe reports 425
 remaining violations:

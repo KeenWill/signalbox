@@ -446,7 +446,7 @@ impl ContextCompactionRepository {
                 prefix: Some(prepared.source_frontier),
                 member_count: result_count,
                 prefix_member_count: source_count,
-                appended_entries: vec![SemanticTranscriptEntryRef::from_source(
+                appended_entries: [SemanticTranscriptEntryRef::from_source(
                     prepared.session,
                     prepared.summary_entry,
                 )],

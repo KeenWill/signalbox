@@ -4703,13 +4703,13 @@ fn encode_attempt_end(
     }
 }
 
-pub(crate) struct SnapshotAppend {
+pub(crate) struct SnapshotAppend<I> {
     pub(crate) owning_session: SessionId,
     pub(crate) frontier: signalbox_domain::ContextFrontierId,
     pub(crate) prefix: Option<signalbox_domain::ContextFrontierId>,
     pub(crate) member_count: u64,
     pub(crate) prefix_member_count: u64,
-    pub(crate) appended_entries: Vec<SemanticTranscriptEntryRef>,
+    pub(crate) appended_entries: I,
 }
 
 pub(crate) enum SnapshotAppendError {
@@ -4718,10 +4718,13 @@ pub(crate) enum SnapshotAppendError {
     MemberPositionOverflow,
 }
 
-pub(crate) async fn insert_snapshot_append(
+pub(crate) async fn insert_snapshot_append<I>(
     connection: &mut PgConnection,
-    append: SnapshotAppend,
-) -> Result<(), SnapshotAppendError> {
+    append: SnapshotAppend<I>,
+) -> Result<(), SnapshotAppendError>
+where
+    I: IntoIterator<Item = SemanticTranscriptEntryRef>,
+{
     sqlx::query(
         "INSERT INTO context_frontier
             (owning_session_id, context_frontier_id,
@@ -4789,7 +4792,7 @@ pub(crate) async fn insert_snapshot(
                 .map(|prefix| prefix.snapshot()),
             member_count,
             prefix_member_count,
-            appended_entries: snapshot.appended_entries().collect(),
+            appended_entries: snapshot.appended_entries(),
         },
     )
     .await

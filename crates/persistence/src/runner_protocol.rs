@@ -431,7 +431,7 @@ impl RunnerProtocolStore {
             .await?;
         let event_ordinal = prior
             .as_ref()
-            .map(|row| decode_u64(row.try_get("event_ordinal")?))
+            .map(|row| decode_u64(row.decode_column("event_ordinal")?))
             .transpose()?
             .unwrap_or(0)
             .checked_add(1)
@@ -492,7 +492,7 @@ impl RunnerProtocolStore {
             let prior_row = prior
                 .as_ref()
                 .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
-            let prior_ordinal: Decimal = prior_row.try_get("event_ordinal")?;
+            let prior_ordinal: Decimal = prior_row.decode_column("event_ordinal")?;
             let snapshot = sqlx::query(
                 "SELECT registration_enrollment_id, registration_revision
                    FROM runner_session_placement_record
@@ -503,8 +503,8 @@ impl RunnerProtocolStore {
             .fetch_one(&mut *transaction)
             .await?;
             (
-                snapshot.try_get::<Option<Uuid>, _>("registration_enrollment_id")?,
-                snapshot.try_get::<Option<Decimal>, _>("registration_revision")?,
+                snapshot.decode_column::<Option<Uuid>>("registration_enrollment_id")?,
+                snapshot.decode_column::<Option<Decimal>>("registration_revision")?,
             )
         } else {
             stored_registration_identity(registration)
@@ -566,7 +566,7 @@ impl RunnerProtocolStore {
             .await?;
         let event_ordinal = prior
             .as_ref()
-            .map(|row| decode_u64(row.try_get("event_ordinal")?))
+            .map(|row| decode_u64(row.decode_column("event_ordinal")?))
             .transpose()?
             .unwrap_or(0)
             .checked_add(1)
@@ -657,7 +657,7 @@ impl RunnerProtocolStore {
             transaction.commit().await?;
             return Ok(None);
         };
-        let event_ordinal = decode_u64(row.try_get("event_ordinal")?)?;
+        let event_ordinal = decode_u64(row.decode_column("event_ordinal")?)?;
         let registration =
             load_placement_registration(transaction.as_mut(), &row, &self.catalog).await?;
         let grant = if registration.is_some() {
@@ -665,7 +665,8 @@ impl RunnerProtocolStore {
         } else {
             None
         };
-        let pinned_profile = row.try_get::<Option<String>, _>("pinned_credential_profile_name")?;
+        let pinned_profile =
+            row.decode_column::<Option<String>>("pinned_credential_profile_name")?;
         let profileless_tombstone = grant.as_ref().filter(|grant| {
             grant.state() == CredentialProfileGrantState::Revoked && pinned_profile.is_none()
         });
@@ -715,13 +716,13 @@ impl RunnerProtocolStore {
             return Ok(None);
         };
         let locked_origin = locked_placement
-            .try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?;
+            .decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?;
         let locked_runner =
-            locked_placement.try_get::<Option<Uuid>, _>("credential_grant_runner_id")?;
+            locked_placement.decode_column::<Option<Uuid>>("credential_grant_runner_id")?;
         let locked_revision =
-            locked_placement.try_get::<Option<Decimal>, _>("credential_grant_revision")?;
+            locked_placement.decode_column::<Option<Decimal>>("credential_grant_revision")?;
         let locked_profile =
-            locked_placement.try_get::<Option<String>, _>("pinned_credential_profile_name")?;
+            locked_placement.decode_column::<Option<String>>("pinned_credential_profile_name")?;
         if locked_runner != Some(runner.into_uuid())
             || locked_revision != Some(Decimal::from(revision.get()))
             || locked_profile.as_deref() != Some(revoked.profile().as_str())
@@ -864,17 +865,17 @@ impl RunnerProtocolStore {
             .fetch_optional(&mut *transaction)
             .await?;
             let exact = if let Some(row) = reserved {
-                row.try_get::<Uuid, _>("replacement_attempt_id")?
+                row.decode_column::<Uuid>("replacement_attempt_id")?
                     == replacement.attempt().into_uuid()
-                    && row.try_get::<Uuid, _>("replacement_session_id")?
+                    && row.decode_column::<Uuid>("replacement_session_id")?
                         == replacement.session().into_uuid()
-                    && row.try_get::<Uuid, _>("replacement_turn_id")?
+                    && row.decode_column::<Uuid>("replacement_turn_id")?
                         == replacement.turn().into_uuid()
-                    && row.try_get::<Uuid, _>("replacement_issuing_turn_attempt_id")?
+                    && row.decode_column::<Uuid>("replacement_issuing_turn_attempt_id")?
                         == replacement.issuing_attempt().into_uuid()
-                    && row.try_get::<Uuid, _>("replacement_request_id")?
+                    && row.decode_column::<Uuid>("replacement_request_id")?
                         == replacement.request().into_uuid()
-                    && row.try_get::<Decimal, _>("replacement_dispatch_generation")?
+                    && row.decode_column::<Decimal>("replacement_dispatch_generation")?
                         == Decimal::from(replacement.generation().as_u64())
             } else {
                 false
@@ -909,15 +910,15 @@ impl RunnerProtocolStore {
         row.map(|row| {
             Ok::<_, RunnerProtocolStoreError>(ToolAttemptDispatchCorrelation::reconstitute(
                 ToolAttemptDispatchCorrelationReconstitutionInput {
-                    session: session_id(row.try_get("replacement_session_id")?),
-                    turn: TurnId::from_uuid(row.try_get("replacement_turn_id")?),
+                    session: session_id(row.decode_column("replacement_session_id")?),
+                    turn: TurnId::from_uuid(row.decode_column("replacement_turn_id")?),
                     issuing_attempt: TurnAttemptId::from_uuid(
-                        row.try_get("replacement_issuing_turn_attempt_id")?,
+                        row.decode_column("replacement_issuing_turn_attempt_id")?,
                     ),
-                    request: ToolRequestId::from_uuid(row.try_get("replacement_request_id")?),
-                    attempt: tool_attempt_id(row.try_get("replacement_attempt_id")?),
+                    request: ToolRequestId::from_uuid(row.decode_column("replacement_request_id")?),
+                    attempt: tool_attempt_id(row.decode_column("replacement_attempt_id")?),
                     generation: decode_dispatch_generation(
-                        row.try_get("replacement_dispatch_generation")?,
+                        row.decode_column("replacement_dispatch_generation")?,
                     )?,
                 },
             ))
@@ -1128,8 +1129,8 @@ impl RunnerProtocolStore {
         };
         let registration = load_registration_in(
             transaction.as_mut(),
-            runner_enrollment_id(row.try_get("registration_enrollment_id")?),
-            decode_registration_revision(row.try_get("registration_revision")?)?,
+            runner_enrollment_id(row.decode_column("registration_enrollment_id")?),
+            decode_registration_revision(row.decode_column("registration_revision")?)?,
             None,
             &self.catalog,
         )
@@ -1166,24 +1167,24 @@ impl RunnerProtocolStore {
             .map(|row| {
                 let dispatch = ToolAttemptDispatchCorrelation::reconstitute(
                     ToolAttemptDispatchCorrelationReconstitutionInput {
-                        session: session_id(row.try_get("session_id")?),
-                        turn: TurnId::from_uuid(row.try_get("turn_id")?),
+                        session: session_id(row.decode_column("session_id")?),
+                        turn: TurnId::from_uuid(row.decode_column("turn_id")?),
                         issuing_attempt: TurnAttemptId::from_uuid(
-                            row.try_get("issuing_turn_attempt_id")?,
+                            row.decode_column("issuing_turn_attempt_id")?,
                         ),
-                        request: ToolRequestId::from_uuid(row.try_get("request_id")?),
-                        attempt: tool_attempt_id(row.try_get("attempt_id")?),
+                        request: ToolRequestId::from_uuid(row.decode_column("request_id")?),
+                        attempt: tool_attempt_id(row.decode_column("attempt_id")?),
                         generation: decode_dispatch_generation(
-                            row.try_get("dispatch_generation")?,
+                            row.decode_column("dispatch_generation")?,
                         )?,
                     },
                 );
                 Ok::<_, RunnerProtocolStoreError>(RunnerLeaseCorrelation {
-                    lease: runner_lease_id(row.try_get("lease_id")?),
-                    runner: runner_id(row.try_get("runner_id")?),
-                    tool: tool_name(row.try_get("tool_name")?)?,
+                    lease: runner_lease_id(row.decode_column("lease_id")?),
+                    runner: runner_id(row.decode_column("runner_id")?),
+                    tool: tool_name(row.decode_column("tool_name")?)?,
                     dispatch,
-                    generation: decode_generation(row.try_get("generation")?)?,
+                    generation: decode_generation(row.decode_column("generation")?)?,
                 })
             })
             .transpose()?;
@@ -1268,37 +1269,37 @@ async fn load_enrollment_in(
     .bind(enrollment.into_uuid())
     .fetch_all(&mut *connection)
     .await?;
-    if Decimal::from(class_rows.len()) != row.try_get::<Decimal, _>("allowed_class_count")? {
+    if Decimal::from(class_rows.len()) != row.decode_column::<Decimal>("allowed_class_count")? {
         return Err(RunnerProtocolCorruption::IncompleteInventory.into());
     }
     let audit_count = row
-        .try_get::<Option<Decimal>, _>("audit_allowed_class_count")?
+        .decode_column::<Option<Decimal>>("audit_allowed_class_count")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalAudit)?;
     if Decimal::from(audit_class_rows.len()) != audit_count {
         return Err(RunnerProtocolCorruption::IncompleteInventory.into());
     }
     let classes = decode_classes(&class_rows)?;
     let audit_classes = decode_classes(&audit_class_rows)?;
-    let state = decode_enrollment_state(row.try_get("state_kind")?)?;
+    let state = decode_enrollment_state(row.decode_column("state_kind")?)?;
     let audit_state = row
-        .try_get::<Option<String>, _>("audit_state_kind")?
+        .decode_column::<Option<String>>("audit_state_kind")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalAudit)?;
     let audit_state = decode_enrollment_state(&audit_state)?;
     let registration_revision = row
-        .try_get::<Option<Decimal>, _>("registration_revision")?
+        .decode_column::<Option<Decimal>>("registration_revision")?
         .map(decode_generation)
         .transpose()?;
     RunnerEnrollment::reconstitute(RunnerEnrollmentReconstitutionInput {
         enrollment,
-        recorded_enrollment: runner_enrollment_id(row.try_get("enrollment_id")?),
-        runner: runner_id(row.try_get("runner_id")?),
+        recorded_enrollment: runner_enrollment_id(row.decode_column("enrollment_id")?),
+        runner: runner_id(row.decode_column("runner_id")?),
         recorded_runner: runner_id(
-            row.try_get::<Option<Uuid>, _>("audit_runner_id")?
+            row.decode_column::<Option<Uuid>>("audit_runner_id")?
                 .ok_or(RunnerProtocolCorruption::MissingCanonicalAudit)?,
         ),
-        authentication: runner_authentication_id(row.try_get("authentication_reference_id")?),
+        authentication: runner_authentication_id(row.decode_column("authentication_reference_id")?),
         recorded_authentication: runner_authentication_id(
-            row.try_get::<Option<Uuid>, _>("audit_authentication_reference_id")?
+            row.decode_column::<Option<Uuid>>("audit_authentication_reference_id")?
                 .ok_or(RunnerProtocolCorruption::MissingCanonicalAudit)?,
         ),
         allowed_classes: classes,
@@ -1499,7 +1500,7 @@ async fn load_registration_in(
         .collect::<Result<Vec<_>, _>>()?;
     let mut profiles = Vec::with_capacity(profile_rows.len());
     for profile in profile_rows {
-        let name = profile_name(profile.try_get("credential_profile_name")?)?;
+        let name = profile_name(profile.decode_column("credential_profile_name")?)?;
         let approval_rows = sqlx::query(
             "SELECT tool_name, approval_kind
                FROM runner_registration_profile_approval
@@ -1518,8 +1519,8 @@ async fn load_registration_in(
             .iter()
             .map(|row| {
                 Ok((
-                    tool_name(row.try_get("tool_name")?)?,
-                    decode_approval(row.try_get("approval_kind")?)?,
+                    tool_name(row.decode_column("tool_name")?)?,
+                    decode_approval(row.decode_column("approval_kind")?)?,
                 ))
             })
             .collect::<Result<Vec<_>, RunnerProtocolStoreError>>()?;
@@ -1530,17 +1531,19 @@ async fn load_registration_in(
     }
     let workspaces = workspace_rows
         .iter()
-        .map(|row| decode_workspace(row.try_get("workspace_kind")?))
+        .map(|row| decode_workspace(row.decode_column("workspace_kind")?))
         .collect::<Result<BTreeSet<_>, _>>()?;
     let registration = ValidatedRunnerRegistration::reconstitute(
         authority,
         catalog,
         ValidatedRunnerRegistrationReconstitutionInput {
-            enrollment: runner_enrollment_id(row.try_get("enrollment_id")?),
+            enrollment: runner_enrollment_id(row.decode_column("enrollment_id")?),
             revision: RunnerGeneration::try_from_u64(revision.get())
                 .ok_or(RunnerProtocolCorruption::GenerationExhausted)?,
-            runner: runner_id(row.try_get("runner_id")?),
-            authentication: runner_authentication_id(row.try_get("authentication_reference_id")?),
+            runner: runner_id(row.decode_column("runner_id")?),
+            authentication: runner_authentication_id(
+                row.decode_column("authentication_reference_id")?,
+            ),
             classes,
             tools,
             profiles,
@@ -1568,8 +1571,8 @@ fn classify_placement_event(
             RunnerDomainError::InvalidState,
         ));
     };
-    let prior_revision = decode_generation(prior.try_get("placement_revision")?)?;
-    let prior_state: String = prior.try_get("state_kind")?;
+    let prior_revision = decode_generation(prior.decode_column("placement_revision")?)?;
+    let prior_state: String = prior.decode_column("state_kind")?;
     match (prior_state.as_str(), placement.state()) {
         ("unpinned", SessionRunnerPlacementState::Pinned(_))
             if placement.revision() == prior_revision =>
@@ -1618,9 +1621,9 @@ fn placement_grant_origin(
     };
     if let Some(prior) = prior {
         let prior_origin =
-            prior.try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?;
-        let prior_runner = prior.try_get::<Option<Uuid>, _>("credential_grant_runner_id")?;
-        let prior_revision = prior.try_get::<Option<Decimal>, _>("credential_grant_revision")?;
+            prior.decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?;
+        let prior_runner = prior.decode_column::<Option<Uuid>>("credential_grant_runner_id")?;
+        let prior_revision = prior.decode_column::<Option<Decimal>>("credential_grant_revision")?;
         match (prior_origin, prior_runner, prior_revision) {
             (Some(origin), Some(runner), Some(revision)) => {
                 let revision = decode_generation(revision)?;
@@ -1786,8 +1789,8 @@ async fn insert_grant_if_new(
         .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
         historical_registration = load_registration_in(
             transaction.as_mut(),
-            runner_enrollment_id(row.try_get("registration_enrollment_id")?),
-            decode_registration_revision(row.try_get("registration_revision")?)?,
+            runner_enrollment_id(row.decode_column("registration_enrollment_id")?),
+            decode_registration_revision(row.decode_column("registration_revision")?)?,
             None,
             catalog,
         )
@@ -1862,23 +1865,23 @@ async fn insert_grant_if_new(
         let mut approvals = BTreeMap::new();
         for tool_row in tool_rows {
             approvals.insert(
-                tool_name(tool_row.try_get("tool_name")?)?,
-                decode_approval(tool_row.try_get("approval_kind")?)?,
+                tool_name(tool_row.decode_column("tool_name")?)?,
+                decode_approval(tool_row.decode_column("approval_kind")?)?,
             );
         }
         let expected_approvals: BTreeMap<_, _> = grant
             .approvals()
             .map(|(tool, approval)| (tool.clone(), approval))
             .collect();
-        let stored_state = if row.try_get::<bool, _>("revoked")? {
-            CredentialProfileGrantState::Revoked
-        } else {
-            CredentialProfileGrantState::Active
-        };
-        if row.try_get::<String, _>("credential_profile_name")? != grant.profile().as_str()
-            || runner_enrollment_id(row.try_get("registration_enrollment_id")?)
+        let stored_state =
+            match decode_stored_grant_revocation(row.decode_column::<bool>("revoked")?) {
+                StoredGrantRevocation::Active => CredentialProfileGrantState::Active,
+                StoredGrantRevocation::Revoked => CredentialProfileGrantState::Revoked,
+            };
+        if row.decode_column::<String>("credential_profile_name")? != grant.profile().as_str()
+            || runner_enrollment_id(row.decode_column("registration_enrollment_id")?)
                 != grant_registration.registration.enrollment()
-            || decode_registration_revision(row.try_get("registration_revision")?)?
+            || decode_registration_revision(row.decode_column("registration_revision")?)?
                 != grant_registration.revision
             || approvals != expected_approvals
             || stored_state != grant.state()
@@ -1897,13 +1900,13 @@ async fn insert_grant_if_new(
     let prior_runner: Option<Uuid> = match (prior, prior_placement) {
         (Some(expected_revision), Some(prior_placement)) => {
             let runner = prior_placement
-                .try_get::<Option<Uuid>, _>("credential_grant_runner_id")?
+                .decode_column::<Option<Uuid>>("credential_grant_runner_id")?
                 .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
             let origin = prior_placement
-                .try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?
+                .decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?
                 .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
             let revision = prior_placement
-                .try_get::<Option<Decimal>, _>("credential_grant_revision")?
+                .decode_column::<Option<Decimal>>("credential_grant_revision")?
                 .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
             if origin != grant_origin || revision != expected_revision {
                 return Err(RunnerProtocolCorruption::CrossWiredReference.into());
@@ -1996,8 +1999,8 @@ async fn load_placement_registration(
     row: &PgRow,
     catalog: &RunnerCatalog,
 ) -> Result<Option<StoredValidatedRunnerRegistration>, RunnerProtocolStoreError> {
-    let enrollment = row.try_get::<Option<Uuid>, _>("registration_enrollment_id")?;
-    let revision = row.try_get::<Option<Decimal>, _>("registration_revision")?;
+    let enrollment = row.decode_column::<Option<Uuid>>("registration_enrollment_id")?;
+    let revision = row.decode_column::<Option<Decimal>>("registration_revision")?;
     match (enrollment, revision) {
         (None, None) => Ok(None),
         (Some(enrollment), Some(revision)) => load_registration_in(
@@ -2021,18 +2024,18 @@ async fn decode_placement(
     registration: Option<&ValidatedRunnerRegistration>,
     profileless_tombstone: Option<&CredentialProfileGrant>,
 ) -> Result<SessionRunnerPlacement, RunnerProtocolStoreError> {
-    let session = session_id(row.try_get("session_id")?);
-    let event = row.try_get::<Decimal, _>("event_ordinal")?;
+    let session = session_id(row.decode_column("session_id")?);
+    let event = row.decode_column::<Decimal>("event_ordinal")?;
     let request = SessionRunnerPlacementRequest {
         selector: decode_selector(row)?,
         working_directory: decode_directory(row)?,
         credential_profile: row
-            .try_get::<Option<String>, _>("requested_credential_profile_name")?
+            .decode_column::<Option<String>>("requested_credential_profile_name")?
             .map(profile_name)
             .transpose()?,
         workspace: decode_workspace_requirement(row)?,
     };
-    let state_kind: String = row.try_get("state_kind")?;
+    let state_kind: String = row.decode_column("state_kind")?;
     let state = if state_kind == "unpinned" {
         SessionRunnerPlacementState::Unpinned
     } else {
@@ -2049,26 +2052,29 @@ async fn decode_placement(
         require_count(row, "pinned_tool_count", tool_rows.len())?;
         let tools = tool_rows
             .iter()
-            .map(|row| tool_name(row.try_get("tool_name")?))
+            .map(|row| tool_name(row.decode_column("tool_name")?))
             .collect::<Result<BTreeSet<_>, _>>()?;
         let mut runner_required_tools = BTreeSet::new();
         for row in &tool_rows {
-            if row.try_get::<bool, _>("runner_required")? {
-                runner_required_tools.insert(tool_name(row.try_get("tool_name")?)?);
+            match decode_stored_runner_requirement(row.decode_column::<bool>("runner_required")?) {
+                StoredRunnerRequirement::Optional => {}
+                StoredRunnerRequirement::Required => {
+                    runner_required_tools.insert(tool_name(row.decode_column("tool_name")?)?);
+                }
             }
         }
         let runner = row
-            .try_get::<Option<Uuid>, _>("pinned_runner_id")?
+            .decode_column::<Option<Uuid>>("pinned_runner_id")?
             .map(runner_id)
             .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
         let directory = row
-            .try_get::<Option<String>, _>("pinned_working_directory")?
+            .decode_column::<Option<String>>("pinned_working_directory")?
             .map(working_directory)
             .transpose()?
             .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
         let workspace = match (
-            row.try_get::<Option<String>, _>("workspace_repository_key")?,
-            row.try_get::<Option<String>, _>("workspace_working_directory")?,
+            row.decode_column::<Option<String>>("workspace_repository_key")?,
+            row.decode_column::<Option<String>>("workspace_working_directory")?,
         ) {
             (None, None) => None,
             (Some(repository), Some(workspace_directory)) => Some(ProvisionedWorkspace {
@@ -2083,7 +2089,7 @@ async fn decode_placement(
             runner,
             working_directory: directory,
             credential_profile: row
-                .try_get::<Option<String>, _>("pinned_credential_profile_name")?
+                .decode_column::<Option<String>>("pinned_credential_profile_name")?
                 .map(profile_name)
                 .transpose()?,
             grant_lineage: decode_grant_lineage(row)?,
@@ -2100,7 +2106,7 @@ async fn decode_placement(
     SessionRunnerPlacement::reconstitute(
         SessionRunnerPlacementReconstitutionInput {
             session,
-            revision: decode_generation(row.try_get("placement_revision")?)?,
+            revision: decode_generation(row.decode_column("placement_revision")?)?,
             request,
             state,
         },
@@ -2115,9 +2121,9 @@ fn decode_grant_lineage(
     placement: &PgRow,
 ) -> Result<Option<RunnerCredentialGrantLineage>, RunnerProtocolStoreError> {
     let origin =
-        placement.try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?;
-    let revision = placement.try_get::<Option<Decimal>, _>("credential_grant_revision")?;
-    let runner = placement.try_get::<Option<Uuid>, _>("credential_grant_runner_id")?;
+        placement.decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?;
+    let revision = placement.decode_column::<Option<Decimal>>("credential_grant_revision")?;
+    let runner = placement.decode_column::<Option<Uuid>>("credential_grant_runner_id")?;
     match (origin, runner, revision) {
         (None, None, None) => Ok(None),
         (Some(_), Some(runner), Some(revision)) => Ok(Some(RunnerCredentialGrantLineage {
@@ -2134,16 +2140,16 @@ async fn load_grant_for_placement(
     catalog: &RunnerCatalog,
 ) -> Result<Option<CredentialProfileGrant>, RunnerProtocolStoreError> {
     let origin =
-        placement.try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?;
-    let revision = placement.try_get::<Option<Decimal>, _>("credential_grant_revision")?;
-    let runner = placement.try_get::<Option<Uuid>, _>("credential_grant_runner_id")?;
+        placement.decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?;
+    let revision = placement.decode_column::<Option<Decimal>>("credential_grant_revision")?;
+    let runner = placement.decode_column::<Option<Uuid>>("credential_grant_runner_id")?;
     if origin.is_none() && revision.is_none() && runner.is_none() {
         return Ok(None);
     }
     let (Some(origin), Some(revision), Some(runner)) = (origin, revision, runner) else {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     };
-    let session = session_id(placement.try_get("session_id")?);
+    let session = session_id(placement.decode_column("session_id")?);
     let revision = decode_generation(revision)?;
     let row = sqlx::query(
         "SELECT grant_record.*,
@@ -2171,9 +2177,9 @@ async fn load_grant_for_placement(
     .fetch_optional(&mut *connection)
     .await?
     .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
-    let profile = row.try_get::<String, _>("credential_profile_name")?;
+    let profile = row.decode_column::<String>("credential_profile_name")?;
     let pinned_profile =
-        placement.try_get::<Option<String>, _>("pinned_credential_profile_name")?;
+        placement.decode_column::<Option<String>>("pinned_credential_profile_name")?;
     if pinned_profile
         .as_ref()
         .is_some_and(|pinned| pinned != &profile)
@@ -2182,8 +2188,8 @@ async fn load_grant_for_placement(
     }
     let grant_registration = load_registration_in(
         connection,
-        runner_enrollment_id(row.try_get("registration_enrollment_id")?),
-        decode_registration_revision(row.try_get("registration_revision")?)?,
+        runner_enrollment_id(row.decode_column("registration_enrollment_id")?),
+        decode_registration_revision(row.decode_column("registration_revision")?)?,
         None,
         catalog,
     )
@@ -2208,9 +2214,12 @@ async fn load_grant_for_placement(
     let mut tools = BTreeSet::new();
     let mut approvals = BTreeMap::new();
     for tool_row in tool_rows {
-        let tool = tool_name(tool_row.try_get("tool_name")?)?;
+        let tool = tool_name(tool_row.decode_column("tool_name")?)?;
         tools.insert(tool.clone());
-        approvals.insert(tool, decode_approval(tool_row.try_get("approval_kind")?)?);
+        approvals.insert(
+            tool,
+            decode_approval(tool_row.decode_column("approval_kind")?)?,
+        );
     }
     CredentialProfileGrant::reconstitute(
         CredentialProfileGrantReconstitutionInput {
@@ -2220,10 +2229,9 @@ async fn load_grant_for_placement(
             profile: profile_name(profile)?,
             tools,
             approvals,
-            state: if row.try_get::<bool, _>("revoked")? {
-                CredentialProfileGrantState::Revoked
-            } else {
-                CredentialProfileGrantState::Active
+            state: match decode_stored_grant_revocation(row.decode_column::<bool>("revoked")?) {
+                StoredGrantRevocation::Active => CredentialProfileGrantState::Active,
+                StoredGrantRevocation::Revoked => CredentialProfileGrantState::Revoked,
             },
         },
         session,
@@ -2257,7 +2265,7 @@ async fn append_lease_event_in(
         }
         Some(row) => {
             require_stored_lease_identity(&row, lease)?;
-            decode_u64(row.try_get("event_ordinal")?)?
+            decode_u64(row.decode_column("event_ordinal")?)?
                 .checked_add(1)
                 .ok_or(RunnerProtocolCorruption::GenerationExhausted)?
         }
@@ -2304,15 +2312,15 @@ async fn insert_lease_generation(
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?;
-    if canonical_dispatch.try_get::<Uuid, _>("session_id")?
+    if canonical_dispatch.decode_column::<Uuid>("session_id")?
         != correlation.dispatch.session().into_uuid()
-        || canonical_dispatch.try_get::<Uuid, _>("turn_id")?
+        || canonical_dispatch.decode_column::<Uuid>("turn_id")?
             != correlation.dispatch.turn().into_uuid()
-        || canonical_dispatch.try_get::<Uuid, _>("issuing_turn_attempt_id")?
+        || canonical_dispatch.decode_column::<Uuid>("issuing_turn_attempt_id")?
             != correlation.dispatch.issuing_attempt().into_uuid()
-        || canonical_dispatch.try_get::<Uuid, _>("request_id")?
+        || canonical_dispatch.decode_column::<Uuid>("request_id")?
             != correlation.dispatch.request().into_uuid()
-        || canonical_dispatch.try_get::<Decimal, _>("dispatch_generation")?
+        || canonical_dispatch.decode_column::<Decimal>("dispatch_generation")?
             != Decimal::from(correlation.dispatch.generation().as_u64())
     {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
@@ -2323,13 +2331,13 @@ async fn insert_lease_generation(
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
     let placement_runner = placement
-        .try_get::<Option<Uuid>, _>("pinned_runner_id")?
+        .decode_column::<Option<Uuid>>("pinned_runner_id")?
         .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
     if placement_runner != lease.runner().into_uuid() {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
     let enrollment = placement
-        .try_get::<Option<Uuid>, _>("registration_enrollment_id")?
+        .decode_column::<Option<Uuid>>("registration_enrollment_id")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
     let enrollment_state: Option<String> = sqlx::query_scalar(RUNNER_LEASE_ENROLLMENT_AUTHORITY)
         .bind(enrollment)
@@ -2342,7 +2350,7 @@ async fn insert_lease_generation(
     let authorization_origin = match authorization {
         Some(_) => Some(
             placement
-                .try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?
+                .decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?
                 .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?,
         ),
         None => None,
@@ -2380,15 +2388,15 @@ async fn insert_lease_generation(
     .bind(lease.runner().into_uuid())
     .bind(lease.tool().as_str())
     .bind(encode_effect(lease.effect()))
-    .bind(placement.try_get::<Decimal, _>("event_ordinal")?)
+    .bind(placement.decode_column::<Decimal>("event_ordinal")?)
     .bind(
         placement
-            .try_get::<Option<Uuid>, _>("registration_enrollment_id")?
+            .decode_column::<Option<Uuid>>("registration_enrollment_id")?
             .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?,
     )
     .bind(
         placement
-            .try_get::<Option<Decimal>, _>("registration_revision")?
+            .decode_column::<Option<Decimal>>("registration_revision")?
             .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?,
     )
     .bind(authorization.map(|authorization| authorization.profile.as_str()))
@@ -2412,69 +2420,70 @@ fn decode_lease(
     row: &PgRow,
     registration: &ValidatedRunnerRegistration,
 ) -> Result<RunnerLease, RunnerProtocolStoreError> {
-    let lease = runner_lease_id(row.try_get("lease_id")?);
-    let attempt = tool_attempt_id(row.try_get("attempt_id")?);
-    let session = session_id(row.try_get("session_id")?);
-    let runner = runner_id(row.try_get("runner_id")?);
-    let tool = tool_name(row.try_get("tool_name")?)?;
-    let generation = decode_generation(row.try_get("generation")?)?;
+    let lease = runner_lease_id(row.decode_column("lease_id")?);
+    let attempt = tool_attempt_id(row.decode_column("attempt_id")?);
+    let session = session_id(row.decode_column("session_id")?);
+    let runner = runner_id(row.decode_column("runner_id")?);
+    let tool = tool_name(row.decode_column("tool_name")?)?;
+    let generation = decode_generation(row.decode_column("generation")?)?;
     let canonical_tool = row
-        .try_get::<Option<String>, _>("canonical_attempt_tool")?
+        .decode_column::<Option<String>>("canonical_attempt_tool")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?;
     let dispatch = ToolAttemptDispatchCorrelation::reconstitute(
         ToolAttemptDispatchCorrelationReconstitutionInput {
             session,
             turn: TurnId::from_uuid(
-                row.try_get::<Option<Uuid>, _>("canonical_attempt_turn")?
+                row.decode_column::<Option<Uuid>>("canonical_attempt_turn")?
                     .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?,
             ),
             issuing_attempt: TurnAttemptId::from_uuid(
-                row.try_get::<Option<Uuid>, _>("canonical_issuing_attempt")?
+                row.decode_column::<Option<Uuid>>("canonical_issuing_attempt")?
                     .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?,
             ),
             request: ToolRequestId::from_uuid(
-                row.try_get::<Option<Uuid>, _>("canonical_attempt_request")?
+                row.decode_column::<Option<Uuid>>("canonical_attempt_request")?
                     .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?,
             ),
             attempt,
             generation: decode_dispatch_generation(
-                row.try_get::<Option<Decimal>, _>("canonical_dispatch_generation")?
+                row.decode_column::<Option<Decimal>>("canonical_dispatch_generation")?
                     .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?,
             )?,
         },
     );
     let canonical_runner = row
-        .try_get::<Option<Uuid>, _>("canonical_placement_runner")?
+        .decode_column::<Option<Uuid>>("canonical_placement_runner")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
     let canonical_placement_state = row
-        .try_get::<Option<String>, _>("canonical_placement_state")?
+        .decode_column::<Option<String>>("canonical_placement_state")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
     let canonical_registration_enrollment = row
-        .try_get::<Option<Uuid>, _>("canonical_registration_enrollment")?
+        .decode_column::<Option<Uuid>>("canonical_registration_enrollment")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
     let canonical_registration_revision = row
-        .try_get::<Option<Decimal>, _>("canonical_registration_revision")?
+        .decode_column::<Option<Decimal>>("canonical_registration_revision")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
     if canonical_placement_state != "pinned"
         || canonical_runner != runner.into_uuid()
         || canonical_registration_enrollment
-            != row.try_get::<Uuid, _>("registration_enrollment_id")?
-        || canonical_registration_revision != row.try_get::<Decimal, _>("registration_revision")?
+            != row.decode_column::<Uuid>("registration_enrollment_id")?
+        || canonical_registration_revision
+            != row.decode_column::<Decimal>("registration_revision")?
     {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
     let authorization = match (
-        row.try_get::<Option<String>, _>("credential_profile_name")?,
-        row.try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?,
-        row.try_get::<Option<Decimal>, _>("credential_grant_revision")?,
-        row.try_get::<Option<String>, _>("credential_approval_kind")?,
+        row.decode_column::<Option<String>>("credential_profile_name")?,
+        row.decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?,
+        row.decode_column::<Option<Decimal>>("credential_grant_revision")?,
+        row.decode_column::<Option<String>>("credential_approval_kind")?,
     ) {
         (None, None, None, None) => {
             if row
-                .try_get::<Option<String>, _>("canonical_grant_tool")?
+                .decode_column::<Option<String>>("canonical_grant_tool")?
                 .is_some()
                 || row
-                    .try_get::<Option<String>, _>("canonical_grant_approval")?
+                    .decode_column::<Option<String>>("canonical_grant_approval")?
                     .is_some()
             {
                 return Err(RunnerProtocolCorruption::CrossWiredReference.into());
@@ -2483,10 +2492,10 @@ fn decode_lease(
         }
         (Some(profile), Some(_), Some(grant_revision), Some(approval)) => {
             let canonical_grant_tool = row
-                .try_get::<Option<String>, _>("canonical_grant_tool")?
+                .decode_column::<Option<String>>("canonical_grant_tool")?
                 .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
             let canonical_grant_approval = row
-                .try_get::<Option<String>, _>("canonical_grant_approval")?
+                .decode_column::<Option<String>>("canonical_grant_approval")?
                 .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
             if canonical_grant_tool != tool.as_str() || canonical_grant_approval != approval {
                 return Err(RunnerProtocolCorruption::CrossWiredReference.into());
@@ -2508,10 +2517,10 @@ fn decode_lease(
             dispatch,
             runner,
             tool: tool.clone(),
-            effect: decode_effect(row.try_get("effect_class")?)?,
+            effect: decode_effect(row.decode_column("effect_class")?)?,
             credential_authorization: authorization.clone(),
             generation,
-            state: decode_lease_state(row.try_get("state_kind")?)?,
+            state: decode_lease_state(row.decode_column("state_kind")?)?,
             recorded_correlation: RunnerLeaseCorrelation {
                 lease,
                 runner: runner_id(canonical_runner),
@@ -2520,9 +2529,9 @@ fn decode_lease(
                 generation,
             },
             recorded_session: session,
-            recorded_effect: decode_effect(row.try_get("effect_class")?)?,
+            recorded_effect: decode_effect(row.decode_column("effect_class")?)?,
             recorded_credential_authorization: authorization.clone(),
-            recorded_state: decode_lease_state(row.try_get("state_kind")?)?,
+            recorded_state: decode_lease_state(row.decode_column("state_kind")?)?,
             retry_prepared: false,
             recorded_retry_prepared: false,
         },
@@ -2621,10 +2630,10 @@ fn require_stored_lease_identity(
 ) -> Result<(), RunnerProtocolStoreError> {
     let correlation = lease.correlation();
     let stored_authorization = match (
-        row.try_get::<Option<String>, _>("credential_profile_name")?,
-        row.try_get::<Option<Decimal>, _>("credential_grant_lineage_origin_ordinal")?,
-        row.try_get::<Option<Decimal>, _>("credential_grant_revision")?,
-        row.try_get::<Option<String>, _>("credential_approval_kind")?,
+        row.decode_column::<Option<String>>("credential_profile_name")?,
+        row.decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?,
+        row.decode_column::<Option<Decimal>>("credential_grant_revision")?,
+        row.decode_column::<Option<String>>("credential_approval_kind")?,
     ) {
         (None, None, None, None) => None,
         (Some(profile), Some(_), Some(revision), Some(approval)) => {
@@ -2639,21 +2648,21 @@ fn require_stored_lease_identity(
         }
         _ => return Err(RunnerProtocolCorruption::CrossWiredReference.into()),
     };
-    if row.try_get::<Uuid, _>("attempt_id")? != correlation.dispatch.attempt().into_uuid()
-        || row.try_get::<Uuid, _>("canonical_dispatch_session")?
+    if row.decode_column::<Uuid>("attempt_id")? != correlation.dispatch.attempt().into_uuid()
+        || row.decode_column::<Uuid>("canonical_dispatch_session")?
             != correlation.dispatch.session().into_uuid()
-        || row.try_get::<Uuid, _>("canonical_dispatch_turn")?
+        || row.decode_column::<Uuid>("canonical_dispatch_turn")?
             != correlation.dispatch.turn().into_uuid()
-        || row.try_get::<Uuid, _>("canonical_dispatch_issuing_attempt")?
+        || row.decode_column::<Uuid>("canonical_dispatch_issuing_attempt")?
             != correlation.dispatch.issuing_attempt().into_uuid()
-        || row.try_get::<Uuid, _>("canonical_dispatch_request")?
+        || row.decode_column::<Uuid>("canonical_dispatch_request")?
             != correlation.dispatch.request().into_uuid()
-        || row.try_get::<Decimal, _>("canonical_dispatch_generation")?
+        || row.decode_column::<Decimal>("canonical_dispatch_generation")?
             != Decimal::from(correlation.dispatch.generation().as_u64())
-        || row.try_get::<Uuid, _>("session_id")? != lease.session().into_uuid()
-        || row.try_get::<Uuid, _>("runner_id")? != correlation.runner.into_uuid()
-        || row.try_get::<String, _>("tool_name")? != correlation.tool.as_str()
-        || decode_effect(row.try_get("effect_class")?)? != lease.effect()
+        || row.decode_column::<Uuid>("session_id")? != lease.session().into_uuid()
+        || row.decode_column::<Uuid>("runner_id")? != correlation.runner.into_uuid()
+        || row.decode_column::<String>("tool_name")? != correlation.tool.as_str()
+        || decode_effect(row.decode_column("effect_class")?)? != lease.effect()
         || stored_authorization.as_ref() != lease.credential_authorization()
     {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
@@ -2739,15 +2748,15 @@ fn encode_workspace_requirement(
 }
 
 fn decode_selector(row: &PgRow) -> Result<RunnerSelector, RunnerProtocolStoreError> {
-    let kind: String = row.try_get("selector_kind")?;
+    let kind: String = row.decode_column("selector_kind")?;
     match kind.as_str() {
         "identity" => row
-            .try_get::<Option<Uuid>, _>("selector_runner_id")?
+            .decode_column::<Option<Uuid>>("selector_runner_id")?
             .map(runner_id)
             .map(RunnerSelector::Identity)
             .ok_or(RunnerProtocolCorruption::InvalidEncoding.into()),
         "capability_class" => row
-            .try_get::<Option<String>, _>("selector_capability_class")?
+            .decode_column::<Option<String>>("selector_capability_class")?
             .map(capability_class)
             .transpose()?
             .map(RunnerSelector::CapabilityClass)
@@ -2757,11 +2766,11 @@ fn decode_selector(row: &PgRow) -> Result<RunnerSelector, RunnerProtocolStoreErr
 }
 
 fn decode_directory(row: &PgRow) -> Result<WorkingDirectorySelection, RunnerProtocolStoreError> {
-    let kind: String = row.try_get("directory_selection_kind")?;
+    let kind: String = row.decode_column("directory_selection_kind")?;
     match kind.as_str() {
         "runner_default" => Ok(WorkingDirectorySelection::RunnerDefault),
         "exact" => row
-            .try_get::<Option<String>, _>("requested_working_directory")?
+            .decode_column::<Option<String>>("requested_working_directory")?
             .map(working_directory)
             .transpose()?
             .map(WorkingDirectorySelection::Exact)
@@ -2773,11 +2782,11 @@ fn decode_directory(row: &PgRow) -> Result<WorkingDirectorySelection, RunnerProt
 fn decode_workspace_requirement(
     row: &PgRow,
 ) -> Result<WorkspaceRequirement, RunnerProtocolStoreError> {
-    let kind: String = row.try_get("workspace_requirement_kind")?;
+    let kind: String = row.decode_column("workspace_requirement_kind")?;
     match kind.as_str() {
         "none" => Ok(WorkspaceRequirement::None),
         "repository_worktree" => row
-            .try_get::<Option<String>, _>("requested_repository_key")?
+            .decode_column::<Option<String>>("requested_repository_key")?
             .map(repository_key)
             .transpose()?
             .map(|repository| WorkspaceRequirement::RepositoryWorktree { repository })
@@ -2821,15 +2830,15 @@ fn encode_loci(loci: &ToolAdmissibleLoci) -> Result<EncodedLoci<'_>, RunnerProto
 
 fn decode_tool_declaration(row: &PgRow) -> Result<RunnerToolDeclaration, RunnerProtocolStoreError> {
     let selector = decode_selector(row)?;
-    let loci: String = row.try_get("loci_kind")?;
+    let loci: String = row.decode_column("loci_kind")?;
     let loci = match loci.as_str() {
         "runner_only" => ToolAdmissibleLoci::RunnerOnly { selector },
         "daemon_or_runner" => ToolAdmissibleLoci::DaemonOrRunner { selector },
         _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
     };
-    let stored_schema: String = row.try_get("model_input_schema")?;
+    let stored_schema: String = row.decode_column("model_input_schema")?;
     let model = RunnerToolModelDefinition::try_new(
-        row.try_get("model_description")?,
+        row.decode_column("model_description")?,
         stored_schema.clone(),
     )
     .map_err(RunnerProtocolStoreError::Domain)?;
@@ -2837,10 +2846,10 @@ fn decode_tool_declaration(row: &PgRow) -> Result<RunnerToolDeclaration, RunnerP
         return Err(RunnerProtocolCorruption::InvalidEncoding.into());
     }
     Ok(RunnerToolDeclaration::new(
-        tool_name(row.try_get("tool_name")?)?,
+        tool_name(row.decode_column("tool_name")?)?,
         model,
-        decode_permission(row.try_get("permission_kind")?)?,
-        decode_effect(row.try_get("effect_class")?)?,
+        decode_permission(row.decode_column("permission_kind")?)?,
+        decode_effect(row.decode_column("effect_class")?)?,
         loci,
     ))
 }
@@ -2940,7 +2949,7 @@ fn decode_classes(
     rows: &[PgRow],
 ) -> Result<BTreeSet<RunnerCapabilityClass>, RunnerProtocolStoreError> {
     rows.iter()
-        .map(|row| capability_class(row.try_get("capability_class")?))
+        .map(|row| capability_class(row.decode_column("capability_class")?))
         .collect()
 }
 
@@ -2964,8 +2973,12 @@ fn tool_name(value: String) -> Result<ToolName, RunnerProtocolStoreError> {
     ToolName::try_new(value).map_err(|_| RunnerProtocolCorruption::InvalidEncoding.into())
 }
 
-fn require_count(row: &PgRow, column: &str, actual: usize) -> Result<(), RunnerProtocolStoreError> {
-    if row.try_get::<Decimal, _>(column)? == Decimal::from(actual) {
+fn require_count(
+    row: &PgRow,
+    column: &'static str,
+    actual: usize,
+) -> Result<(), RunnerProtocolStoreError> {
+    if row.decode_column::<Decimal>(column)? == Decimal::from(actual) {
         Ok(())
     } else {
         Err(RunnerProtocolCorruption::IncompleteInventory.into())
@@ -3029,6 +3042,59 @@ fn classify_mutating_commit_error(error: sqlx::Error) -> RunnerProtocolStoreErro
     }
 }
 
+trait RunnerProtocolRow {
+    fn decode_column<'row, T>(
+        &'row self,
+        column: &'static str,
+    ) -> Result<T, RunnerProtocolStoreError>
+    where
+        T: sqlx::Decode<'row, Postgres> + sqlx::Type<Postgres>;
+}
+
+impl RunnerProtocolRow for PgRow {
+    fn decode_column<'row, T>(
+        &'row self,
+        column: &'static str,
+    ) -> Result<T, RunnerProtocolStoreError>
+    where
+        T: sqlx::Decode<'row, Postgres> + sqlx::Type<Postgres>,
+    {
+        match Row::try_get(self, column) {
+            Ok(value) => Ok(value),
+            Err(sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_)) => {
+                Err(RunnerProtocolCorruption::InvalidColumn(column).into())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StoredGrantRevocation {
+    Active,
+    Revoked,
+}
+
+const fn decode_stored_grant_revocation(value: bool) -> StoredGrantRevocation {
+    match value {
+        false => StoredGrantRevocation::Active,
+        true => StoredGrantRevocation::Revoked,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StoredRunnerRequirement {
+    Optional,
+    Required,
+}
+
+const fn decode_stored_runner_requirement(value: bool) -> StoredRunnerRequirement {
+    match value {
+        false => StoredRunnerRequirement::Optional,
+        true => StoredRunnerRequirement::Required,
+    }
+}
+
 const fn runner_enrollment_id(value: Uuid) -> RunnerEnrollmentId {
     RunnerEnrollmentId::from_uuid(value)
 }
@@ -3072,6 +3138,8 @@ pub enum RunnerProtocolCorruption {
     IncompleteInventory,
     /// Correlated durable records identify different domain values.
     CrossWiredReference,
+    /// A projected column cannot decode to its expected Rust type.
+    InvalidColumn(&'static str),
     /// A stored scalar cannot construct its closed domain value.
     InvalidEncoding,
     /// A durable generation cannot advance without overflow.
@@ -3080,19 +3148,42 @@ pub enum RunnerProtocolCorruption {
 
 impl fmt::Display for RunnerProtocolCorruption {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
-            Self::MissingCanonicalEnrollment => "canonical runner enrollment is missing",
-            Self::MissingCanonicalAudit => "canonical runner audit evidence is missing",
-            Self::MissingCanonicalRegistration => "canonical runner registration is missing",
-            Self::MissingCanonicalPlacement => "canonical runner placement is missing",
-            Self::MissingCanonicalGrant => "canonical credential grant is missing",
-            Self::MissingCanonicalAttempt => "canonical physical tool attempt is missing",
-            Self::IncompleteInventory => "stored runner inventory is incomplete",
-            Self::CrossWiredReference => "stored runner references are cross-wired",
-            Self::InvalidEncoding => "stored runner encoding is invalid",
-            Self::GenerationExhausted => "stored runner generation is exhausted",
-        };
-        formatter.write_str(message)
+        match self {
+            Self::MissingCanonicalEnrollment => {
+                formatter.write_str("canonical runner enrollment is missing")
+            }
+            Self::MissingCanonicalAudit => {
+                formatter.write_str("canonical runner audit evidence is missing")
+            }
+            Self::MissingCanonicalRegistration => {
+                formatter.write_str("canonical runner registration is missing")
+            }
+            Self::MissingCanonicalPlacement => {
+                formatter.write_str("canonical runner placement is missing")
+            }
+            Self::MissingCanonicalGrant => {
+                formatter.write_str("canonical credential grant is missing")
+            }
+            Self::MissingCanonicalAttempt => {
+                formatter.write_str("canonical physical tool attempt is missing")
+            }
+            Self::IncompleteInventory => {
+                formatter.write_str("stored runner inventory is incomplete")
+            }
+            Self::CrossWiredReference => {
+                formatter.write_str("stored runner references are cross-wired")
+            }
+            Self::InvalidColumn(column) => {
+                write!(
+                    formatter,
+                    "stored runner column {column} has an invalid value"
+                )
+            }
+            Self::InvalidEncoding => formatter.write_str("stored runner encoding is invalid"),
+            Self::GenerationExhausted => {
+                formatter.write_str("stored runner generation is exhausted")
+            }
+        }
     }
 }
 

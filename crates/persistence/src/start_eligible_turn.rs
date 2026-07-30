@@ -708,7 +708,7 @@ async fn insert_prepared_activation(
                 .map(|prefix| prefix.snapshot()),
             member_count,
             prefix_member_count,
-            appended_entries: starting_snapshot.appended_entries().collect(),
+            appended_entries: starting_snapshot.appended_entries(),
         },
     )
     .await
