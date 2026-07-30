@@ -3,6 +3,9 @@ mod targets;
 use divan::{Bencher, black_box};
 
 fn main() {
+    if cfg!(debug_assertions) {
+        return;
+    }
     divan::main();
 }
 

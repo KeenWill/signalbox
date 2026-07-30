@@ -11,7 +11,8 @@ use signalbox_domain::{
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
     SessionCreationProvenance, SessionId, SessionInputPosition, SessionReconstitutionInput,
-    TranscriptAncestry, TurnAttemptId, TurnId, derive_accepted_input_total_order,
+    ToolArgumentsKind, TranscriptAncestry, TurnAttemptId, TurnId,
+    derive_accepted_input_total_order,
 };
 use uuid::Uuid;
 
@@ -39,6 +40,7 @@ pub enum FixtureError {
     Position,
     Frontier,
     SemanticEntryMissing,
+    ToolArguments,
 }
 
 pub type SchedulingFixture = AcceptedInputSchedulingReconstitutionInput;
@@ -584,5 +586,10 @@ pub fn tool_arguments_fixture() -> String {
 
 /// Canonicalizes the fixed provider tool-argument document.
 pub fn canonicalize_tool_arguments(input: String) -> NormalizedToolArguments {
-    fixture_or_exit(NormalizedToolArguments::try_from_provider_text(input))
+    let normalized = fixture_or_exit(NormalizedToolArguments::try_from_provider_text(input));
+    fixture_or_exit(
+        (normalized.kind() == ToolArgumentsKind::Json)
+            .then_some(normalized)
+            .ok_or(FixtureError::ToolArguments),
+    )
 }

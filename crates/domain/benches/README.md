@@ -48,7 +48,7 @@ code-performance change.
 
 - `reconstitute_scheduling` enters `reconstitute_inner` with 64 turns, 97
   semantic entries, 97 shared snapshots, and a 16-entry active acceptance tail.
-  This baseline comes before the scheduled refactor of that function. A
+  This target preserves a pre-refactor comparison point for that function. A
   sustained instruction increase means the complete scheduling read path does
   more CPU work. A 4% increase is an investigation lead, not an acceptance
   threshold: first confirm the compiler, dependencies, harness, and fixture are
