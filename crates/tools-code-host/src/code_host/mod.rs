@@ -395,8 +395,8 @@ pub enum CodeHostTransportFailure {
     InvalidResponse,
     /// Response bytes exceeded the fixed operation cap.
     ResponseTooLarge,
-    /// A multi-request read observed the change-request head move.
-    HeadRevisionChanged,
+    /// A multi-request read observed the change-request base or head move.
+    ChangeRequestRevisionChanged,
     /// Transport loss left physical dispatch unknown.
     DispatchUnknown,
 }
@@ -651,7 +651,7 @@ const fn transport_failure_detail(failure: CodeHostTransportFailure) -> Option<K
         CodeHostTransportFailure::Rejected
         | CodeHostTransportFailure::InvalidResponse
         | CodeHostTransportFailure::ResponseTooLarge => Some(KnownFailureDetail::CodeHostRejected),
-        CodeHostTransportFailure::HeadRevisionChanged
+        CodeHostTransportFailure::ChangeRequestRevisionChanged
         | CodeHostTransportFailure::DispatchUnknown => None,
     }
 }
@@ -671,7 +671,7 @@ const fn transport_failure_class(
         }
         CodeHostTransportFailure::InvalidResponse
         | CodeHostTransportFailure::ResponseTooLarge
-        | CodeHostTransportFailure::HeadRevisionChanged
+        | CodeHostTransportFailure::ChangeRequestRevisionChanged
         | CodeHostTransportFailure::DispatchUnknown => Some(OperatorFailureClass::Infrastructure {
             commit_ambiguous: kind.mutates(),
         }),
