@@ -1,0 +1,319 @@
+# Keeps devenv.lock current. devenv.yaml pins nixpkgs to
+# `github:cachix/devenv-nixpkgs/rolling` — a branch, not a version — so the
+# development toolchain drifts continuously and would otherwise be re-locked
+# only when someone happened to run `devenv update` by hand. This workflow runs
+# that command on a schedule and proposes the result as a pull request.
+#
+# Why this is not Renovate. Renovate's nix manager matches `flake.nix` and
+# maintains the `flake.lock` beside it; this repository has neither file, so
+# the manager never sees devenv.yaml or devenv.lock. Closing that gap with a
+# regex custom manager would be worse than leaving it open: every locked node
+# in devenv.lock carries a `narHash` beside its `rev`, Renovate cannot compute
+# a narHash, and a bumped rev paired with the previous hash is a lock Nix
+# rejects — a broken environment on every update pull request, arriving under a
+# description that says it worked. `devenv update` re-resolves the inputs and
+# computes the hashes itself, which is why the mechanism is a command rather
+# than a pattern. renovate.json5 records the same reasoning where someone would
+# go looking to "fix" the gap.
+#
+# Cadence. Weekly, not daily. A rolling branch moves most days, so a daily job
+# would open a pull request most days and each one would be reviewed the same
+# way — read the revisions, confirm the environment still builds, merge. That is
+# noise for a development environment, which no deployed artifact depends on.
+# Weekly, early in the week, so a proposal is reviewed during the week rather
+# than sitting over a weekend. The schedule is offset from the Monday
+# supply-chain sweep in deny.yml so the two do not land together.
+#
+# Not a gate. This workflow is not a required check, nothing depends on it, and
+# it changes nothing on main. It opens a pull request; a human reviews and
+# merges it. A run that leaves devenv.lock byte-identical opens nothing.
+#
+# What actually validates the lock. No other workflow in this repository enters
+# the devenv environment — rust.yml and swift.yml install their own toolchains,
+# and devenv.nix says so in as many words — so a pull request's ordinary checks
+# say nothing about whether the updated lock still evaluates. This workflow
+# therefore builds the environment itself, after updating and before proposing,
+# and states the outcome in the pull request body. The check is deliberately
+# non-blocking: a lock that fails to build is exactly the change a human most
+# needs to see, so the pull request is opened either way and says which
+# happened.
+#
+# Token. Pull requests opened with the default GITHUB_TOKEN do not trigger
+# further workflow runs; GitHub suppresses them to stop workflows recursing. As
+# main's ruleset stands today that does not block a merge — it requires a pull
+# request, code-owner review, and resolved threads, but no status checks — so
+# the immediate cost is that the proposal arrives carrying no CI signal at all,
+# not even the suites that would at least prove the tree still builds under the
+# toolchain CI installs for itself. It becomes a hard block the moment the Rust
+# and supply-chain checks are made required, which renovate.json5 already names
+# as the precondition for its cargo automerge rule. So this workflow prefers a
+# personal access token when one is configured, and falls back to GITHUB_TOKEN
+# so it still does something useful before that secret exists. Under the
+# fallback the pull request opens with no checks until someone closes and
+# reopens it to start them; the body says so.
+#
+# To configure the preferred path, create a repository secret named
+# DEVENV_UPDATE_TOKEN holding a fine-grained personal access token scoped to
+# this repository alone, with exactly two permissions: Contents (read and
+# write), to push the automation branch, and Pull requests (read and write), to
+# open and update the pull request. It needs no Workflows permission, because
+# the only file it ever commits is devenv.lock.
+#
+# The token reaches git through a credential helper that reads it from the
+# step's environment. It is never an argument (visible in process listings),
+# never echoed, and never written to .git/config or a credentials file.
+name: devenv lock
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Tuesdays at 07:41 UTC. The minute is deliberately not on the hour:
+    # GitHub queues scheduled runs across all repositories, and the top of the
+    # hour is its most contended slot.
+    - cron: "41 7 * * 2"
+
+permissions: {}
+
+# Serialise the scheduled run against a manual one so two runs cannot race to
+# force-push the same automation branch.
+concurrency:
+  group: devenv-lock
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update devenv.lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      # Both are the fallback path's minimum: pushing the automation branch and
+      # opening the pull request. When DEVENV_UPDATE_TOKEN is configured that
+      # token does the work instead and these grants go unused, but the
+      # workflow cannot know which path it is on until it runs.
+      contents: write
+      pull-requests: write
+    env:
+      BRANCH: automation/devenv-lock
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Installs Nix 2.35.1 and adds the runner user to `trusted-users`, which
+      # devenv needs in order to evaluate a shell.
+      - name: Install Nix
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+
+      # From nixpkgs rather than the devenv flake, so the binary substitutes
+      # from cache.nixos.org and no additional binary cache — and so no third
+      # party beyond the Nix installer above — enters this job. The version is
+      # printed because it is part of the evidence: devenv.yaml sets
+      # `require_version`, so which CLI produced a lock is worth recording.
+      - name: Install devenv
+        run: |
+          set -euo pipefail
+          nix profile add nixpkgs#devenv
+          devenv version
+
+      - name: Update devenv.lock
+        run: |
+          set -euo pipefail
+          cp devenv.lock "${RUNNER_TEMP}/devenv.lock.before"
+          # No arguments: bare `devenv update` re-resolves every input declared
+          # in devenv.yaml. Naming an input updates only that one, which is not
+          # what a sweep wants.
+          devenv update
+          cp devenv.lock "${RUNNER_TEMP}/devenv.lock.after"
+
+      - name: Check whether the lock moved
+        id: changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- devenv.lock; then
+            echo "moved=false" >> "${GITHUB_OUTPUT}"
+            echo "devenv.lock is unchanged; nothing to propose."
+          else
+            echo "moved=true" >> "${GITHUB_OUTPUT}"
+            echo "devenv.lock changed."
+          fi
+
+      # The only evidence anything produces about this lock, per the header.
+      # Entering the shell builds every package the environment declares and
+      # runs its enterShell, which is what a developer's first `devenv shell`
+      # after merging would do. It deliberately does not fail the job: the
+      # result is reported in the pull request body instead.
+      - name: Build the environment from the updated lock
+        id: verify
+        if: ${{ steps.changed.outputs.moved == 'true' }}
+        run: |
+          set -uo pipefail
+          if devenv shell -- true; then
+            echo "built=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "built=false" >> "${GITHUB_OUTPUT}"
+            echo "::warning::The devenv environment did not build from the updated lock."
+          fi
+
+      - name: Describe what moved
+        id: describe
+        if: ${{ steps.changed.outputs.moved == 'true' }}
+        env:
+          LOCK_BEFORE: ${{ runner.temp }}/devenv.lock.before
+          LOCK_AFTER: ${{ runner.temp }}/devenv.lock.after
+          COMMIT_MESSAGE_FILE: ${{ runner.temp }}/commit-message
+          BODY_FILE: ${{ runner.temp }}/pull-request-body
+          ENVIRONMENT_BUILT: ${{ steps.verify.outputs.built }}
+          USES_CONFIGURED_TOKEN: ${{ secrets.DEVENV_UPDATE_TOKEN != '' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import json
+          import os
+          import pathlib
+
+          def nodes(path):
+              return json.loads(pathlib.Path(path).read_text())["nodes"]
+
+          before = nodes(os.environ["LOCK_BEFORE"])
+          after = nodes(os.environ["LOCK_AFTER"])
+
+          def requested(node):
+              """How devenv.yaml names this input, not where it resolved to."""
+              original = node.get("original", {})
+              if original.get("type") == "github" and original.get("owner"):
+                  reference = f"github:{original['owner']}/{original.get('repo', '')}"
+                  if original.get("ref"):
+                      reference += f"/{original['ref']}"
+                  return reference
+              return original.get("type", "unknown source")
+
+          def compare_url(locked, old_rev, new_rev):
+              if locked.get("type") != "github" or not locked.get("owner"):
+                  return None
+              owner, repo = locked["owner"], locked.get("repo", "")
+              return f"https://github.com/{owner}/{repo}/compare/{old_rev}...{new_rev}"
+
+          moved, summary = [], []
+          for name in sorted(set(before) | set(after)):
+              old = (before.get(name) or {}).get("locked")
+              new = (after.get(name) or {}).get("locked")
+              # The graph root names inputs but locks no source of its own.
+              if old is None and new is None:
+                  continue
+              if old is None:
+                  moved.append(f"- `{name}` added, locked at `{new.get('rev', 'unknown')}`")
+                  summary.append(f"{name}: added")
+                  continue
+              if new is None:
+                  moved.append(f"- `{name}` removed, was `{old.get('rev', 'unknown')}`")
+                  summary.append(f"{name}: removed")
+                  continue
+              old_rev, new_rev = old.get("rev"), new.get("rev")
+              if old_rev == new_rev:
+                  continue
+              entry = f"- `{name}` ({requested(after[name])}): `{old_rev}` → `{new_rev}`"
+              url = compare_url(new, old_rev, new_rev)
+              if url:
+                  entry += f"\n  <{url}>"
+              moved.append(entry)
+              summary.append(f"{name}: {old_rev[:12]} -> {new_rev[:12]}")
+
+          if not moved:
+              # Reachable when only a narHash or lastModified changed and every
+              # rev held. Say that rather than presenting an empty list.
+              moved.append(
+                  "- No input revision changed; devenv re-resolved the lock's "
+                  "recorded metadata only."
+              )
+
+          built = os.environ["ENVIRONMENT_BUILT"] == "true"
+          evidence = (
+              "`devenv shell -- true` built the environment from this lock and "
+              "exited cleanly."
+              if built
+              else "**`devenv shell -- true` did not build the environment from "
+              "this lock.** Read the run log before merging."
+          )
+
+          paragraphs = [
+              "Scheduled re-lock of the development environment. `devenv update` "
+              "re-resolved every input declared in `devenv.yaml` and rewrote "
+              "`devenv.lock`, recomputing each node's `narHash` alongside its "
+              "`rev`. No other file changed.",
+              "Inputs that moved:\n\n" + "\n".join(moved),
+              "No other workflow enters the devenv environment, so this pull "
+              "request's ordinary checks exercise the toolchain CI installs for "
+              "itself and say nothing about this lock. The evidence about the "
+              "lock is: " + evidence,
+              "Meaningfully changed lines, excluding lockfiles: 0.",
+              f"Produced by .github/workflows/devenv-lock.yml — {os.environ['RUN_URL']}",
+          ]
+
+          if os.environ["USES_CONFIGURED_TOKEN"] != "true":
+              paragraphs.insert(
+                  3,
+                  "This pull request was opened with the default `GITHUB_TOKEN`, "
+                  "so GitHub suppressed the workflow runs it would otherwise "
+                  "trigger and it shows no checks. Close and reopen it to start "
+                  "them, or configure the `DEVENV_UPDATE_TOKEN` secret described "
+                  "in the workflow header.",
+              )
+
+          pathlib.Path(os.environ["BODY_FILE"]).write_text("\n\n".join(paragraphs) + "\n")
+          pathlib.Path(os.environ["COMMIT_MESSAGE_FILE"]).write_text(
+              "devenv: refresh the locked development inputs\n\n"
+              + "\n".join(summary if summary else ["lock metadata only"])
+              + "\n"
+          )
+          PYTHON
+
+      # One step, so the token never crosses a step boundary as an output.
+      # The branch is always rebuilt from the checked-out main and force-pushed:
+      # if last week's proposal is still open, this replaces it with the current
+      # revisions rather than stacking a second pull request beside it.
+      - name: Propose the updated lock
+        if: ${{ steps.changed.outputs.moved == 'true' }}
+        env:
+          CONFIGURED_TOKEN: ${{ secrets.DEVENV_UPDATE_TOKEN }}
+          DEFAULT_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT_MESSAGE_FILE: ${{ runner.temp }}/commit-message
+          BODY_FILE: ${{ runner.temp }}/pull-request-body
+        run: |
+          set -euo pipefail
+
+          export SIGNALBOX_LOCK_TOKEN="${CONFIGURED_TOKEN:-${DEFAULT_TOKEN}}"
+          if [[ -z "${CONFIGURED_TOKEN}" ]]; then
+            echo "::warning::DEVENV_UPDATE_TOKEN is not configured; the pull request will open with no checks."
+          fi
+
+          git config --local user.name 'github-actions[bot]'
+          git config --local user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+          # Reads the token from this step's environment when git asks for it.
+          git config --local "credential.${GITHUB_SERVER_URL}.helper" \
+            '!f() { echo username=x-access-token; echo "password=${SIGNALBOX_LOCK_TOKEN}"; }; f'
+
+          git checkout -B "${BRANCH}"
+          # Only the lock. Entering the shell above left build state behind,
+          # and .gitignore covers it, but naming the path keeps that guarantee
+          # here rather than in another file.
+          git add -- devenv.lock
+          git commit --file "${COMMIT_MESSAGE_FILE}"
+          git push --force origin "HEAD:refs/heads/${BRANCH}"
+
+          export GH_TOKEN="${SIGNALBOX_LOCK_TOKEN}"
+          existing="$(gh pr list --head "${BRANCH}" --state open \
+            --json number --jq '.[0].number // empty')"
+          if [[ -n "${existing}" ]]; then
+            gh pr edit "${existing}" --body-file "${BODY_FILE}"
+            echo "Updated pull request #${existing}."
+          else
+            gh pr create \
+              --base main \
+              --head "${BRANCH}" \
+              --title 'devenv: refresh the locked development inputs' \
+              --body-file "${BODY_FILE}"
+          fi
