@@ -360,6 +360,18 @@ where
             original
         }
     }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        let original = self.original().operator_failure_cause_code();
+        let Some(reconciliation) = self.reconciliation() else {
+            return original;
+        };
+        if is_fatal_failure_class(reconciliation.operator_failure_class()) {
+            reconciliation.operator_failure_cause_code()
+        } else {
+            original
+        }
+    }
 }
 
 /// Backwards-compatible name for retained model-call execution evidence.
@@ -695,6 +707,14 @@ where
             Self::ResumeLookup(error) => error.operator_failure_class(),
             Self::Model(error) => error.operator_failure_class(),
             Self::Tool(error) => error.operator_failure_class(),
+        }
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::ResumeLookup(_) => "tool_loop_resume_lookup",
+            Self::Model(error) => error.operator_failure_cause_code(),
+            Self::Tool(error) => error.operator_failure_cause_code(),
         }
     }
 }
@@ -1151,6 +1171,14 @@ mod tests {
                 Self::CallerBug => OperatorFailureClass::CallerOrHubBug,
             }
         }
+
+        fn operator_failure_cause_code(&self) -> &'static str {
+            match self {
+                Self::Infrastructure => "initial_execution",
+                Self::Corruption => "reconciliation_corruption",
+                Self::CallerBug => "reconciliation_caller_bug",
+            }
+        }
     }
 
     #[derive(Debug)]
@@ -1467,6 +1495,10 @@ mod tests {
 
     #[tokio::test]
     async fn retained_reconciliation_preserves_cause_and_reports_fatal_classification() {
+        let primary =
+            super::RetainedModelExecutionError::Primary(StagedExecutionFailure::Infrastructure);
+        assert_eq!(primary.operator_failure_cause_code(), "initial_execution");
+
         let corruption = reconcile_retained_once(
             StagedExecutionFailure::Infrastructure,
             ready(Err::<(), _>(StagedExecutionFailure::Corruption)),
@@ -1477,6 +1509,7 @@ mod tests {
             corruption,
             StagedExecutionFailure::Corruption,
             OperatorFailureClass::FailClosedCorruption,
+            "reconciliation_corruption",
         );
 
         let caller_bug = reconcile_retained_once(
@@ -1489,6 +1522,7 @@ mod tests {
             caller_bug,
             StagedExecutionFailure::CallerBug,
             OperatorFailureClass::CallerOrHubBug,
+            "reconciliation_caller_bug",
         );
     }
 
@@ -1497,10 +1531,12 @@ mod tests {
         error: super::RetainedModelExecutionError<StagedExecutionFailure>,
         reconciliation: StagedExecutionFailure,
         expected_class: OperatorFailureClass,
+        expected_cause: &'static str,
     ) {
         assert_eq!(error.original(), &StagedExecutionFailure::Infrastructure);
         assert_eq!(error.reconciliation(), Some(&reconciliation));
         assert_eq!(error.operator_failure_class(), expected_class);
+        assert_eq!(error.operator_failure_cause_code(), expected_cause);
     }
 
     #[tokio::test]
