@@ -627,15 +627,13 @@ the eligibility and conditional live results into the required check, so a
 skipped or failed required smoke cannot appear green. Manual dispatch remains
 available, and a path-filtered push to `main` reruns the smoke after merge.
 
-The `codex-smoke` environment's selected branch patterns must include `main`,
-`renovate/openai-codex-*.x`, and `refs/pull/*/merge`. GitHub evaluates an
-environment used by `pull_request` against `GITHUB_REF`, which is the synthetic
-merge ref rather than the head branch; omitting the third pattern denies the
-environment to every automatic pull-request smoke even when the Renovate head
-matches the second. The explicit same-repository gate and GitHub's fork secret
-withholding remain the fork boundary because the merge-ref pattern itself
-matches both same-repository and fork pull requests. The model dispatch still
-performs no version probe: this check lives in the smoke, never in the hot path.
+The `codex-smoke` environment is configured for all branches because GitHub
+evaluates an environment used by `pull_request` against `GITHUB_REF`, which is
+the synthetic merge ref rather than the head branch. That setting admits fork
+and same-repository merge refs alike and is not a security boundary. The
+explicit same-repository gate and GitHub's independent fork-secret withholding
+are the fork boundary. The model dispatch still performs no version probe: this
+check lives in the smoke, never in the hot path.
 
 The smoke authenticates the CLI through its own non-interactive API-key login,
 piped from an environment-scoped secret into the CLI's credential store, which

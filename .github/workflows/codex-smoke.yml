@@ -14,12 +14,11 @@
 # authors: the secretless gate rejects changed fork pull requests, and GitHub
 # independently withholds secrets from ordinary pull_request runs from forks.
 #
-# The smoke remains bound to the codex-smoke environment. Its selected-branch
-# policy must admit `main`, `renovate/openai-codex-*.x`, and
-# `refs/pull/*/merge`: GitHub evaluates an environment used by pull_request
-# against the synthetic merge ref, not the head branch. The first two patterns
-# retain push/manual defense in depth; the third admits explicitly gated
-# same-repository pull requests.
+# The smoke remains bound to the codex-smoke environment, which is configured
+# for all branches so main, manual, and synthetic pull-request merge refs can
+# enter. That availability setting admits fork and same-repository refs alike;
+# it is not a security boundary. Fork exclusion comes only from the secretless
+# repository check and GitHub's independent fork-secret withholding above.
 #
 # The credential is referenced only in the authentication step, piped to the
 # CLI login command on stdin, and never echoed or passed in argv or a child
@@ -103,8 +102,8 @@ jobs:
     permissions:
       contents: read
     # Repository → Settings → Environments → codex-smoke holds
-    # CODEX_SMOKE_API_KEY. The selected branch patterns required by this
-    # pull_request design are documented in the security comment above.
+    # CODEX_SMOKE_API_KEY. Its all-branches availability setting is documented
+    # above and deliberately supplies no additional author-trust decision.
     environment: codex-smoke
     concurrency:
       group: codex-smoke
