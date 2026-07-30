@@ -44,15 +44,15 @@ use signalbox_domain::{
     ReplaceSessionMetadataResult, ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal,
     ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
     ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
-    ReviewFinding, ReviewFindingContent, ReviewFindingDiffSide, ReviewFindingEvent,
-    ReviewFindingEventKind, ReviewFindingEventResult, ReviewFindingEventResultKind,
-    ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal, ReviewFindingRef,
-    ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence,
-    ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassResult,
-    ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
-    ReviewProducedFindings, ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunRef,
-    ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
-    ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide,
+    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
+    ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal,
+    ReviewFindingRef, ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass,
+    ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
+    ReviewPassRef, ReviewPassResult, ReviewPassState, ReviewPassTurnEvidence,
+    ReviewPassTurnOutcome, ReviewPolicy, ReviewProducedFindings, ReviewRun, ReviewRunEvidence,
+    ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject,
+    ReviewText, ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
     SessionMetadataLastWriter, SessionMetadataSnapshot, SessionTemplateName,
     SessionTemplateProvenance, SubmitInput, SubmitInputAppliedResult, SubmitInputRejectedResult,
@@ -2634,7 +2634,12 @@ fn review_finding_snapshot(finding: &ReviewFinding) -> ReviewFindingSnapshot {
             title: content.title().as_str().to_owned(),
             body: content.body().as_str().to_owned(),
             severity,
-            confidence: CanonicalU64::new(u64::from(content.confidence().basis_points())),
+            is_real_confidence: CanonicalU64::new(u64::from(
+                content.is_real_confidence().basis_points(),
+            )),
+            severity_label_confidence: CanonicalU64::new(u64::from(
+                content.severity_label_confidence().basis_points(),
+            )),
             category: content.category().as_str().to_owned(),
             recommended_fix: content
                 .recommended_fix()
@@ -2831,9 +2836,14 @@ fn review_finding_content(
         WireReviewSeverity::High => ReviewFindingSeverity::High,
         WireReviewSeverity::Critical => ReviewFindingSeverity::Critical,
     };
-    let confidence =
-        ReviewConfidence::try_from_basis_points(u16::try_from(input.confidence.value()).ok()?)
-            .ok()?;
+    let is_real_confidence = ReviewConfidence::try_from_basis_points(
+        u16::try_from(input.is_real_confidence.value()).ok()?,
+    )
+    .ok()?;
+    let severity_label_confidence = ReviewConfidence::try_from_basis_points(
+        u16::try_from(input.severity_label_confidence.value()).ok()?,
+    )
+    .ok()?;
     Some((
         input.finding_id,
         ReviewFindingContent::new(
@@ -2841,7 +2851,7 @@ fn review_finding_content(
             ReviewText::try_new(input.title).ok()?,
             ReviewText::try_new(input.body).ok()?,
             severity,
-            confidence,
+            ReviewFindingConfidenceAxes::new(is_real_confidence, severity_label_confidence),
             ReviewKey::try_new(input.category).ok()?,
             input
                 .recommended_fix
@@ -8689,7 +8699,8 @@ mod tests {
             title: String::from("Canonical finding"),
             body: String::from("Finding order does not change command meaning."),
             severity: ReviewSeverity::High,
-            confidence: CanonicalU64::new(9_000),
+            is_real_confidence: CanonicalU64::new(9_000),
+            severity_label_confidence: CanonicalU64::new(8_500),
             category: String::from("correctness"),
             recommended_fix: None,
         }
