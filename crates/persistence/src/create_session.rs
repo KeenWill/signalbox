@@ -24,7 +24,11 @@ use crate::mapping::{
 use crate::outbox;
 
 const COMMAND_KIND: &str = "create_session";
-const STORAGE_VERSION: i16 = 4;
+const MIN_SUPPORTED_STORAGE_VERSION: i16 = 1;
+const WRITTEN_STORAGE_VERSION: i16 = 4;
+const DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION: i16 = 2;
+const SYSTEM_PROMPT_FROM_STORAGE_VERSION: i16 = 3;
+const TEMPLATE_PROVENANCE_FROM_STORAGE_VERSION: i16 = 4;
 const OWNER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
 const APPLIED: &str = "applied";
@@ -222,7 +226,7 @@ impl CreateSessionRepository {
         )
         .bind(durable_command_id_to_uuid(command_id))
         .bind(COMMAND_KIND)
-        .bind(STORAGE_VERSION)
+        .bind(WRITTEN_STORAGE_VERSION)
         .execute(&mut *transaction)
         .await?
         .rows_affected()
@@ -408,7 +412,7 @@ async fn insert_prepared(
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
-    .bind(STORAGE_VERSION)
+    .bind(WRITTEN_STORAGE_VERSION)
     .bind(OWNER_INITIATED)
     .bind(NO_ANCESTRY)
     .bind(defaults_version_to_numeric(defaults.version()))
@@ -561,7 +565,9 @@ fn decode_complete(
         row.try_get("command_template_digest")?,
         "command template provenance",
     )?;
-    if typed_version < STORAGE_VERSION && command_template_provenance.is_some() {
+    if !storage_version_supports_template_provenance(typed_version)
+        && command_template_provenance.is_some()
+    {
         return Err(
             CreateSessionCorruption::Inconsistent("pre-version-four template provenance").into(),
         );
@@ -597,7 +603,9 @@ fn decode_complete(
         row.try_get("stored_template_digest")?,
         "stored template provenance",
     )?;
-    if typed_version < STORAGE_VERSION && stored_template_provenance.is_some() {
+    if !storage_version_supports_template_provenance(typed_version)
+        && stored_template_provenance.is_some()
+    {
         return Err(
             CreateSessionCorruption::Inconsistent("pre-version-four template provenance").into(),
         );
@@ -685,7 +693,7 @@ fn require_supported_version(
     field: &'static str,
 ) -> Result<i16, CreateSessionRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if matches!(actual, 1..=4) {
+    if (MIN_SUPPORTED_STORAGE_VERSION..=WRITTEN_STORAGE_VERSION).contains(&actual) {
         Ok(actual)
     } else {
         Err(CreateSessionCorruption::Unsupported {
@@ -757,17 +765,17 @@ fn decode_selection(
                 value: dangerous_tool_auto_approval,
             })
         })?;
-    if storage_version == 1
+    if storage_version < DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION
         && dangerous_tool_auto_approval != signalbox_domain::DangerousToolAutoApproval::Disabled
     {
         return Err(CreateSessionCorruption::Inconsistent(
-            "version-one dangerous tool auto approval",
+            "storage version without dangerous tool auto approval",
         )
         .into());
     }
-    if storage_version <= 2 && system_prompt.is_some() {
+    if storage_version < SYSTEM_PROMPT_FROM_STORAGE_VERSION && system_prompt.is_some() {
         return Err(
-            CreateSessionCorruption::Inconsistent("pre-version-three system prompt").into(),
+            CreateSessionCorruption::Inconsistent("storage version without system prompt").into(),
         );
     }
     let system_prompt = system_prompt
@@ -781,6 +789,10 @@ fn decode_selection(
         dangerous_tool_auto_approval,
         system_prompt,
     ))
+}
+
+const fn storage_version_supports_template_provenance(storage_version: i16) -> bool {
+    storage_version >= TEMPLATE_PROVENANCE_FROM_STORAGE_VERSION
 }
 
 async fn inspect_registry(
@@ -822,7 +834,25 @@ fn map_registry_error(error: RegistryInspectionError) -> CreateSessionRepository
 mod tests {
     use std::io;
 
-    use super::CreateSessionRepositoryError;
+    use super::{
+        CreateSessionRepositoryError, WRITTEN_STORAGE_VERSION,
+        storage_version_supports_template_provenance,
+    };
+
+    /// Version four rows carrying template provenance remain valid after the
+    /// writer advances to a later storage version.
+    #[test]
+    fn writer_version_does_not_reinterpret_existing_template_provenance() {
+        const EXISTING_TEMPLATE_PROVENANCE_STORAGE_VERSION: i16 = 4;
+        const NEXT_WRITTEN_STORAGE_VERSION: i16 = WRITTEN_STORAGE_VERSION + 1;
+
+        assert!(storage_version_supports_template_provenance(
+            EXISTING_TEMPLATE_PROVENANCE_STORAGE_VERSION
+        ));
+        assert!(storage_version_supports_template_provenance(
+            NEXT_WRITTEN_STORAGE_VERSION
+        ));
+    }
 
     #[test]
     fn lost_commit_response_is_typed_as_ambiguous() {
