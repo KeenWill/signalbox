@@ -9,7 +9,7 @@ adapter implementation was verified through PR #320
 (`agent/claude-cli-adapter`). The Codex CLI adapter stack comprises PR #264
 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
 escalation closeout is PR #317 (`agent/escalation-closeout`). The Codex CLI
-compatibility-smoke automation was verified through PR #328
+compatibility-smoke automation was verified through PR #333
 (`agent/ci-tells-truth`). The `signalboxd` names this page states for the
 composition root, its telemetry, and the production `FileCredentialAccess` were
 verified through PR #258 (`agent/signalboxd-rename`); the Anthropic adapter's
