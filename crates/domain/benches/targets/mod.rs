@@ -15,6 +15,8 @@ use signalbox_domain::{
 };
 use uuid::Uuid;
 
+const SCHEDULING_SESSION_ID_SEED: u128 = 1;
+const SESSION_DEFAULT_MODEL_ID_SEED: u128 = 2;
 const TERMINAL_TURN_COUNT: u64 = 48;
 const QUEUED_TURN_COUNT: u64 = 15;
 const FRONTIER_LAYER_COUNT: u128 = 64;
@@ -45,10 +47,10 @@ pub struct FrontierBuildInput {
     later_layers: Vec<(ContextFrontierId, Vec<SemanticTranscriptEntryRef>)>,
 }
 
-pub type PrefixProofFixture = (
-    ResolvedContextFrontierSnapshot,
-    ResolvedContextFrontierSnapshot,
-);
+pub struct PrefixProofFixture {
+    prefix: ResolvedContextFrontierSnapshot,
+    later: ResolvedContextFrontierSnapshot,
+}
 
 fn fixture_or_exit<T, Failure>(result: Result<T, Failure>) -> T
 where
@@ -92,10 +94,10 @@ fn position(ordinal: u64) -> Result<SessionInputPosition, FixtureError> {
 }
 
 fn current_session() -> Result<Session, FixtureError> {
-    let session = session_id(1);
+    let session = session_id(SCHEDULING_SESSION_ID_SEED);
     let version = SessionConfigurationDefaultsVersion::first();
     let defaults = SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
-        DirectModelSelection::from_uuid(Uuid::from_u128(2)),
+        DirectModelSelection::from_uuid(Uuid::from_u128(SESSION_DEFAULT_MODEL_ID_SEED)),
     ));
     SessionReconstitutionInput::new(
         session,
@@ -423,19 +425,27 @@ pub fn prefix_proof_fixture() -> PrefixProofFixture {
             prefix = Some(frontier.clone());
         }
     }
-    fixture_or_exit(
+    let operands = fixture_or_exit(
         prefix
             .and_then(ResolvedContextFrontierReconstitutionInput::reconstitute)
             .zip(frontier.reconstitute())
+            .map(|(prefix, later)| PrefixProofFixture { prefix, later })
             .ok_or(FixtureError::Frontier),
-    )
+    );
+    fixture_or_exit(
+        operands
+            .prefix
+            .is_semantic_prefix_of(&operands.later)
+            .then_some(())
+            .ok_or(FixtureError::Frontier),
+    );
+    operands
 }
 
 /// Proves the fixed 384-entry frontier is a semantic prefix of the 512-entry
 /// frontier.
 pub fn prove_shared_prefix(input: &PrefixProofFixture) -> bool {
-    let is_prefix = input.0.is_semantic_prefix_of(&input.1);
-    fixture_or_exit(is_prefix.then_some(is_prefix).ok_or(FixtureError::Frontier))
+    input.prefix.is_semantic_prefix_of(&input.later)
 }
 
 /// Supplies a fixed total-order workload with realistic interrupt chaining.
