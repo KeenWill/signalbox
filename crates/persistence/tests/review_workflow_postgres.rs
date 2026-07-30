@@ -2848,6 +2848,148 @@ async fn inv040_referenced_finding_retains_producing_pass() -> Result<(), Box<dy
     Ok(())
 }
 
+/// INV-040: reference admission observes terminalization that commits while
+/// waiting for the target finding inventory locks.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_reference_refreshes_after_terminalization_wait() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let canonical_pass = insert_fixture_pass(&fixture, 0x8a1, ReviewPassKind::ReadOnlyReview).await;
+    let rejection_pass = insert_fixture_pass(&fixture, 0x8a2, ReviewPassKind::Judge).await;
+    let dedupe_pass = insert_fixture_pass(&fixture, 0x8a3, ReviewPassKind::Dedupe).await;
+    let evidence = succeed_fixture_passes(
+        &pool,
+        &fixture.store,
+        &[fixture.pass, canonical_pass, rejection_pass, dedupe_pass],
+    )
+    .await;
+    let subject_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x8a4)));
+    let canonical_ref =
+        ReviewFindingRef::new(canonical_pass, ReviewFindingId::from_uuid(uuid(0x8a5)));
+    let subject_evidence = pass_with_produced_findings(vec![subject_ref], evidence[0].clone());
+    let canonical_evidence = pass_with_produced_findings(vec![canonical_ref], evidence[1].clone());
+    let subject = finding(
+        subject_ref,
+        subject_evidence.clone(),
+        &fixture.target_snapshot,
+    );
+    let canonical = finding(
+        canonical_ref,
+        canonical_evidence.clone(),
+        &fixture.target_snapshot,
+    );
+    fixture
+        .store
+        .insert_findings(&subject_evidence, std::slice::from_ref(&subject))
+        .await?;
+    fixture
+        .store
+        .insert_findings(&canonical_evidence, std::slice::from_ref(&canonical))
+        .await?;
+    let reason = text("the canonical finding is no longer actionable");
+    let rejection = finding_event(
+        canonical_ref,
+        ReviewEventOrdinal::one(),
+        evidence[2].clone(),
+        ReviewFindingEventKind::Rejected {
+            reason: reason.clone(),
+        },
+    );
+    let duplicate = finding_event(
+        subject_ref,
+        ReviewEventOrdinal::one(),
+        evidence[3].clone(),
+        ReviewFindingEventKind::Duplicate {
+            canonical: ReviewReferencedFindingEvidence::try_from_finding(&canonical)
+                .expect("open canonical finding is reference evidence"),
+        },
+    );
+    let rejected = canonical
+        .apply(rejection)
+        .expect("the judge may reject the canonical finding");
+
+    let mut terminalizing = pool.begin().await?;
+    sqlx::query(
+        "SELECT finding_id
+           FROM review_finding
+          WHERE finding_id = $1
+          FOR NO KEY UPDATE",
+    )
+    .bind(canonical_ref.finding().into_uuid())
+    .fetch_one(&mut *terminalizing)
+    .await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET result_kind = 'finding_event',
+                result_finding_id = $2,
+                result_finding_run_id = $3,
+                result_finding_pass_id = $4,
+                result_event_ordinal = 1,
+                result_event_kind = 'rejected',
+                result_reason = $5
+          WHERE pass_id = $1",
+    )
+    .bind(rejection_pass.pass().into_uuid())
+    .bind(canonical_ref.finding().into_uuid())
+    .bind(canonical_ref.run().run().into_uuid())
+    .bind(canonical_ref.pass().pass().into_uuid())
+    .bind(reason.as_str())
+    .execute(&mut *terminalizing)
+    .await?;
+    sqlx::query(
+        "INSERT INTO review_finding_event
+            (finding_id, event_ordinal, finding_run_id, target_id,
+             event_pass_id, event_pass_run_id, event_kind, reason,
+             referenced_finding_id, referenced_finding_run_id,
+             referenced_finding_target_id, referenced_finding_pass_id,
+             referenced_finding_status, external_link_id,
+             external_link_association_kind)
+         VALUES (
+             $1, 1, $2, $3, $4, $5, 'rejected', $6,
+             NULL, NULL, NULL, NULL, NULL, NULL, NULL
+         )",
+    )
+    .bind(canonical_ref.finding().into_uuid())
+    .bind(canonical_ref.run().run().into_uuid())
+    .bind(canonical_ref.target().into_uuid())
+    .bind(rejection_pass.pass().into_uuid())
+    .bind(rejection_pass.run().run().into_uuid())
+    .bind(reason.as_str())
+    .execute(&mut *terminalizing)
+    .await?;
+
+    let appending_store = fixture.store.clone();
+    let appending = tokio::spawn(async move {
+        appending_store
+            .append_finding_event(subject_ref.finding(), duplicate)
+            .await
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "reference admission waits for the canonical finding lock"
+    );
+    terminalizing.commit().await?;
+    let error = appending
+        .await
+        .expect("reference admission task remains live")
+        .expect_err("terminal canonical status must reject the stale reference");
+    let ReviewWorkflowStoreError::Database(error) = error else {
+        panic!("expected relational eligible-status rejection");
+    };
+
+    assert_sqlstate(&error, "23514");
+    assert_eq!(
+        fixture.store.load_finding(canonical_ref.finding()).await?,
+        Some(rejected)
+    );
+    assert_eq!(
+        fixture.store.load_finding(subject_ref.finding()).await?,
+        Some(subject)
+    );
+    Ok(())
+}
+
 /// INV-040: a superseded event round-trips a successor from another sealed
 /// producer run without rewriting either finding's ancestry.
 #[tokio::test(flavor = "multi_thread")]

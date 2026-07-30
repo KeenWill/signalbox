@@ -584,7 +584,6 @@ impl ReviewWorkflowStore {
         finding: ReviewFindingId,
         event: ReviewFindingEvent,
     ) -> Result<Option<ReviewFinding>, ReviewWorkflowStoreError> {
-        let encoded = encode_finding_event(event.kind());
         let publication_link = match event.kind() {
             ReviewFindingEventKind::BlockedWithReason {
                 link: Some(pending),
@@ -592,37 +591,45 @@ impl ReviewWorkflowStore {
             } => Some(pending.link()),
             _ => None,
         };
-        let mut locked_findings = vec![finding.into_uuid()];
-        if let Some(referenced) = encoded.referenced {
-            locked_findings.push(referenced.reference().finding().into_uuid());
-        }
-        locked_findings.sort_unstable();
-        locked_findings.dedup();
-        let mut transaction = if publication_link.is_some() {
-            self.pool.begin().await?
-        } else {
-            begin_repeatable_write(&self.pool).await?
-        };
+        let mut transaction = self.pool.begin().await?;
         if let Some(link) = publication_link {
             // Publication reconciliation locks the reservation before any
-            // finding, matching the attachment path's global lock order.
+            // finding, matching the attachment-path lock order.
             sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
                 .bind(link.into_uuid())
                 .fetch_one(&mut *transaction)
                 .await?;
-        }
-        sqlx::query(crate::lock_inventory::REVIEW_FINDINGS_TRANSITION)
-            .bind(&locked_findings)
+            sqlx::query(crate::lock_inventory::REVIEW_FINDINGS_TRANSITION)
+                .bind(vec![finding.into_uuid()])
+                .fetch_all(&mut *transaction)
+                .await?;
+        } else {
+            // Every ordinary event writer locks the complete target inventory
+            // in identity order. Under read committed, a waiter then loads the
+            // graph from snapshots taken after the winning event commits; the
+            // held inventory keeps later event writes from changing that graph
+            // across the loader statements.
+            sqlx::query(
+                "SELECT finding_id
+                   FROM review_finding
+                  WHERE target_id = (
+                            SELECT target_id
+                              FROM review_finding
+                             WHERE finding_id = $1
+                        )
+                  ORDER BY finding_id
+                  FOR NO KEY UPDATE",
+            )
+            .bind(finding.into_uuid())
             .fetch_all(&mut *transaction)
             .await?;
+        }
         let current = if publication_link.is_some() {
             // The held reservation and finding locks make the subject projection
             // stable while preserving attachment commits observed after waiting.
             self.load_finding_projection_on_connection(&mut transaction, finding)
                 .await?
         } else {
-            // Reference-sensitive target graphs span several statements and
-            // therefore require the repeatable snapshot opened above.
             self.load_finding_on_connection(&mut transaction, finding)
                 .await?
         };
@@ -1893,16 +1900,6 @@ fn require_joined_reference(
         return Err(corruption(aggregate, String::from(detail)));
     }
     Ok(())
-}
-
-async fn begin_repeatable_write(
-    pool: &PgPool,
-) -> Result<Transaction<'_, Postgres>, ReviewWorkflowStoreError> {
-    let mut transaction = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-        .execute(&mut *transaction)
-        .await?;
-    Ok(transaction)
 }
 
 async fn begin_repeatable_read(

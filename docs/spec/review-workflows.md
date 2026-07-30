@@ -264,20 +264,23 @@ finding-repair block names none.
 Duplicate and superseded events freeze the referenced finding's canonically
 authenticated current status at admission. That status must be `Open` or
 `Accepted`. The append-only event stores that authenticated status as a durable
-admission fact. The store locks both finding roots in identity order, verifies
-the referenced finding's current history under those locks, and appends the
-fact; later reconstitution validates the frozen fact rather than comparing it
-with a status that may since have advanced. A finding becomes terminal when it
-acquires either reference, so no later reference may point back to it; direct
-and transitive reference cycles therefore fail closed. Reconstitution validates
-the complete history and fails closed on a foreign owner, run-workflow or policy
-mismatch, gaps, illegal edges, incompatible or contradictory pass evidence, an
-event not exactly named by its pass result, self-reference, foreign-run or
-ineligible finding references, reuse of a link consumed by an earlier posted
-event, or a publication event whose external link is not an attached link
-associated with that finding or whose external object kind is not review,
-review-thread, inline-review-comment, or general change-request-comment. A
-posted event's pass is the attachment's exact producing pass (INV-040).
+admission fact. For ordinary event admission, the store locks the complete
+target finding inventory in identity order, then verifies the referenced
+finding's current history under those locks and appends the fact. A waiter loads
+the graph from read-committed snapshots taken after the winning event commits;
+the held inventory stabilizes that graph across the loader statements. Later
+reconstitution validates the frozen fact rather than comparing it with a status
+that may since have advanced. A finding becomes terminal when it acquires either
+reference, so no later reference may point back to it; direct and transitive
+reference cycles therefore fail closed. Reconstitution validates the complete
+history and fails closed on a foreign owner, run-workflow or policy mismatch,
+gaps, illegal edges, incompatible or contradictory pass evidence, an event not
+exactly named by its pass result, self-reference, foreign-run or ineligible
+finding references, reuse of a link consumed by an earlier posted event, or a
+publication event whose external link is not an attached link associated with
+that finding or whose external object kind is not review, review-thread,
+inline-review-comment, or general change-request-comment. A posted event's pass
+is the attachment's exact producing pass (INV-040).
 
 ## External links and posting reservations
 
@@ -558,10 +561,10 @@ identities.
 Admission authenticates that complete ancestry against a canonically succeeded
 read-only-review producer whose sealed `ProducedFindings` inventory contains the
 finding. The subject producer, referenced producer, and event pass must all name
-the same exact target and policy. Persistence locks subject and referenced
-finding roots in identity order and admits the reference only while the
-referenced finding is `Open` or `Accepted`. A finding already in a terminal
-status cannot be newly named as the referenced root.
+the same exact target and policy. Persistence locks the complete target finding
+inventory in identity order and, after any lock wait, admits the reference only
+while the referenced finding is `Open` or `Accepted`. A finding already in a
+terminal status cannot be newly named as the referenced root.
 
 Self-reference, repeated reference, and direct or transitive cycles fail closed.
 Complete-graph domain reconstitution checks every referenced root and edge,
@@ -638,7 +641,8 @@ canonical identity-ordered inventory with every finding owned by that producing
 pass. Cross-run references store the referenced finding's independent target,
 run, pass, and finding identities. Composite foreign keys authenticate the
 canonical finding ancestry and membership in the succeeded producer's sealed
-inventory; ordered root locking protects eligible status and cycle checks.
+inventory; identity-ordered complete-target root locking protects eligible
+status and cycle checks across the multi-statement graph load.
 
 The only mutable workflow columns are the current run and pass state
 projections; their evidence-bearing fields, including the one-time
