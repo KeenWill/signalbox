@@ -272,8 +272,8 @@ fn print_help() {
         "Usage: cargo bench -p signalbox-persistence --features postgres-integration \
          --bench postgres_load -- [OPTIONS]\n\n\
          Options:\n\
-           --duration-seconds N   Positive offered-load duration per point, in seconds \
-         (default: 10)\n\
+           --duration-seconds N   Positive offered-load seconds per point, within the \
+         platform timer range (default: 10)\n\
            --pool-size N          Pre-opened pool size, above the highest concurrency \
          (default: 80)\n\
            --concurrency LIST     Comma-separated positive sweep (default: \
@@ -469,7 +469,7 @@ struct PointResult {
     completed_during_offered_load: usize,
     pool_size: u32,
     server_max_connections: u32,
-    host_cpus: usize,
+    available_parallelism: usize,
     latencies: Vec<Duration>,
 }
 
@@ -481,7 +481,7 @@ struct PointConfig {
     server_max_connections: u32,
     concurrency: usize,
     duration: Duration,
-    host_cpus: usize,
+    available_parallelism: usize,
 }
 
 impl PointResult {
@@ -604,7 +604,7 @@ async fn run_point(
         completed_during_offered_load,
         pool_size: config.pool_size,
         server_max_connections: config.server_max_connections,
-        host_cpus: config.host_cpus,
+        available_parallelism: config.available_parallelism,
         latencies,
     })
 }
@@ -742,8 +742,18 @@ async fn create_and_submit_turn(pool: &PgPool, ids: OperationIds) -> HarnessResu
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
             SubmitInputAppliedResult::TurnOrigin(result),
         )) if result.turn() == flow.turn => {}
-        SubmitInputHandlingOutcome::Recorded(_) => {
-            return Err(error("fresh input did not create the requested turn"));
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_),
+        )) => {
+            return Err(error("fresh input created a different turn"));
+        }
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_),
+        )) => {
+            return Err(error("fresh input unexpectedly became pending steering"));
+        }
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(_)) => {
+            return Err(error("fresh input was rejected"));
         }
         SubmitInputHandlingOutcome::ConflictingReuse { .. } => {
             return Err(error("fresh input command identity conflicted"));
@@ -980,9 +990,9 @@ fn format_optional(value: Option<f64>) -> String {
 
 fn print_result_header() {
     println!(
-        "| scenario | image | host CPUs | fsync | pool | server max | concurrency | warmup (s) | \
-         offered (s) | elapsed (s) | completed in window | latency samples | ops/s | p50 (ms) | \
-         p95 (ms) | p99 (ms) |"
+        "| scenario | image | available parallelism | fsync | pool | server max | concurrency | \
+         warmup (s) | offered (s) | elapsed (s) | completed in window | latency samples | ops/s | \
+         p50 (ms) | p95 (ms) | p99 (ms) |"
     );
     println!("|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
 }
@@ -992,7 +1002,7 @@ fn print_result(result: &PointResult) {
         "| {} | postgres:{} | {} | {} | {} | {} | {} | {:.0} | {:.0} | {:.3} | {} | {} | {:.2} | {} | {} | {} |",
         result.scenario.label(),
         POSTGRES_IMAGE_TAG,
-        result.host_cpus,
+        result.available_parallelism,
         result.fsync.label(),
         result.pool_size,
         result.server_max_connections,
@@ -1019,8 +1029,8 @@ async fn main() -> HarnessResult<()> {
         }
         ParsedArgs::Skip => return Ok(()),
     };
-    let host_cpus = std::thread::available_parallelism()
-        .map_err(|cpu_error| error(format!("host CPU count is unavailable: {cpu_error}")))?
+    let available_parallelism = std::thread::available_parallelism()
+        .map_err(|cpu_error| error(format!("available parallelism is unavailable: {cpu_error}")))?
         .get();
     let identities = Arc::new(LoadContext::new());
     let mut database_sequence = 0_u64;
@@ -1059,7 +1069,7 @@ async fn main() -> HarnessResult<()> {
                         server_max_connections: config.server_max_connections,
                         concurrency,
                         duration: config.duration,
-                        host_cpus,
+                        available_parallelism,
                     },
                     pool.clone(),
                     Arc::clone(&identities),

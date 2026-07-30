@@ -43,17 +43,17 @@ where additional concurrency no longer produces a meaningful throughput gain
 while tail latency begins climbing. Report the whole curve because the knee and
 post-knee behavior matter more than a single peak.
 
-Every output row records the PostgreSQL image tag, detected host CPU count,
-verified fsync setting, pool size, configured server connection limit,
-concurrency, warmup duration, configured offered-load duration, and actual
-elapsed duration including the final drain. It separately reports completions
-inside the offered window and the number of latency samples, which includes
-operations that started inside the window and completed during the drain.
-Completed rows print immediately, so a later point failure preserves earlier
-measurements. Compare matching fsync-on and fsync-off points. A large throughput
-gap or latency reduction with fsync off points to durable-write I/O as the
-limiting cost; a small gap points instead toward schema, locking, query, or
-application work.
+Every output row records the PostgreSQL image tag, detected process-available
+parallelism, verified fsync setting, pool size, configured server connection
+limit, concurrency, warmup duration, configured offered-load duration, and
+actual elapsed duration including the final drain. It separately reports
+completions inside the offered window and the number of latency samples, which
+includes operations that started inside the window and completed during the
+drain. Completed rows print immediately, so a later point failure preserves
+earlier measurements. Compare matching fsync-on and fsync-off points. A large
+throughput gap or latency reduction with fsync off points to durable-write I/O
+as the limiting cost; a small gap points instead toward schema, locking, query,
+or application work.
 
 A single operation that does not return within 60 seconds ends its curve point
 with an explicit liveness error, preventing an unresponsive database or
