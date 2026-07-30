@@ -398,12 +398,18 @@ not satisfy a declaration's requirement is never offered that declaration
 ([model-call execution](model-call-execution.md#frontier-rendering) prepares the
 snapshot), so a session whose writable root is not a worktree advertises the
 five writable-root tools, none of the four worktree Git tools, and `git_clone`
-exactly when its selected runner advertises at least one repository key — a
-session on a runner that advertises none advertises no Git tool at all. Nothing
-such a session can propose fails at lease claim for a capability it never had.
-Why: a requirement stated on the declaration is checked once at preparation,
-while a requirement implied only by a tool's argument contract can be discovered
-no earlier than the dispatch that fails.
+only when its selected runner advertises at least one repository key *and* the
+session holds a granted credential profile — every configured repository entry
+names one
+([configuration and credentials](configuration-and-credentials.md#runner-configuration)),
+so a profileless session and a session on a runner with no repository key each
+advertise no Git tool at all. Which advertised key that grant actually opens is
+the runner's admission check, and its `credential_unavailable` refusal names a
+mismatch between an existing entry and the granted profile rather than a
+capability the session was told it had. Why: a requirement stated on the
+declaration is checked once at preparation, while a requirement implied only by
+a tool's argument contract can be discovered no earlier than the dispatch that
+fails.
 
 Each provider operation carries the exact session-executable definition and
 locus snapshot prepared under

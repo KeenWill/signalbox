@@ -238,16 +238,23 @@ falling silent. `operation_failed` carries the exact correlation of the refused
 operation — provisioning authorization, release, or lease offer before
 `lease_claim` — and two layers. The first is one closed daemon-actionable
 category: `credential_unavailable`, `repository_unavailable`,
-`sandbox_unavailable`, `workspace_conflict`, or `lease_admission_refused`.
-Daemon logic keys off that category alone, so the set stays small and every
-member names a decision the daemon can make. The second is one runner-authored
-detail: a bounded runner-specific code, a bounded message, and a bounded
-structured payload, all carried as data. The daemon retains the detail as
-operator evidence and exposes it verbatim through owner runner inspection; it
-never parses, interprets, or branches on it, so a runner may add detail codes
-freely without a daemon change. A failure the daemon has durably recorded
-terminates that operation: the corresponding provisioning, release, or lease
-authority is resolved as refused, and neither side waits on it further.
+`sandbox_unavailable`, `workspace_conflict`, `workspace_cleanup_failed`, or
+`lease_admission_refused`. `workspace_cleanup_failed` is the release-specific
+member: a journaled release whose rename or deletion keeps failing reports it
+rather than retaining its journal forever, and the daemon's durable admission
+resolves that release as refused, which is what frees the runner's journaled
+release and its single workspace-operation slot. The undeleted placement then
+appears in the next startup report as a `cleanup_failed` leak, which is the
+version-one response to unreclaimed disk. Daemon logic keys off that category
+alone, so the set stays small and every member names a decision the daemon can
+make. The second is one runner-authored detail: a bounded runner-specific code,
+a bounded message, and a bounded structured payload, all carried as data. The
+daemon retains the detail as operator evidence and exposes it verbatim through
+owner runner inspection; it never parses, interprets, or branches on it, so a
+runner may add detail codes freely without a daemon change. A failure the daemon
+has durably recorded terminates that operation: the corresponding provisioning,
+release, or lease authority is resolved as refused, and neither side waits on it
+further.
 
 After `enrolled`, `replacement_pending`, or `resumed`, startup reconciliation
 sends one leak report before any workspace provision or lease offer is
@@ -255,17 +262,21 @@ admissible; heartbeats remain admissible throughout. A report is named by the
 lowercase SHA-256 digest of its complete canonical sorted fact sequence and has
 pages numbered from one. Each nonfinal page carries exactly 64 facts and each
 final page carries zero through 64; even an empty report sends final page one.
-Facts are sorted by their bounded repository-relative locator and contain only
-`unknown_manifest`, `retired_present`, `manifest_conflict`, `cleanup_failed`, or
-`unreconciled`, the locator, lowercase SHA-256 manifest-or-entry digest, and
-nullable session and placement revision when independently parseable. Each page
-carries the prior page digest, null only on page one, so equal replay is exact
-and omission or reordering fails closed. The runner journals the report and
-current page until `workspace_leak_recorded`. The daemon durably stages pages by
-report and page, then atomically replaces the runner-status leak snapshot only
-when it acknowledges the final page; an interrupted newer report never erases
-the prior complete one. Reconnect inventory names the exact retained page and
-resumes at its durable acknowledgement boundary.
+Facts are sorted by their bounded runner-root-relative locator — relative to the
+runner state root and not to any repository, so a workspace-free private root,
+staging, and trash are all nameable — and contain only `unknown_manifest`,
+`retired_present`, `manifest_conflict`, `cleanup_failed`, or `unreconciled`, the
+locator, lowercase SHA-256 manifest-or-entry digest, and nullable session and
+placement revision when independently parseable. The locator carries no absolute
+host path, matching the projection in
+[process protocol](process-protocol.md#client-requests). Each page carries the
+prior page digest, null only on page one, so equal replay is exact and omission
+or reordering fails closed. The runner journals the report and current page
+until `workspace_leak_recorded`. The daemon durably stages pages by report and
+page, then atomically replaces the runner-status leak snapshot only when it
+acknowledges the final page; an interrupted newer report never erases the prior
+complete one. Reconnect inventory names the exact retained page and resumes at
+its durable acknowledgement boundary.
 
 Every message after `enrolled` or `replacement_pending` carries the exact active
 or pending connection registration revision. Lease messages additionally carry
@@ -741,6 +752,7 @@ key, and whether that repository is empty or populated is a fact about the
 repository rather than a third value the request selects. A session with no
 worktree therefore has no session repository, and it reaches a repository only
 by cloning one into its writable root under a runner-configured repository key
+and the credential profile that key's entry names
 ([tool loop](tool-loop.md#version-one-workstation-tool-contracts)). Credentials
 and sandbox constrain neither of those: every credential choice composes with
 every workspace choice, and either sandbox profile composes with every
@@ -1207,10 +1219,14 @@ fact. The runner neutralizes ambient configuration by pointing
 allowlist as command-line configuration — `protocol.allow=never`,
 `protocol.https.allow=always`, and `protocol.ext.allow=never` — and disables
 repository-local hooks. The same command line also empties the accumulated
-credential-helper list before naming any helper the runner itself supplies, so
-the effective helper set for an invocation is exactly what the runner chose:
-nothing for a Git tool, and only the per-provisioning broker helper for a clone
-under a granted profile. Command-line configuration outranks the model-writable
+credential-helper list before installing the helper that invocation is supposed
+to use, so the effective helper set is exactly what the runner installed and
+never what the repository configuration asked for: the fixed runner-owned helper
+described by
+[configuration and credentials](configuration-and-credentials.md#runner-credential-lifecycle)
+for a Git tool reaching a remote under a granted profile, the per-provisioning
+broker helper during provisioning, and no helper at all for an invocation that
+reaches no remote. Command-line configuration outranks the model-writable
 repository configuration, so `url.<base>.insteadOf` rewrites, a re-enabled
 external helper, and a hook cannot move the effective transport off HTTPS or
 substitute an executable for a fetch. Validating the stored `remote.<name>.url`
@@ -1240,13 +1256,17 @@ anywhere in the interval therefore resumes from the journal rather than from a
 manifest the runner may already have deleted: `release_accepted` resumes the
 deletion and then reports, `release_completed` resends the correlation, and a
 daemon restart cannot leave a resent release without a boundary — exactly as for
-a retained result. Startup resumes deletion for trash proven by a manifest or by
-a retained release entry, and may remove staging whose manifest proves it was
-never published. It reconciles every ready or active manifest with the daemon
-before execution and reports every unknown, retired-but-present, conflicting, or
-otherwise unreconciled workspace as a typed leak. It never silently deletes a
-reported leak. This startup report is visible even when no session can be
-resumed.
+a retained result. A release whose rename or deletion keeps failing does not
+hold that journal indefinitely: the runner reports the
+`workspace_cleanup_failed` operation failure above, whose durable admission
+resolves the release and frees the slot, and the surviving placement is reported
+as a `cleanup_failed` leak. Startup resumes deletion for trash proven by a
+manifest or by a retained release entry, and may remove staging whose manifest
+proves it was never published. It reconciles every ready or active manifest with
+the daemon before execution and reports every unknown, retired-but-present,
+conflicting, or otherwise unreconciled workspace as a typed leak. It never
+silently deletes a reported leak. This startup report is visible even when no
+session can be resumed.
 
 ## Open edges
 
