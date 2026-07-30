@@ -169,10 +169,12 @@ credential-profile names, and 64 repository entries; names are sorted and
 unique. A repository entry is one exact repository key paired with the exact
 optional credential-profile name that key's runner configuration carries, and
 entries are sorted and unique by key. Absence advertises anonymous HTTPS
-availability rather than an incomplete pair. Why: the daemon has to decide
-before a model call whether a session can clone anything at all, and independent
-inventories of keys and profiles cannot answer that — only the pairing shows
-whether an entry is anonymous or requires the profile this session was granted
+availability rather than an incomplete pair;
+[runner credential lifecycle](configuration-and-credentials.md#runner-credential-lifecycle)
+owns that configuration meaning. Why: the daemon has to decide before a model
+call whether a session can clone anything at all, and independent inventories of
+keys and profiles cannot answer that — only the pairing shows whether an entry
+is anonymous or requires the profile this session was granted
 ([tool loop](tool-loop.md#registry-placement-and-effect-metadata) owns the
 advertisement condition that reads it). Workspace and sandbox inventories are
 their closed vocabularies. A reconnect inventory contains at most one lease, one
@@ -488,8 +490,9 @@ A registration carries availability claims only:
 
 - the runner's advertised capability classes;
 - tool names;
-- credential-profile names, and repository entries pairing each key with the
-  profile name it requires; and
+- credential-profile names, and repository entries pairing each key with its
+  optional configured profile name, where absence advertises anonymous HTTPS;
+  and
 - workspace and sandbox-profile capabilities.
 
 It carries no permission default, effect class, placement declaration, approval
@@ -566,7 +569,9 @@ repository entries remain exact availability inventories recorded by that
 registration and acquire no policy by being stored: the profile name a
 repository entry carries, when present, states which configured credential that
 repository requires, never that any session holds it; absence states that the
-entry is anonymous.
+entry is anonymous. The configuration meaning of presence and absence is owned
+by
+[runner credential lifecycle](configuration-and-credentials.md#runner-credential-lifecycle).
 
 The version-one daemon composition constructs this value once from the compiled
 workstation registry, the exact `workstation-v1` class, and fixed profile
@@ -1328,7 +1333,9 @@ Every invocation that installs a credential helper also forces
 remote invocation installs no helper. Why: with Git's false default, the helper
 receives protocol and host but not the owner/repository path, so the exact-path
 authorization check must return no credential and every authenticated remote
-operation fails.
+operation fails;
+[runner credential lifecycle](configuration-and-credentials.md#runner-credential-lifecycle)
+owns the helper and forced-configuration contract.
 
 That forced configuration gates the transport and nothing else, and one
 repository-local key defeats every check built on it. `url.<base>.insteadOf`

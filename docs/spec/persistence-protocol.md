@@ -713,18 +713,23 @@ cause attached to any disposition other than `known_failed`. Active-phase,
 terminal-evidence, and acceptance-tail validation semantics are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
-Runner-status reconstitution includes every retained operation failure through
-one closed correlation input with `WorkspaceProvisioning`, `WorkspaceRelease`,
-and `LeaseOffer` arms. The adapter loads the complete typed target beside the
+Runner-status reconstitution pages retained operation failures through one
+closed correlation input with `WorkspaceProvisioning`, `WorkspaceRelease`, and
+`LeaseOffer` arms. The adapter applies the process protocol's exclusive typed
+evidence cursor in runner-and-correlation order, loads at most the requested
+page size plus one checked evidence row, and uses the extra row only to produce
+the continuation cursor; it never loads the append-only failure history into
+memory. For each emitted failure, it loads the complete typed target beside the
 failure row, decodes the category and every detail bound, requires the target's
 runner and full correlation to equal the retained arm, and requires the target
 to carry the matching refused/no-execution terminal proof. A missing target,
 success/refusal conflict, invalid detail, impossible category/arm pair, or
-duplicate correlation is typed corruption; it is never dropped from the status
-count. The resulting checked failures are ordered by runner and operation
-correlation and projected verbatim by `read_runner_status`, so restart
-reproduces the same category, code, message, and structured payload that durable
-admission acknowledged.
+duplicate correlation is typed corruption; it is never dropped from the page
+count. The resulting checked failures are projected verbatim by
+`read_runner_status`, so restart and continuation reproduce the same category,
+code, message, and structured payload that durable admission acknowledged. The
+records remain append-only without a retention cap; bounded reads, rather than
+lossy retention, keep an arbitrarily long history inspectable.
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired
