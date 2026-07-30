@@ -594,9 +594,8 @@ pub fn tool_arguments_fixture() -> String {
 /// Canonicalizes the fixed provider tool-argument document.
 pub fn canonicalize_tool_arguments(input: String) -> NormalizedToolArguments {
     let normalized = fixture_or_exit(NormalizedToolArguments::try_from_provider_text(input));
-    fixture_or_exit(
-        (normalized.kind() == ToolArgumentsKind::Json)
-            .then_some(normalized)
-            .ok_or(FixtureError::ToolArguments),
-    )
+    match normalized.kind() {
+        ToolArgumentsKind::Json => normalized,
+        ToolArgumentsKind::Undecodable => fixture_or_exit(Err(FixtureError::ToolArguments)),
+    }
 }
