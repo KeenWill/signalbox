@@ -320,6 +320,15 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(message.role, .assistant)
   }
 
+  func testFailedProviderCauseAppearsInNativeActivity() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithFailedProviderCause()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertEqual(projection.activity, ProcessProjectionFixture.quotaExhaustedActivity)
+  }
+
   func testSnapshotPreservesPendingAcceptanceOrderAndActiveActivity() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithQueuedAndActiveTurns()
     var projector = SignalboxProcessTranscriptProjector()
@@ -3477,6 +3486,10 @@ private enum ProcessProjectionFixture {
   static let queuedActivity = SignalboxProcessActivity(state: .queued, label: "Queued")
   static let completedActivity = SignalboxProcessActivity(state: .completed, label: "Completed")
   static let failedActivity = SignalboxProcessActivity(state: .failed, label: "Failed")
+  static let quotaExhaustedActivity = SignalboxProcessActivity(
+    state: .failed,
+    label: "Failed: provider quota exhausted"
+  )
   static let cancelledActivity = SignalboxProcessActivity(state: .cancelled, label: "Cancelled")
   static let waitingActivity = SignalboxProcessActivity(
     state: .waitingForToolDecision,
@@ -3507,6 +3520,66 @@ private enum ProcessProjectionFixture {
 
   static func materializedAcceptedInputIDs() throws -> Set<SignalboxCanonicalUUID> {
     [try SignalboxCanonicalUUID(validating: ProcessSubmissionFixture.acceptedInputID)]
+  }
+
+  static func snapshotWithFailedProviderCause() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"failed",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call":{
+              "model_call_id":"\(ProcessDriverFixture.modelCall)",
+              "disposition":"known_failed",
+              "cause":"quota_exhausted"
+            }
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_call_usage",
+          "model_call_index":"0",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "usage":{
+            "input_tokens":null,
+            "output_tokens":null,
+            "cache_creation_input_tokens":null,
+            "cache_read_input_tokens":null
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"1",
+          "entry_count":"0"
+        }
+        """,
+      ]
+    )
   }
 
   static func snapshotWithUserEntry() throws -> SignalboxSynchronizationSnapshot {

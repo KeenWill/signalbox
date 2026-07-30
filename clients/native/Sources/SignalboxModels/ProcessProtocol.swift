@@ -535,6 +535,8 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   case modelAliasesEnd(aliasCount: SignalboxCanonicalUInt64)
   case transcriptSnapshotStart(SignalboxTranscriptSnapshotBoundary)
   case transcriptTurn(SignalboxTranscriptTurn)
+  case transcriptModelCallUsage(SignalboxTranscriptModelCallUsage)
+  case transcriptModelCallsEnd(modelCallCount: SignalboxCanonicalUInt64)
   case transcriptEntry(SignalboxTranscriptEntryMessage)
   case transcriptTextEntry(SignalboxTranscriptTextEntryMessage)
   case transcriptContent(SignalboxTranscriptContent)
@@ -634,6 +636,22 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
           decoder: decoder
         )
         self = .transcriptTurn(try SignalboxTranscriptTurn(from: decoder))
+      case "transcript_model_call_usage":
+        try tagged.rejectUnadmittedFields(
+          ["type", "model_call_index", "turn_id", "model_call_id", "usage"],
+          decoder: decoder
+        )
+        self = .transcriptModelCallUsage(
+          try SignalboxTranscriptModelCallUsage(from: decoder)
+        )
+      case "transcript_model_calls_end":
+        try tagged.rejectUnadmittedFields(
+          ["type", "model_call_count"],
+          decoder: decoder
+        )
+        self = .transcriptModelCallsEnd(
+          modelCallCount: try decoder.decode("model_call_count")
+        )
       case "transcript_entry":
         try tagged.rejectUnadmittedFields(
           ["type", "entry_index", "source_session_id", "entry_id", "entry"],
@@ -1101,6 +1119,49 @@ public struct SignalboxTranscriptSnapshotEnd: Decodable, Equatable, Sendable {
   }
 }
 
+public struct SignalboxTranscriptModelCallUsage: Decodable, Equatable, Sendable {
+  public let modelCallIndex: SignalboxCanonicalUInt64
+  public let turnID: SignalboxCanonicalUUID
+  public let modelCallID: SignalboxCanonicalUUID
+  public let usage: SignalboxModelCallTokenUsage
+
+  public init(from decoder: Decoder) throws {
+    modelCallIndex = try decoder.decode("model_call_index")
+    turnID = try decoder.decode("turn_id")
+    modelCallID = try decoder.decode("model_call_id")
+    usage = try decoder.decode("usage")
+  }
+}
+
+public struct SignalboxModelCallTokenUsage: Decodable, Equatable, Sendable {
+  public let inputTokens: SignalboxCanonicalUInt64?
+  public let outputTokens: SignalboxCanonicalUInt64?
+  public let cacheCreationInputTokens: SignalboxCanonicalUInt64?
+  public let cacheReadInputTokens: SignalboxCanonicalUInt64?
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      [
+        "input_tokens", "output_tokens", "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+      ],
+      decoder: decoder
+    )
+    try payload.requireFields(
+      [
+        "input_tokens", "output_tokens", "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+      ],
+      decoder: decoder
+    )
+    inputTokens = try decoder.decodeIfPresent("input_tokens")
+    outputTokens = try decoder.decodeIfPresent("output_tokens")
+    cacheCreationInputTokens = try decoder.decodeIfPresent("cache_creation_input_tokens")
+    cacheReadInputTokens = try decoder.decodeIfPresent("cache_read_input_tokens")
+  }
+}
+
 public struct SignalboxTranscriptTurn: Decodable, Equatable, Sendable {
   public let turnID: SignalboxCanonicalUUID
   public let acceptancePosition: SignalboxCanonicalUInt64
@@ -1283,20 +1344,35 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
 public struct SignalboxFailedTerminalModelCall: Decodable, Equatable, Sendable {
   public let modelCallID: SignalboxCanonicalUUID
   public let disposition: SignalboxFailedModelCallDisposition
+  public let cause: SignalboxFailedModelCallCause?
 
   public init(from decoder: Decoder) throws {
     try SignalboxUntaggedPayload(from: decoder).rejectUnadmittedFields(
-      ["model_call_id", "disposition"],
+      ["model_call_id", "disposition", "cause"],
       decoder: decoder
     )
     modelCallID = try decoder.decode("model_call_id")
     disposition = try decoder.decode("disposition")
+    cause = try decoder.decodeIfPresent("cause")
   }
 }
 
 public enum SignalboxFailedModelCallDisposition: String, Decodable, Equatable, Sendable {
   case knownFailed = "known_failed"
   case cancelled
+}
+
+public enum SignalboxFailedModelCallCause: String, Decodable, Equatable, Sendable {
+  case credentialRejected = "credential_rejected"
+  case permissionDenied = "permission_denied"
+  case invalidRequest = "invalid_request"
+  case targetNotFound = "target_not_found"
+  case requestTooLarge = "request_too_large"
+  case rateLimited = "rate_limited"
+  case quotaExhausted = "quota_exhausted"
+  case overloaded
+  case providerInternal = "provider_internal"
+  case unrecognized
 }
 
 public struct SignalboxCurrentModelCall: Decodable, Equatable, Sendable {
@@ -2224,6 +2300,24 @@ private struct SignalboxUntaggedPayload: Decodable {
       .init(
         codingPath: decoder.codingPath + [SignalboxDynamicCodingKey(field)],
         debugDescription: "Closed object contains an unadmitted field."
+      )
+    )
+  }
+
+  func requireFields(
+    _ requiredFields: Set<String>,
+    decoder: Decoder
+  ) throws {
+    guard
+      let field = requiredFields.sorted().first(where: { payload[$0] == nil })
+    else {
+      return
+    }
+    throw DecodingError.keyNotFound(
+      SignalboxDynamicCodingKey(field),
+      .init(
+        codingPath: decoder.codingPath,
+        debugDescription: "Closed object is missing a required field."
       )
     )
   }

@@ -2788,6 +2788,11 @@ impl IssuedModelCallCorrelation {
         observation: ModelCallTerminalObservation,
         usage: ProviderReportedTokenUsage,
     ) -> CorrelatedModelCallTerminalObservation;
+    pub fn bind_provider_failure_observation_with_usage(
+        self,
+        cause: ProviderModelCallFailureCause,
+        usage: ProviderReportedTokenUsage,
+    ) -> CorrelatedModelCallTerminalObservation;
 }
 pub struct ProviderReportedTokenUsage { /* private */ }
 impl ProviderReportedTokenUsage {
@@ -2805,9 +2810,23 @@ impl ProviderReportedTokenUsage {
     // accessors: input_tokens(), output_tokens(),
     // cache_creation_input_tokens(), cache_read_input_tokens()
 }
+pub enum ProviderModelCallFailureCause {
+    CredentialRejected,
+    PermissionDenied,
+    InvalidRequest,
+    TargetNotFound,
+    RequestTooLarge,
+    RateLimited,
+    QuotaExhausted,
+    Overloaded,
+    ProviderInternal,
+    Unrecognized,
+}
+
 pub struct CorrelatedModelCallTerminalObservation { /* private */ }
 impl CorrelatedModelCallTerminalObservation {
-    // accessors: call(), correlation(), observation(), usage()
+    // accessors: call(), correlation(), observation(), usage(),
+    //   provider_failure_cause()
 }
 
 pub enum ModelCallTerminalObservation {
@@ -7047,7 +7066,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: turn_attempt                               | 13                   |
 | domain: model_call                                 | 12                   |
 | domain: context_compaction                         | 12                   |
-| domain: model_execution                            | 50                   |
+| domain: model_execution                            | 51                   |
 | domain: context_frontier                           | 6                    |
 | domain: semantic_entry                             | 4                    |
 | domain: tool                                       | 38                   |
@@ -7060,7 +7079,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 53                   |
-| **signalbox-domain total**                         | **536 (+1 free fn)** |
+| **signalbox-domain total**                         | **537 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

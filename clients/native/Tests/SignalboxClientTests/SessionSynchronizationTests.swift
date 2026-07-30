@@ -1554,6 +1554,45 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(transport.machine.diagnostics.first?.kind, .protocolViolation)
   }
 
+  func testModelCallEvidenceFramesCompleteWithoutAFalseDiagnostic() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.queuedTurn()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallUsage()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 1)
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.snapshotEnd(
+          cursor: SynchronizationFixture.initialCursor,
+          turnCount: 1,
+          entryCount: 0
+        )
+      )
+    )
+    let snapshot = try SynchronizationFixture.publishedSnapshot(in: effects)
+
+    XCTAssertEqual(snapshot.records.count, 2)
+    XCTAssertTrue(transport.machine.diagnostics.isEmpty)
+  }
+
   func testNonRetriableProtocolErrorReportsTerminalFailure() throws {
     var transport = try SynchronizationFixture.transport()
 
@@ -2198,6 +2237,36 @@ private enum SynchronizationFixture {
         "fragment_index":"0",
         "final_fragment":true,
         "content_fragment":"\(content)"
+      }
+      """
+    )
+  }
+
+  static func modelCallUsage() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_model_call_usage",
+        "model_call_index":"0",
+        "turn_id":"\(turn)",
+        "model_call_id":"\(modelCall)",
+        "usage":{
+          "input_tokens":"10",
+          "output_tokens":"0",
+          "cache_creation_input_tokens":null,
+          "cache_read_input_tokens":"4"
+        }
+      }
+      """
+    )
+  }
+
+  static func modelCallsEnd(count: UInt64) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_model_calls_end",
+        "model_call_count":"\(count)"
       }
       """
     )

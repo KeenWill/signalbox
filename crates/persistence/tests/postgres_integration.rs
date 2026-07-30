@@ -45,19 +45,20 @@ use signalbox_domain::{
     ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
     NormalizedToolArguments, PerInputConfigurationChoices,
     PhysicalCancellationModelCallTurnIdentities, PreparedCreateSession, PreparedModelCallRequest,
-    ProviderModelIdentity, RefusedModelCallTurnIdentities, ReplaceSessionDefaults,
-    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult, ResolvedProviderTarget,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
-    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, StoppedToolResponsePartIdentity,
-    StoppedToolRoundModelCallIdentities, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
-    ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId,
-    ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal, ToolEffectClass,
-    ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolResponsePartIdentity,
-    ToolResultContent, ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse,
-    TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
+    ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
+    RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
+    ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionInputPosition, SessionSystemPrompt,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
+    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
+    SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
+    SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd,
+    ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal,
+    ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestId,
+    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
+    TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -80,9 +81,10 @@ use signalbox_persistence::{
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
-        ProcessModelCallRecoveryPrecondition, ProcessModelSelection, ProcessReadCorruption,
-        ProcessReadError, ProcessReadRepository, ProcessReconciliationOperation,
-        ProcessSessionDefaultsRead, ProcessTranscriptEntry, ProcessTurnState,
+        ProcessModelCallRecoveryPrecondition, ProcessModelSelection,
+        ProcessProviderModelCallFailureCause, ProcessReadCorruption, ProcessReadError,
+        ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionDefaultsRead,
+        ProcessTranscriptEntry, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -6417,6 +6419,68 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
             .reread_terminal_observation(refused.session, &refused_observation)
             .await?,
         RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A definitive provider failure persists and projects only its closed cause
+/// classification, independently of provider-authored native evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn provider_failure_cause_round_trips_through_persistence_and_process_read()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x76c0;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let observation = authorized
+        .observation_correlation()
+        .bind_provider_failure_observation_with_usage(
+            ProviderModelCallFailureCause::QuotaExhausted,
+            ProviderReportedTokenUsage::unreported(),
+        );
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation.clone(),
+            ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 17)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 18)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    let stored_cause: Option<String> = sqlx::query_scalar(
+        "SELECT terminal_provider_failure_cause
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored_cause.as_deref(), Some("quota_exhausted"));
+    assert_eq!(
+        repository
+            .reread_terminal_observation(fixture.session, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("the failed session has a transcript projection");
+    let ProcessTurnState::Failed {
+        terminal_model_call: Some(terminal_call),
+        ..
+    } = snapshot.turns()[0].state()
+    else {
+        panic!("the failed projection retains its terminal call");
+    };
+    assert_eq!(
+        terminal_call.provider_failure_cause(),
+        Some(ProcessProviderModelCallFailureCause::QuotaExhausted)
     );
 
     pool.close().await;

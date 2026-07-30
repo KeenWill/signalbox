@@ -25,9 +25,10 @@ use signalbox_application::{
 use signalbox_domain::{
     AssistantResponsePart, AssistantText, AuthorizedModelCall, ContextFrontierId,
     FrozenModelSelection, ModelCallId, ModelCallTerminalObservation, NormalizedToolArguments,
-    ProviderReportedTokenUsage, ResolvedProviderTarget, SessionId, ToolArgumentsKind,
-    ToolCallProposal as DomainToolCallProposal, ToolExecutionErrorKind, ToolName as DomainToolName,
-    ToolResultContent, ToolUsingAssistantResponse, TurnAttemptId, TurnId,
+    ProviderModelCallFailureCause, ProviderReportedTokenUsage, ResolvedProviderTarget, SessionId,
+    ToolArgumentsKind, ToolCallProposal as DomainToolCallProposal, ToolExecutionErrorKind,
+    ToolName as DomainToolName, ToolResultContent, ToolUsingAssistantResponse, TurnAttemptId,
+    TurnId,
 };
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
@@ -538,6 +539,23 @@ const fn preparation_failure_cause(failure: &PreparationFailure) -> ModelCallCau
             ModelCallCauseCode::CredentialUnavailable(CredentialAccessCode::of(error.failure))
         }
         PreparationFailure::CredentialUnusable { .. } => ModelCallCauseCode::CredentialUnusable,
+    }
+}
+
+/// Maps the adapter's exhaustive error taxonomy to the closed domain
+/// classification retained beyond this bridge.
+const fn provider_failure_cause(kind: ProviderErrorKind) -> ProviderModelCallFailureCause {
+    match kind {
+        ProviderErrorKind::CredentialRejected => ProviderModelCallFailureCause::CredentialRejected,
+        ProviderErrorKind::PermissionDenied => ProviderModelCallFailureCause::PermissionDenied,
+        ProviderErrorKind::InvalidRequest => ProviderModelCallFailureCause::InvalidRequest,
+        ProviderErrorKind::TargetNotFound => ProviderModelCallFailureCause::TargetNotFound,
+        ProviderErrorKind::RequestTooLarge => ProviderModelCallFailureCause::RequestTooLarge,
+        ProviderErrorKind::RateLimited => ProviderModelCallFailureCause::RateLimited,
+        ProviderErrorKind::QuotaExhausted => ProviderModelCallFailureCause::QuotaExhausted,
+        ProviderErrorKind::Overloaded => ProviderModelCallFailureCause::Overloaded,
+        ProviderErrorKind::ProviderInternal => ProviderModelCallFailureCause::ProviderInternal,
+        ProviderErrorKind::Unrecognized => ProviderModelCallFailureCause::Unrecognized,
     }
 }
 
@@ -1070,9 +1088,12 @@ where
             fail_closed(correlation, failure.error, failure.served_target.as_deref())
         })?;
         report_classified_outcome(correlation, &classified);
-        Ok(authorized
-            .observation_correlation()
-            .bind_terminal_observation_with_usage(classified.observation, usage))
+        let correlation = authorized.observation_correlation();
+        Ok(match classified.cause {
+            ModelCallCauseCode::ProviderError(kind) => correlation
+                .bind_provider_failure_observation_with_usage(provider_failure_cause(kind), usage),
+            _ => correlation.bind_terminal_observation_with_usage(classified.observation, usage),
+        })
     }
 }
 
@@ -1606,10 +1627,10 @@ mod tests {
     use signalbox_application::ModelConversationMessage;
     use signalbox_domain::{
         AssistantText, DirectModelSelection, ImportedText, ImportedTranscriptEntryId, ModelCallId,
-        ModelCallTerminalObservation, NormalizedToolArguments, ProviderModelIdentity,
-        SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion,
-        SessionId, ToolExecutionError, ToolExecutionErrorKind, ToolRequest, ToolRequestId,
-        ToolRequestOrdinal, ToolRequestReconstitutionInput, TurnId,
+        ModelCallTerminalObservation, NormalizedToolArguments, ProviderModelCallFailureCause,
+        ProviderModelIdentity, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
+        SessionConfigurationDefaultsVersion, SessionId, ToolExecutionError, ToolExecutionErrorKind,
+        ToolRequest, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, TurnId,
     };
     use signalbox_expect_table::table;
     use signalbox_model_runtime::{
@@ -2056,6 +2077,16 @@ mod tests {
 
         assert!(Arc::ptr_eq(&delta.text, &cloned.text));
         assert_eq!(cloned.text(), delta.text());
+    }
+
+    /// A definitive provider classification becomes the closed domain cause
+    /// carried beyond the bridge, never provider-authored error prose.
+    #[test]
+    fn provider_failure_cause_reaches_the_domain_classification() {
+        assert_eq!(
+            super::provider_failure_cause(ProviderErrorKind::QuotaExhausted),
+            ProviderModelCallFailureCause::QuotaExhausted
+        );
     }
 
     /// S02 / INV-014 / INV-025: runtime terminal evidence maps to the exact

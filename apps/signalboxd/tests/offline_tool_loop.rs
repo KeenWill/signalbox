@@ -2949,12 +2949,14 @@ async fn s02_s10_inv006_failed_continuation_call_admits_and_runs_later_turn()
         turn_disposition: String,
         terminal_model_call_id: Option<Uuid>,
         call_disposition: String,
+        provider_failure_cause: Option<String>,
         model_call_count: i64,
     }
     let terminal_shape: FailedContinuationShape = sqlx::query_as(
         "SELECT lifecycle.terminal_disposition_kind AS turn_disposition,
                 lifecycle.terminal_model_call_id,
                 continuation.terminal_disposition_kind AS call_disposition,
+                continuation.terminal_provider_failure_cause AS provider_failure_cause,
                 (SELECT count(*) FROM model_call
                   WHERE session_id = $1 AND turn_id = $2) AS model_call_count
            FROM turn_lifecycle AS lifecycle
@@ -2974,6 +2976,10 @@ async fn s02_s10_inv006_failed_continuation_call_admits_and_runs_later_turn()
         "the failed turn names its continuation call"
     );
     assert_eq!(terminal_shape.call_disposition, "known_failed");
+    assert_eq!(
+        terminal_shape.provider_failure_cause,
+        Some(String::from("provider_internal"))
+    );
     assert_eq!(
         terminal_shape.model_call_count, 2,
         "the terminal call is the second-round continuation call"
