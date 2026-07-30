@@ -5,21 +5,28 @@
 # rather than assumed. The discipline it implements is specified in the Codex
 # CLI provider adapter section of docs/spec/runtime-substrate.md.
 #
-# Security shape. The pull-request gate has no environment and receives no
-# configured secret. It reports on every pull request, but admits the smoke job
-# only when tooling/codex-cli/** changed and the head repository is this
-# repository. GitHub withholds secrets from ordinary pull_request runs authored
-# by forks independently of that predicate. The smoke remains bound to the
-# codex-smoke environment. Its selected-branch policy must admit branch patterns
-# `main`, `renovate/openai-codex-*.x`, and `refs/pull/*/merge`: GitHub evaluates
-# an environment used by pull_request against the synthetic merge ref, not the
-# head branch. The first two patterns retain push/manual defense in depth; the
-# third lets the explicitly gated same-repository PR job reach the environment.
+# Accepted trust boundary. The live exchange must execute the proposed
+# repository adapter code against the pinned CLI; that is the purpose of this
+# compatibility smoke. After authentication, that repository-controlled test
+# process can read the CLI credential store under CODEX_HOME. The workflow
+# therefore trusts anyone with write access to this repository, the same trust
+# already required to push executable code to main. It does not trust fork
+# authors: the secretless gate rejects changed fork pull requests, and GitHub
+# independently withholds secrets from ordinary pull_request runs from forks.
 #
-# The credential is read once, from secrets.*, into the single step that pipes
-# it to the CLI's own login command. It is never echoed, written to the log, or
-# passed to the Rust process. Repository code is compiled and the credential-
-# free real-CLI probes run before the credential store exists.
+# The smoke remains bound to the codex-smoke environment. Its selected-branch
+# policy must admit `main`, `renovate/openai-codex-*.x`, and
+# `refs/pull/*/merge`: GitHub evaluates an environment used by pull_request
+# against the synthetic merge ref, not the head branch. The first two patterns
+# retain push/manual defense in depth; the third admits explicitly gated
+# same-repository pull requests.
+#
+# The credential is referenced only in the authentication step, piped to the
+# CLI login command on stdin, and never echoed or passed in argv or a child
+# environment. npm lifecycle scripts are disabled, and repository code is
+# compiled and the credential-free real-CLI probes run before the credential
+# store exists. The later live test's access to that store is intentional under
+# the accepted same-repository-writer boundary above.
 name: Codex CLI smoke
 
 on:
@@ -119,8 +126,10 @@ jobs:
       # The runner image ships Node, and the pinned package is a thin launcher
       # around a prebuilt native binary, so no Node toolchain setup is needed.
       # `npm ci` installs the lockfile's integrity-checked artifact exactly.
+      # The package ships its platform binary as an optional dependency and
+      # needs no lifecycle script, so installation disables scripts entirely.
       - name: Install the pinned Codex CLI
-        run: npm ci --prefix tooling/codex-cli
+        run: npm ci --ignore-scripts --prefix tooling/codex-cli
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
