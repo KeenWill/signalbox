@@ -53,6 +53,13 @@ const DEFAULT_POOL_SIZE: u32 = 80;
 const DEFAULT_CONCURRENCIES: [usize; 7] = [1, 2, 4, 8, 16, 32, 64];
 const SERVER_CONNECTION_HEADROOM: u32 = 4;
 const IDENTITY_PREFIX: u128 = 0x5b00_0000_u128 << 96;
+// These synthetic fixtures provide stable, valid payloads; their wording has no
+// domain meaning.
+const SESSION_INPUT_FIXTURE: &str = "Measure the current state.";
+const MODEL_CREDENTIAL_FIXTURE: &str = "benchmark-provider-primary";
+const TOOL_NAME_FIXTURE: &str = "current_time";
+const TOOL_ARGUMENTS_FIXTURE: &str = "{}";
+const TOOL_RESULT_FIXTURE: &str = "2026-07-30T12:00:00Z";
 
 type HarnessResult<T> = Result<T, Box<dyn Error + Send + Sync + 'static>>;
 
@@ -224,8 +231,13 @@ fn parse_args() -> HarnessResult<ParsedArgs> {
         .checked_add(SERVER_CONNECTION_HEADROOM)
         .ok_or_else(|| error("--pool-size is too large to configure PostgreSQL"))?;
 
+    let duration = Duration::from_secs(duration_seconds);
+    Instant::now()
+        .checked_add(duration)
+        .ok_or_else(|| error("--duration-seconds exceeds the platform timer range"))?;
+
     Ok(ParsedArgs::Run(Config {
-        duration: Duration::from_secs(duration_seconds),
+        duration,
         pool_size,
         concurrencies,
         fsync_modes,
@@ -392,13 +404,19 @@ enum IdentityRole {
     PreparedModelCallFrontier = 137,
     FailedModelCallSuccessorEntry = 138,
     FailedModelCallSuccessorTurn = 139,
-    ToolRequest = 140,
-    ToolResponseEntry = 141,
-    ToolRoundFrontier = 142,
-    ToolRoundSuccessorTurn = 143,
-    ToolDecisionCommand = 144,
-    ToolDecisionTurnAttempt = 145,
-    ToolAttempt = 146,
+    ResumeCandidateModelCall = 140,
+    ResumeFailedModelCallEntry = 141,
+    ResumeFailedModelCallFrontier = 142,
+    ResumePreparedModelCallFrontier = 143,
+    ResumeFailedModelCallSuccessorEntry = 144,
+    ResumeFailedModelCallSuccessorTurn = 145,
+    ToolRequest = 146,
+    ToolResponseEntry = 147,
+    ToolRoundFrontier = 148,
+    ToolRoundSuccessorTurn = 149,
+    ToolDecisionCommand = 150,
+    ToolDecisionTurnAttempt = 151,
+    ToolAttempt = 152,
 }
 
 const CANCELLED_TOOL_ENTRY_OFFSET: u128 = 64;
@@ -435,6 +453,7 @@ impl LoadContext {
 #[derive(Default)]
 struct WorkerMeasurements {
     latencies: Vec<Duration>,
+    completed_during_offered_load: usize,
 }
 
 struct PointResult {
@@ -443,6 +462,7 @@ struct PointResult {
     concurrency: usize,
     offered_duration: Duration,
     elapsed: Duration,
+    completed_during_offered_load: usize,
     pool_size: u32,
     server_max_connections: u32,
     host_cpus: usize,
@@ -461,12 +481,12 @@ struct PointConfig {
 }
 
 impl PointResult {
-    fn completed(&self) -> usize {
+    fn measured_latencies(&self) -> usize {
         self.latencies.len()
     }
 
     fn throughput(&self) -> f64 {
-        self.completed() as f64 / self.elapsed.as_secs_f64()
+        self.completed_during_offered_load as f64 / self.offered_duration.as_secs_f64()
     }
 
     fn percentile_milliseconds(&self, percentile: usize) -> Option<f64> {
@@ -523,21 +543,29 @@ async fn run_point(
                 measurements
                     .latencies
                     .push(completed.duration_since(started));
+                if completed <= stop {
+                    measurements.completed_during_offered_load += 1;
+                }
             }
             Ok::<_, Box<dyn Error + Send + Sync + 'static>>(measurements)
         });
     }
 
     let measurement_started = Instant::now();
+    let measurement_deadline = measurement_started
+        .checked_add(config.duration)
+        .ok_or_else(|| error("measurement duration exceeds the platform timer range"))?;
     deadline
-        .set(measurement_started + config.duration)
+        .set(measurement_deadline)
         .map_err(|_| error("measurement deadline was initialized twice"))?;
     barrier.wait().await;
     let mut latencies = Vec::new();
+    let mut completed_during_offered_load = 0;
     while let Some(worker) = workers.join_next().await {
         let measurements = worker
             .map_err(|join_error| error(format!("load worker failed to join: {join_error}")))??;
         latencies.extend(measurements.latencies);
+        completed_during_offered_load += measurements.completed_during_offered_load;
     }
     latencies.sort_unstable();
     let elapsed = measurement_started.elapsed();
@@ -548,6 +576,7 @@ async fn run_point(
         concurrency: config.concurrency,
         offered_duration: config.duration,
         elapsed,
+        completed_during_offered_load,
         pool_size: config.pool_size,
         server_max_connections: config.server_max_connections,
         host_cpus: config.host_cpus,
@@ -625,13 +654,11 @@ async fn create_and_submit_turn(pool: &PgPool, ids: OperationIds) -> HarnessResu
     let command = SubmitInput::new(
         DurableCommandId::from_uuid(ids.uuid(IdentityRole::SubmitCommand)),
         flow.session,
-        UserContent::try_text(String::from("Measure the current state.")).map_err(
-            |content_error| {
-                error(format!(
-                    "benchmark input fixture was rejected: {content_error:?}"
-                ))
-            },
-        )?,
+        UserContent::try_text(String::from(SESSION_INPUT_FIXTURE)).map_err(|content_error| {
+            error(format!(
+                "benchmark input fixture was rejected: {content_error:?}"
+            ))
+        })?,
         signalbox_domain::DeliveryRequest::StartWhenNoActiveTurn {
             configuration: PerInputConfigurationChoices::new(
                 SessionConfigurationDefaultsVersion::first(),
@@ -726,7 +753,7 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
     let model_repository = PostgresModelCallRepository::new(
         pool.clone(),
         targets,
-        ModelCallCredentialReference::new("benchmark-provider-primary"),
+        ModelCallCredentialReference::new(MODEL_CREDENTIAL_FIXTURE),
     );
     let call = ModelCallId::from_uuid(ids.uuid(IdentityRole::ModelCall));
     let prepared = model_repository
@@ -748,11 +775,47 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
             },
         )
         .await?;
-    if !matches!(
-        prepared,
-        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
-    ) {
-        return Err(error("initial model call did not checkpoint"));
+    match prepared {
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call => {}
+        PrepareInitialModelCallOutcome::Checkpointed(_) => {
+            return Err(error(
+                "initial model call checkpointed a different identity",
+            ));
+        }
+        PrepareInitialModelCallOutcome::NoWork
+        | PrepareInitialModelCallOutcome::Ready { .. }
+        | PrepareInitialModelCallOutcome::TargetUnavailable(_) => {
+            return Err(error("initial model call did not checkpoint"));
+        }
+    }
+    let resumed = model_repository
+        .prepare_initial_call(
+            flow.session,
+            ModelCallId::from_uuid(ids.uuid(IdentityRole::ResumeCandidateModelCall)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(
+                    ids.uuid(IdentityRole::ResumeFailedModelCallEntry),
+                ),
+                ContextFrontierId::from_uuid(ids.uuid(IdentityRole::ResumeFailedModelCallFrontier)),
+            ),
+            ContextFrontierId::from_uuid(ids.uuid(IdentityRole::ResumePreparedModelCallFrontier)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(
+                        ids.uuid(IdentityRole::ResumeFailedModelCallSuccessorEntry),
+                    ),
+                    TurnId::from_uuid(ids.uuid(IdentityRole::ResumeFailedModelCallSuccessorTurn)),
+                )
+            },
+        )
+        .await?;
+    match resumed {
+        PrepareInitialModelCallOutcome::Ready { .. } => {}
+        PrepareInitialModelCallOutcome::NoWork
+        | PrepareInitialModelCallOutcome::Checkpointed(_)
+        | PrepareInitialModelCallOutcome::TargetUnavailable(_) => {
+            return Err(error("checkpointed model call did not reload as ready"));
+        }
     }
     let authorized = match model_repository.authorize_send(flow.session, call).await? {
         AuthorizeModelCallOutcome::Authorized(authorized) => *authorized,
@@ -765,16 +828,17 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
     let response =
         ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
             ToolCallProposal::new(
-                ToolName::try_new(String::from("current_time")).map_err(|tool_error| {
+                ToolName::try_new(String::from(TOOL_NAME_FIXTURE)).map_err(|tool_error| {
                     error(format!("benchmark tool name was rejected: {tool_error:?}"))
                 })?,
-                NormalizedToolArguments::try_from_provider_text(String::from("{}")).map_err(
-                    |arguments_error| {
-                        error(format!(
-                            "benchmark tool arguments were rejected: {arguments_error:?}"
-                        ))
-                    },
-                )?,
+                NormalizedToolArguments::try_from_provider_text(String::from(
+                    TOOL_ARGUMENTS_FIXTURE,
+                ))
+                .map_err(|arguments_error| {
+                    error(format!(
+                        "benchmark tool arguments were rejected: {arguments_error:?}"
+                    ))
+                })?,
             ),
         )])
         .map_err(|response_error| {
@@ -801,8 +865,17 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
             |_| TurnId::from_uuid(ids.uuid(IdentityRole::ToolRoundSuccessorTurn)),
         )
         .await?;
-    if !matches!(model_outcome, ModelCallTerminalOutcome::ToolRound(_)) {
-        return Err(error("model call did not commit a tool round"));
+    match model_outcome {
+        ModelCallTerminalOutcome::ToolRound(_) => {}
+        ModelCallTerminalOutcome::Completed(_)
+        | ModelCallTerminalOutcome::CancelledWithToolResponse(_)
+        | ModelCallTerminalOutcome::Failed(_)
+        | ModelCallTerminalOutcome::Cancelled(_)
+        | ModelCallTerminalOutcome::Refused(_)
+        | ModelCallTerminalOutcome::ReconciliationRequired(_)
+        | ModelCallTerminalOutcome::AwaitingRecovery(_) => {
+            return Err(error("model call did not commit a tool round"));
+        }
     }
 
     let tool_repository = PostgresToolLoopRepository::new(pool.clone());
@@ -840,7 +913,7 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
         .commit_observation(authorized_attempt.executor_fence().bind(
             ToolAttemptObservation::Completed {
                 result: ToolResultContent::Text(
-                    ToolResultText::try_new(String::from("2026-07-30T12:00:00Z")).map_err(
+                    ToolResultText::try_new(String::from(TOOL_RESULT_FIXTURE)).map_err(
                         |result_error| {
                             error(format!(
                                 "benchmark tool result was rejected: {result_error:?}"
@@ -851,8 +924,11 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
             },
         ))
         .await?;
-    if !matches!(ended.end(), ToolAttemptEnd::Completed { .. }) {
-        return Err(error("tool attempt did not commit completion"));
+    match ended.end() {
+        ToolAttemptEnd::Completed { .. } => {}
+        ToolAttemptEnd::KnownFailed { .. } | ToolAttemptEnd::Ambiguous => {
+            return Err(error("tool attempt did not commit completion"));
+        }
     }
     Ok(())
 }
@@ -864,14 +940,15 @@ fn format_optional(value: Option<f64>) -> String {
 fn print_result_header() {
     println!(
         "| scenario | image | host CPUs | fsync | pool | server max | concurrency | offered (s) | \
-         elapsed (s) | completed | ops/s | p50 (ms) | p95 (ms) | p99 (ms) |"
+         elapsed (s) | completed in window | latency samples | ops/s | p50 (ms) | p95 (ms) | \
+         p99 (ms) |"
     );
-    println!("|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
 }
 
 fn print_result(result: &PointResult) {
     println!(
-        "| {} | postgres:{} | {} | {} | {} | {} | {} | {:.0} | {:.3} | {} | {:.2} | {} | {} | {} |",
+        "| {} | postgres:{} | {} | {} | {} | {} | {} | {:.0} | {:.3} | {} | {} | {:.2} | {} | {} | {} |",
         result.scenario.label(),
         POSTGRES_IMAGE_TAG,
         result.host_cpus,
@@ -881,7 +958,8 @@ fn print_result(result: &PointResult) {
         result.concurrency,
         result.offered_duration.as_secs_f64(),
         result.elapsed.as_secs_f64(),
-        result.completed(),
+        result.completed_during_offered_load,
+        result.measured_latencies(),
         result.throughput(),
         format_optional(result.percentile_milliseconds(50)),
         format_optional(result.percentile_milliseconds(95)),

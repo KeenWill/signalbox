@@ -4,8 +4,9 @@ This on-demand Tokio harness measures the saturation curve of PostgreSQL
 persistence work. It is not a latency microbenchmark: each curve point keeps a
 fixed number of operations in flight for a fixed offered-load duration after one
 concurrent warmup operation per worker, then drains the operations already
-started. It reports completed operations per actual elapsed second plus
-uncensored p50, p95, and p99 operation latency.
+started. It reports operations completed during the offered-load window per
+offered-load second. The final drain is excluded from throughput but retained in
+the uncensored p50, p95, and p99 operation latency samples.
 
 Run the complete sweep in the Cargo bench profile:
 
@@ -28,8 +29,8 @@ The scenarios are:
   command, defaults, scheduler row, append-only records, and transactional
   outbox event.
 - `full_path`: session creation, input submission, scheduler-locked turn
-  activation, a completed model call proposing a tool, approval, and a completed
-  tool attempt.
+  activation, model-call checkpoint and reload, a completed model call proposing
+  a tool, approval, and a completed tool attempt.
 - `scheduler_lock`: session creation, input submission, and scheduler-locked
   turn activation on independent sessions. This isolates the common path through
   the per-session scheduler lock without the model and tool transactions.
@@ -42,11 +43,13 @@ post-knee behavior matter more than a single peak.
 Every output row records the PostgreSQL image tag, detected host CPU count,
 verified fsync setting, pool size, configured server connection limit,
 concurrency, configured offered-load duration, and actual elapsed duration
-including the final drain. Completed rows print immediately, so a later point
-failure preserves earlier measurements. Compare matching fsync-on and fsync-off
-points. A large throughput gap or latency reduction with fsync off points to
-durable-write I/O as the limiting cost; a small gap points instead toward
-schema, locking, query, or application work.
+including the final drain. It separately reports completions inside the offered
+window and the number of latency samples, which includes operations that started
+inside the window and completed during the drain. Completed rows print
+immediately, so a later point failure preserves earlier measurements. Compare
+matching fsync-on and fsync-off points. A large throughput gap or latency
+reduction with fsync off points to durable-write I/O as the limiting cost; a
+small gap points instead toward schema, locking, query, or application work.
 
 The harness is deliberately absent from ordinary CI. Container scheduling,
 filesystem behavior, and shared-host load make timings too noisy for a stable
