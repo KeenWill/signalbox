@@ -49,6 +49,8 @@ mod operation;
 mod output;
 mod preparation;
 mod provider_json;
+mod provider_support;
+mod redaction;
 mod runtime;
 mod scripted;
 mod settings;
@@ -83,6 +85,13 @@ pub use provider_json::{
     PROVIDER_JSON_NESTING_LIMIT, ProviderJsonNestingExceeded, ProviderJsonNestingValidator,
     validate_provider_json_nesting,
 };
+pub use provider_support::{
+    MAX_BUFFERED_PROVIDER_RESPONSE_BYTES, MAX_STREAMED_PROVIDER_RESPONSE_BYTES,
+    ResponsePrefixBudget, boundary_loss_evidence, emit_provider_observation,
+    pre_exchange_loss_evidence, proven_unsent_evidence, provider_response_body_too_large,
+    provider_response_prefix_len, serialize_provider_request, transport_facts_from_error,
+};
+pub use redaction::{CredentialRedactingSink, redact_evidence};
 pub use runtime::{CancellationSignal, ModelRuntime};
 pub use scripted::{Script, ScriptedModel, ScriptedPrepared};
 pub use settings::ModelSettings;
