@@ -137,6 +137,10 @@ impl NormalizedToolArguments {
             });
         }
 
+        // The byte cap does not bound JSON depth. Disabling serde_json's
+        // recursion limit is safe here only because serde_stacker grows the
+        // parse and serialization stacks and iterative destruction below keeps
+        // a deeply nested Value from overflowing the thread stack during Drop.
         if !is_complete_json(&value) {
             return Ok(Self {
                 kind: ToolArgumentsKind::Undecodable,

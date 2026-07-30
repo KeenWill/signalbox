@@ -16,13 +16,14 @@ use signalbox_application::{
     ToolExecutionService, ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor,
     UuidV7ModelCallExecutionIdGenerator, UuidV7ToolLoopIdGenerator,
 };
-use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, SessionId};
+use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, SessionId, TurnId};
 use signalbox_persistence::model_execution::{
     ModelCallRepositoryError, PostgresModelCallRepository,
 };
 use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError};
 use tokio::sync::watch;
 
+use tracing::Instrument;
 mod configuration;
 mod context_guard;
 mod daemon_tools;
@@ -117,6 +118,14 @@ pub trait ActivatedTurnExecution {
     /// proven not to have entered durable execution.
     fn active_resume_failure_requires_recovery(_error: &Self::Error) -> bool {
         true
+    }
+
+    /// Returns the durable turn known before a resumed execution failed.
+    ///
+    /// Read-only lookup failures have no turn. Implementations that begin
+    /// executing a found turn preserve it in their typed error evidence.
+    fn active_resume_failure_turn(_error: &Self::Error) -> Option<TurnId> {
+        None
     }
 
     /// Reports that durable activation may require startup recovery.
@@ -220,6 +229,10 @@ where
 
     fn active_resume_failure_requires_recovery(error: &Self::Error) -> bool {
         Execution::active_resume_failure_requires_recovery(error)
+    }
+
+    fn active_resume_failure_turn(error: &Self::Error) -> Option<TurnId> {
+        Execution::active_resume_failure_turn(error)
     }
 
     fn report_post_activation_failure(&self) {
@@ -359,6 +372,18 @@ where
             original
         }
     }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        let original = self.original().operator_failure_cause_code();
+        let Some(reconciliation) = self.reconciliation() else {
+            return original;
+        };
+        if is_fatal_failure_class(reconciliation.operator_failure_class()) {
+            reconciliation.operator_failure_cause_code()
+        } else {
+            original
+        }
+    }
 }
 
 /// Backwards-compatible name for retained model-call execution evidence.
@@ -387,13 +412,42 @@ impl Drop for FatalOnIncompleteExecution {
     }
 }
 
+/// Closed execution stage retained independently from optional turn evidence.
+///
+/// Recovery failures can identify the retained turn, so turn presence cannot
+/// classify the operator-visible stage. These two labels carry no model,
+/// prompt, tool, or adapter payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TurnPassExecutionStage {
+    /// Reconciliation of a turn retained from an earlier daemon run.
+    ActiveTurnRecovery,
+    /// Execution of a turn activated by the current eligibility pass.
+    Execution,
+}
+
+impl TurnPassExecutionStage {
+    const fn operator_label(self) -> &'static str {
+        match self {
+            Self::ActiveTurnRecovery => "active_turn_recovery",
+            Self::Execution => "execution",
+        }
+    }
+}
+
 /// Scheduler-pass failure retaining whether activation or execution failed.
 #[derive(Debug)]
 pub enum ActivatedTurnPassError<ActivationError, ExecutionError> {
     /// The authoritative activation transaction failed.
     Activation(ActivationError),
     /// A transaction, capability, or provider stage failed after activation.
-    Execution(ExecutionError),
+    Execution {
+        /// Stage at which execution orchestration failed.
+        stage: TurnPassExecutionStage,
+        /// Selected turn, absent when failure occurred before selection.
+        turn: Option<TurnId>,
+        /// Typed application failure.
+        source: ExecutionError,
+    },
     /// The transaction returned an activation for another hinted session.
     ActivationSessionMismatch,
 }
@@ -407,7 +461,9 @@ where
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Activation(error) => write!(formatter, "turn activation failed: {error}"),
-            Self::Execution(error) => write!(formatter, "activated turn execution failed: {error}"),
+            Self::Execution { source, .. } => {
+                write!(formatter, "activated turn execution failed: {source}")
+            }
             Self::ActivationSessionMismatch => {
                 formatter.write_str("turn activation returned a different session")
             }
@@ -432,10 +488,18 @@ where
     fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass {
         match self {
             Self::Activation(error) => error.operator_failure_class(),
-            Self::Execution(error) => error.operator_failure_class(),
+            Self::Execution { source, .. } => source.operator_failure_class(),
             Self::ActivationSessionMismatch => {
                 signalbox_application::OperatorFailureClass::CallerOrHubBug
             }
+        }
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::Activation(error) => error.operator_failure_cause_code(),
+            Self::Execution { source, .. } => source.operator_failure_cause_code(),
+            Self::ActivationSessionMismatch => "activation_session_mismatch",
         }
     }
 }
@@ -475,6 +539,21 @@ where
     Execution::Error: Send + 'static,
 {
     type Error = ActivatedTurnPassError<Transaction::Error, Execution::Error>;
+    fn failure_stage(error: &Self::Error) -> &'static str {
+        match error {
+            ActivatedTurnPassError::Activation(_) => "activation",
+            ActivatedTurnPassError::Execution { stage, .. } => stage.operator_label(),
+            ActivatedTurnPassError::ActivationSessionMismatch => "activation_correlation",
+        }
+    }
+
+    fn failure_turn(error: &Self::Error) -> Option<TurnId> {
+        match error {
+            ActivatedTurnPassError::Activation(_) => None,
+            ActivatedTurnPassError::Execution { turn, .. } => *turn,
+            ActivatedTurnPassError::ActivationSessionMismatch => None,
+        }
+    }
 
     fn run(
         &mut self,
@@ -483,10 +562,13 @@ where
         let activation = self.activation.execute_with_cloned_transaction(session);
         let execution = self.execution.clone();
         async move {
-            execution
-                .resume_active(session)
-                .await
-                .map_err(ActivatedTurnPassError::Execution)?;
+            execution.resume_active(session).await.map_err(|source| {
+                ActivatedTurnPassError::Execution {
+                    stage: TurnPassExecutionStage::ActiveTurnRecovery,
+                    turn: Execution::active_resume_failure_turn(&source),
+                    source,
+                }
+            })?;
             let outcome = match activation.await {
                 Ok(outcome) => outcome,
                 Err(error) => {
@@ -497,17 +579,36 @@ where
             match outcome {
                 StartEligibleTurnOutcome::NoEligibleTurn => Ok(()),
                 StartEligibleTurnOutcome::Activated(activated) => {
+                    let turn = activated.turn();
                     if !activation_session_matches(&execution, session, activated.session()) {
                         return Err(ActivatedTurnPassError::ActivationSessionMismatch);
                     }
                     execution
                         .execute(activated)
+                        .instrument(turn_work_span(session, turn))
                         .await
-                        .map_err(ActivatedTurnPassError::Execution)
+                        .map_err(|source| ActivatedTurnPassError::Execution {
+                            stage: TurnPassExecutionStage::Execution,
+                            turn: Some(turn),
+                            source,
+                        })
                 }
             }
         }
     }
+}
+/// Creates one turn child span beneath the scheduler's session span.
+///
+/// The hierarchy follows one selected turn through orchestration and keeps
+/// stable names and fields for a future OpenTelemetry layer. Both values are
+/// daemon-minted identities; no conversation content or adapter prose enters
+/// this span.
+fn turn_work_span(session: SessionId, turn: TurnId) -> tracing::Span {
+    tracing::info_span!(
+        "turn_work",
+        session_id = %session.as_uuid(),
+        turn_id = %turn.as_uuid(),
+    )
 }
 
 /// Reports one classified failure whose durable commit outcome is unknown, so
@@ -595,6 +696,13 @@ pub type PostgresProviderToolExecutionError<ExecutorError> =
 pub enum PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError> {
     /// Read-only active-turn lookup failed before durable execution began.
     ResumeLookup(ToolLoopRepositoryError),
+    /// A found active turn failed while resumed execution was in progress.
+    ResumeExecution {
+        /// Exact durable turn selected by the resume lookup.
+        turn: TurnId,
+        /// Classified model/tool-loop execution failure.
+        source: Box<Self>,
+    },
     /// Model-call execution or same-incarnation reconciliation failed.
     Model(Box<PostgresProviderModelExecutionError<ProviderError>>),
     /// Tool preparation, execution, evidence commit, or continuation failed.
@@ -610,6 +718,7 @@ where
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ResumeLookup(error) => error.fmt(formatter),
+            Self::ResumeExecution { source, .. } => source.fmt(formatter),
             Self::Model(error) => error.fmt(formatter),
             Self::Tool(error) => error.fmt(formatter),
         }
@@ -625,6 +734,7 @@ where
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::ResumeLookup(error) => Some(error),
+            Self::ResumeExecution { source, .. } => Some(source),
             Self::Model(error) => Some(error),
             Self::Tool(error) => Some(error),
         }
@@ -640,8 +750,18 @@ where
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
             Self::ResumeLookup(error) => error.operator_failure_class(),
+            Self::ResumeExecution { source, .. } => source.operator_failure_class(),
             Self::Model(error) => error.operator_failure_class(),
             Self::Tool(error) => error.operator_failure_class(),
+        }
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::ResumeLookup(_) => "tool_loop_resume_lookup",
+            Self::ResumeExecution { source, .. } => source.operator_failure_cause_code(),
+            Self::Model(error) => error.operator_failure_cause_code(),
+            Self::Tool(error) => error.operator_failure_cause_code(),
         }
     }
 }
@@ -916,7 +1036,16 @@ where
                 .await
                 .map_err(PostgresProviderToolLoopExecutionError::ResumeLookup)?;
             match turn {
-                Some(turn) => execution.execute_scope(session, turn).await,
+                Some(turn) => execution
+                    .execute_scope(session, turn)
+                    .instrument(turn_work_span(session, turn))
+                    .await
+                    .map_err(
+                        |source| PostgresProviderToolLoopExecutionError::ResumeExecution {
+                            turn,
+                            source: Box::new(source),
+                        },
+                    ),
                 None => Ok(()),
             }
         }
@@ -927,6 +1056,15 @@ where
             error,
             PostgresProviderToolLoopExecutionError::ResumeLookup(_)
         )
+    }
+
+    fn active_resume_failure_turn(error: &Self::Error) -> Option<TurnId> {
+        match error {
+            PostgresProviderToolLoopExecutionError::ResumeExecution { turn, .. } => Some(*turn),
+            PostgresProviderToolLoopExecutionError::ResumeLookup(_)
+            | PostgresProviderToolLoopExecutionError::Model(_)
+            | PostgresProviderToolLoopExecutionError::Tool(_) => None,
+        }
     }
 }
 
@@ -1023,14 +1161,15 @@ mod tests {
     };
     use signalbox_domain::{
         AcceptedInputTurnActivationIdentities, ActivatedAcceptedInputTurn, ContextFrontierId,
-        SemanticTranscriptEntryId, SessionId, TurnAttemptId,
+        SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
     };
     use tokio::sync::watch;
     use uuid::Uuid;
 
     use super::{
-        ActivatedTurnExecution, ActivatedTurnPass, FatalExecutionSignal, FatalExecutionSupervisor,
-        activation_session_matches, reconcile_retained_once, supervise_execution,
+        ActivatedTurnExecution, ActivatedTurnPass, ActivatedTurnPassError, FatalExecutionSignal,
+        FatalExecutionSupervisor, TurnPassExecutionStage, activation_session_matches,
+        reconcile_retained_once, supervise_execution,
     };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1096,6 +1235,14 @@ mod tests {
                 },
                 Self::Corruption => OperatorFailureClass::FailClosedCorruption,
                 Self::CallerBug => OperatorFailureClass::CallerOrHubBug,
+            }
+        }
+
+        fn operator_failure_cause_code(&self) -> &'static str {
+            match self {
+                Self::Infrastructure => "initial_execution",
+                Self::Corruption => "reconciliation_corruption",
+                Self::CallerBug => "reconciliation_caller_bug",
             }
         }
     }
@@ -1213,6 +1360,12 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     struct PostMutationResumeFailureExecution;
 
+    impl PostMutationResumeFailureExecution {
+        fn failed_turn() -> TurnId {
+            TurnId::from_uuid(Uuid::from_u128(10))
+        }
+    }
+
     impl ActivatedTurnExecution for PostMutationResumeFailureExecution {
         type Error = ExecutionFailure;
 
@@ -1228,6 +1381,10 @@ mod tests {
             _session: SessionId,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Err(ExecutionFailure))
+        }
+
+        fn active_resume_failure_turn(_error: &Self::Error) -> Option<TurnId> {
+            Some(Self::failed_turn())
         }
     }
 
@@ -1354,6 +1511,19 @@ mod tests {
         assert!(signal.is_triggered());
     }
 
+    #[test]
+    fn activation_session_mismatch_omits_the_foreign_turn() {
+        let error =
+            ActivatedTurnPassError::<ExecutionFailure, ExecutionFailure>::ActivationSessionMismatch;
+
+        assert_eq!(
+            <ActivatedTurnPass<AdvancingIds, RecordingTransaction, NoopExecution> as EligibilityPass>::failure_turn(
+                &error
+            ),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn post_activation_failure_raises_the_fatal_signal() {
         let (fatal_signal, triggered) = watch::channel(false);
@@ -1394,6 +1564,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resumed_execution_failure_preserves_the_known_turn_and_recovery_stage() {
+        let (execution, _signal) =
+            FatalExecutionSupervisor::new(PostMutationResumeFailureExecution);
+        let mut pass = ActivatedTurnPass::new(
+            StartEligibleTurnService::new(AdvancingIds::new(), RecordingTransaction::default()),
+            execution,
+        );
+
+        let error = pass
+            .run(SessionId::from_uuid(Uuid::from_u128(9)))
+            .await
+            .expect_err("the resumed execution fails");
+
+        assert_eq!(
+            <ActivatedTurnPass<
+                AdvancingIds,
+                RecordingTransaction,
+                FatalExecutionSupervisor<PostMutationResumeFailureExecution>,
+            > as EligibilityPass>::failure_turn(&error),
+            Some(PostMutationResumeFailureExecution::failed_turn()),
+        );
+        assert_eq!(
+            <ActivatedTurnPass<
+                AdvancingIds,
+                RecordingTransaction,
+                FatalExecutionSupervisor<PostMutationResumeFailureExecution>,
+            > as EligibilityPass>::failure_stage(&error),
+            TurnPassExecutionStage::ActiveTurnRecovery.operator_label(),
+        );
+    }
+
+    #[tokio::test]
     #[allow(
         clippy::panic,
         reason = "the test deliberately exercises unwind supervision"
@@ -1414,6 +1616,10 @@ mod tests {
 
     #[tokio::test]
     async fn retained_reconciliation_preserves_cause_and_reports_fatal_classification() {
+        let primary =
+            super::RetainedModelExecutionError::Primary(StagedExecutionFailure::Infrastructure);
+        assert_eq!(primary.operator_failure_cause_code(), "initial_execution");
+
         let corruption = reconcile_retained_once(
             StagedExecutionFailure::Infrastructure,
             ready(Err::<(), _>(StagedExecutionFailure::Corruption)),
@@ -1424,6 +1630,7 @@ mod tests {
             corruption,
             StagedExecutionFailure::Corruption,
             OperatorFailureClass::FailClosedCorruption,
+            "reconciliation_corruption",
         );
 
         let caller_bug = reconcile_retained_once(
@@ -1436,6 +1643,7 @@ mod tests {
             caller_bug,
             StagedExecutionFailure::CallerBug,
             OperatorFailureClass::CallerOrHubBug,
+            "reconciliation_caller_bug",
         );
     }
 
@@ -1444,10 +1652,12 @@ mod tests {
         error: super::RetainedModelExecutionError<StagedExecutionFailure>,
         reconciliation: StagedExecutionFailure,
         expected_class: OperatorFailureClass,
+        expected_cause: &'static str,
     ) {
         assert_eq!(error.original(), &StagedExecutionFailure::Infrastructure);
         assert_eq!(error.reconciliation(), Some(&reconciliation));
         assert_eq!(error.operator_failure_class(), expected_class);
+        assert_eq!(error.operator_failure_cause_code(), expected_cause);
     }
 
     #[tokio::test]
