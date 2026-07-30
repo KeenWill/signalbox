@@ -871,43 +871,90 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     Ok(outcome)
 }
 
-/// Builds the operator-selected directive without exposing rejected input.
+/// Whether an operator filter setting was admitted or rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OperatorFilterDisposition {
+    /// The absent, empty, or closed-level setting was admitted.
+    Accepted,
+    /// A non-level or non-Unicode setting fell back to INFO.
+    Rejected,
+}
+
+/// Builds a first-party-only level override without exposing rejected input.
 ///
-/// Absence preserves the existing INFO default; any valid directive can make
-/// DEBUG sites reachable, while invalid input falls back closed to INFO.
-fn operator_filter(value: Option<&str>) -> (tracing_subscriber::EnvFilter, bool) {
+/// Absence preserves the existing global INFO default. A closed log level can
+/// make Signalbox DEBUG sites reachable, but dependency DEBUG/TRACE sites stay
+/// disabled because arbitrary target directives are rejected.
+fn operator_filter(
+    value: Option<&str>,
+) -> (tracing_subscriber::EnvFilter, OperatorFilterDisposition) {
     match value {
-        None => (tracing_subscriber::EnvFilter::new("info"), false),
-        Some(value) if value.trim().is_empty() => {
-            (tracing_subscriber::EnvFilter::new("info"), false)
-        }
-        Some(value) => match tracing_subscriber::EnvFilter::try_new(value) {
-            Ok(filter) => (filter, false),
-            Err(_) => (tracing_subscriber::EnvFilter::new("info"), true),
+        None => (
+            tracing_subscriber::EnvFilter::new("info"),
+            OperatorFilterDisposition::Accepted,
+        ),
+        Some(value) if value.trim().is_empty() => (
+            tracing_subscriber::EnvFilter::new("info"),
+            OperatorFilterDisposition::Accepted,
+        ),
+        Some(value) => match value.trim().parse::<tracing::level_filters::LevelFilter>() {
+            Ok(level) => match signalbox_level_filter(level) {
+                Some(filter) => (filter, OperatorFilterDisposition::Accepted),
+                None => (
+                    tracing_subscriber::EnvFilter::new("info"),
+                    OperatorFilterDisposition::Rejected,
+                ),
+            },
+            Err(_) => (
+                tracing_subscriber::EnvFilter::new("info"),
+                OperatorFilterDisposition::Rejected,
+            ),
         },
     }
 }
 
-/// Installs compact operator telemetry with a configurable level directive.
+/// Applies one closed level only to crates covered by Signalbox redaction.
 ///
-/// The filter value itself is never logged: it may contain deployment-specific
-/// target names. Rejection records only the public setting name.
+/// The global INFO directive preserves the default operator experience. The
+/// three target overrides name the only crates that emit daemon telemetry, so
+/// dependency verbosity cannot be raised through this process surface.
+fn signalbox_level_filter(
+    level: tracing::level_filters::LevelFilter,
+) -> Option<tracing_subscriber::EnvFilter> {
+    let directives = [
+        String::from("info"),
+        format!("signalboxd={level}"),
+        format!("signalbox_application={level}"),
+        format!("signalbox_model_provider_runtime={level}"),
+    ]
+    .join(",");
+    tracing_subscriber::EnvFilter::try_new(directives).ok()
+}
+
+/// Installs compact operator telemetry with a configurable closed level.
+///
+/// The setting value itself is never logged. Rejection records only the public
+/// setting name, and third-party targets remain capped at the INFO default.
 fn install_tracing_subscriber() {
     let configured = env::var(LOG_FILTER_ENVIRONMENT);
-    let (filter, rejected) = match configured.as_deref() {
+    let (filter, disposition) = match configured.as_deref() {
         Ok(value) => operator_filter(Some(value)),
         Err(env::VarError::NotPresent) => operator_filter(None),
-        Err(env::VarError::NotUnicode(_)) => (tracing_subscriber::EnvFilter::new("info"), true),
+        Err(env::VarError::NotUnicode(_)) => (
+            tracing_subscriber::EnvFilter::new("info"),
+            OperatorFilterDisposition::Rejected,
+        ),
     };
     tracing_subscriber::fmt()
         .compact()
         .with_env_filter(filter)
         .init();
-    if rejected {
-        tracing::warn!(
+    match disposition {
+        OperatorFilterDisposition::Accepted => {}
+        OperatorFilterDisposition::Rejected => tracing::warn!(
             setting = LOG_FILTER_ENVIRONMENT,
-            "invalid tracing filter rejected; using INFO default"
-        );
+            "invalid tracing level rejected; using INFO default"
+        ),
     }
 }
 
@@ -1020,13 +1067,13 @@ mod tests {
     use super::{
         AnthropicConstructionError, DATABASE_URL_ENVIRONMENT, GITHUB_TOKEN_FILE_ENVIRONMENT,
         HubConfiguration, HubConfigurationError, HubRuntimeError,
-        MODEL_CONFIGURATION_FILE_ENVIRONMENT, PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError,
-        RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
-        SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
-        TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
-        completed_runtime_outcome, erase_startup_cause, migrate_scan_then_schedule,
-        operator_filter, process_runtime_failure_class, run_scheduler_until_shutdown,
-        should_close_pool,
+        MODEL_CONFIGURATION_FILE_ENVIRONMENT, OperatorFilterDisposition,
+        PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RequiredSettingFailure,
+        RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, SanitizedStartupCause,
+        SchedulerStopCause, ShutdownOutcome, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
+        anthropic_construction_cause, completed_runtime_outcome, erase_startup_cause,
+        migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
+        run_scheduler_until_shutdown, should_close_pool,
     };
 
     #[derive(Clone, Default)]
@@ -1123,19 +1170,25 @@ mod tests {
     }
 
     #[test]
-    fn tracing_filter_defaults_to_info_and_admits_debug() {
-        let (default_filter, default_rejected) = operator_filter(None);
-        let (empty_filter, empty_rejected) = operator_filter(Some(""));
-        let (debug_filter, debug_rejected) = operator_filter(Some("debug"));
-        let (invalid_filter, invalid_rejected) = operator_filter(Some("not a valid directive ["));
+    fn tracing_filter_defaults_to_info_and_scopes_debug_to_signalbox() {
+        let (default_filter, default_disposition) = operator_filter(None);
+        let (empty_filter, empty_disposition) = operator_filter(Some(""));
+        let (debug_filter, debug_disposition) = operator_filter(Some("debug"));
+        let (external_filter, external_disposition) = operator_filter(Some("hyper=trace"));
+        let (invalid_filter, invalid_disposition) = operator_filter(Some("not a level"));
         assert_eq!(default_filter.to_string(), "info");
-        assert!(!default_rejected);
+        assert_eq!(default_disposition, OperatorFilterDisposition::Accepted);
         assert_eq!(empty_filter.to_string(), "info");
-        assert!(!empty_rejected);
-        assert_eq!(debug_filter.to_string(), "debug");
-        assert!(!debug_rejected);
+        assert_eq!(empty_disposition, OperatorFilterDisposition::Accepted);
+        assert_eq!(
+            debug_filter.to_string(),
+            "signalbox_model_provider_runtime=debug,signalbox_application=debug,signalboxd=debug,info"
+        );
+        assert_eq!(debug_disposition, OperatorFilterDisposition::Accepted);
+        assert_eq!(external_filter.to_string(), "info");
+        assert_eq!(external_disposition, OperatorFilterDisposition::Rejected);
         assert_eq!(invalid_filter.to_string(), "info");
-        assert!(invalid_rejected);
+        assert_eq!(invalid_disposition, OperatorFilterDisposition::Rejected);
     }
 
     #[tokio::test]
