@@ -645,25 +645,26 @@ impl ReviewWorkflowStore {
         run: ReviewRunId,
     ) -> Result<Vec<ReviewFinding>, ReviewWorkflowStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
-        let identifiers = sqlx::query_scalar::<_, Uuid>(
-            "SELECT finding_id
+        let target = sqlx::query_scalar::<_, Uuid>(
+            "SELECT target_id
                FROM review_finding
               WHERE run_id = $1
-              ORDER BY finding_id",
+              ORDER BY finding_id
+              LIMIT 1",
         )
         .bind(run.into_uuid())
-        .fetch_all(&mut *transaction)
+        .fetch_optional(&mut *transaction)
         .await?;
-        let mut findings = Vec::with_capacity(identifiers.len());
-        for identifier in identifiers {
-            let finding = self
-                .load_finding_on_connection(&mut transaction, finding_id(identifier))
-                .await?
-                .ok_or_else(|| {
-                    corruption("review_finding", String::from("listed finding disappeared"))
-                })?;
-            findings.push(finding);
-        }
+        let Some(target) = target else {
+            transaction.commit().await?;
+            return Ok(Vec::new());
+        };
+        let findings = self
+            .load_target_findings_on_connection(&mut transaction, target)
+            .await?
+            .into_iter()
+            .filter(|finding| finding.proposal().reference().run().run() == run)
+            .collect();
         transaction.commit().await?;
         Ok(findings)
     }
@@ -684,6 +685,24 @@ impl ReviewWorkflowStore {
         let Some(target) = target else {
             return Ok(None);
         };
+        self.load_target_findings_on_connection(connection, target)
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.proposal().reference().finding() == finding)
+            .map(Some)
+            .ok_or_else(|| {
+                corruption(
+                    "review_finding",
+                    String::from("requested target graph finding disappeared"),
+                )
+            })
+    }
+
+    async fn load_target_findings_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        target: Uuid,
+    ) -> Result<Vec<ReviewFinding>, ReviewWorkflowStoreError> {
         let identifiers = sqlx::query_scalar::<_, Uuid>(
             "SELECT finding_id
                FROM review_finding
@@ -712,16 +731,7 @@ impl ReviewWorkflowStore {
                 format!("reference graph is corrupt: {error:?}"),
             )
         })?;
-        findings
-            .into_iter()
-            .find(|candidate| candidate.proposal().reference().finding() == finding)
-            .map(Some)
-            .ok_or_else(|| {
-                corruption(
-                    "review_finding",
-                    String::from("requested target graph finding disappeared"),
-                )
-            })
+        Ok(findings)
     }
 
     async fn load_finding_projection_on_connection(

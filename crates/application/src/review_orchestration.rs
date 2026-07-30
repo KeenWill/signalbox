@@ -265,14 +265,23 @@ fn validate_import(
     attempt: &ReviewOrchestrationAttempt,
     outcome: &ReviewImportOutcome,
 ) -> Result<(), ReviewImportEvidenceFailure> {
-    let ReviewImportOutcome::Succeeded {
-        pass,
-        run,
-        template_digest,
-        ..
-    } = outcome
-    else {
-        return Ok(());
+    let (pass, run, template_digest) = match outcome {
+        ReviewImportOutcome::Succeeded {
+            pass,
+            run,
+            template_digest,
+            ..
+        } => (pass, run, template_digest),
+        ReviewImportOutcome::Incomplete {
+            pass: Some(pass), ..
+        } => {
+            return if pass.target() == attempt.target {
+                Ok(())
+            } else {
+                Err(ReviewImportEvidenceFailure::ForeignTarget)
+            };
+        }
+        ReviewImportOutcome::Incomplete { pass: None, .. } => return Ok(()),
     };
     let pass_ref = pass.reference();
     if pass_ref.target() != attempt.target {
@@ -1296,19 +1305,44 @@ where
                 (key, digest, outcome)
             });
         }
+        let mut first_concern_error = None;
         while let Some(joined) = tasks.join_next().await {
-            let (concern, template_digest, outcome) =
-                joined.map_err(|_| ReviewOrchestrationServiceError::ConcernTaskTerminated)?;
-            let outcome = outcome.map_err(ReviewOrchestrationServiceError::Runner)?;
-            ensure_sealed(
-                self.store
-                    .record_concern_claim(
-                        attempt.id,
-                        ReviewConcernClaim::new(concern, template_digest, outcome),
-                    )
-                    .await
-                    .map_err(ReviewOrchestrationServiceError::Store)?,
-            )?;
+            match joined {
+                Err(_) => retain_first_error(
+                    &mut first_concern_error,
+                    ReviewOrchestrationServiceError::ConcernTaskTerminated,
+                ),
+                Ok((_, _, Err(error))) => retain_first_error(
+                    &mut first_concern_error,
+                    ReviewOrchestrationServiceError::Runner(error),
+                ),
+                Ok((concern, template_digest, Ok(outcome))) => {
+                    let seal = self
+                        .store
+                        .record_concern_claim(
+                            attempt.id,
+                            ReviewConcernClaim::new(concern, template_digest, outcome),
+                        )
+                        .await;
+                    match seal {
+                        Err(error) => retain_first_error(
+                            &mut first_concern_error,
+                            ReviewOrchestrationServiceError::Store(error),
+                        ),
+                        Ok(ReviewDurableSealOutcome::Conflict) => retain_first_error(
+                            &mut first_concern_error,
+                            ReviewOrchestrationServiceError::DurableConflict,
+                        ),
+                        Ok(
+                            ReviewDurableSealOutcome::Recorded
+                            | ReviewDurableSealOutcome::EqualReplay,
+                        ) => {}
+                    }
+                }
+            }
+        }
+        if let Some(error) = first_concern_error {
+            return Err(error);
         }
 
         let claims = self
@@ -1485,6 +1519,12 @@ where
     }
 }
 
+fn retain_first_error<Error>(first: &mut Option<Error>, candidate: Error) {
+    if first.is_none() {
+        *first = Some(candidate);
+    }
+}
+
 fn ensure_sealed<StoreError, RunnerError>(
     outcome: ReviewDurableSealOutcome,
 ) -> Result<(), ReviewOrchestrationServiceError<StoreError, RunnerError>> {
@@ -1532,6 +1572,7 @@ mod tests {
     enum RunnerMode {
         Partial,
         Complete,
+        ConcernRunnerError,
     }
 
     #[derive(Debug)]
@@ -1542,6 +1583,8 @@ mod tests {
         judgment_calls: Arc<AtomicUsize>,
         repair_calls: Arc<AtomicUsize>,
         publication_calls: Arc<AtomicUsize>,
+        concern_error_returned: Arc<tokio::sync::Notify>,
+        concern_success_release: Arc<tokio::sync::Notify>,
     }
 
     impl FakeRunner {
@@ -1553,6 +1596,8 @@ mod tests {
                 judgment_calls: Arc::new(AtomicUsize::new(0)),
                 repair_calls: Arc::new(AtomicUsize::new(0)),
                 publication_calls: Arc::new(AtomicUsize::new(0)),
+                concern_error_returned: Arc::new(tokio::sync::Notify::new()),
+                concern_success_release: Arc::new(tokio::sync::Notify::new()),
             }
         }
     }
@@ -1588,6 +1633,8 @@ mod tests {
             let mode = self.mode;
             let recorded = Arc::clone(&self.attempt_recorded);
             let violations = Arc::clone(&self.inventory_order_violations);
+            let error_returned = Arc::clone(&self.concern_error_returned);
+            let success_release = Arc::clone(&self.concern_success_release);
             async move {
                 if !recorded.load(Ordering::SeqCst) {
                     violations.fetch_add(1, Ordering::SeqCst);
@@ -1608,6 +1655,13 @@ mod tests {
                             .expect("empty inventory is canonical"),
                     )),
                 );
+                if mode == RunnerMode::ConcernRunnerError {
+                    if work.concern.key.as_str() == "naming" {
+                        error_returned.notify_one();
+                        return Err(());
+                    }
+                    success_release.notified().await;
+                }
                 if mode == RunnerMode::Partial && work.concern.key.as_str() == "naming" {
                     Ok(ReviewConcernOutcome::Failed {
                         pass: pass.reference(),
@@ -1991,6 +2045,56 @@ mod tests {
             .expect("exact blocked repair inventory is classified");
 
         assert_eq!(stage, CompletedRepairStage::Blocked(repairs));
+    }
+
+    #[test]
+    fn incomplete_import_rejects_a_foreign_optional_pass() {
+        let immutable_attempt = attempt();
+        let foreign_pass = ReviewPassRef::new(
+            ReviewRunRef::new(
+                ReviewTargetId::from_uuid(Uuid::from_u128(999)),
+                ReviewRunId::from_uuid(Uuid::from_u128(1_000)),
+            ),
+            ReviewPassId::from_uuid(Uuid::from_u128(1_001)),
+        );
+        let incomplete = ReviewImportOutcome::Incomplete {
+            pass: Some(foreign_pass),
+            status: ReviewPassIncompleteStatus::Failed,
+        };
+
+        let error = validate_import(&immutable_attempt, &incomplete)
+            .expect_err("foreign incomplete pass ancestry must fail closed");
+
+        assert_eq!(error, ReviewImportEvidenceFailure::ForeignTarget);
+    }
+
+    #[tokio::test]
+    async fn concern_error_drains_and_records_a_later_success_before_returning() {
+        let attempt_recorded = Arc::new(AtomicBool::new(false));
+        let runner = FakeRunner::new(
+            RunnerMode::ConcernRunnerError,
+            Arc::clone(&attempt_recorded),
+        );
+        let error_returned = Arc::clone(&runner.concern_error_returned);
+        let success_release = Arc::clone(&runner.concern_success_release);
+        let mut service = ReviewOrchestrationService::new(FakeStore::new(attempt_recorded), runner);
+        let immutable_attempt = attempt();
+        let expected_recorded_concern = immutable_attempt.concerns()[0].key().clone();
+        let release_success = async move {
+            error_returned.notified().await;
+            tokio::task::yield_now().await;
+            success_release.notify_one();
+        };
+
+        let (result, ()) = tokio::join!(service.execute(immutable_attempt), release_success);
+        let error = result.expect_err("first concern runner error is returned after draining");
+
+        assert!(matches!(error, ReviewOrchestrationServiceError::Runner(())));
+        assert_eq!(service.store.claims.len(), 1);
+        assert_eq!(
+            service.store.claims[0].concern(),
+            &expected_recorded_concern
+        );
     }
 
     #[tokio::test]
