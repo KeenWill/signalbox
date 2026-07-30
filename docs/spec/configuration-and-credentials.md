@@ -160,11 +160,12 @@ The shipped example contains exactly one credential entry:
 PAT file and whose `injection_env` is `GH_TOKEN`. The parser and resolver are
 otherwise name-generic: adding another credential shape is a configuration
 entry, not a code branch. The runner advertises the exact configured credential
-and repository names as availability; the daemon records no credential-specific
-effect or approval policy, and an owner placement may grant only a name the
-current registration advertised. Reserved model-provider profile and environment
-names are rejected. Because arbitrary secret bytes have no self-describing type,
-file contents cannot be classified as a provider key; the runner has no
+names, and each configured repository key paired with the profile name its own
+entry carries, as availability; the daemon records no credential-specific effect
+or approval policy, and an owner placement may grant only a name the current
+registration advertised. Reserved model-provider profile and environment names
+are rejected. Because arbitrary secret bytes have no self-describing type, file
+contents cannot be classified as a provider key; the runner has no
 model-provider config field or daemon path that supplies one.
 
 Startup opens or creates `runner_root` as an effective-user-owned real `0700`
@@ -442,14 +443,25 @@ between operations.
 The value is supplied only under the configured environment name inside the
 bubblewrap namespace. It does not appear in command arguments, Git remote URLs,
 Git configuration, inherited host environment, error details, or logs. Git tools
-use a fixed runner-owned credential helper inside the namespace. It returns the
-selected value only when protocol, exact `github.com` host, owner/repository
-path, repository key, and repository-bound credential profile all match the
-provisioned workspace; every other query returns no credential. The runner
-scrubs the exact value and its JSON-string-escaped form from admitted stdout,
-stderr, and result text before forwarding. This reduces accidental echo; it
-cannot prevent model-controlled code from transforming or using the value within
-its granted repository scope, which is an accepted restricted-profile cost.
+use a fixed runner-owned credential helper inside the namespace, and its
+authorization is bound to the repository entry that dispatch resolved rather
+than to the session's provisioned workspace. For a Git tool operating on an
+existing worktree that entry is the repository key the workspace manifest
+records; for `git_clone` it is the checked `repository` argument, whose
+configured entry the runner resolves before the invocation. The helper returns
+the selected value only when the query's protocol, exact `github.com` host, and
+owner/repository path all match that entry's configuration-validated canonical
+URL and that entry names exactly the granted credential profile; every other
+query returns no credential. Why: binding the helper to the provisioned
+workspace left the operation that introduces a session's first repository
+unauthorizable, because a clone runs in a writable root whose manifest names no
+repository key at all
+([runner protocol and placement](runner-protocol.md#workspace-provisioning-and-recovery)).
+The runner scrubs the exact value and its JSON-string-escaped form from admitted
+stdout, stderr, and result text before forwarding. This reduces accidental echo;
+it cannot prevent model-controlled code from transforming or using the value
+within its granted repository scope, which is an accepted restricted-profile
+cost.
 
 Unknown profiles fail before lease claim. A credential failure after a claimed
 dispatch is a fixed `ExecutionFailed` observation naming only the profile and

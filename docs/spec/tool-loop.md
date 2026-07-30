@@ -325,8 +325,8 @@ The exact tools are:
 - `git_clone` takes
   `{ "repository": checked_repository_key, "destination": path, "timeout_seconds": timeout }`.
   Destination must not exist and its parent must be real. The runner resolves
-  the named canonical URL and, when one was granted, the exact credential
-  profile, clones without submodules into that destination, and returns
+  the named entry's canonical URL and the granted credential profile that entry
+  names, clones without submodules into that destination, and returns
   `{ "head": canonical_full_commit_hex | null, "branch": string | null, "unborn_branch": string | null }`.
   A populated repository returns its exact `head` with the nullable `branch` and
   a null `unborn_branch`. An empty repository is a success, not a failure and
@@ -390,26 +390,33 @@ session advertises. `workspace_read`, `workspace_write`, `workspace_edit`,
 `shell_exec`, and `build_test` require only a writable root, which every
 runner-backed session has. `git_fetch`, `git_branch`, `git_commit`, and
 `git_push` require the session's writable root to be a repository worktree;
-`git_clone` requires a writable root and one configured repository key, because
-it clones into that root instead of presuming the root is already a worktree;
-and each operation that reaches a remote additionally requires the granted
-credential profile its repository entry names. A session whose composition does
-not satisfy a declaration's requirement is never offered that declaration
-([model-call execution](model-call-execution.md#frontier-rendering) prepares the
-snapshot), so a session whose writable root is not a worktree advertises the
-five writable-root tools, none of the four worktree Git tools, and `git_clone`
-only when its selected runner advertises at least one repository key *and* the
-session holds a granted credential profile — every configured repository entry
-names one
+`git_clone` requires a writable root and one configured repository entry,
+because it clones into that root instead of presuming the root is already a
+worktree; and each operation that reaches a remote additionally requires the
+granted credential profile its repository entry names. A session whose
+composition does not satisfy a declaration's requirement is never offered that
+declaration ([model-call execution](model-call-execution.md#frontier-rendering)
+prepares the snapshot), so a session whose writable root is not a worktree
+advertises the five writable-root tools, none of the four worktree Git tools,
+and `git_clone` only when its selected runner advertises at least one repository
+entry whose credential-profile name is exactly the profile that session was
+granted. Every configured repository entry names exactly one profile
 ([configuration and credentials](configuration-and-credentials.md#runner-configuration)),
-so a profileless session and a session on a runner with no repository key each
-advertise no Git tool at all. Which advertised key that grant actually opens is
-the runner's admission check, and its `credential_unavailable` refusal names a
-mismatch between an existing entry and the granted profile rather than a
-capability the session was told it had. Why: a requirement stated on the
-declaration is checked once at preparation, while a requirement implied only by
-a tool's argument contract can be discovered no earlier than the dispatch that
-fails.
+and the advertisement carries each key together with the profile that key
+requires
+([runner protocol and placement](runner-protocol.md#advertised-catalogs-and-daemon-authority)),
+so preparation decides this from the registration snapshot alone: a profileless
+session, a session on a runner with no repository entry, and a session whose
+granted profile no advertised entry names each advertise no Git tool at all.
+Which of the matching keys a given request names remains the runner's admission
+check, and its `repository_unavailable` or `credential_unavailable` refusal
+names a specific rejected argument rather than a capability the session was told
+it had. Why: a requirement stated on the declaration is checked once at
+preparation, while a requirement implied only by a tool's argument contract can
+be discovered no earlier than the dispatch that fails — and the key/profile
+pairing is what makes this particular requirement decidable at preparation,
+because two independent inventories can each be nonempty with no usable pair
+between them, which is a promise of a tool no argument could execute.
 
 Each provider operation carries the exact session-executable definition and
 locus snapshot prepared under

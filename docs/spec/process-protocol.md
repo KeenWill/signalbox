@@ -610,27 +610,34 @@ The repeating shape is deliberate: a daemon with several enrolled runners needs
 no new response vocabulary. Each status carries issued request, runner,
 enrollment, and registration identities, connection state (`connected`,
 `suspect`, or `lost`), registration revision, advertised capability classes,
-tool names, credential-profile names, repository keys, workspace capabilities,
-and sandbox profiles. Each `runner_operation_failure` names its runner, the
-refused operation's correlation, one closed daemon-actionable `category`
-(`credential_unavailable`, `repository_unavailable`, `sandbox_unavailable`,
-`workspace_conflict`, or `lease_admission_refused`), and the runner-authored
-`detail` object carrying its bounded `code`, `message`, and structured `payload`
-verbatim. The daemon bounds that detail and reproduces it without
-interpretation; the runner applies the same exact-value redaction it applies to
-tool output before sending it, so the detail carries no credential value, and it
-carries no absolute host path or configured repository URL. Owner inspection is
-therefore the surface on which the complete runner-specific failure is readable
-even though daemon logic keys only off the category. `pending_runner_status`
-also carries the literal authority state `provisioning_only`; it is never
-presented as dispatch-capable. Each leak names its exact runner id and carries
-the exact closed `kind`, bounded runner-root-relative `locator`, lowercase
-manifest-or-entry SHA-256 digest, and nullable `session_id` and positive
-`placement_revision` admitted by that runner final acknowledged wire report. It
-never carries an absolute host path, repository URL, or credential fact.
-Runner-id then locator-byte ordering for leaks, runner-id then
-operation-correlation ordering for failures, and the terminal counts make the
-complete sequence authoritative without an aggregate frame bound.
+tool names, credential-profile names, repository entries — each naming its
+repository key and the credential-profile name that key requires — workspace
+capabilities, and sandbox profiles. Each `runner_operation_failure` names its
+runner, the refused operation's correlation, one closed daemon-actionable
+`category` (`credential_unavailable`, `repository_unavailable`,
+`sandbox_unavailable`, `workspace_conflict`, `workspace_cleanup_failed`, or
+`lease_admission_refused`), and the runner-authored `detail` object carrying its
+bounded `code`, `message`, and structured `payload` verbatim. The daemon bounds
+that detail and reproduces it without interpretation; the runner applies the
+same exact-value redaction it applies to tool output before sending it, so the
+detail carries no credential value, and it carries no absolute host path or
+configured repository URL. That `category` set is exactly the closed
+daemon-actionable set the runner wire carries
+([runner protocol and placement](runner-protocol.md#local-transport-and-connection-protocol)),
+member for member, so every retained failure is serializable here and the
+projection never has to choose between omitting one that `failure_count` counts
+and rejecting the response. Owner inspection is therefore the surface on which
+the complete runner-specific failure is readable even though daemon logic keys
+only off the category. `pending_runner_status` also carries the literal
+authority state `provisioning_only`; it is never presented as dispatch-capable.
+Each leak names its exact runner id and carries the exact closed `kind`, bounded
+runner-root-relative `locator`, lowercase manifest-or-entry SHA-256 digest, and
+nullable `session_id` and positive `placement_revision` admitted by that runner
+final acknowledged wire report. It never carries an absolute host path,
+repository URL, or credential fact. Runner-id then locator-byte ordering for
+leaks, runner-id then operation-correlation ordering for failures, and the
+terminal counts make the complete sequence authoritative without an aggregate
+frame bound.
 
 Followers additionally admit
 `provider_text_delta { session_id, turn_id, model_call_id, part_index, content }`
@@ -1076,12 +1083,18 @@ plus `runner_id` and `lease_id` as canonical UUID strings, `placement_revision`
 and `lease_generation` as positive canonical decimal strings,
 `working_directory` as the bounded directory the dispatch executed in or JSON
 null when the placement selected the runner default, `sandbox_profile` as
-exactly `workspace-restricted` or `ambient`, and `outcome` as exactly one of
-`succeeded`, `known_failed`, or `ambiguous`. The discriminator is what lets a
-client tell the arms apart instead of inferring the shape from which members are
-present, and `outcome` is the closed classification the durable attempt reached
-rather than a restatement of the result content. The relocation members are the
-same ones every other relocation-bearing projection carries, so a
+exactly `workspace-restricted` or `ambient`, and `outcome` as exactly
+`succeeded` or `known_failed`. The discriminator is what lets a client tell the
+arms apart instead of inferring the shape from which members are present, and
+`outcome` is the closed classification the durable attempt reached rather than a
+restatement of the result content. The set has no ambiguous member because a
+physically ambiguous attempt never becomes an execution result: it stays the
+turn's ambiguity set and projects as `tool_closed`, which names only the tool
+request and therefore carries no attempt and no `execution` object
+([tool-loop](tool-loop.md#serialized-staged-execution)). Admitting an
+`ambiguous` outcome here would have obliged clients to accept an
+execution-result state no domain transition can produce. The relocation members
+are the same ones every other relocation-bearing projection carries, so a
 working-directory move is visible in tool evidence exactly as a runner move is.
 The profile label is evidence metadata, not text that a tool can forge.
 

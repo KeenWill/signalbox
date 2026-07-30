@@ -153,7 +153,7 @@ The closed version-one frame vocabulary is:
 | daemon → runner | `workspace_recorded`         | Exact authorization and manifest correlation after durable receipt admission.                                                                                                                                                 |
 | daemon → runner | `workspace_release`          | Exact retired session placement revision and workspace-manifest identity.                                                                                                                                                     |
 | runner → daemon | `workspace_released`         | Same release correlation after manifest transition and symlink-safe removal. Spool until acknowledged.                                                                                                                        |
-| daemon → runner | `workspace_release_recorded` | Exact release correlation after durable release admission; only this frame frees the runner's journaled release and its workspace-operation slot.                                                                             |
+| daemon → runner | `workspace_release_recorded` | Exact release correlation after durable release admission; this frame, or `operation_failure_recorded` for the same release correlation, frees the runner's journaled release and its workspace-operation slot.               |
 | daemon → runner | `lease_offer`                | Complete immutable lease and tool dispatch correlation, selected profile/grant, normalized arguments, and result bounds.                                                                                                      |
 | runner → daemon | `lease_claim`                | Exact offered correlation after local tool/profile/credential/workspace admission.                                                                                                                                            |
 | daemon → runner | `lease_claimed`              | Exact claimed correlation after durable claim commit; it is one half of execution capability.                                                                                                                                 |
@@ -161,25 +161,32 @@ The closed version-one frame vocabulary is:
 | runner → daemon | `result`                     | Exact claimed correlation and one bounded success, known-failure, or ambiguous evidence envelope. Spool until acknowledged.                                                                                                   |
 | daemon → runner | `result_recorded`            | Exact result correlation after atomic lease/attempt result commit.                                                                                                                                                            |
 | runner → daemon | `operation_failed`           | Exact refused-operation correlation, one daemon-actionable failure category, and one bounded runner-specific detail. Spool until acknowledged.                                                                                |
-| daemon → runner | `operation_failure_recorded` | Exact failure correlation after durable admission; only this frame frees the runner's journaled failure.                                                                                                                      |
+| daemon → runner | `operation_failure_recorded` | Exact failure correlation after durable admission; frees the runner's journaled failure, and for a `workspace_cleanup_failed` failure also retires the journaled release it names and frees the workspace-operation slot.     |
 | either          | `shutdown`                   | Current connection epoch and closed reason `daemon_shutdown` or `runner_shutdown`; creates no loss proof by itself.                                                                                                           |
 | daemon → runner | `rejected`                   | Offending frame kind, available correlation, and one closed code; no arbitrary peer text. Fatal codes close the connection.                                                                                                   |
 
 An advertisement contains at most 16 capability classes, 256 tools, 64
-credential-profile names, and 64 repository keys; names are sorted and unique.
-Workspace and sandbox inventories are their closed vocabularies. A reconnect
-inventory contains at most one lease, one unacknowledged terminal result, one
-workspace operation, one unacknowledged operation failure, and one
-unacknowledged leak-report page because execution, workspace work, and report
-delivery are each serial. Digests detect replay disagreement and confer no
-authority. `rejected` codes are `unsupported_version`,
-`unsupported_digest_version`, `malformed_frame`, `enrollment_conflict`,
-`enrollment_revoked`, `registration_rejected`, `stale_connection`,
-`correlation_mismatch`, `policy_rejected`, `workspace_conflict`, `runner_lost`,
-`unavailable`, or `shutting_down`. Any frame outside the state shown by the
-table, a duplicate with unequal canonical payload, or an acknowledgement without
-its durable predecessor is fatal and advances nothing. Equal replay returns or
-resends the same recorded answer.
+credential-profile names, and 64 repository entries; names are sorted and
+unique. A repository entry is one exact repository key paired with the exact
+credential-profile name that key's runner configuration names, and entries are
+sorted and unique by key. Why: the daemon has to decide before a model call
+whether a session can clone anything at all, and two independent inventories of
+keys and profiles cannot answer that — only the pairing shows whether some key's
+entry names the profile this session was granted
+([tool loop](tool-loop.md#registry-placement-and-effect-metadata) owns the
+advertisement condition that reads it). Workspace and sandbox inventories are
+their closed vocabularies. A reconnect inventory contains at most one lease, one
+unacknowledged terminal result, one workspace operation, one unacknowledged
+operation failure, and one unacknowledged leak-report page because execution,
+workspace work, and report delivery are each serial. Digests detect replay
+disagreement and confer no authority. `rejected` codes are
+`unsupported_version`, `unsupported_digest_version`, `malformed_frame`,
+`enrollment_conflict`, `enrollment_revoked`, `registration_rejected`,
+`stale_connection`, `correlation_mismatch`, `policy_rejected`,
+`workspace_conflict`, `runner_lost`, `unavailable`, or `shutting_down`. Any
+frame outside the state shown by the table, a duplicate with unequal canonical
+payload, or an acknowledgement without its durable predecessor is fatal and
+advances nothing. Equal replay returns or resends the same recorded answer.
 
 Digest bytes are pinned rather than left to each implementation. Every digest is
 the lowercase 64-character hex SHA-256 of a domain-separated, version-tagged
@@ -210,8 +217,10 @@ admissible, and a registration revision has exactly one byte sequence.
 Each kind's field sequence is complete and fixed here:
 
 - `advertisement` — capability classes, tool names, workspace capabilities,
-  sandbox profiles, credential-profile names, then repository keys, each as a
-  sorted inventory of its exact names or closed tokens
+  sandbox profiles, and credential-profile names, each as a sorted inventory of
+  its exact names or closed tokens, then repository entries as one sorted
+  inventory of nested records of repository key followed by credential-profile
+  name
   ([advertised catalogs and daemon authority](#advertised-catalogs-and-daemon-authority));
 - `leak-report` — one inventory holding the report's complete sorted fact
   sequence, each fact a nested record of fact kind, locator, entry digest,
@@ -241,9 +250,17 @@ category: `credential_unavailable`, `repository_unavailable`,
 `sandbox_unavailable`, `workspace_conflict`, `workspace_cleanup_failed`, or
 `lease_admission_refused`. `workspace_cleanup_failed` is the release-specific
 member: a journaled release whose rename or deletion keeps failing reports it
-rather than retaining its journal forever, and the daemon's durable admission
-resolves that release as refused, which is what frees the runner's journaled
-release and its single workspace-operation slot. The undeleted placement then
+rather than retaining its journal forever, and `operation_failure_recorded` for
+that exact release correlation resolves the release as refused, retiring both
+journals — the failure and the release — and freeing the runner's single
+workspace-operation slot. It is therefore the one acknowledgement other than
+`workspace_release_recorded` that retires a release, and for any single release
+correlation exactly one of the two is ever produced, because a release either
+completed or was refused. Why: `workspace_release_recorded` follows a completed
+deletion and can never be produced for a release whose deletion failed, so
+admitting only that frame as a release's retirement would leave the reporting
+runner holding the journal and its one workspace-operation slot forever — the
+exact outcome this category exists to prevent. The undeleted placement then
 appears in the next startup report as a `cleanup_failed` leak, which is the
 version-one response to unreclaimed disk. Daemon logic keys off that category
 alone, so the set stays small and every member names a decision the daemon can
@@ -427,7 +444,8 @@ A registration carries availability claims only:
 
 - the runner's advertised capability classes;
 - tool names;
-- credential-profile and repository-key names; and
+- credential-profile names, and repository entries pairing each key with the
+  profile name it requires; and
 - workspace and sandbox-profile capabilities.
 
 It carries no permission default, effect class, placement declaration, approval
@@ -499,9 +517,11 @@ independently of stored registration rows. Registration reconstitution compares
 every stored class, tool declaration, workspace capability, and sandbox profile
 with that trusted catalog and rejects any difference; stored declarations cannot
 bootstrap their own authority. Duplicate names or an internally inconsistent
-placement declaration rejects the complete catalog. Credential and repository
-names remain exact availability inventories recorded by that registration and
-acquire no policy by being stored.
+placement declaration rejects the complete catalog. Credential-profile names and
+repository entries remain exact availability inventories recorded by that
+registration and acquire no policy by being stored: the profile name a
+repository entry carries states which configured credential that repository
+requires, never that any session holds it.
 
 The version-one daemon composition constructs this value once from the compiled
 workstation registry, the exact `workstation-v1` class, and fixed profile
@@ -561,11 +581,14 @@ Advertisement validation never synthesizes a declaration for an unknown tool.
 Unknown tools, capability classes, workspace capabilities, and sandbox profiles,
 or malformed credential-profile names reject the complete advertisement. A
 daemon-only tool or a runner tool whose declared identity-or-class selector the
-advertisement does not satisfy also rejects the complete advertisement. The
-resulting `ValidatedRunnerRegistration` exposes only exact advertised
-availability paired with daemon-owned policy. A runner can therefore neither
-self-widen its tool surface nor replace confirmation with automatic approval
-(INV-042).
+advertisement does not satisfy also rejects the complete advertisement, as does
+a repository entry whose credential-profile name is absent from the same
+advertisement's profile inventory: an entry naming a profile the runner does not
+offer could never be granted, and admitting it would put an unusable pair into
+the very correlation preparation reads. The resulting
+`ValidatedRunnerRegistration` exposes only exact advertised availability paired
+with daemon-owned policy. A runner can therefore neither self-widen its tool
+surface nor replace confirmation with automatic approval (INV-042).
 
 ## Effect classes and runner leases
 
@@ -757,7 +780,7 @@ and the credential profile that key's entry names
 and sandbox constrain neither of those: every credential choice composes with
 every workspace choice, and either sandbox profile composes with every
 combination of the other two. Runner capability varies over the same axes: a
-runner may advertise no workspace capability and no repository key at all, and
+runner may advertise no workspace capability and no repository entry at all, and
 such a runner is a fully usable placement target for every session composition
 that needs neither.
 
@@ -805,7 +828,10 @@ a request that the daemon or runner select one, and it neither requires nor
 implies a workspace. `WorkspaceRequirement::None` is admissible with either
 sandbox profile and with any credential choice. A plain-directory workspace is
 that same `WorkspaceRequirement::None` paired with an exact working-directory
-selection: the runner provisions nothing and executes in the named directory. A
+selection: the runner provisions nothing and executes in the named directory,
+and it never creates, renames, or deletes that directory, so retiring such a
+placement releases nothing
+([workspace provisioning and recovery](#workspace-provisioning-and-recovery)). A
 runner that advertises no workspace capability therefore remains a valid target
 for every placement that requires no worktree.
 
@@ -1140,10 +1166,18 @@ a direct lease-row insert (INV-035, INV-045).
 `WorkspaceRequirement::RepositoryWorktree` is satisfiable only when the selected
 validated registration advertises `WorkspaceCapability::WorktreePerSession` and
 the repository key resolves in checked runner configuration to a credential-free
-HTTPS clone URL. The provisioned workspace binds the session, placement
-revision, runner, repository key, exact clone URL identity, sandbox profile, and
-working directory. Replacement always uses the successor placement revision and
-cannot carry the prior workspace forward.
+HTTPS clone URL. The runner accepts the provisioning authorization only when
+that entry names exactly the credential profile the authorization carries; a
+mismatched or absent profile is a `credential_unavailable` refusal rather than a
+clone attempted under a grant the entry does not name. That same equality
+governs every authenticated Git operation, however the entry was reached —
+through the workspace manifest, through this authorization, or through a checked
+`git_clone` argument
+([configuration and credentials](configuration-and-credentials.md#runner-credential-lifecycle)
+owns the helper that enforces it). The provisioned workspace binds the session,
+placement revision, runner, repository key, exact clone URL identity, sandbox
+profile, and working directory. Replacement always uses the successor placement
+revision and cannot carry the prior workspace forward.
 
 Runners are not cleanup authorities. Only the runner that provisioned a
 workspace can delete it, and a runner that is replaced, revoked, or dead simply
@@ -1241,32 +1275,50 @@ every transport setting still read as valid.
 A daemon release is accepted only for an exact retired placement revision —
 either superseded by replacement or terminal `RunnerAbandoned` — after no live
 lease or unacknowledged result remains. The session itself need not be terminal
-and may continue on its successor placement or with daemon-only tools. The
-runner journals the release before it does anything irreversible, following the
-same acknowledge-and-journal pattern that provisioning and results already use.
-It first fsyncs a `release_accepted` journal entry carrying the complete release
-correlation below its state root; only then does it mark release in the
-manifest, atomically rename the placement below `trash/`, fsync, and delete it
-by descriptor-relative traversal that unlinks symlinks instead of following
-them. It advances the same entry to `release_completed` after the deletion and
-resends `workspace_released` until the daemon durably admits it and replies
-`workspace_release_recorded`; only that acknowledgement lets the runner discard
-the journaled release and free its single workspace-operation slot. A crash
-anywhere in the interval therefore resumes from the journal rather than from a
-manifest the runner may already have deleted: `release_accepted` resumes the
-deletion and then reports, `release_completed` resends the correlation, and a
-daemon restart cannot leave a resent release without a boundary — exactly as for
-a retained result. A release whose rename or deletion keeps failing does not
-hold that journal indefinitely: the runner reports the
-`workspace_cleanup_failed` operation failure above, whose durable admission
-resolves the release and frees the slot, and the surviving placement is reported
-as a `cleanup_failed` leak. Startup resumes deletion for trash proven by a
-manifest or by a retained release entry, and may remove staging whose manifest
-proves it was never published. It reconciles every ready or active manifest with
-the daemon before execution and reports every unknown, retired-but-present,
-conflicting, or otherwise unreconciled workspace as a typed leak. It never
-silently deletes a reported leak. This startup report is visible even when no
-session can be resumed.
+and may continue on its successor placement or with daemon-only tools.
+
+A release exists only for a workspace the runner itself created: a provisioned
+repository worktree, or the private root the runner made below its own state
+root. Each of those is named by a workspace manifest, which is the identity the
+`workspace_release` frame correlates against. A retired placement whose writable
+root is the third kind — the exact working directory its own request named, the
+plain-directory workspace of [session composition](#session-composition) — has
+no manifest and therefore has no release: the daemon enqueues nothing for it,
+the runner never renames or deletes it, and because that directory is not
+runner-owned disk it is not reported as an unreclaimed-workspace leak either.
+Retirement of such a placement is complete the moment the placement state is
+durable. Why: the directory was named by the creation request rather than
+provisioned by the runner, so treating retirement as a reason to delete it would
+destroy a directory the system was only ever lent — and the release correlation
+has no identity it could name for it in any case, which makes an unconditional
+release unrepresentable on the wire as well as wrong.
+
+For a workspace it did create, the runner journals the release before it does
+anything irreversible, following the same acknowledge-and-journal pattern that
+provisioning and results already use. It first fsyncs a `release_accepted`
+journal entry carrying the complete release correlation below its state root;
+only then does it mark release in the manifest, atomically rename the placement
+below `trash/`, fsync, and delete it by descriptor-relative traversal that
+unlinks symlinks instead of following them. It advances the same entry to
+`release_completed` after the deletion and resends `workspace_released` until
+the daemon durably admits it and replies `workspace_release_recorded`; that
+acknowledgement lets the runner discard the journaled release and free its
+single workspace-operation slot. A crash anywhere in the interval therefore
+resumes from the journal rather than from a manifest the runner may already have
+deleted: `release_accepted` resumes the deletion and then reports,
+`release_completed` resends the correlation, and a daemon restart cannot leave a
+resent release without a boundary — exactly as for a retained result. A release
+whose rename or deletion keeps failing does not hold that journal indefinitely:
+the runner reports the `workspace_cleanup_failed` operation failure above, whose
+`operation_failure_recorded` acknowledgement retires that journaled release
+together with the failure and frees the slot, and the surviving placement is
+reported as a `cleanup_failed` leak. Startup resumes deletion for trash proven
+by a manifest or by a retained release entry, and may remove staging whose
+manifest proves it was never published. It reconciles every ready or active
+manifest with the daemon before execution and reports every unknown,
+retired-but-present, conflicting, or otherwise unreconciled workspace as a typed
+leak. It never silently deletes a reported leak. This startup report is visible
+even when no session can be resumed.
 
 ## Open edges
 
