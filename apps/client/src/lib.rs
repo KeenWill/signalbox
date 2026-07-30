@@ -243,6 +243,7 @@ async fn execute(
         } => Some(PreparedImport::Scan(collect_import_paths(path)?)),
         Command::Create { .. }
         | Command::Continue { .. }
+        | Command::Compact { .. }
         | Command::Imported { .. }
         | Command::List
         | Command::Templates
@@ -270,6 +271,7 @@ async fn execute(
             ..
         } => Some(read_system_prompt_file(path).await?),
         Command::Create { .. }
+        | Command::Compact { .. }
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -331,6 +333,20 @@ async fn execute(
                 through_position,
                 relationship,
                 selection,
+                command_id,
+            )
+            .await
+        }
+        Command::Compact {
+            session_id,
+            through_position,
+            command_id,
+        } => {
+            compact(
+                &mut client,
+                &mut output,
+                session_id,
+                through_position,
                 command_id,
             )
             .await
@@ -722,6 +738,52 @@ async fn continue_imported(
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("continue returned an unexpected response").mutation()),
+    }
+}
+
+async fn compact(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+    through_position: Option<CanonicalU64>,
+    command_id: Option<CommandId>,
+) -> Result<(), ClientError> {
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let mut connection = client
+        .mutation_request(ClientRequest::CompactSession {
+            command_id,
+            session_id,
+            through_position,
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::SessionCompacted {
+            session_id: compacted_session,
+            context_compaction_id,
+            model_call_id,
+            through_position,
+            summary_entry_id,
+            result_frontier_id,
+        } if compacted_session == session_id => Ok(output.session_compacted(
+            session_id,
+            context_compaction_id,
+            model_call_id,
+            through_position.value(),
+            summary_entry_id,
+            result_frontier_id,
+        )?),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("compact returned an unexpected response").mutation()),
     }
 }
 
@@ -2249,6 +2311,7 @@ fn terminal_event_state(
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::TurnActivated { .. }
+        | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
         | SessionEvent::TurnCompleted { .. }
@@ -2399,6 +2462,7 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::TurnActivated { .. }
+        | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ModelCallTransition { .. } => None,
     }
 }
@@ -4237,7 +4301,8 @@ mod tests {
                     title: String::from("Retain the exact edge"),
                     body: String::from("The terminal count must authenticate the list."),
                     severity: ReviewSeverity::High,
-                    confidence: CanonicalU64::new(9_000),
+                    is_real_confidence: CanonicalU64::new(9_000),
+                    severity_label_confidence: CanonicalU64::new(8_500),
                     category: String::from("correctness"),
                     recommended_fix: None,
                 },
@@ -4438,11 +4503,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the current client inherits the configuration-free
-    /// version-thirteen request and returns its typed accepted-input/source-turn receipt.
+    /// INV-033: the current client sends the configuration-free request and returns its typed accepted-input/source-turn receipt.
     #[tokio::test]
-    async fn inv033_current_client_inherits_the_exact_v13_steering_exchange()
-    -> Result<(), Box<dyn Error>> {
+    async fn inv033_current_client_uses_the_exact_steering_exchange() -> Result<(), Box<dyn Error>>
+    {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let listener = UnixListener::bind(&socket)?;
@@ -4455,7 +4519,7 @@ mod tests {
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert_eq!(request.version(), ProtocolVersion::Nineteen);
+            assert_eq!(request.version(), ProtocolVersion::One);
             assert_eq!(
                 request.request(),
                 &ClientRequest::SubmitInput {
@@ -4770,7 +4834,8 @@ mod tests {
                     title: String::from("Bound the list"),
                     body: String::from("The client must reject an over-bound inventory."),
                     severity: ReviewSeverity::High,
-                    confidence: CanonicalU64::new(9_000),
+                    is_real_confidence: CanonicalU64::new(9_000),
+                    severity_label_confidence: CanonicalU64::new(8_500),
                     category: String::from("availability"),
                     recommended_fix: None,
                 },

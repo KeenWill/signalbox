@@ -5,8 +5,7 @@
 # and the living
 # specification under docs/spec/. Ownership stays with those documents; each check
 # restates only the operational pass/fail logic, and the comment above each
-# check names its owning rule document. See the docs/decisions.md entry
-# "CodeRabbit pre-merge checks mirror repository rules" for modes and rollout.
+# check names its owning rule document. Git history retains the rollout context.
 
 reviews:
   request_changes_workflow: true
@@ -16,36 +15,29 @@ reviews:
   path_instructions:
     - path: "docs/agents/backlog.md"
       instructions: |-
-        This file opens with a non-authoritative-planning banner: it is the owner's working scratchpad, decides nothing, and is not a statement of record. Do NOT review it for normative-statement placement, decision weight, or PR-description accuracy, and do NOT flag its prose for cross-document consistency, single-source-of-record duplication, or normative wording (must/never/only). Its entries are deliberately loose and are superseded by the owning docs/spec/ page, docs/decisions.md, or docs/open-questions.md when an item is picked up. Treat findings only for plainly broken Markdown or dead repository-relative links.
+        This file opens with a non-authoritative-planning banner: it is the owner's working scratchpad, decides nothing, and is not a statement of record. Do NOT review it for normative-statement placement, decision weight, or PR-description accuracy, and do NOT flag its prose for cross-document consistency, single-source-of-record duplication, or normative wording (must/never/only). Its entries are deliberately loose and are superseded by the owning docs/spec/ page, pull-request record, or docs/open-questions.md when an item is picked up. Treat findings only for plainly broken Markdown or dead repository-relative links.
   pre_merge_checks:
     # Only requested reviewers (not the PR author) may override failing checks.
     override_requested_reviewers_only: true
     # Built-in checks (docstrings, title, description, issue_assessment) keep
     # their schema defaults and are deliberately not restated here.
     custom_checks:
-      # verdict logic for the invariant-enforcement linking rule owned by
-      # AGENTS.md and the catalog preamble in docs/invariants.md
-      - name: "Invariant catalog claims are backed by tests"
+      # verdict logic for the generated invariant index owned by AGENTS.md
+      - name: "Invariant index is generated from tests"
         mode: warning
         instructions: |-
-          Scope: only PRs that add or modify text in the Enforcement column of docs/invariants.md. Pass immediately if that column is untouched.
-          Enforcement cells are bare citations: the INV tag with one or more file paths, no coverage narration. For every cell added or changed in this PR:
-          1. Every cited file path must exist in the repository at the PR head. Fail on any dead path.
-          2. Each cited file must carry the row's tag: search case-insensitively for "invNNN" in test function names or "INV-NNN" in comments. Zero matches is a Fail.
-          3. At least one citation per cell must be a test target — a file under crates/*/tests/ or one where the tag appears in test function names; non-test mechanism citations (source modules, migrations) pass only alongside a test citation, except where the cell explicitly records an enforcement gap ("remains later work").
-          4. Prose beyond the citations — totality claims, coverage narration, test-by-test description — is a Fail, except an explicit enforcement-gap clause ("remains later work" or equivalent); the INV-tagged tests themselves are the statement of coverage.
-          Evidence must come from the PR head tree — the cited tests may be added by this same PR. Report each failing cell with its INV ID and the missing evidence. If docs/invariants.md is changed but no Enforcement cell is, Pass.
+          Scope: docs/invariants.md and INV tags in Rust test names or attached test doc comments. Pass immediately if neither changes.
+          Fail if docs/invariants.md does not exactly match `python3 scripts/generate_invariants.py --write`, or if a changed INV tag is not attached to a test declaration. The tests are the source of truth; the generated index may contain only IDs and citations.
+          Report the stale tag or file. Do not request hand edits to the generated Markdown.
 
       # verdict logic for the decision-weight rules owned by AGENTS.md
       - name: "Decisions recorded at the correct weight"
         mode: warning
         instructions: |-
-          Determine whether this PR makes a decision, then verify it is recorded.
-          Ordinary-decision triggers (any): a dependency added to any Cargo.toml [dependencies] or [dev-dependencies] (not a pure version bump); a change to process or tooling rules (.github/workflows/, scripts/, .coderabbit.yaml, AGENTS.md, CONTRIBUTING.md, docs/agents/goal-mode.md, docs/agents/testing-style.md); a migration under crates/persistence/migrations/ that backfills data, alters constraints on an existing table, or otherwise makes a choice the specification does not already fix; a provisional limit or parameter the PR description itself presents as provisional or owner-decided; an entry in docs/open-questions.md closed or removed whose resolution has no foundation-level effects.
-          If any trigger fires, docs/decisions.md must gain a new entry in this PR headed "## YYYY-MM-DD — <title>" (newest first) containing all four bolded sections: **Context.**, **Decision.**, **Rejected alternatives.**, **Affects.**. Fail if the entry or any section is missing.
-          NOT a trigger: implementing behavior the docs/spec/ pages and recorded decisions already fix — new public types, ports, or traits, and purely additive migrations realizing specified behavior need no entry; the spec update and PR description are their record.
-          Foundation-weight triggers (any): a docs/spec/ page's normative semantics change beyond recording behavior this PR or its stack implements; a boundary between domain, storage, wire, or framework representations moves; an invariant row in docs/invariants.md is weakened or deleted; an entry in docs/open-questions.md is closed or removed AND its resolution has any of these effects (an ordinary closure moving no boundary, weakening no invariant, and introducing no cross-cutting technology is an ordinary decision, not foundation weight). If any fires, the specification diff must ride in this PR or at the bottom of its stack AND a docs/decisions.md entry must record the choice; Fail if either is missing.
-          Pass when no trigger fires (mechanical fixes, refactors, formatting, specified-behavior slices), or the required records are present. Report which trigger fired and which record is missing.
+          Determine whether this PR makes a decision, then verify its pull-request record and, when foundation-weight, its owning specification diff.
+          Ordinary-decision triggers include a new dependency, a process or tooling rule, a migration choice the specification does not fix, a provisional owner-selected limit, or an ordinary open-question closure. If one fires, the PR description must state the choice and tradeoff. Implementing behavior an existing contract fixes is not itself a decision.
+          Foundation-weight triggers are: changing cross-crate or wire semantics; moving a boundary between domain, storage, wire, or framework representations; weakening an invariant; introducing a technology that constrains several components; or closing an open question with any of those effects. If one fires, the owning docs/spec/ diff must ride in this PR or at the bottom of its implementing stack, and the PR description must identify the contract change. Owner merge is acceptance.
+          Pass when no trigger fires or the required PR/spec records are present. Report which trigger fired and which record is missing.
 
       # verdict logic for the public-source hygiene rule owned by AGENTS.md
       - name: "Public-source hygiene"
@@ -60,9 +52,9 @@ reviews:
         mode: warning
         instructions: |-
           Scope: Markdown prose added or modified under docs/ or in README.md, excluding any file that already carried the non-authoritative-planning banner at its head on the PR's base branch (e.g. docs/agents/backlog.md) and still carries it at the PR head, and any file this PR adds as a new file opening with that banner — a banner file states nothing of record, so drop it from this check's scope file by file rather than skipping the check whenever such a file is present. A banner this PR stamps onto a file that already existed without one does not exempt that file, and neither does a banner this PR removes: in both directions the reclassification and the prose around it stay in scope. Pass immediately if no in-scope prose changed.
-          Fail when the PR adds a normative statement — a sentence using must, never, always, only, cannot, or "is rejected" about system behavior or process — that duplicates a statement owned elsewhere: the owning docs/spec/ page, a docs/decisions.md entry, an invariant row in docs/invariants.md, a scenario in docs/scenarios.md, or a rule in AGENTS.md or docs/agents/testing-style.md. Duplication means a reader could learn the rule from the new text alone; a restatement is acceptable only when the same sentence or paragraph links to the owning document.
+          Fail when the PR adds a normative statement — a sentence using must, never, always, only, cannot, or "is rejected" about system behavior or process — that duplicates a statement owned elsewhere: the owning cross-crate or wire contract under docs/spec/, an INV-tagged test, a scenario in docs/scenarios.md, or a rule in AGENTS.md or docs/agents/testing-style.md. Duplication means a reader could learn the rule from the new text alone; a restatement is acceptable only when the same sentence or paragraph links to the owning document.
           Also fail when the PR copies a single-owner list into a second file: the validation command sequence (owned by AGENTS.md), the decision-weight criteria (owned by AGENTS.md), or spec-owned semantics restated into docs/architecture.md or docs/glossary.md.
-          Pass when: the new text is itself the statement of record (a new or updated owning spec-page section, invariant row, or decision entry); or the added prose links to its owner in the same paragraph; or the change is a cross-reference, link, or wording fix adding no normative content.
+          Pass when: the new text is itself the statement of record (a new or updated owning spec-page section or process rule); or the added prose links to its owner in the same paragraph; or the change is a cross-reference, link, or wording fix adding no normative content.
           Report each failure as: the added sentence, the owning document, and the link that should replace the restatement.
 
       # verdict logic for the finished-pull-request description rule owned by
@@ -117,14 +109,6 @@ reviews:
           Verification: for each sealed annotation on a type whose producing code this PR touches, list the type's public producers in source (search for public fns and methods returning the type) and compare against the producers the annotation names. The sets must match exactly.
           Report each stale annotation with the type, the producers the prose names, and the producers found in source.
 
-      # verdict logic for the append-only record rule owned by the
-      # docs/decisions.md preamble
-      - name: "Decision log is append-only"
-        mode: error
-        instructions: |-
-          Scope: docs/decisions.md. Pass immediately if it is untouched.
-          Fail if the diff changes or deletes any line inside an entry (a "## YYYY-MM-DD — ..." section) that exists on the base branch, except pure mdformat rewrapping with identical words, or fixing a hyperlink whose target this same PR moved. A new entry must be inserted above all existing entries with a date not older than the newest existing entry; Fail on out-of-order insertion. An entry this same PR introduced may still be edited within the PR.
-          Report each violated entry and which rule it breaks.
 
 knowledge_base:
   code_guidelines:

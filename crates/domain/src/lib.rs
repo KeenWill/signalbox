@@ -10,6 +10,7 @@ mod accepted_input;
 mod actor;
 mod applied_interrupt;
 mod configuration;
+mod context_compaction;
 mod context_frontier;
 mod delivery_request;
 mod fatal_mismatch;
@@ -49,6 +50,13 @@ pub use configuration::{
     SessionDefaultsVersionMismatch, SessionSystemPrompt, SessionSystemPromptError,
     SessionSystemPromptFailure, TurnConfigurationProvenance, UnknownModelAlias,
     VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
+};
+pub use context_compaction::{
+    ContextCompaction, ContextCompactionId, ContextCompactionModelCall,
+    ContextCompactionModelCallReconstitutionFailure, ContextCompactionModelCallReconstitutionInput,
+    ContextCompactionModelCallState, ContextCompactionRange,
+    ContextCompactionReconstitutionFailure, ContextCompactionReconstitutionInput,
+    ContextCompactionTokenUsage, ContextFrontierProjection, ContextFrontierProjectionFailure,
 };
 pub use context_frontier::{
     ContextFrontier, ContextFrontierId, ResolvedContextFrontierReconstitutionInput,
@@ -130,19 +138,19 @@ pub use review_workflow::{
     ReviewExternalLinkObservation, ReviewExternalLinkObservationResult,
     ReviewExternalLinkPublicationBlockedResult, ReviewExternalLinkTransitionError,
     ReviewExternalLinkTransitionFailure, ReviewExternalObjectClaim, ReviewExternalObjectClaimError,
-    ReviewExternalObjectKind, ReviewExternalObjectState, ReviewFinding, ReviewFindingContent,
-    ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
-    ReviewFindingEventResultKind, ReviewFindingEventType, ReviewFindingExternalLinkError,
-    ReviewFindingExternalLinkFailure, ReviewFindingExternalLinkRef, ReviewFindingLocation,
-    ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
-    ReviewFindingSeverity, ReviewFindingStatus, ReviewFindingTransitionError,
-    ReviewFindingTransitionFailure, ReviewKey, ReviewLineRange, ReviewLineRangeError, ReviewPass,
-    ReviewPassAcceptedInputEvidence, ReviewPassConstructionError, ReviewPassConstructionFailure,
-    ReviewPassEvidence, ReviewPassKind, ReviewPassReconstitutionError,
-    ReviewPassReconstitutionFailure, ReviewPassReconstitutionInput, ReviewPassRef,
-    ReviewPassResult, ReviewPassState, ReviewPassTransitionError, ReviewPassTransitionFailure,
-    ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewPolicyError,
-    ReviewPolicyVersion, ReviewPositiveNumberError, ReviewProducedFindings,
+    ReviewExternalObjectKind, ReviewExternalObjectState, ReviewFinding,
+    ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide, ReviewFindingEvent,
+    ReviewFindingEventKind, ReviewFindingEventResult, ReviewFindingEventResultKind,
+    ReviewFindingEventType, ReviewFindingExternalLinkError, ReviewFindingExternalLinkFailure,
+    ReviewFindingExternalLinkRef, ReviewFindingLocation, ReviewFindingPendingExternalLinkRef,
+    ReviewFindingProposal, ReviewFindingRef, ReviewFindingSeverity, ReviewFindingStatus,
+    ReviewFindingTransitionError, ReviewFindingTransitionFailure, ReviewKey, ReviewLineRange,
+    ReviewLineRangeError, ReviewPass, ReviewPassAcceptedInputEvidence, ReviewPassConstructionError,
+    ReviewPassConstructionFailure, ReviewPassEvidence, ReviewPassKind,
+    ReviewPassReconstitutionError, ReviewPassReconstitutionFailure, ReviewPassReconstitutionInput,
+    ReviewPassRef, ReviewPassResult, ReviewPassState, ReviewPassTransitionError,
+    ReviewPassTransitionFailure, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
+    ReviewPolicyError, ReviewPolicyVersion, ReviewPositiveNumberError, ReviewProducedFindings,
     ReviewProducedFindingsError, ReviewReferencedFindingEvidence, ReviewRun, ReviewRunEvidence,
     ReviewRunEvidenceFailure, ReviewRunReconstitutionError, ReviewRunReconstitutionInput,
     ReviewRunRef, ReviewRunState, ReviewRunTransitionError, ReviewRunTransitionFailure,

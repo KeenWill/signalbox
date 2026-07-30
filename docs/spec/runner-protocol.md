@@ -4,14 +4,16 @@ This page specifies the implemented runner-protocol domain foundation as
 verified against the implementing stack through PR #260
 (`agent/runner-protocol-domain`); its durable Postgres representation and
 restart-recovery authority were verified through PR #267
-(`agent/runner-persistence`). It owns logical runner enrollment,
-daemon-authoritative catalog validation, runner leases, session placement and
-affinity, credential-profile grants, and workspace requirements. The tool
-registry's common declarations remain owned by [tool loop](tool-loop.md);
-session transcript and frontier mechanics remain owned by
-[sessions and transcript](sessions-and-transcript.md); physical tool attempts
-remain owned by [tool loop](tool-loop.md). Invariant tags cite
-[the invariant catalog](../invariants.md).
+(`agent/runner-persistence`). The corrected reconstitution mismatch contract was
+re-verified through PR #322 (`agent/docs-discipline`; pinned and pinned-loss
+request mismatches). It owns logical runner enrollment, daemon-authoritative
+catalog validation, runner leases, the independent session-composition axes,
+session placement and affinity, credential-profile grants, and workspace
+requirements. The tool registry's common declarations remain owned by
+[tool loop](tool-loop.md); session transcript and frontier mechanics remain
+owned by [sessions and transcript](sessions-and-transcript.md); physical tool
+attempts remain owned by [tool loop](tool-loop.md). Invariant tags cite
+[the invariant test index](../invariants.md).
 
 The executable runner build-out is a foundation proposal at the bottom of its
 implementing stack. The domain and Postgres foundation above remain the verified
@@ -37,6 +39,57 @@ reaches a durable terminal attempt before the next dispatch. Version one has no
 Mac runner, remote transport, concurrent execution, or MCP locus. The additive
 wire types do not encode a same-host assumption, but no unused remote mechanism
 or negotiation surface is designed.
+
+### The singleton-runner rule is temporary
+
+The single-runner rule is a short-term development boundary, not a design
+commitment. Several runners enrolled with one daemon simultaneously is required
+functionality on a medium-term horizon at the latest, and nothing may be built
+that forecloses it. The single active enrollment, and the rejection of a second
+healthy `enroll` below, are version-one artifacts that lift when multi-runner
+enrollment lands; they are not a statement that a deployment has one runner.
+Every runner-scoped fact — identity, enrollment, registration revision,
+connection and loss state, advertisement, workspace root — is therefore already
+per runner rather than per deployment, and a contract that reads "the runner" as
+a deployment-wide singleton is a defect to be repaired rather than a rule to be
+preserved. Why: an agent that mistakes this boundary for a decision attaches
+deployment-scoped meaning to runner-scoped facts, and every such attachment has
+to be found and undone before a second runner can connect.
+
+### Committed functionality beyond version one
+
+Nothing in this section describes implemented behaviour. Version one has no
+`move_healthy_session` request, no client may send one, and no daemon or runner
+surface answers one, exactly as no second simultaneous enrollment exists above.
+Every statement here is a constraint on future change rather than a capability
+present today, and that constraint is the only force it carries: the version-one
+mechanisms it names may not be altered in a way that forecloses these
+commitments. What remains genuinely undecided about them — workspace portability
+between runners, and any automatic-placement policy — stays in
+[open questions](../open-questions.md#scheduling-and-runners), which remains the
+one home for undecided design; a commitment whose implementation is deferred is
+not an undecided question.
+
+Owner-directed relocation of a healthy session is committed functionality that
+version one does not implement. `move_healthy_session` is the owner command that
+re-places a healthy session on a different runner; its same-runner form changes
+only the working directory. Version one's sole placement-change producer is loss
+replacement ([session placement and affinity](#session-placement-and-affinity)),
+so no implementation exists here. The mechanisms the command will consume —
+positive placement revisions, the `RunnerPlacementChanged` semantic boundary,
+the runner event family, and the placement fields carried by session-creation
+records — are specified so that adding it changes no other contract, and every
+later change to those mechanisms must remain compatible with a relocation that
+no loss caused. Its model-facing consequence is already correct and stays as
+written: the injected placement event states that prior runner-local execution
+state is unavailable
+([model-call execution](model-call-execution.md#frontier-rendering)), which is
+exactly what an owner-directed move must say.
+
+Successor promotion stays owner-initiated in every form. Fresh-install
+enrollment is instantly active; only a successor after loss waits, and it waits
+on an owner command rather than on a daemon decision. No mechanism in this page
+migrates a session, promotes a candidate, or reschedules work automatically.
 
 ## Local transport and connection protocol
 
@@ -82,48 +135,187 @@ One connection then carries this serial state machine:
 
 The closed version-one frame vocabulary is:
 
-| Direction       | Frame                     | Required checked payload and effect                                                                                                                                                                                           |
-| --------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| runner → daemon | `enroll`                  | Enrollment-request id and complete advertisement. Admitted only as pristine enrollment or one provisioning-only pending replacement candidate.                                                                                |
-| daemon → runner | `enrolled`                | Request id, issued enrollment/runner/authentication ids, registration revision, and accepted advertisement digest. Durable registration precedes send.                                                                        |
-| runner → daemon | `resume`                  | Request id, all issued identities, complete current advertisement, prior registration revision, and bounded reconnect inventory.                                                                                              |
-| daemon → runner | `resumed`                 | Current registration revision and one closed directive per inventoried item: resend, await, discard-as-recorded, or fail stale.                                                                                               |
-| daemon → runner | `replacement_pending`     | Request id, issued candidate identities, provisioning-only registration revision, and advertisement digest. Heartbeat, startup reconciliation, and an owner-command-bound workspace operation are admissible; leases are not. |
-| runner → daemon | `advertise`               | Complete replacement advertisement under the current identities and registration revision.                                                                                                                                    |
-| daemon → runner | `registered`              | Exact new registration revision and advertisement digest after durable registration.                                                                                                                                          |
-| daemon → runner | `heartbeat`               | Positive connection-epoch-local sequence and last accepted peer sequence.                                                                                                                                                     |
-| runner → daemon | `heartbeat_ack`           | Same challenge sequence, monotonic runner sequence, and exact optional lease/workspace phase.                                                                                                                                 |
-| runner → daemon | `workspace_leak_page`     | Registration revision, report digest, positive page, prior-page digest, final-page flag, and at most 64 sorted typed leak facts. Spool until acknowledged.                                                                    |
-| daemon → runner | `workspace_leak_recorded` | Exact report digest, page, and page digest after durable page admission; the final acknowledgement publishes the complete startup report.                                                                                     |
-| daemon → runner | `workspace_provision`     | Single-use provisioning authorization, session, placement revision, runner/registration, repository key, sandbox profile, and optional credential-profile name.                                                               |
-| runner → daemon | `workspace_ready`         | Same authorization correlation plus complete provisioned-workspace manifest identity and bounded content digest. Spool until acknowledged.                                                                                    |
-| daemon → runner | `workspace_recorded`      | Exact authorization and manifest correlation after durable receipt admission.                                                                                                                                                 |
-| daemon → runner | `workspace_release`       | Exact retired session placement revision and workspace-manifest identity.                                                                                                                                                     |
-| runner → daemon | `workspace_released`      | Same release correlation after manifest transition and symlink-safe removal.                                                                                                                                                  |
-| daemon → runner | `lease_offer`             | Complete immutable lease and tool dispatch correlation, selected profile/grant, normalized arguments, and result bounds.                                                                                                      |
-| runner → daemon | `lease_claim`             | Exact offered correlation after local tool/profile/credential/workspace admission.                                                                                                                                            |
-| daemon → runner | `lease_claimed`           | Exact claimed correlation after durable claim commit; it is one half of execution capability.                                                                                                                                 |
-| daemon → runner | `dispatch`                | Exact claimed correlation and immutable payload; receipt with `lease_claimed` authorizes one execution.                                                                                                                       |
-| runner → daemon | `result`                  | Exact claimed correlation and one bounded success, known-failure, or ambiguous evidence envelope. Spool until acknowledged.                                                                                                   |
-| daemon → runner | `result_recorded`         | Exact result correlation after atomic lease/attempt result commit.                                                                                                                                                            |
-| either          | `shutdown`                | Current connection epoch and closed reason `daemon_shutdown` or `runner_shutdown`; creates no loss proof by itself.                                                                                                           |
-| daemon → runner | `rejected`                | Offending frame kind, available correlation, and one closed code; no arbitrary peer text. Fatal codes close the connection.                                                                                                   |
+| Direction       | Frame                        | Required checked payload and effect                                                                                                                                                                                           |
+| --------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| runner → daemon | `enroll`                     | Enrollment-request id, digest version, and complete advertisement. Admitted only as pristine enrollment or one provisioning-only pending replacement candidate.                                                               |
+| daemon → runner | `enrolled`                   | Request id, issued enrollment/runner/authentication ids, registration revision, and accepted advertisement digest. Durable registration precedes send.                                                                        |
+| runner → daemon | `resume`                     | Request id, digest version, all issued identities, complete current advertisement, prior registration revision, and bounded reconnect inventory.                                                                              |
+| daemon → runner | `resumed`                    | Current registration revision and one closed directive per inventoried item: resend, await, discard-as-recorded, or fail stale.                                                                                               |
+| daemon → runner | `replacement_pending`        | Request id, issued candidate identities, provisioning-only registration revision, and advertisement digest. Heartbeat, startup reconciliation, and an owner-command-bound workspace operation are admissible; leases are not. |
+| runner → daemon | `advertise`                  | Complete replacement advertisement under the current identities and registration revision.                                                                                                                                    |
+| daemon → runner | `registered`                 | Exact new registration revision and advertisement digest after durable registration.                                                                                                                                          |
+| daemon → runner | `heartbeat`                  | Positive connection-epoch-local sequence and last accepted peer sequence.                                                                                                                                                     |
+| runner → daemon | `heartbeat_ack`              | Same challenge sequence, monotonic runner sequence, and exact optional lease/workspace phase.                                                                                                                                 |
+| runner → daemon | `workspace_leak_page`        | Registration revision, report digest, positive page, prior-page digest, final-page flag, and at most 64 sorted typed leak facts. Spool until acknowledged.                                                                    |
+| daemon → runner | `workspace_leak_recorded`    | Exact report digest, page, and page digest after durable page admission; the final acknowledgement publishes the complete startup report.                                                                                     |
+| daemon → runner | `workspace_provision`        | Single-use provisioning authorization, session, placement revision, runner/registration, repository key, sandbox profile, and optional credential-profile name.                                                               |
+| runner → daemon | `workspace_ready`            | Same authorization correlation plus complete provisioned-workspace manifest identity and bounded content digest. Spool until acknowledged.                                                                                    |
+| daemon → runner | `workspace_recorded`         | Exact authorization and manifest correlation after durable receipt admission.                                                                                                                                                 |
+| daemon → runner | `workspace_release`          | Exact retired session placement revision and workspace-manifest identity.                                                                                                                                                     |
+| runner → daemon | `workspace_released`         | Same release correlation after manifest transition and symlink-safe removal. Spool until acknowledged.                                                                                                                        |
+| daemon → runner | `workspace_release_recorded` | Exact release correlation after durable release admission; this frame, or `operation_failure_recorded` for the same release correlation, frees the runner's journaled release and its workspace-operation slot.               |
+| daemon → runner | `lease_offer`                | Complete immutable lease and tool dispatch correlation, selected profile/grant, normalized arguments, and result bounds.                                                                                                      |
+| runner → daemon | `lease_claim`                | Exact offered correlation after local tool/profile/credential/workspace admission.                                                                                                                                            |
+| daemon → runner | `lease_claimed`              | Exact claimed correlation after durable claim commit; it is one half of execution capability.                                                                                                                                 |
+| daemon → runner | `dispatch`                   | Exact claimed correlation and immutable payload; receipt with `lease_claimed` authorizes one execution.                                                                                                                       |
+| runner → daemon | `result`                     | Exact claimed correlation and one bounded success, known-failure, or ambiguous evidence envelope. Spool until acknowledged.                                                                                                   |
+| daemon → runner | `result_recorded`            | Exact result correlation after atomic lease/attempt result commit.                                                                                                                                                            |
+| runner → daemon | `operation_failed`           | Exact refused-operation correlation, one daemon-actionable failure category, and one bounded runner-specific detail. Spool until acknowledged.                                                                                |
+| daemon → runner | `operation_failure_recorded` | Exact failure correlation after durable admission; frees the runner's journaled failure, and for a `workspace_cleanup_failed` failure also retires the journaled release it names and frees the workspace-operation slot.     |
+| either          | `shutdown`                   | Current connection epoch and closed reason `daemon_shutdown` or `runner_shutdown`; creates no loss proof by itself.                                                                                                           |
+| daemon → runner | `rejected`                   | Offending frame kind, available correlation, and one closed code; no arbitrary peer text. Fatal codes close the connection.                                                                                                   |
 
 An advertisement contains at most 16 capability classes, 256 tools, 64
-credential-profile names, and 64 repository keys; names are sorted and unique.
-Workspace and sandbox inventories are their closed vocabularies. A reconnect
-inventory contains at most one lease, one unacknowledged terminal result, one
-workspace operation, and one unacknowledged leak-report page because execution
-and report delivery are serial. Digests are lowercase 64-character SHA-256 hex
-over the canonical checked representation; they detect replay disagreement and
-confer no authority. `rejected` codes are `unsupported_version`,
-`malformed_frame`, `enrollment_conflict`, `enrollment_revoked`,
-`registration_rejected`, `stale_connection`, `correlation_mismatch`,
-`policy_rejected`, `workspace_conflict`, `runner_lost`, `unavailable`, or
-`shutting_down`. Any frame outside the state shown by the table, a duplicate
-with unequal canonical payload, or an acknowledgement without its durable
-predecessor is fatal and advances nothing. Equal replay returns or resends the
-same recorded answer.
+credential-profile names, and 64 repository entries; names are sorted and
+unique. A repository entry is one exact repository key paired with the exact
+credential-profile name that key's runner configuration names, and entries are
+sorted and unique by key. Why: the daemon has to decide before a model call
+whether a session can clone anything at all, and two independent inventories of
+keys and profiles cannot answer that — only the pairing shows whether some key's
+entry names the profile this session was granted
+([tool loop](tool-loop.md#registry-placement-and-effect-metadata) owns the
+advertisement condition that reads it). Workspace and sandbox inventories are
+their closed vocabularies. A reconnect inventory contains at most one lease, one
+unacknowledged terminal result, one workspace operation, one unacknowledged
+operation failure, and one unacknowledged leak-report page because execution,
+workspace work, and report delivery are each serial. Digests detect replay
+disagreement and confer no authority. `rejected` codes are
+`unsupported_version`, `unsupported_digest_version`, `malformed_frame`,
+`enrollment_conflict`, `enrollment_revoked`, `registration_rejected`,
+`stale_connection`, `correlation_mismatch`, `policy_rejected`,
+`workspace_conflict`, `runner_lost`, `unavailable`, or `shutting_down`. Any
+frame outside the state shown by the table, a duplicate with unequal canonical
+payload, or an acknowledgement without its durable predecessor is fatal and
+advances nothing. Equal replay returns or resends the same recorded answer.
+
+Digest bytes are pinned rather than left to each implementation. Every digest is
+the lowercase 64-character hex SHA-256 of a domain-separated, version-tagged
+preimage: the ASCII prefix `sbx-digest-v1:<kind>:` followed by that kind's
+canonical field encoding, where `<kind>` is exactly `advertisement`,
+`leak-report`, `leak-page`, `workspace-manifest`, or `clone-url`. The canonical
+encoding is length-prefixed: each field is its unsigned 64-bit big-endian byte
+length followed by its exact bytes, in the field order that kind's definition
+fixes, with each sorted inventory in the sort order already required of it and
+with no separator, padding, or optional whitespace anywhere. Text is exact UTF-8
+with no normalization, case folding, or trimming; an optional field is preceded
+by one presence byte so an absent field is distinguishable from a present empty
+one. Why: length prefixing is what makes two different field splittings hash
+differently, and domain separation is what keeps an advertisement digest from
+ever equalling a manifest digest computed over the same bytes.
+
+Every field takes exactly one of these encodings, so no implementation picks a
+representation: text is its exact UTF-8 bytes; an identity is its canonical
+lowercase hyphenated 36-byte UUID text; a digest is its lowercase 64-byte hex
+text; a closed-vocabulary value is its exact wire token; an unsigned integer is
+exactly eight bytes big-endian; and a boolean is exactly one byte, `0x00` or
+`0x01`. A sorted inventory is its element count as an unsigned integer followed
+by each element as its own length-prefixed field, and a nested record is one
+length-prefixed field whose bytes are that record's own canonical encoding under
+these same rules. A decimal, textual, or other-width integer is therefore never
+admissible, and a registration revision has exactly one byte sequence.
+
+Each kind's field sequence is complete and fixed here:
+
+- `advertisement` — capability classes, tool names, workspace capabilities,
+  sandbox profiles, and credential-profile names, each as a sorted inventory of
+  its exact names or closed tokens, then repository entries as one sorted
+  inventory of nested records of repository key followed by credential-profile
+  name
+  ([advertised catalogs and daemon authority](#advertised-catalogs-and-daemon-authority));
+- `leak-report` — one inventory holding the report's complete sorted fact
+  sequence, each fact a nested record of fact kind, locator, entry digest,
+  optional session, then optional placement revision;
+- `leak-page` — registration revision, report digest, page number, optional
+  prior-page digest, final-page flag, then that page's facts as one inventory of
+  those same nested records;
+- `workspace-manifest` — lifecycle, session, placement revision, runner,
+  optional repository key, optional canonical-clone-URL digest, optional
+  credential-profile name, sandbox profile, relative workspace path, then the
+  bounded recovery commit-or-branch facts
+  ([workspace provisioning and recovery](#workspace-provisioning-and-recovery));
+  and
+- `clone-url` — the single configuration-validated canonical URL text.
+
+`enroll` and `resume` carry the exact digest version the runner will compute,
+and the daemon admits only the version it implements. A mismatch is the fatal
+`unsupported_digest_version` rejection naming both versions, so a changed
+encoding fails with a stated cause instead of surfacing as a bare hash mismatch
+on the first acknowledgement.
+
+A runner that cannot perform an admitted operation reports it rather than
+falling silent. `operation_failed` carries the exact correlation of the refused
+operation — provisioning authorization, release, or lease offer before
+`lease_claim` — and two layers. The first is one closed daemon-actionable
+category: `credential_unavailable`, `repository_unavailable`,
+`sandbox_unavailable`, `workspace_conflict`, `workspace_cleanup_failed`, or
+`lease_admission_refused`. `workspace_cleanup_failed` is the release-specific
+member: a journaled release whose rename or deletion keeps failing reports it
+rather than retaining its journal forever, and `operation_failure_recorded` for
+that exact release correlation resolves the release as refused, retiring both
+journals — the failure and the release — and freeing the runner's single
+workspace-operation slot. It is therefore the one acknowledgement other than
+`workspace_release_recorded` that retires a release, and no single release
+correlation ever draws both, because a release either completed or was refused.
+A release whose owning connection becomes durably lost draws neither and is
+retired as unowned instead
+([workspace provisioning and recovery](#workspace-provisioning-and-recovery)).
+Why: `workspace_release_recorded` follows a completed deletion and can never be
+produced for a release whose deletion failed, so admitting only that frame as a
+release's retirement would leave the reporting runner holding the journal and
+its one workspace-operation slot forever — the exact outcome this category
+exists to prevent. The undeleted placement then appears in the next startup
+report as a `cleanup_failed` leak, which is the version-one response to
+unreclaimed disk. Daemon logic keys off that category alone, so the set stays
+small and every member names a decision the daemon can make. The second is one
+runner-authored detail: a runner-specific code, a message, and a structured
+payload, all carried as data. The daemon retains the detail as operator evidence
+and exposes it verbatim through owner runner inspection; it never parses,
+interprets, or branches on it, so a runner may add detail codes freely without a
+daemon change.
+
+Extensible is not unbounded, and each member's limit is exact rather than
+described as bounded. The complete detail is durable operator evidence held
+within 4,096 UTF-8 bytes, the bound this system already uses for a known
+failure's durable detail and for an exact runner value, and the three members
+are derived from that bound:
+
+- the code uses the same checked-name syntax as every other runner catalog key —
+  nonempty, U+0000-free, at most 64 UTF-8 bytes, only ASCII letters, digits,
+  dot, underscore, and hyphen, and beginning with an ASCII letter or digit
+  ([advertised catalogs and daemon authority](#advertised-catalogs-and-daemon-authority))
+  — so a new code needs no new grammar and is safe to retain and display
+  verbatim;
+- the message is exact nonempty UTF-8, excludes U+0000, and carries at most
+  1,024 UTF-8 bytes, retained with no trimming, case folding, or other
+  normalization. A runner whose captured text is longer truncates it to that cap
+  with the same head-and-tail `[signalbox: N bytes omitted]` marker a truncated
+  process stream carries
+  ([tool loop](tool-loop.md#version-one-workstation-tool-contracts)), rather
+  than emitting a frame it knows is inadmissible; and
+- the payload is one JSON object — `{}` when there is nothing structured to add,
+  never absent and never JSON null — whose complete serialized form is at most
+  2,048 UTF-8 bytes, whose member names use the code's checked-name syntax, and
+  whose values are JSON strings under the message's byte bound, unsigned
+  integers, booleans, null, or nested objects and arrays holding at most 64
+  members or elements each, with at most eight containers on any root-to-value
+  path counted exactly as
+  [conversation import](conversation-import.md#claude-code-session-jsonl-versions-1-and-2)
+  counts container depth.
+
+Those three limits together leave more than a kibibyte of the retained bound for
+the detail object's own framing and worst-case JSON escaping. A detail outside
+any of them is an oversized or malformed frame and fails closed like any other,
+so the runner checks the detail as it constructs it and never spools one it
+could not have admitted itself. Why: `operation_failed` is spooled until
+acknowledged, so a detail one side considers valid and the other rejects is not
+a cosmetic disagreement between implementations — it is resent forever, and the
+provisioning, release, or lease offer it was reporting waits permanently for an
+`operation_failure_recorded` that can never arrive. Exact limits are what make
+two independently implemented sides admit the same set.
+
+A failure the daemon has durably recorded terminates that operation: the
+corresponding provisioning, release, or lease authority is resolved as refused,
+and neither side waits on it further.
 
 After `enrolled`, `replacement_pending`, or `resumed`, startup reconciliation
 sends one leak report before any workspace provision or lease offer is
@@ -131,17 +323,21 @@ admissible; heartbeats remain admissible throughout. A report is named by the
 lowercase SHA-256 digest of its complete canonical sorted fact sequence and has
 pages numbered from one. Each nonfinal page carries exactly 64 facts and each
 final page carries zero through 64; even an empty report sends final page one.
-Facts are sorted by their bounded repository-relative locator and contain only
-`unknown_manifest`, `retired_present`, `manifest_conflict`, `cleanup_failed`, or
-`unreconciled`, the locator, lowercase SHA-256 manifest-or-entry digest, and
-nullable session and placement revision when independently parseable. Each page
-carries the prior page digest, null only on page one, so equal replay is exact
-and omission or reordering fails closed. The runner journals the report and
-current page until `workspace_leak_recorded`. The daemon durably stages pages by
-report and page, then atomically replaces the runner-status leak snapshot only
-when it acknowledges the final page; an interrupted newer report never erases
-the prior complete one. Reconnect inventory names the exact retained page and
-resumes at its durable acknowledgement boundary.
+Facts are sorted by their bounded runner-root-relative locator — relative to the
+runner state root and not to any repository, so a workspace-free private root,
+staging, and trash are all nameable — and contain only `unknown_manifest`,
+`retired_present`, `manifest_conflict`, `cleanup_failed`, or `unreconciled`, the
+locator, lowercase SHA-256 manifest-or-entry digest, and nullable session and
+placement revision when independently parseable. The locator carries no absolute
+host path, matching the projection in
+[process protocol](process-protocol.md#client-requests). Each page carries the
+prior page digest, null only on page one, so equal replay is exact and omission
+or reordering fails closed. The runner journals the report and current page
+until `workspace_leak_recorded`. The daemon durably stages pages by report and
+page, then atomically replaces the runner-status leak snapshot only when it
+acknowledges the final page; an interrupted newer report never erases the prior
+complete one. Reconnect inventory names the exact retained page and resumes at
+its durable acknowledgement boundary.
 
 Every message after `enrolled` or `replacement_pending` carries the exact active
 or pending connection registration revision. Lease messages additionally carry
@@ -205,6 +401,39 @@ result; a third request conflicts rather than replacing either authority. The
 runner atomically journals the returned receipt before treating enrollment or
 pending replacement as complete.
 
+Loss triggered by re-registration has its own recovery. When a live runner stops
+advertising a capability that a pinned placement requires, the
+registration-reconciliation transition marks that placement `RunnerLost` while
+the connection and enrollment stay healthy, so no successor is pending and no
+different live runner exists to name. For that loss source only, the owner
+replacement command may name the same runner identity: a checked re-enrollment
+against its current connection revalidates the exact enrollment, runner, and
+authentication-reference correlations, requires the current registration to
+advertise every capability the successor placement request needs, and then
+installs the successor placement, grant lineage, and semantic boundary exactly
+as a different-runner replacement does. Every other loss source keeps the
+different-runner requirement, and no provisioning-only successor is admitted for
+this loss source in version one. Why: the runner is present and capable at the
+moment of recovery, so demanding a second runner would leave the only state that
+produced this loss permanently unrecoverable.
+
+A pending successor may also be promoted with no lost session placement
+involved. `promote_pending_runner` is the owner command for the
+deployment-scoped fact that this daemon's active runner is durably gone: it
+requires the recorded active enrollment's connection to be durably lost and the
+pending candidate to be connected under its provisioning-only authority, then
+revokes the predecessor and constructs the active enrollment and validated
+registration from the exact pending facts in one transaction. It provisions no
+workspace, consumes no workspace receipt, touches no session placement, creates
+no lease, and fabricates no turn or frontier; a session pinned to the
+predecessor stays `RunnerLost` until its own owner replacement runs. The command
+generalizes to multi-runner as the fact that one of this daemon's active runners
+is durably gone and a successor for it is pending, and stays owner-initiated in
+both forms. Why: a deployment with no session, or one whose every placement is
+an unpinned capability-class request, offers no placement for a replacement
+command to target, so without this path its pending candidate would remain
+provisioning-only forever.
+
 For a pinned repository-backed loss, `replace_lost_runner` first durably claims
 the owner command and its complete request, then creates one single-use
 provisioning authorization naming that command and pending registration. The
@@ -259,7 +488,8 @@ A registration carries availability claims only:
 
 - the runner's advertised capability classes;
 - tool names;
-- credential-profile and repository-key names; and
+- credential-profile names, and repository entries pairing each key with the
+  profile name it requires; and
 - workspace and sandbox-profile capabilities.
 
 It carries no permission default, effect class, placement declaration, approval
@@ -322,7 +552,7 @@ Sandbox profile is also closed vocabulary: `WorkspaceRestricted`
 (`workspace-restricted` on configuration and wire surfaces) and `Ambient`
 (`ambient`). Both must be explicitly advertised before a session can select
 them. The daemon owns each profile's fixed meaning and approval defaults; an
-advertisement asserts availability only (INV-022, INV-023, INV-042).
+advertisement asserts availability only (INV-042).
 
 One `RunnerCatalog` domain value contains allowed capability classes, complete
 runner-tool declarations, allowed workspace capabilities, and the two fixed
@@ -331,9 +561,11 @@ independently of stored registration rows. Registration reconstitution compares
 every stored class, tool declaration, workspace capability, and sandbox profile
 with that trusted catalog and rejects any difference; stored declarations cannot
 bootstrap their own authority. Duplicate names or an internally inconsistent
-placement declaration rejects the complete catalog. Credential and repository
-names remain exact availability inventories recorded by that registration and
-acquire no policy by being stored.
+placement declaration rejects the complete catalog. Credential-profile names and
+repository entries remain exact availability inventories recorded by that
+registration and acquire no policy by being stored: the profile name a
+repository entry carries states which configured credential that repository
+requires, never that any session holds it.
 
 The version-one daemon composition constructs this value once from the compiled
 workstation registry, the exact `workstation-v1` class, and fixed profile
@@ -393,11 +625,14 @@ Advertisement validation never synthesizes a declaration for an unknown tool.
 Unknown tools, capability classes, workspace capabilities, and sandbox profiles,
 or malformed credential-profile names reject the complete advertisement. A
 daemon-only tool or a runner tool whose declared identity-or-class selector the
-advertisement does not satisfy also rejects the complete advertisement. The
-resulting `ValidatedRunnerRegistration` exposes only exact advertised
-availability paired with daemon-owned policy. A runner can therefore neither
-self-widen its tool surface nor replace confirmation with automatic approval
-(INV-042).
+advertisement does not satisfy also rejects the complete advertisement, as does
+a repository entry whose credential-profile name is absent from the same
+advertisement's profile inventory: an entry naming a profile the runner does not
+offer could never be granted, and admitting it would put an unusable pair into
+the very correlation preparation reads. The resulting
+`ValidatedRunnerRegistration` exposes only exact advertised availability paired
+with daemon-owned policy. A runner can therefore neither self-widen its tool
+surface nor replace confirmation with automatic approval (INV-042).
 
 ## Effect classes and runner leases
 
@@ -550,6 +785,66 @@ or claim authority. The application repository commits claim, terminal result,
 and lease state together; the wire adapter projects only from those durable
 facts during reconnect.
 
+## Session composition
+
+Workspace, repository, credentials, and sandbox are independent axes of one
+session. A choice on any axis constrains no other axis, and no axis is ever
+inferred from another:
+
+- **workspace** — none, a plain directory on the runner, or a repository
+  worktree;
+- **repository** — none, an empty repository, or a populated repository, which
+  is the state of whatever repository the session reaches rather than a separate
+  request member. An empty repository is an ordinary starting state, and no
+  repository at all is an ordinary session shape rather than a degenerate one;
+- **credentials** — none, or one exact credential-profile name the selected
+  runner advertises. A profile is grantable with no repository and no workspace,
+  because a session may need a credential for work that has nothing to clone;
+  and
+- **sandbox** — one explicitly selected profile: `ambient`, which supervises
+  without confining, or `workspace-restricted`, whose writable root is the
+  session's own workspace and need not be a repository clone. Either profile is
+  selectable with any choice on the other three axes.
+
+Every combination is a stated choice at creation: nothing is inferred, not the
+credential profile, not the repository, not the working directory. A creation
+request that selects nothing on an axis states that absence explicitly and
+receives absence, never a daemon-selected or runner-selected substitute. The
+axes are independent in what they admit, and the request shape says exactly
+which member carries each. Workspace and repository share one member, because a
+repository reaches a session as its worktree and in no other way:
+`WorkspaceRequirement::None` is both the no-workspace and the plain-directory
+choice, `WorkspaceRequirement::RepositoryWorktree` carries the exact repository
+key, and whether that repository is empty or populated is a fact about the
+repository rather than a third value the request selects. A session with no
+worktree therefore has no session repository, and it reaches a repository only
+by cloning one into its writable root under a runner-configured repository key
+and the credential profile that key's entry names
+([tool loop](tool-loop.md#version-one-workstation-tool-contracts)). Credentials
+and sandbox constrain neither of those: every credential choice composes with
+every workspace choice, and either sandbox profile composes with every
+combination of the other two. Runner capability varies over the same axes: a
+runner may advertise no workspace capability and no repository entry at all, and
+such a runner is a fully usable placement target for every session composition
+that needs neither.
+
+The advertised executable tool set is therefore a function of the session's
+actual capabilities rather than of the compiled registry. A declaration whose
+arguments, paths, or working directory are defined relative to a session
+repository is advertised only to a session that has one; a workspace-free
+session advertises exactly the tools that can run in it
+([model-call execution](model-call-execution.md#frontier-rendering) owns the
+snapshot, and [tool loop](tool-loop.md#registry-placement-and-effect-metadata)
+owns the declarations). No combination is rejected for being workspace-free, and
+no contract on this page may assume that a repository exists.
+
+Why: an earlier shape of this specification read as though a session were a
+repository clone on the one runner, and four separate defects — a credential
+inferred for a repository placement, a rejected empty repository, placement
+fields missing from template creation, and a workspace-free restricted placement
+advertising repository tools — were that single assumption surfacing in four
+places. Stating the axes once is what keeps a fifth from appearing.
+
 ## Session placement and affinity
 
 `SessionRunnerPlacement` starts with one request that is immutable between
@@ -569,6 +864,20 @@ The override map has at most 64 entries, rejects duplicate or undeclared tool
 names as one invalid request, and is copied into the durable placement snapshot.
 It is session policy rather than runner advertisement: a runner cannot add,
 remove, or reinterpret it.
+
+Every element of the request is an independent axis under
+[session composition](#session-composition) and is supplied explicitly. An
+absent `CredentialProfileName` is the stated choice of no credential rather than
+a request that the daemon or runner select one, and it neither requires nor
+implies a workspace. `WorkspaceRequirement::None` is admissible with either
+sandbox profile and with any credential choice. A plain-directory workspace is
+that same `WorkspaceRequirement::None` paired with an exact working-directory
+selection: the runner provisions nothing and executes in the named directory,
+and it never creates, renames, or deletes that directory, so retiring such a
+placement releases nothing
+([workspace provisioning and recovery](#workspace-provisioning-and-recovery)). A
+runner that advertises no workspace capability therefore remains a valid target
+for every placement that requires no worktree.
 
 The working-directory value is exact nonempty UTF-8, excludes U+0000, and is at
 most 4,096 bytes. The domain does not apply host-platform path parsing. A
@@ -629,31 +938,40 @@ pre-pin replacement instead returns a checked `RunnerPrePinReplacement` carrying
 the lost exact identity and before-and-after requests; the successor is ordinary
 `Unpinned`, and no pinned facts or semantic placement change exist.
 
-Every replacement runner must differ from the lost runner and be currently
-registered on a live connection. Pinned replacement provisions a fresh workspace
-at the successor revision; pre-pin replacement provisions nothing until eventual
-initial dispatch. Reconnect of the lost identity cannot consume either
-replacement transition or clear a lost state. Safe retry authority exists only
-for a pinned lost runner and can be consumed only as part of its owner
-replacement; it never causes automatic dispatch.
+Every replacement runner must be currently registered on a live connection, and
+must differ from the lost runner except in the checked same-runner recovery that
+[identity, enrollment, and registration](#identity-enrollment-and-registration)
+admits for a registration-triggered loss. Pinned replacement provisions a fresh
+workspace at the successor revision when the successor request requires one and
+provisions nothing when it does not; pre-pin replacement provisions nothing
+until eventual initial dispatch. Reconnect of the lost identity cannot consume
+either replacement transition or clear a lost state. When a daemon-local model
+call is authorized and in flight as the replacement runs, the replacement is
+staged rather than refused: the transition appends its semantic boundary only
+after that call reaches its observation boundary, so the call's own output
+appends first and the prefix-only frontier law holds
+([turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#runner-loss-session-recovery)).
+Safe retry authority exists only for a pinned lost runner and can be consumed
+only as part of its owner replacement; it never causes automatic dispatch.
 
 Reconstitution accepts a complete public raw-facts input and rejects ordinary
 `Unpinned` above revision one unless append-only history proves an exact
 lost-before-pin owner replacement into that revision. It rejects
-`RunnerLostBeforePin` unless the request selector is the retained exact runner,
-a pinned or pinned-loss state that does not match its current request and
-validated capabilities, and any stored credential-grant lineage whose revision
-is newer than the placement revision. A profileless placement with retained
-lineage additionally requires the exact terminally revoked grant tombstone for
-that session, runner, and revision; an omitted, active, or cross-wired tombstone
-fails closed. Durable replacement-history verification is enforced by the
-persistence projection described below. Pinned or pinned-loss reconstitution
-validates against the exact registration snapshot that produced the pin and
-rejects any stored tool or runner-required-tool inventory that differs from that
-checked result. A current narrowed re-registration is reconciled separately and
-is not substituted for that historical snapshot. This domain aggregate accepts
-every positive placement revision because each is reachable through checked
-successor transitions.
+`RunnerLostBeforePin` unless the request selector is the retained exact runner.
+Two further conditions each cause rejection on their own, and no exemption
+attaches to either: a pinned or pinned-loss state that does not match its
+current request and validated capabilities is rejected, and a stored
+credential-grant lineage whose revision is newer than the placement revision is
+rejected. A profileless placement with retained lineage additionally requires
+the exact terminally revoked grant tombstone for that session, runner, and
+revision; an omitted, active, or cross-wired tombstone fails closed. Durable
+replacement-history verification is enforced by the persistence projection
+described below. Pinned or pinned-loss reconstitution validates against the
+exact registration snapshot that produced the pin and rejects any stored tool or
+runner-required-tool inventory that differs from that checked result. A current
+narrowed re-registration is reconciled separately and is not substituted for
+that historical snapshot. This domain aggregate accepts every positive placement
+revision because each is reachable through checked successor transitions.
 
 The store retains append-only created, pinned, runner-lost-before-pin,
 pre-pin-replaced, runner-lost, runner-replaced, abandoned, and profile-replaced
@@ -681,21 +999,23 @@ becomes `RunnerLost`; an unpinned placement whose exact-identity selector names
 the lost runner becomes `RunnerLostBeforePin { runner }`. An unpinned
 capability-class request has selected no runner and is unaffected. Once durable
 loss commits, only two owner commands can leave either lost state. For pinned
-loss, `replace` names a different live runner or atomically activates the one
-pending replacement enrollment, then commits the checked successor placement,
-grant lineage, semantic `RunnerPlacementChanged` transcript entry, and next
-context frontier atomically. The entry is reference-only and contains no
-credential value or unbounded runner output. Replacing `RunnerLostBeforePin`
-updates the exact selector and returns to `Unpinned` at the successor revision
-without fabricating a semantic boundary, workspace, grant, or lease. `abandon`
-requires the exact current lost placement and an empty active-turn slot, then
-installs terminal `RunnerAbandoned` placement state. An active turn must first
-finish the existing stop, approval-decision, or reconciliation flow; abandonment
-has no cancellation proof and cannot end a turn. An idle or queued-only session
-fabricates no turn or frontier and later exposes only daemon-executable tools.
-It creates no successor turn and never rewrites an issued side effect as known.
-Neither command can target an ordinary unpinned, live, stale, or
-already-replaced placement (INV-026, INV-029, INV-037, INV-044).
+loss, `replace` names a different live runner, atomically activates the one
+pending replacement enrollment, or — for a registration-triggered loss only —
+re-enrolls the same runner against its current connection, then commits the
+checked successor placement, grant lineage, semantic `RunnerPlacementChanged`
+transcript entry, and next context frontier atomically. The entry is
+reference-only and contains no credential value or unbounded runner output.
+Replacing `RunnerLostBeforePin` updates the exact selector and returns to
+`Unpinned` at the successor revision without fabricating a semantic boundary,
+workspace, grant, or lease. `abandon` requires the exact current lost placement
+and an empty active-turn slot, then installs terminal `RunnerAbandoned`
+placement state. An active turn must first finish the existing stop,
+approval-decision, or reconciliation flow; abandonment has no cancellation proof
+and cannot end a turn. An idle or queued-only session fabricates no turn or
+frontier and later exposes only daemon-executable tools. It creates no successor
+turn and never rewrites an issued side effect as known. Neither command can
+target an ordinary unpinned, live, stale, or already-replaced placement
+(INV-026, INV-029, INV-037, INV-044).
 
 ## Sandbox profiles and approval
 
@@ -708,18 +1028,40 @@ requires the same explicit replacement frontier as changing runners.
 For `WorkspaceRestricted`, the runner launches every executable tool as a fresh
 bubblewrap process. It unshares user, mount, PID, IPC, UTS, cgroup, and network
 namespaces; drops capabilities; clears inherited environment; mounts fresh
-`/proc`, `/dev`, `/tmp`, and runtime directories; binds only the exact session
-repository read-write; and binds configured toolchain and cache allowlist paths
-read-only. Repository provisioning uses the same profile before publication: it
-binds only the authorized empty staging repository at the fixed guest workspace
-path, uses a per-provisioning broker socket, injects only the selected helper
-credential, verifies the resulting clone, and atomically publishes it. The
-runner refuses restricted registration when the installed bubblewrap cannot
-prove the required namespace and bind behavior. File tools use
-descriptor-relative traversal beneath the repository and refuse symlinks, magic
-links, device nodes, sockets, and path escape. Writes replace a sibling
-temporary file atomically. Shell and build/test tools receive no host path that
-was not bound into their namespace (INV-022, INV-023).
+`/proc`, `/dev`, `/tmp`, and runtime directories; binds only the session's exact
+writable root read-write; and binds configured toolchain and cache allowlist
+paths read-only.
+
+Confinement is defined over that writable root, which need not be a repository.
+The root is the provisioned repository when the placement requires a worktree,
+the exact selected working directory when the placement requires no worktree and
+names one, and otherwise one private per-placement directory the runner creates
+below its own state root, empty when it first creates it. Exactly one writable
+root exists per placement in every case, so the profile means the same thing —
+one writable subtree, no host interface, no inherited environment — for a
+workspace-free session as for a repository-backed one. Each of the three roots
+is identified by durable facts rather than by process memory: the provisioned
+repository by its manifest, the selected working directory by the placement
+value that names it, and the private root by its deterministic per-placement
+path and its own manifest
+([workspace provisioning and recovery](#workspace-provisioning-and-recovery)). A
+restarted runner therefore re-adopts the root it was already using, with
+whatever the session wrote into it, and never substitutes a fresh empty
+directory for one holding session files. Why: defining restricted confinement in
+terms of the session repository made a repository a precondition for being
+sandboxed at all, which would have pushed every workspace-free session into
+`ambient` for no security reason.
+
+Repository provisioning uses the same profile before publication: it binds only
+the authorized empty staging repository at the fixed guest workspace path, uses
+a per-provisioning broker socket, injects only the selected helper credential,
+verifies the resulting clone, and atomically publishes it. The runner refuses
+restricted registration when the installed bubblewrap cannot prove the required
+namespace and bind behavior. File tools use descriptor-relative traversal
+beneath that writable root and refuse symlinks, magic links, device nodes,
+sockets, and path escape. Writes replace a sibling temporary file atomically.
+Shell and build/test tools receive no host path that was not bound into their
+namespace.
 
 The restricted network namespace has no host interface. A namespace-local shim
 connects through one per-dispatch Unix socket to a runner-owned HTTPS broker.
@@ -799,16 +1141,31 @@ argv, wire state, manifests, and logs. Exact-value output redaction limits
 accidental echo but is not a claim that arbitrary model-controlled execution
 cannot misuse a credential within its scope.
 
-Session creation records the requested profile as a placement axis. The pinning
-transition snapshots the selected profile and validated advertised tool set into
-one `CredentialProfileGrant`, because only then are the exact runner and
-availability known. The grant binds the session, runner, profile, and positive
-grant revision. A runner that did not advertise the profile cannot receive the
-grant. Lease creation requires the current active grant, the same pinned runner
-and profile, a tool present in the snapshot, and consumption of the exact
-`RunnerToolAttemptAuthorization` produced after approval resolution and bound to
-that tool. The grant records the exact tool/profile posture without issuing a
-reusable standalone dispatch token.
+Session creation records the requested profile as a placement axis, and that
+choice is always explicit and never inferred. A session may be created with no
+credentials at all: the request states either one named profile or an explicit
+none, and neither the daemon nor the runner may substitute a profile for an
+absent selection. A profileless placement creates no grant, resolves no
+configured path, and injects no value, including when it requires a repository
+worktree — a repository whose configured clone needs authentication and whose
+placement selected no profile fails provisioning with the
+`credential_unavailable` category rather than proceeding under a profile the
+owner did not choose. Conversely a named profile is grantable to a placement
+with no repository and no workspace, because the credential belongs to the
+session's work rather than to a clone
+([session composition](#session-composition)). Why: a silently inferred
+credential is an authorization the owner never granted, and refusing to guess is
+the only behavior that keeps the grant record a truthful statement of intent.
+
+The pinning transition snapshots the selected profile and validated advertised
+tool set into one `CredentialProfileGrant`, because only then are the exact
+runner and availability known. The grant binds the session, runner, profile, and
+positive grant revision. A runner that did not advertise the profile cannot
+receive the grant. Lease creation requires the current active grant, the same
+pinned runner and profile, a tool present in the snapshot, and consumption of
+the exact `RunnerToolAttemptAuthorization` produced after approval resolution
+and bound to that tool. The grant records the exact tool/profile posture without
+issuing a reusable standalone dispatch token.
 
 Grant replacement is forward-only. It requires the supplied validated
 registration to remain the enrollment-owned current revision, checks the current
@@ -853,11 +1210,33 @@ a direct lease-row insert (INV-035, INV-045).
 `WorkspaceRequirement::RepositoryWorktree` is satisfiable only when the selected
 validated registration advertises `WorkspaceCapability::WorktreePerSession` and
 the repository key resolves in checked runner configuration to a credential-free
-HTTPS clone URL. The provisioned workspace binds the session, placement
-revision, runner, repository key, exact clone URL identity, sandbox profile, and
-working directory. Its cleanup owner is structurally the runner that provisioned
-it; no daemon-cleanup alternative is constructible. Replacement always uses the
-successor placement revision and cannot carry the prior workspace forward.
+HTTPS clone URL. The runner accepts the provisioning authorization only when
+that entry names exactly the credential profile the authorization carries; a
+mismatched or absent profile is a `credential_unavailable` refusal rather than a
+clone attempted under a grant the entry does not name. That same equality
+governs every authenticated Git operation, however the entry was reached —
+through the workspace manifest, through this authorization, or through a checked
+`git_clone` argument
+([configuration and credentials](configuration-and-credentials.md#runner-credential-lifecycle)
+owns the helper that enforces it). The provisioned workspace binds the session,
+placement revision, runner, repository key, exact clone URL identity, sandbox
+profile, and working directory. Replacement always uses the successor placement
+revision and cannot carry the prior workspace forward.
+
+Runners are not cleanup authorities. Only the runner that provisioned a
+workspace can delete it, and a runner that is replaced, revoked, or dead simply
+leaves its workspace on disk: no cleanup authority resumes for a retired
+identity, and no mechanism transfers ownership of an existing clone to a
+successor. The system records the abandoned clone through the existing startup
+workspace-leak report, which the owner can read, and stops there. Reclaiming
+that disk is an operator and tooling concern — periodic cleanup jobs, added per
+backend over time — and is deliberately outside this contract. Why: making
+cleanup a runner obligation turned every loss-based replacement into a state the
+design could reach and not leave, while the alternative costs only disk — the
+leak is recorded, it is bounded by the workspaces that one runner held, and no
+correctness property depends on reclaiming it. The consequence is stated plainly
+rather than solved: a replaced or dead runner's workspace is leaked, and the
+leak record is the whole of the version-one response.
 
 The runner opens one effective-user-owned real `0700` root without following its
 final component, pins and retains its directory identity, and holds a
@@ -867,37 +1246,193 @@ link traversal. A complete workspace lives at
 `sessions/<canonical-session-uuid>/<placement-revision>/repo`, including its own
 `.git`; no shared Git directory, linked worktree administration, user home path,
 or credential-bearing remote URL is used. Provisioning creates a sibling staging
-directory, performs the clone through the restricted profile and selected PAT,
-writes a versioned `0600` non-secret manifest in the non-mounted placement
-parent, fsyncs the manifest and containing directories, and atomically renames
-the prepared placement directory before returning `ProvisionedWorkspace`. Exact
-replay returns the matching ready receipt; conflicting facts fail closed.
+directory, performs the clone through the restricted profile and, when the
+placement selected one, the granted credential profile, writes a versioned
+`0600` non-secret manifest in the non-mounted placement parent, fsyncs the
+manifest and containing directories, and atomically renames the prepared
+placement directory before returning `ProvisionedWorkspace`. Exact replay
+returns the matching ready receipt; conflicting facts fail closed. A clone of an
+empty repository is an ordinary success, not a failure and not a reason to
+remove the destination: the receipt and manifest record an unborn HEAD naming
+the branch the repository's first commit will be born on, and publication
+proceeds exactly as for a populated repository
+([tool loop](tool-loop.md#version-one-workstation-tool-contracts) owns the
+`git_clone` result shape).
 
-The manifest records lifecycle, session, placement revision, runner, repository
-key, the lowercase SHA-256 digest of the configuration-validated canonical clone
-URL, credential-profile name, sandbox profile, relative repository path, and the
-bounded commit or branch facts needed for recovery. The canonical URL is
-credential-free, but its digest is sufficient identity and avoids repeating the
-operator configuration value. Recovery resolves the repository key again and
-requires the current canonical URL digest to equal the protected manifest value;
-a changed mapping is `manifest_conflict` and can never reinterpret an existing
-clone. The writable repository `.git/config` is not authority. The manifest
-records no credential path or value. The same runner state root durably spools
-one unacknowledged terminal result per the serial wire protocol.
+A placement that requires no worktree and names no working directory still needs
+one writable root, and that private root is a managed workspace rather than
+scratch space the runner forgets. It lives at the sibling path
+`sessions/<canonical-session-uuid>/<placement-revision>/work`, and the runner
+creates it on first use with the same fsynced non-secret manifest in the
+non-mounted placement parent, recording no repository key, clone-URL digest, or
+credential-profile name. Because the path is a function of durable placement
+facts alone, a restarted runner recomputes it, authenticates it against that
+manifest, and re-adopts the same directory rather than creating a second one,
+and startup reconciliation treats it exactly as it treats a provisioned
+worktree: a private root whose placement is retired is reported as a typed
+retired-but-present leak, and no cleanup authority resumes for it. Why: a
+restricted session's writable root is where its file and shell tools put durable
+work, so a root the runner could not re-identify after a restart would discard
+that work silently while the session kept running.
+
+The manifest records lifecycle, session, placement revision, runner, optional
+repository key, the optional lowercase SHA-256 digest of the
+configuration-validated canonical clone URL, optional credential-profile name,
+sandbox profile, relative workspace path, and the bounded commit or branch facts
+needed for recovery; the repository-bound members are absent together for a
+private root. The canonical URL is credential-free, but its digest is sufficient
+identity and avoids repeating the operator configuration value. Recovery
+resolves the repository key again and requires the current canonical URL digest
+to equal the protected manifest value; a changed mapping is `manifest_conflict`
+and can never reinterpret an existing clone. The writable repository
+`.git/config` is not authority. The manifest records no credential path or
+value. The same runner state root durably spools one unacknowledged terminal
+result, one unacknowledged workspace release, and one unacknowledged operation
+failure per the serial wire protocol.
+
+Every Git invocation, in provisioning and in every Git tool alike, runs with its
+effective configuration forced by the runner rather than validated after the
+fact. The runner neutralizes ambient configuration by pointing
+`GIT_CONFIG_SYSTEM` and `GIT_CONFIG_GLOBAL` at `/dev/null`, passes the transport
+allowlist as command-line configuration — `protocol.allow=never`,
+`protocol.https.allow=always`, and `protocol.ext.allow=never` — and disables
+repository-local hooks. The same command line also empties the accumulated
+credential-helper list before installing the helper that invocation is supposed
+to use, so the effective helper set is exactly what the runner installed and
+never what the repository configuration asked for: the fixed runner-owned helper
+described by
+[configuration and credentials](configuration-and-credentials.md#runner-credential-lifecycle)
+for a Git tool reaching a remote under a granted profile, the per-provisioning
+broker helper during provisioning, and no helper at all for an invocation that
+reaches no remote. Command-line configuration outranks the model-writable
+repository configuration, so no repository setting can move the effective
+transport off HTTPS, and a re-enabled external helper or a hook cannot
+substitute an executable for a fetch. Why: a repository-local
+`credential.helper` whose value begins with `!` is a shell snippet Git runs, so
+leaving the helper list unemptied would let an auto-approved, retry-classified
+`git_fetch` execute model-authored code while every transport setting still read
+as valid.
+
+That forced configuration gates the transport and nothing else, and one
+repository-local key defeats every check built on it. `url.<base>.insteadOf`
+rewrites any URL beginning with the configured value to begin with `<base>`
+instead, and it rewrites a URL given on the command line exactly as it rewrites
+a stored remote. A model-written `url.<substitute>.insteadOf` whose value is the
+canonical URL therefore redirects the operation to `<substitute>` over ordinary
+HTTPS: the rewritten URL is HTTPS, so `protocol.allow=never` with
+`protocol.https.allow=always` admits it; the stored `remote.<name>.url` is
+untouched, so a check that reads it sees the canonical value; the substitute's
+hostname can stay inside the admitted transport set, so the restricted broker's
+hostname and SNI checks pass; and a public substitute needs no credential helper
+at all. Passing an explicit URL rather than a remote name closes none of it, and
+the rewrite table cannot be emptied the way the protocol and helper keys are:
+`insteadOf` is an unbounded keyspace whose bases the writer chooses, so
+command-line configuration can add entries to it but can never subtract them,
+and no highest-priority value clears it.
+
+The canonical repository binding therefore gets its own boundary, placed where
+the transport boundary cannot reach. Every invocation that reaches a remote
+first resolves the URL Git will actually use — for a remote name and for a
+literal URL alike — and requires it to equal, byte for byte, the canonical URL
+of the placement's repository entry. The runner does not compute that resolution
+itself; it asks Git for it, so the answer is the post-rewrite URL rather than an
+approximation of Git's rules. The version-one mechanism is `ls-remote --get-url`
+for a fetch or a literal URL and `remote get-url --push` for a push, each run
+under exactly the forced configuration, working directory, and repository
+selection its guarded invocation will use, so the resolution observes the same
+rewrite table, `remote.<name>.url`, and `remote.<name>.pushurl` that invocation
+would. A resolved URL that differs from the canonical value fails the operation
+before the network is touched and is reported as the mismatch it is; neither URL
+is ever treated as a correction of the other. Validating the stored
+`remote.<name>.url` remains defense in depth above this check rather than the
+check itself. Why: every pre-rewrite reading of the configuration reads exactly
+the value the model left in place to be read, so only the effective URL is
+evidence — and the canonical binding is the whole of what stands between an
+auto-approved `git_fetch` and content served by an attacker-chosen repository.
+
+What that check covers is worth stating exactly, because the root cause survives
+it. It resolves and then uses, and it holds because the two invocations are
+adjacent under the runner's one global execution permit with repository hooks
+disabled, so no model-authored code runs between them; admitting concurrent
+execution or repository hooks would break it, and preserving this adjacency is a
+condition on both. It binds the URL and not the bytes: fetching from the right
+repository is no claim about what that repository serves. It binds the URL and
+not everything else repository configuration reaches — configuration that
+changes what Git runs rather than where it connects, such as content filters
+applied on checkout or external diff and file-system-monitor programs, is
+neutralized only where one of the command-line settings above names it, which is
+a posture and not a closed set. Repository configuration is model-writable at
+all because `.git` sits inside the writable root; moving it outside the model's
+reach is the structural answer that would retire the class instead of
+enumerating it, and it is recorded as a design question under
+[tool safety](../open-questions.md#tool-safety) rather than settled here.
 
 A daemon release is accepted only for an exact retired placement revision —
 either superseded by replacement or terminal `RunnerAbandoned` — after no live
 lease or unacknowledged result remains. The session itself need not be terminal
-and may continue on its successor placement or with daemon-only tools. The
-runner marks release in the manifest, atomically renames the placement below
-`trash/`, fsyncs, and then deletes it by descriptor-relative traversal that
-unlinks symlinks instead of following them. Startup resumes deletion only for
-manifest-proven trash and may remove staging whose manifest proves it was never
-published. It reconciles every ready or active manifest with the daemon before
-execution and reports every unknown, retired-but-present, conflicting, or
-otherwise unreconciled workspace as a typed leak. It never silently deletes a
-reported leak. This startup report is visible even when no session can be
-resumed.
+and may continue on its successor placement or with daemon-only tools.
+
+A release exists only for a workspace the runner itself created: a provisioned
+repository worktree, or the private root the runner made below its own state
+root. Each of those is named by a workspace manifest, which is the identity the
+`workspace_release` frame correlates against. A retired placement whose writable
+root is the third kind — the exact working directory its own request named, the
+plain-directory workspace of [session composition](#session-composition) — has
+no manifest and therefore has no release: the daemon enqueues nothing for it,
+the runner never renames or deletes it, and because that directory is not
+runner-owned disk it is not reported as an unreclaimed-workspace leak either.
+Retirement of such a placement is complete the moment the placement state is
+durable. Why: the directory was named by the creation request rather than
+provisioned by the runner, so treating retirement as a reason to delete it would
+destroy a directory the system was only ever lent — and the release correlation
+has no identity it could name for it in any case, which makes an unconditional
+release unrepresentable on the wire as well as wrong.
+
+Reachability is the second precondition, and it is independent of the first: a
+release is enqueued only while the runner that holds the workspace is still
+connected. Retirement whose predecessor connection is already durably lost —
+heartbeat-loss replacement onto a different runner or onto a pending enrollment,
+and every abandonment — enqueues no release, and durable loss of a connection
+that still owed one retires that release as unowned. Either way the workspace
+takes the recorded-leak response above rather than an exchange no identity can
+complete. In version one the exchange therefore exists only for the checked
+same-runner re-enrollment, where registration reconciliation retired the
+placement while the connection and enrollment stayed healthy, so the runner
+holding the workspace is the same runner still on the wire
+([identity, enrollment, and registration](#identity-enrollment-and-registration)).
+Why: both of the frames that can retire a release require the holding runner to
+acknowledge deletion or report cleanup failure, and no cleanup authority resumes
+for a retired identity, so a release addressed to an unreachable runner is a
+durable record that is redelivered after every restart and that nothing can ever
+clear — the leak this design already accepts, converted into a queue entry that
+outlives it.
+
+For a workspace it did create, the runner journals the release before it does
+anything irreversible, following the same acknowledge-and-journal pattern that
+provisioning and results already use. It first fsyncs a `release_accepted`
+journal entry carrying the complete release correlation below its state root;
+only then does it mark release in the manifest, atomically rename the placement
+below `trash/`, fsync, and delete it by descriptor-relative traversal that
+unlinks symlinks instead of following them. It advances the same entry to
+`release_completed` after the deletion and resends `workspace_released` until
+the daemon durably admits it and replies `workspace_release_recorded`; that
+acknowledgement lets the runner discard the journaled release and free its
+single workspace-operation slot. A crash anywhere in the interval therefore
+resumes from the journal rather than from a manifest the runner may already have
+deleted: `release_accepted` resumes the deletion and then reports,
+`release_completed` resends the correlation, and a daemon restart cannot leave a
+resent release without a boundary — exactly as for a retained result. A release
+whose rename or deletion keeps failing does not hold that journal indefinitely:
+the runner reports the `workspace_cleanup_failed` operation failure above, whose
+`operation_failure_recorded` acknowledgement retires that journaled release
+together with the failure and frees the slot, and the surviving placement is
+reported as a `cleanup_failed` leak. Startup resumes deletion for trash proven
+by a manifest or by a retained release entry, and may remove staging whose
+manifest proves it was never published. It reconciles every ready or active
+manifest with the daemon before execution and reports every unknown,
+retired-but-present, conflicting, or otherwise unreconciled workspace as a typed
+leak. It never silently deletes a reported leak. This startup report is visible
+even when no session can be resumed.
 
 ## Open edges
 
@@ -906,9 +1441,12 @@ resumed.
   [Protocols and persistence](../open-questions.md#protocols-and-persistence)
   and
   [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance).
-- More than one active runner, automatic scheduling, load balancing, and MCP
-  placement remain in
-  [Scheduling and runners](../open-questions.md#scheduling-and-runners).
+- Automatic scheduling, load balancing, and MCP placement remain in
+  [Scheduling and runners](../open-questions.md#scheduling-and-runners), as does
+  the workspace-portability question that moving a session with a workspace to
+  another runner depends on. More than one simultaneously enrolled runner is not
+  an open question: it is committed functionality that version one defers
+  ([the singleton-runner rule is temporary](#the-singleton-runner-rule-is-temporary)).
 - Dynamic sandbox policy, catalog file parsing and reload, catalog revision
   rebinding, and concurrent execution remain in
   [Tool safety](../open-questions.md#tool-safety).

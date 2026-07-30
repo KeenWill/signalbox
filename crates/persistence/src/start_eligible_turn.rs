@@ -2,14 +2,13 @@
 
 use std::{error::Error, fmt};
 
-use rust_decimal::Decimal;
 use signalbox_application::{
     ClassifyOperatorFailure, OperatorFailureClass, StartEligibleTurnOutcome,
     StartEligibleTurnTransaction,
 };
 use signalbox_domain::{
     AcceptedInputEligibilityFailure, AcceptedInputStartingLineage,
-    AcceptedInputTurnActivationIdentities, ActiveTurnPhase, CurrentTurnAttemptState,
+    AcceptedInputTurnActivationIdentities, ActiveTurnPhase, CurrentTurnAttemptState, ModelCallId,
     PreparedAcceptedInputTurnActivation,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload, SessionId,
 };
@@ -19,6 +18,7 @@ use crate::{
     mapping::{
         defaults_version_to_numeric, input_position_to_numeric, session_id_to_uuid, turn_id_to_uuid,
     },
+    model_execution::{SnapshotAppend, SnapshotAppendError, insert_snapshot_append},
     outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection},
@@ -176,6 +176,65 @@ impl StartEligibleTurnRepositoryError {
     }
 }
 
+/// Failure while atomically binding a counted activation to its Prepared call.
+#[derive(Debug)]
+pub enum CommitActivationPreviewError {
+    /// Activation revalidation, persistence, or commit failed.
+    Activation(StartEligibleTurnRepositoryError),
+    /// The exact initial model-call checkpoint could not be persisted.
+    ModelCall(crate::model_execution::ModelCallRepositoryError),
+}
+
+impl fmt::Display for CommitActivationPreviewError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Activation(error) => error.fmt(formatter),
+            Self::ModelCall(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for CommitActivationPreviewError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Activation(error) => Some(error),
+            Self::ModelCall(error) => Some(error),
+        }
+    }
+}
+
+impl ClassifyOperatorFailure for CommitActivationPreviewError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::Activation(error) => error.operator_failure_class(),
+            Self::ModelCall(error) => error.operator_failure_class(),
+        }
+    }
+}
+
+/// Read-only exact activation candidate retained for guarded commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedActivationPreview {
+    identities: AcceptedInputTurnActivationIdentities,
+    prepared: PreparedAcceptedInputTurnActivation,
+}
+
+impl PreparedActivationPreview {
+    /// Borrows the exact checked candidate used for prospective model rendering.
+    pub const fn prepared(&self) -> &PreparedAcceptedInputTurnActivation {
+        &self.prepared
+    }
+}
+
+/// Outcome of committing a previously counted activation preview.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CommitActivationPreviewOutcome {
+    /// The exact preview still matched and was atomically activated.
+    Activated(Box<signalbox_domain::ActivatedAcceptedInputTurn>),
+    /// Authoritative state changed after preview; the caller must restart the pass.
+    Stale,
+}
+
 enum TransactionDecision {
     Commit(StartEligibleTurnOutcome),
     Rollback(StartEligibleTurnOutcome),
@@ -191,6 +250,125 @@ impl StartEligibleTurnRepository {
     /// Uses the supplied pool for serialized, atomic eligibility handling.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Derives one exact activation candidate without committing it.
+    pub async fn preview(
+        &self,
+        session: SessionId,
+        identities: AcceptedInputTurnActivationIdentities,
+    ) -> Result<Option<PreparedActivationPreview>, StartEligibleTurnRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let prepared = prepare_preview(&mut transaction, session, identities).await?;
+        transaction.rollback().await?;
+        Ok(prepared.map(|prepared| PreparedActivationPreview {
+            identities,
+            prepared,
+        }))
+    }
+
+    /// Revalidates and atomically commits one previously counted preview.
+    pub async fn commit_preview(
+        &self,
+        preview: PreparedActivationPreview,
+    ) -> Result<CommitActivationPreviewOutcome, StartEligibleTurnRepositoryError> {
+        let session = preview.prepared.turn().session();
+        let mut transaction = self.pool.begin().await?;
+        let session_uuid = session_id_to_uuid(session);
+        let (session_exists, scheduler_session) =
+            sqlx::query_as::<_, (bool, Option<Uuid>)>(crate::lock_inventory::START_ELIGIBLE_TURN)
+                .bind(session_uuid)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if !session_exists || scheduler_session.is_none() {
+            transaction.rollback().await?;
+            return Ok(CommitActivationPreviewOutcome::Stale);
+        }
+        let Some(current) = prepare_preview(&mut transaction, session, preview.identities).await?
+        else {
+            transaction.rollback().await?;
+            return Ok(CommitActivationPreviewOutcome::Stale);
+        };
+        if current != preview.prepared {
+            transaction.rollback().await?;
+            return Ok(CommitActivationPreviewOutcome::Stale);
+        }
+        let activated = insert_prepared_activation(&mut transaction, current).await?;
+        transaction.commit().await.map_err(|error| {
+            let commit_ambiguous = commit_failure_is_ambiguous(&error);
+            StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous)
+        })?;
+        Ok(CommitActivationPreviewOutcome::Activated(Box::new(
+            activated,
+        )))
+    }
+
+    /// Revalidates one counted preview and atomically commits both its
+    /// activation and exact no-steering Prepared initial call.
+    pub async fn commit_counted_preview(
+        &self,
+        preview: PreparedActivationPreview,
+        call: ModelCallId,
+        model_calls: &crate::model_execution::PostgresModelCallRepository,
+    ) -> Result<CommitActivationPreviewOutcome, CommitActivationPreviewError> {
+        let session = preview.prepared.turn().session();
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(StartEligibleTurnRepositoryError::from)
+            .map_err(CommitActivationPreviewError::Activation)?;
+        let session_uuid = session_id_to_uuid(session);
+        let (session_exists, scheduler_session) =
+            sqlx::query_as::<_, (bool, Option<Uuid>)>(crate::lock_inventory::START_ELIGIBLE_TURN)
+                .bind(session_uuid)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+        if !session_exists || scheduler_session.is_none() {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitActivationPreviewOutcome::Stale);
+        }
+        let current = prepare_preview(&mut transaction, session, preview.identities)
+            .await
+            .map_err(CommitActivationPreviewError::Activation)?;
+        let Some(current) = current else {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitActivationPreviewOutcome::Stale);
+        };
+        if current != preview.prepared {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitActivationPreviewOutcome::Stale);
+        }
+        let activated = insert_prepared_activation(&mut transaction, current)
+            .await
+            .map_err(CommitActivationPreviewError::Activation)?;
+        model_calls
+            .checkpoint_counted_activation_in_transaction(&mut transaction, session, call)
+            .await
+            .map_err(CommitActivationPreviewError::ModelCall)?;
+        transaction.commit().await.map_err(|error| {
+            let commit_ambiguous = commit_failure_is_ambiguous(&error);
+            CommitActivationPreviewError::Activation(
+                StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous),
+            )
+        })?;
+        Ok(CommitActivationPreviewOutcome::Activated(Box::new(
+            activated,
+        )))
     }
 
     /// Locks one session scheduler row, reconstitutes complete scheduling
@@ -234,6 +412,63 @@ impl StartEligibleTurnTransaction for StartEligibleTurnRepository {
         identities: AcceptedInputTurnActivationIdentities,
     ) -> Result<StartEligibleTurnOutcome, Self::Error> {
         StartEligibleTurnRepository::handle(self, session, identities).await
+    }
+}
+
+async fn prepare_preview(
+    connection: &mut PgConnection,
+    requested_session: SessionId,
+    identities: AcceptedInputTurnActivationIdentities,
+) -> Result<Option<PreparedAcceptedInputTurnActivation>, StartEligibleTurnRepositoryError> {
+    let session = match load_session_from_connection(connection, requested_session).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return Ok(None),
+        Err(SessionRepositoryError::Database(error)) => return Err(error.into()),
+        Err(SessionRepositoryError::Corruption(error)) => {
+            return Err(StartEligibleTurnCorruption::CurrentSession(error).into());
+        }
+    };
+    let scheduling = load_scheduling_projection(connection, session)
+        .await
+        .map_err(map_scheduling_error)?;
+    match scheduling.prepare_earliest_queued_activation(identities) {
+        Ok(prepared) => Ok(Some(prepared)),
+        Err(error) => match error.failure() {
+            AcceptedInputEligibilityFailure::ActiveTurnPresent { .. }
+            | AcceptedInputEligibilityFailure::ContextCompactionInProgress { .. }
+            | AcceptedInputEligibilityFailure::NoQueuedTurn => Ok(None),
+            AcceptedInputEligibilityFailure::OriginEntryIdentityAlreadyExists => {
+                Err(StartEligibleTurnRepositoryError::IdentityCollision(
+                    StartEligibleTurnIdentityCollision::OriginEntry,
+                ))
+            }
+            AcceptedInputEligibilityFailure::ModelIdentityEntryIdentityAlreadyExists => {
+                Err(StartEligibleTurnRepositoryError::IdentityCollision(
+                    StartEligibleTurnIdentityCollision::ModelIdentityEntry,
+                ))
+            }
+            AcceptedInputEligibilityFailure::StartingFrontierIdentityAlreadyExists => {
+                Err(StartEligibleTurnRepositoryError::IdentityCollision(
+                    StartEligibleTurnIdentityCollision::StartingFrontier,
+                ))
+            }
+            AcceptedInputEligibilityFailure::InitialAttemptIdentityAlreadyExists => {
+                Err(StartEligibleTurnRepositoryError::IdentityCollision(
+                    StartEligibleTurnIdentityCollision::InitialAttempt,
+                ))
+            }
+            AcceptedInputEligibilityFailure::InternalOriginFrontierConstructionFailed => Err(
+                StartEligibleTurnCorruption::Inconsistent("origin frontier construction").into(),
+            ),
+            AcceptedInputEligibilityFailure::InternalPredecessorTerminalFrontierMissing {
+                ..
+            } => Err(
+                StartEligibleTurnCorruption::Inconsistent("predecessor terminal frontier").into(),
+            ),
+            AcceptedInputEligibilityFailure::InternalStartingFrontierDerivationFailed => Err(
+                StartEligibleTurnCorruption::Inconsistent("starting frontier derivation").into(),
+            ),
+        },
     }
 }
 
@@ -290,6 +525,7 @@ async fn handle_in_transaction(
         Err(error) => {
             let outcome = match error.failure() {
                 AcceptedInputEligibilityFailure::ActiveTurnPresent { .. }
+                | AcceptedInputEligibilityFailure::ContextCompactionInProgress { .. }
                 | AcceptedInputEligibilityFailure::NoQueuedTurn => {
                     return Ok(TransactionDecision::Rollback(
                         StartEligibleTurnOutcome::NoEligibleTurn,
@@ -354,6 +590,7 @@ async fn insert_prepared_activation(
         }
         InitialSemanticTranscriptEntryPayload::Imported { .. }
         | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+        | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
         | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
         | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
         | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
@@ -433,6 +670,7 @@ async fn insert_prepared_activation(
             }
             InitialSemanticTranscriptEntryPayload::Imported { .. }
             | InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
             | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
             | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
@@ -456,47 +694,32 @@ async fn insert_prepared_activation(
     let prefix_member_count = starting_snapshot
         .entry_count()
         .checked_sub(appended_entry_count)
+        .and_then(|count| u64::try_from(count).ok())
         .ok_or(StartEligibleTurnRepositoryError::HubInvariant(
             "starting frontier prefix member count",
         ))?;
-    sqlx::query(
-        "INSERT INTO context_frontier
-            (owning_session_id, context_frontier_id,
-             prefix_context_frontier_id, member_count)
-         VALUES ($1, $2, $3, $4)",
+    insert_snapshot_append(
+        connection,
+        SnapshotAppend {
+            owning_session: session,
+            frontier: starting_snapshot.frontier().snapshot(),
+            prefix: starting_snapshot
+                .immediate_semantic_prefix()
+                .map(|prefix| prefix.snapshot()),
+            member_count,
+            prefix_member_count,
+            appended_entries: starting_snapshot.appended_entries(),
+        },
     )
-    .bind(session_id_to_uuid(session))
-    .bind(starting_snapshot.frontier().snapshot().into_uuid())
-    .bind(
-        starting_snapshot
-            .immediate_semantic_prefix()
-            .map(|prefix| prefix.snapshot().into_uuid()),
-    )
-    .bind(Decimal::from(member_count))
-    .execute(&mut *connection)
-    .await?;
-    for (index, entry) in starting_snapshot.appended_entries().enumerate() {
-        let position = prefix_member_count
-            .checked_add(index)
-            .and_then(|index| index.checked_add(1))
-            .and_then(|position| u64::try_from(position).ok())
-            .ok_or(StartEligibleTurnRepositoryError::HubInvariant(
-                "starting frontier member position",
-            ))?;
-        sqlx::query(
-            "INSERT INTO context_frontier_delta
-                (owning_session_id, context_frontier_id, member_position,
-                 source_session_id, semantic_entry_id)
-             VALUES ($1, $2, $3, $4, $5)",
-        )
-        .bind(session_id_to_uuid(session))
-        .bind(starting_snapshot.frontier().snapshot().into_uuid())
-        .bind(Decimal::from(position))
-        .bind(session_id_to_uuid(entry.source_session()))
-        .bind(entry.entry().into_uuid())
-        .execute(&mut *connection)
-        .await?;
-    }
+    .await
+    .map_err(|error| match error {
+        SnapshotAppendError::FrontierInsert(error) | SnapshotAppendError::MemberInsert(error) => {
+            error.into()
+        }
+        SnapshotAppendError::MemberPositionOverflow => {
+            StartEligibleTurnRepositoryError::HubInvariant("starting frontier member position")
+        }
+    })?;
 
     let initial_attempt = match activated.phase() {
         ActiveTurnPhase::Running { current_attempt }

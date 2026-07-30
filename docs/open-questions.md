@@ -1,11 +1,11 @@
 # Open questions
 
 This is the inventory of unresolved foundational questions. A "leaning" guides
-exploration but is not a decision. Closing a question requires an entry in the
-[decision log](decisions.md) or, at foundation weight, a foundation-level
-accepted record. Accepted decisions are specified in the
-[living specification](spec/README.md) and the decision log; scenario
-identifiers refer to [scenarios.md](scenarios.md).
+exploration but is not a decision. Closing a question requires an owner-accepted
+pull request or, at foundation weight, a foundation specification diff. Accepted
+cross-component and wire contracts live in the
+[living specification](spec/README.md); scenario identifiers refer to
+[scenarios.md](scenarios.md).
 
 ## Identity representation
 
@@ -24,10 +24,8 @@ identifiers refer to [scenarios.md](scenarios.md).
   and delegation variants remain open together with rich assistant content and
   provider/client rendering. The tool-result content extension is tracked under
   [Tool safety](#tool-safety). The steering payload and stop marker are fixed by
-  the
-  [steering and stop decision](decisions.md#2026-07-23--atomic-steering-consumption-and-proof-bearing-stop-requests).
-  Imported semantic history is owned separately by
-  [conversation-import](spec/conversation-import.md). Blocks only those later
+  the steering and stop decision. Imported semantic history is owned separately
+  by [conversation-import](spec/conversation-import.md). Blocks only those later
   native semantic-history slices. (S02–S04, S08, S09, S17)
 - **Selectable native transcript-frontier boundaries.** Which terminal native
   semantic boundaries a client may select as a `TranscriptFrontier` remains
@@ -46,14 +44,13 @@ identifiers refer to [scenarios.md](scenarios.md).
 
 ## Model-input projection
 
-- **Projection and summarization beyond the implemented role mappings.** The
-  [M3 rendering decision](decisions.md#2026-07-22--render-the-initial-model-frontier-by-semantic-entry-role)
-  and [model-call execution](spec/model-call-execution.md) own the implemented
+- **Projection and summarization beyond the implemented role mappings.**
+  [Model-call execution](spec/model-call-execution.md) owns the implemented
   model-input projections; [conversation-import](spec/conversation-import.md)
   owns only normalized imported source content. Rich imported tool/result/media
-  projection, semantic compaction, selective omission, summarization, rebasing,
-  and context-window policy remain routed through the accepted frontier
-  extension gate owned by
+  projection, selective omission beyond the fixed compaction projection,
+  alternative summaries, and rebasing remain routed through the accepted
+  frontier extension gate owned by
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
   [sessions-and-transcript](spec/sessions-and-transcript.md). Blocks those
   extensions. (S02, S17, S28)
@@ -122,6 +119,48 @@ identifiers refer to [scenarios.md](scenarios.md).
   whether an interrupt-only path may bypass `StopRequested` remains undecided.
   Later scope. (S07)
 
+### Automatic context compaction
+
+This is a blocking condition rather than an open design question. Automatic
+context compaction ships with a known defect on its primary path, accepted on
+the grounds that the code sits unused until something depends on it. That ground
+disappears the moment anything relies on it, so the condition is recorded here
+rather than only in the review thread that raised it.
+
+**The defect.** The compaction request wraps accumulated plain-text history in
+JSON with provenance metadata and reserves the same `max_output_tokens` as the
+ordinary call, and is never counted against `context_window_tokens`. It can
+therefore be *larger* than the input that already overflowed the window. The
+provider may reject the summary call for context overflow; that call is then
+terminalized, and the per-turn automatic marker prevents a second attempt.
+
+**The consequence.** A session that crosses its context window has its queued
+turn stalled with its single automatic attempt consumed and no path forward
+inside the running daemon — which is the exact situation automatic compaction
+exists to rescue. Nothing durable is corrupted, no summary boundary is written
+wrong, and no transcript entries are lost: the failed call is recorded as
+legitimate terminal non-Completed evidence. The session is stalled, not damaged.
+
+**The trigger is the common case, not an edge of it.** Compaction is invoked
+precisely when history is large. History large enough that wrapping it in JSON
+with metadata overflows the window is the middle of that condition rather than
+its boundary.
+
+**The condition.** Automatic context compaction must not be relied on until the
+summary call is guaranteed to fit. Anything built on top of it, and any workflow
+that assumes a long-running session will rescue itself, is blocked on that fix
+rather than merely improved by it. Explicit compaction is unaffected by this
+particular defect.
+
+**Shape of the fix.** Count the summary request against `context_window_tokens`
+before triggering it, or select a compaction strategy guaranteed to fit — for
+example bounding the history actually wrapped rather than reserving the full
+`max_output_tokens` on top of unbounded input. Scheduled as a follow-up pull
+request against a quiet `main` rather than inside the compaction stack.
+
+Raised as a review finding and dispositioned with this condition attached:
+https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
+
 ## Session organization, visibility, and retention
 
 - **Creation-attributed default visibility.** The implemented visibility and
@@ -188,9 +227,8 @@ identifiers refer to [scenarios.md](scenarios.md).
   normalization is decided: the
   [provider-target identity rule](spec/model-call-execution.md#provider-target-identity)
   accepts an alias resolved to its own dated snapshot as the same target and
-  keeps a different lineage as a distinct substitution outcome
-  ([decision](decisions.md#2026-07-26--normalize-an-alias-to-its-dated-snapshot-and-keep-substitution-distinct)).
-  The mismatch disposition itself is likewise accepted
+  keeps a different lineage as a distinct substitution outcome. The mismatch
+  disposition itself is likewise accepted
   ([model-call-execution](spec/model-call-execution.md)). What remains open is
   the durable per-call provenance schema that would record the concrete served
   identity and a substitution as evidence rather than as operator diagnostics
@@ -205,19 +243,114 @@ identifiers refer to [scenarios.md](scenarios.md).
 Dispatch fencing, initial scheduler mechanics, and the complete version-one
 local runner orchestration are specified in
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
-[runner protocol and placement](spec/runner-protocol.md). The questions below
-remain open.
+[runner protocol and placement](spec/runner-protocol.md). The loss, replacement,
+cleanup, contract-gap, and session-composition questions this section previously
+carried are decided, and each decision is stated by the contract page that owns
+it: staged replacement ordering and the runner-recovery turn phase in
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md#runner-loss-session-recovery);
+same-runner recovery after a registration-triggered loss, deployment-scoped
+successor promotion, non-transferable workspace cleanup, pinned canonical digest
+bytes, runner-to-daemon failure frames, workspace-release acknowledgement,
+forced Git transport configuration, and the independent
+[session-composition axes](spec/runner-protocol.md#session-composition) in
+[runner protocol and placement](spec/runner-protocol.md); the runner-recovery
+phase, the placement transcript payload, creation-record placement, and the
+runner event family in
+[persistence-protocol](spec/persistence-protocol.md#relational-representation);
+the closed runner execution object, creation-request placement, and template
+creation carrying placement in
+[process-protocol](spec/process-protocol.md#client-requests); the relocation
+transcript boundary in
+[sessions-and-transcript](spec/sessions-and-transcript.md#semantic-transcript-entries);
+capability-derived tool advertisement in
+[model-call-execution](spec/model-call-execution.md#frontier-rendering); and Git
+subprocess deadlines, full-ref branch validation, unborn-HEAD clones, and honest
+output truncation in
+[tool-loop](spec/tool-loop.md#version-one-workstation-tool-contracts). Why: a
+decided question is a contract, and a contract binds only where the implementer
+of that contract reads it; a decision restated on this page would be a second
+authority over prose that already owns it, free to drift from the page it
+paraphrases. Multiple simultaneously enrolled runners and owner-directed
+relocation of a healthy session are committed functionality that version one
+defers rather than open questions
+([runner protocol and placement](spec/runner-protocol.md#the-singleton-runner-rule-is-temporary)).
+The questions below remain open.
 
-- **Multiple-runner scheduling.** Pool admission, capacity-aware placement,
-  fairness, affinity scoring, draining, and automatic rescheduling beyond the
-  [version-one runner boundary](spec/runner-protocol.md#version-one-executable-boundary)
-  remain undecided. Blocks runner pools and remote fleets. (S16, S30–S32)
-- **MCP placement.** A future daemon-side MCP client may centralize shared
-  servers and a future runner-side host may execute sandbox-local servers. Exact
-  catalog declaration, lifecycle, credential, and compatibility semantics are
-  deferred to the MCP pass; no MCP locus exists today. Blocks MCP tools.
+- **Workspace portability between runners.** Moving a session that owns a
+  workspace to another runner requires that workspace to exist, or to be
+  reconstructible, on the destination. Version one never carries a workspace
+  across a placement change: a replaced runner's clone is leaked and the
+  successor provisions its own. That is sufficient for a repository-backed
+  session whose work is already pushed and insufficient for uncommitted state,
+  and it is the missing prerequisite for interchangeable runners on a hosted
+  backend rather than persistent workstations. Decide what a portable workspace
+  is — reprovisioning from durable facts, an explicit transfer, or a shared
+  volume the destination binds — before any automated placement across a runner
+  family exists. Not a blocker: owner-directed moves of a workspace-free
+  session, and of a session whose work is pushed, require none of it. (S16,
+  S30–S32)
+- **Automatic scheduling, load balancing, and MCP placement.** Placement selects
+  a runner by exact identity or capability class and is never rescheduled; no
+  policy chooses among several satisfying runners, balances load, or admits an
+  MCP locus. Deciding those requires multiple simultaneously enrolled runners
+  plus a stated selection policy and its observability, and it composes with the
+  workspace portability question above. Blocks automatic placement, not manual
+  placement. (S16, S30–S32)
 
 ## Tool safety
+
+### Review-slog toolkit adoption
+
+This is a blocking condition rather than an open design question. The
+review-slog toolkit ships with a known race in its merge gate, accepted on the
+grounds that the toolkit is not yet load-bearing. That ground disappears the
+moment it is adopted, so the condition is recorded here rather than only in the
+review thread that raised it.
+
+**The window.** `review_gate_transaction` reads stack state, thread inventory,
+convergence state, stack state again, and convergence state again, then requires
+the two stack reads to be equal and the two convergence reads to be equal before
+composing the gate. The stack pair brackets the interval between the first and
+second stack reads; the convergence pair brackets the interval between the first
+and second convergence reads. Neither pair brackets the interval between the
+final stack read and the final convergence read. A stack-only change inside that
+interval — the immediate base advancing, or a child change request being opened
+or force-pushed — leaves both stack reads equal, because both were taken before
+it, and leaves both convergence reads equal, because convergence evidence
+carries no ancestry facts. The equality check passes and the gate composes its
+verdict from a stack snapshot that is already stale.
+
+**What becomes silently missable.** Every stack-derived blocker:
+`parent_needs_merge_forward`, `base_chain_missing_main`,
+`child_needs_merge_forward`, and `evidence_truncated` where it derives from a
+truncated child page. The gate reports `ready: true` with no blocker recorded
+and nothing in the result marking the stack evidence as stale, so a reader of
+the output cannot detect the condition. Convergence-derived blockers —
+unresolved, undispositioned and buried threads, continuous-integration state,
+mergeability, and reviewer verdict status — are not affected, because the gate
+is composed from the final convergence read, which is the freshest read in the
+transaction.
+
+**This is a sequencing argument, not a severity one.** A base advancing
+concurrently with a gate check is normal in a merge train, not exotic; the race
+is not rare. What makes it acceptable to ship is that merges are gated by the
+standalone convergence checker, not by this tool, so a stale verdict cannot
+currently affect a real merge decision.
+
+**The condition.** The review gate must not be used to gate any merge decision
+until the stale-stack-read window is closed. Adoption is blocked on the fix; the
+fix does not follow adoption.
+
+**Shape of the fix.** Minimally, a third stack read after the final convergence
+read, folded into the equality check: this closes the window and leaves only the
+post-transaction interval, which no read ordering can close, since the base may
+always advance after the last read. Preferably, a stable read loop that repeats
+the stack and convergence reads until two consecutive complete snapshots agree.
+Both are small changes and either is cheap relative to trusting the tool with a
+merge decision.
+
+Raised as a review finding and dispositioned with this condition attached:
+https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
 
 - **Future tool-attempt retry.** General automatic retry, accepted-risk retry
   after ambiguity, idempotency-key policy, duplicate-risk controls, and retry
@@ -259,6 +392,38 @@ remain open.
 - **Rich result-content variants.** Attempt content is text-only. Image and
   file/artifact arms, their resource governance, and provider/client rendering
   remain undecided.
+- **Large durable payload architecture.** Tool evidence is bounded by storage
+  policy rather than by physics: 1 MiB of result text, 1 MiB of arguments, 4,096
+  bytes of error detail, and 4,096 bytes of exact runner value, all held in
+  PostgreSQL `text` columns with no physical ceiling near those values. Version
+  one derives its
+  [process output caps](spec/tool-loop.md#version-one-workstation-tool-contracts)
+  from exactly those bounds, so oversized executor output is truncated honestly
+  before result admission rather than turning a working command into a failure;
+  `ResultTooLarge` remains the admission classification for an admitted result
+  that still exceeds the durable bound. Deliberately delivering larger payloads
+  — files well past 1 MiB — needs its own design: where the bytes live, how a
+  result references rather than embeds them, what the model and each client see,
+  and the abuse and denial-of-service controls a larger bound requires. Recorded
+  as a design question rather than a blocker; the truncating caps remain correct
+  until it is answered.
+- **Repository configuration outside the model's writable root.** A session's
+  `.git` sits inside its writable root, so repository-local Git configuration is
+  model-writable, and version one answers that key by key: a forced transport
+  allowlist, an emptied credential-helper list, disabled repository hooks, and
+  an effective-URL check that binds every remote-reaching operation to its
+  canonical repository after Git's own rewrite expansion
+  ([runner protocol and placement](spec/runner-protocol.md#workspace-provisioning-and-recovery)).
+  That posture is not a closed set: configuration that changes what Git runs
+  rather than where it connects is neutralized only where a command-line setting
+  names it, so each new key is found rather than excluded. Putting the
+  administrative directory and its configuration outside the model's reach would
+  retire the whole class instead of enumerating it, and needs its own design —
+  where that directory lives, how every invocation names it so the worktree
+  pointer cannot be repointed, what the sandbox binds, and what a session's own
+  `git` usage sees. Recorded as a design question rather than a blocker; the
+  forced configuration and the effective-URL check remain the version-one
+  boundary.
 
 ## Identity, credentials, and resource governance
 
@@ -333,10 +498,10 @@ questions below remain open.
   transport, authentication binding, compatibility negotiation, internet
   backpressure, and cross-host stale-evidence retention remain undecided. Blocks
   remote dispatch, not the local runner. (S12, S16, S30–S32)
-- **Compatibility beyond the retained process-protocol versions.** Versions one
-  through four have their owning [specification](spec/process-protocol.md). A
-  future compatibility window, negotiation scheme, and generated-client policy
-  remain undecided. (S01, S24)
+- **Compatibility after the process-protocol freeze.** The single pre-deployment
+  version and its freeze condition are owned by
+  [process-protocol](spec/process-protocol.md). A future compatibility window,
+  negotiation scheme, and generated-client policy remain undecided. (S01, S24)
 - **Transient model-update relay.** Whether provider token deltas cross the
   process boundary, and the required draft identity, sequencing, replacement,
   backpressure, and redaction rules, remain undecided. The implemented durable

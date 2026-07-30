@@ -79,10 +79,11 @@ pub struct ReviewFindingId(/* private */);
 pub struct ReviewExternalLinkId(/* private */);
 ```
 
-Five more identities with the same shape are defined in their owning modules and
+Six more identities with the same shape are defined in their owning modules and
 listed there: `DirectModelSelection`, `ModelAlias` (configuration),
 `ProviderModelIdentity` (model_call), `ContextFrontierId`,
-`SemanticTranscriptEntryId` (context_frontier).
+`SemanticTranscriptEntryId` (context_frontier), and `ContextCompactionId`
+(context_compaction).
 
 ## domain: actor
 
@@ -2102,6 +2103,11 @@ impl AcceptedInputSchedulingReconstitutionInput {
         pinned_targets: Vec<PinnedProviderTargetReconstitutionInput>,
         model_calls: Vec<ModelCallReconstitutionInput>,
     ) -> Self;
+    pub fn with_context_compaction_facts(
+        self,
+        calls: Vec<ContextCompactionModelCallReconstitutionInput>,
+        compactions: Vec<ContextCompactionReconstitutionInput>,
+    ) -> Self;
     pub fn with_consumed_steering_facts(
         self,
         consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
@@ -2119,7 +2125,8 @@ impl AcceptedInputSchedulingReconstitutionInput {
         imported_session: ReconstitutedImportedSession,
     ) -> Self;
     // accessors: session(), imported_session(), turns(), semantic_entries(),
-    // snapshots(), pinned_targets(), model_calls(), consumed_steering(),
+    // snapshots(), pinned_targets(), model_calls(), compaction_calls(),
+    // compactions(), consumed_steering(),
     // steering_continuation_rounds(), continuation_rounds(),
     // active_acceptance_tail()
 }
@@ -2158,11 +2165,21 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
         call: ModelCallId,
     },
     DuplicateModelCall { call: ModelCallId },
+    DuplicateModelCallIdentityAcrossKinds { call: ModelCallId },
     DuplicatePinnedTarget { turn: TurnId },
     PinnedTargetMissing { call: ModelCallId },
     UnreferencedPinnedTarget { turn: TurnId },
     ModelCallSnapshotMissing { call: ModelCallId },
     InvalidModelCall { call: ModelCallId },
+    CompactionCallSnapshotMissing { call: ModelCallId },
+    DuplicateCompactionCall { call: ModelCallId },
+    InvalidCompactionCall { call: ModelCallId },
+    CompactionSnapshotMissing { compaction: ContextCompactionId },
+    CompactionEvidenceMissing { compaction: ContextCompactionId },
+    InvalidCompaction { compaction: ContextCompactionId },
+    DuplicateCompaction { compaction: ContextCompactionId },
+    UnreferencedCompactionEvidence { call: ModelCallId },
+    InvalidCompactionChain { compaction: ContextCompactionId },
     UnreferencedModelCall { call: ModelCallId },
     TerminalModelCallMissing { turn: TurnId, call: ModelCallId },
     TerminalModelCallMismatch { turn: TurnId },
@@ -2334,6 +2351,7 @@ impl PreparedAcceptedInputTurnActivation {
 
 pub enum AcceptedInputEligibilityFailure {
     ActiveTurnPresent { turn: TurnId },
+    ContextCompactionInProgress { call: ModelCallId },
     NoQueuedTurn,
     OriginEntryIdentityAlreadyExists,
     ModelIdentityEntryIdentityAlreadyExists,
@@ -2697,6 +2715,10 @@ pub struct ModelCallExecutionReconstitutionError { /* private */ }
 
 pub struct ModelCallExecution { /* private */ }
 impl ModelCallExecution {
+    pub fn preview_initial_call(
+        &self,
+        call: ModelCallId,
+    ) -> Result<PreparedModelCallRequest, ModelCallPreparationError>;
     pub fn prepare_initial_call_consuming_steering(
         self,
         call: ModelCallId,
@@ -2943,6 +2965,115 @@ pub enum ModelCallClosureError {
 }
 ```
 
+## domain: context_compaction
+
+```rust
+pub struct ContextCompactionId(/* private */); // identity newtype (see lib.rs shape)
+pub struct ContextCompactionTokenUsage { /* private */ }
+impl ContextCompactionTokenUsage {
+    pub const fn unreported() -> Self;
+    pub const fn with_input_tokens(self, value: Option<u64>) -> Self;
+    pub const fn with_output_tokens(self, value: Option<u64>) -> Self;
+    pub const fn with_cache_creation_input_tokens(self, value: Option<u64>) -> Self;
+    pub const fn with_cache_read_input_tokens(self, value: Option<u64>) -> Self;
+    // accessors: input_tokens(), output_tokens(),
+    // cache_creation_input_tokens(), cache_read_input_tokens()
+}
+pub enum ContextCompactionModelCallState {
+    Prepared,
+    InFlight,
+    Terminal(ModelCallDisposition),
+}
+pub struct ContextCompactionModelCall { /* private */ }
+// accessors: id(), session(), selection(), target(), source_frontier(), state(), usage()
+pub struct ContextCompactionModelCallReconstitutionInput { /* private */ }
+impl ContextCompactionModelCallReconstitutionInput {
+    pub const fn new(
+        id: ModelCallId,
+        session: SessionId,
+        selection: DirectModelSelection,
+        target: ResolvedProviderTarget,
+        source_frontier: ContextFrontierId,
+        state: ContextCompactionModelCallState,
+        usage: ContextCompactionTokenUsage,
+    ) -> Self;
+    // accessors: id(), source_snapshot()
+    pub fn reconstitute(
+        self,
+        source: &ResolvedContextFrontierSnapshot,
+    ) -> Result<ContextCompactionModelCall, ContextCompactionModelCallReconstitutionFailure>;
+}
+pub enum ContextCompactionModelCallReconstitutionFailure {
+    FrontierMismatch,
+    UsageBeforeTerminal,
+}
+pub struct ContextCompactionRange { /* private */ }
+impl ContextCompactionRange {
+    pub const fn inclusive(
+        first: SemanticTranscriptEntryRef,
+        through: SemanticTranscriptEntryRef,
+    ) -> Self;
+    // accessors: first(), through()
+}
+pub struct ContextCompaction { /* private */ }
+// accessors: id(), session(), predecessor(), source_frontier(), result_frontier(),
+// producing_call(), range(), summary_entry()
+pub struct ContextCompactionReconstitutionInput { /* private */ }
+impl ContextCompactionReconstitutionInput {
+    pub const fn new(
+        id: ContextCompactionId,
+        session: SessionId,
+        predecessor: Option<ContextCompactionId>,
+        source_frontier: ContextFrontierId,
+        result_frontier: ContextFrontierId,
+        producing_call: ModelCallId,
+        range: ContextCompactionRange,
+        summary_entry: SemanticTranscriptEntryId,
+    ) -> Self;
+    // accessors: id(), source_snapshot(), result_snapshot(), producing_call(),
+    // summary_entry()
+    pub fn reconstitute(
+        self,
+        source: &ResolvedContextFrontierSnapshot,
+        result: &ResolvedContextFrontierSnapshot,
+        source_entries: &[SemanticTranscriptEntry],
+        result_entries: &[SemanticTranscriptEntry],
+        summary: &SemanticTranscriptEntry,
+        call: &ContextCompactionModelCall,
+    ) -> Result<ContextCompaction, ContextCompactionReconstitutionFailure>;
+}
+pub enum ContextCompactionReconstitutionFailure {
+    FrontierSessionMismatch,
+    FrontierIdentityMismatch,
+    FrontierEntryMismatch,
+    SourceProjectionInvalid,
+    SummaryEntryMismatch,
+    SummaryPayloadMismatch,
+    RangeEndpointMissing,
+    RangeStartMismatch,
+    RangeOrderInvalid,
+    UnsafeToolExchangeBoundary,
+    ResultIsNotSummaryAppend,
+    ProducingCallMismatch,
+}
+pub struct ContextFrontierProjection { /* private */ }
+impl ContextFrontierProjection {
+    pub fn from_complete_entries(
+        entries: &[SemanticTranscriptEntry],
+    ) -> Result<Self, ContextFrontierProjectionFailure>;
+    pub fn ordered_entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = SemanticTranscriptEntryRef> + '_;
+}
+pub enum ContextFrontierProjectionFailure {
+    RangeStartMismatch,
+    RangeEndpointMissing,
+    RangeOrderInvalid,
+    UnsafeToolExchangeBoundary,
+    SummaryNotAfterBoundary,
+}
+```
+
 ## domain: context_frontier
 
 ```rust
@@ -3026,6 +3157,11 @@ pub enum SemanticTranscriptEntryPayload {
         turn: TurnId,
         defaults_version: SessionConfigurationDefaultsVersion,
         selected: DirectModelSelection,
+    },
+    ContextSummary {
+        producing_call: ModelCallId,
+        summarized: ContextCompactionRange,
+        value: AssistantText,
     },
     TurnFailed { turn: TurnId },
     AssistantText { producing_call: ModelCallId, value: AssistantText },
@@ -4316,6 +4452,12 @@ pub enum ModelConversationMessage {
         defaults_version: SessionConfigurationDefaultsVersion,
         selected: DirectModelSelection,
     },
+    ContextSummary {
+        source: SemanticTranscriptEntryRef,
+        producing_call: ModelCallId,
+        summarized: ContextCompactionRange,
+        content: AssistantText,
+    },
     User {
         source: SemanticTranscriptEntryRef,
         accepted_input: AcceptedInputId,
@@ -4357,6 +4499,13 @@ pub enum ModelToolResultContent {
 
 pub struct PreparedModelOperation { /* private */ }
 impl PreparedModelOperation {
+    pub fn render(
+        request: PreparedModelCallRequest,
+        credential_reference: ModelCallCredentialReference,
+        system_prompt: Option<SessionSystemPrompt>,
+        tools: Box<[ToolDefinition]>,
+        tool_entries: &[ResolvedToolConversationEntry],
+    ) -> Result<Self, ModelFrontierRenderingError>;
     // accessors: request(), credential_reference(), system_prompt(), messages(), tools()
 }
 
@@ -4369,6 +4518,8 @@ pub enum ModelFrontierRenderingError {
     MissingOrMismatchedToolEvidence { entry: SemanticTranscriptEntryRef },
     UnrenderableToolResult { entry: SemanticTranscriptEntryRef },
     UnexpectedToolEvidence { entry: SemanticTranscriptEntryRef },
+    MissingProjectedEntry { entry: SemanticTranscriptEntryRef },
+    InvalidContextProjection(ContextFrontierProjectionFailure),
 }
 // impl Display + std::error::Error + ClassifyOperatorFailure
 
@@ -4492,6 +4643,22 @@ pub enum ModelCallCapabilityPreparation<Capability> {
     Ready(Capability),
     Cancelled,
     KnownFailure,
+}
+
+pub enum ModelCallInputTokenCount {
+    Counted(u64),
+    Cancelled,
+}
+
+pub trait ModelCallInputTokenCounter {
+    type Error: ClassifyOperatorFailure;
+    fn count_input_tokens<Cancellation>(
+        &self,
+        operation: PreparedModelOperation,
+        cancellation: Cancellation,
+    ) -> impl Future<Output = Result<ModelCallInputTokenCount, Self::Error>> + Send
+    where
+        Cancellation: Future<Output = ()> + Send + 'static;
 }
 
 pub trait ModelCallProvider {
@@ -5389,6 +5556,10 @@ pub enum StartupScanSessionOutcome {
     NoActiveTurn,
     Recovered(Box<FailedAcceptedInputTurn>),
     RecoveredModelCall(Box<ModelCallTerminalOutcome>),
+    RecoveredContextCompaction {
+        call: ModelCallId,
+        disposition: ModelCallDisposition,
+    },
     RecoveredToolAttempt(Box<ToolAttemptCrashOutcome>),
     ResumableToolBatch { turn: TurnId },
     AwaitingRecoveryDecision { turn: TurnId },
@@ -6143,6 +6314,16 @@ impl ReviewConfidenceError {
     pub const fn basis_points(self) -> u16;
 }
 
+pub struct ReviewFindingConfidenceAxes { /* private */ }
+impl ReviewFindingConfidenceAxes {
+    pub const fn new(
+        is_real_confidence: ReviewConfidence,
+        severity_label_confidence: ReviewConfidence,
+    ) -> Self;
+    pub const fn is_real_confidence(self) -> ReviewConfidence;
+    pub const fn severity_label_confidence(self) -> ReviewConfidence;
+}
+
 pub struct ReviewPolicyVersion(/* private NonZeroU32 */);
 pub struct ReviewPolicy { /* version and two confidence thresholds */ }
 pub struct ReviewPolicyError { /* rejected complete policy */ }
@@ -6602,12 +6783,13 @@ impl ReviewFindingContent {
         title: ReviewText,
         body: ReviewText,
         severity: ReviewFindingSeverity,
-        confidence: ReviewConfidence,
+        confidence_axes: ReviewFindingConfidenceAxes,
         category: ReviewKey,
         recommended_fix: Option<ReviewText>,
     ) -> Self;
-    // accessors: location(), title(), body(), severity(), confidence(),
-    // category(), recommended_fix()
+    // accessors: location(), title(), body(), severity(),
+    // is_real_confidence(), severity_label_confidence(), category(),
+    // recommended_fix()
 }
 
 pub struct ReviewFindingProposal { /* reference + producing pass + content */ }
@@ -6875,6 +7057,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: turn_eligibility                           | 29                   |
 | domain: turn_attempt                               | 13                   |
 | domain: model_call                                 | 12                   |
+| domain: context_compaction                         | 12                   |
 | domain: model_execution                            | 50                   |
 | domain: context_frontier                           | 6                    |
 | domain: semantic_entry                             | 4                    |
@@ -6885,16 +7068,16 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: review_workflow                            | 81                   |
+| domain: review_workflow                            | 82                   |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 53                   |
-| **signalbox-domain total**                         | **524 (+1 free fn)** |
+| **signalbox-domain total**                         | **537 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
 | application: list_conversations                    | 8 (incl. 2 traits)   |
 | application: load_session                          | 2 (incl. 1 trait)    |
-| application: model_execution                       | 30 (incl. 7 traits)  |
+| application: model_execution                       | 32 (incl. 8 traits)  |
 | application: tool_loop                             | 23 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 5 (incl. 1 trait)    |
@@ -6906,4 +7089,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **153**              |
+| **signalbox-application total**                    | **155**              |

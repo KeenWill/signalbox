@@ -1,0 +1,7 @@
+error: field `value`: serde with/deserialize_with requires tool_schema(with = Type) to declare its wire shape
+  --> tests/ui/custom_decoder_without_shape.rs:12:5
+   |
+12 | /     #[serde(deserialize_with = "decode")]
+13 | |     #[tool_schema(description = "Custom-decoded value.")]
+14 | |     value: String,
+   | |_________________^

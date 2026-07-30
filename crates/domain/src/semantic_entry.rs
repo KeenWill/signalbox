@@ -5,10 +5,11 @@
 //! boundaries that validate the referenced facts.
 
 use crate::{
-    AcceptedInputId, DirectModelSelection, ImportedSourceAttestation, ImportedSpeaker,
-    ImportedTranscriptContent, ImportedTranscriptEntryId, ModelCallId, NonEmptyUnicodeText,
-    NonEmptyUnicodeTextError, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
-    SessionConfigurationDefaultsVersion, SessionId, ToolRequestId, TurnId,
+    AcceptedInputId, ContextCompactionRange, DirectModelSelection, ImportedSourceAttestation,
+    ImportedSpeaker, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelCallId,
+    NonEmptyUnicodeText, NonEmptyUnicodeTextError, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion, SessionId, ToolRequestId,
+    TurnId,
 };
 
 /// Exact assistant-owned text from one definitive provider response.
@@ -68,6 +69,15 @@ pub enum SemanticTranscriptEntryPayload {
         defaults_version: SessionConfigurationDefaultsVersion,
         /// The exact direct selection frozen for the turn.
         selected: DirectModelSelection,
+    },
+    /// A model-produced summary of one exact inclusive frontier range.
+    ContextSummary {
+        /// The dedicated model call that produced the summary.
+        producing_call: ModelCallId,
+        /// The exact inclusive source-qualified entry range summarized.
+        summarized: ContextCompactionRange,
+        /// Exact model-produced summary text.
+        value: AssistantText,
     },
     /// An explicit marker for an exact failed turn.
     TurnFailed {

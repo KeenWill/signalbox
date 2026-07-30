@@ -42,6 +42,7 @@
 
 mod credential;
 mod evidence;
+mod input_count;
 mod message;
 mod observation;
 mod operation;
@@ -67,6 +68,7 @@ pub use evidence::{
     RefusalEvidence, StreamInterruption, TerminalEvidence, TerminalReport, TransportFacts,
     UnsentCause,
 };
+pub use input_count::{InputTokenCountOutcome, ModelInputTokenCounter};
 pub use message::{
     AssistantPart, ConversationMessage, ConversationRole, MessagePart, ToolResultRecord,
 };

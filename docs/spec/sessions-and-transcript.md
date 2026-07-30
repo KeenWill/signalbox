@@ -10,16 +10,19 @@ model-identity boundary were additionally verified through PR #272
 (`agent/mid-session-model`); the imported-frontier process surface was verified
 through PR #294 (`agent/continue-imported-conversation`); the session system
 prompt was verified through PR #286 (`agent/session-system-prompt`); and the
-version-thirteen input-delivery surface and its user-reachable steering boundary
-were verified through PR #302 (`agent/mid-turn-steering`). The copy-on-create
-session-template provenance and creation mode were verified through PR #311
-(`agent/session-templates-spec`). The runner placement-entry paragraphs are the
-foundation proposal at the bottom of their implementing stack and become
+input-delivery surface and its user-reachable steering boundary were verified
+through PR #302 (`agent/mid-turn-steering`). The copy-on-create session-template
+provenance and creation mode were verified through PR #311
+(`agent/session-templates-spec`). The append-only context-compaction record and
+projection were verified through PR #312 (`agent/context-compaction-core`); the
+command path and canonical visible-range selection were verified through PR #314
+(`agent/context-compaction-protocol`). The runner placement-entry paragraphs are
+the foundation proposal at the bottom of their implementing stack and become
 verified only with those child pull requests. The imported-conversation record
 and converter are owned by [conversation-import](conversation-import.md). Where
-a law is cited as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of
-record; where mechanics owned by another decision are summarized, the owning
-sibling page is linked inline.
+a law is cited as `INV-NNN`, the generated
+[invariant test index](../invariants.md) resolves it; where mechanics owned by
+another contract are summarized, the owning sibling page is linked inline.
 
 ## Session identity and creation provenance
 
@@ -62,15 +65,31 @@ INV-039).
 
 ## Session creation
 
-`CreateSession` carries the durable command identity, the provenance pair, and
-one complete unversioned initial defaults value, plus its explicit or
-template-derived creation mode. Structural equality excludes the command
-identifier. Explicit mode compares provenance and the complete defaults;
-template-derived mode compares provenance and the caller-supplied template name
-while excluding the copied defaults and content digest. The two modes are never
-equal (INV-012, INV-047). Three topics are owned by
+`CreateSession` carries the durable command identity, the provenance pair, one
+complete unversioned initial defaults value, and one optional complete session
+runner placement, plus its explicit or template-derived creation mode.
+Structural equality excludes the command identifier. Explicit mode compares
+provenance, the complete defaults, and the placement; template-derived mode
+compares provenance, the placement, and the caller-supplied template name while
+excluding the copied defaults and content digest. The two modes are never equal
+(INV-012, INV-047). Three topics are owned by
 [identity-and-commands](identity-and-commands.md): durable-command storage, the
 structural-equality doctrine, and identity generation, supply, and encoding.
+
+The placement is absent for a daemon-only session. When present it is the
+complete immutable request — runner selector, working-directory selection,
+credential-profile selection, workspace requirement, sandbox profile, and tool
+permission overrides — with every axis stated explicitly and none inferred from
+another; the axes and their independence are owned by
+[runner protocol and placement](runner-protocol.md#session-composition). Because
+placement is a caller-supplied semantic field, it participates in replay
+equality in both creation modes: replaying one command identity under a
+different placement, including under a placement where the first handling had
+none, is conflicting reuse rather than a corrected request. Template-derived
+creation carries the same placement field as explicit creation; a resolved
+template supplies defaults and never a placement, so the two choices compose
+instead of excluding each other and no selected placement can be silently
+discarded.
 
 Application orchestration (`crates/application/src/create_session.rs`):
 
@@ -90,10 +109,14 @@ creation uses the separate command path below; it does not widen
 
 The committing transaction atomically inserts the session row, the scheduler
 registration (`session_scheduler`), defaults version one, the current-defaults
-pointer, the typed command record, and the owner-global registry claim.
-Completeness at every commit boundary is enforced by deferred reverse foreign
-keys (`session_current_defaults_fk`, `session_scheduler_row_fk`) plus deferred
-constraint triggers `session_requires_creation_command` and
+pointer, the typed command record, the owner-global registry claim, and — when
+the request carried a placement — that session's initial `Unpinned`
+`SessionRunnerPlacement` record at revision one with its complete request. A
+visible session therefore never names a placement its creation command did not
+carry, and a carried placement is never dropped between the claim and the
+session. Completeness at every commit boundary is enforced by deferred reverse
+foreign keys (`session_current_defaults_fk`, `session_scheduler_row_fk`) plus
+deferred constraint triggers `session_requires_creation_command` and
 `durable_command_requires_typed_record`. The family-aware session trigger
 replaced `session_create_command_fk` when imported-frontier creation added its
 separate command family (migration `202607240002_imported_session_seed.sql`);
@@ -123,14 +146,15 @@ not a historical fact.
 
 `CreateSessionFromImportedFrontier` is a distinct durable command family
 carrying command identity, one addressable `ImportedTranscriptFrontier`, one
-`ImportedSessionRelationship` (`Resume` or `Fork`), and complete unversioned
-initial defaults. The frontier itself names its `ImportedConversationId` and
-inclusive entry boundary; the command accepts no second independently supplied
-conversation identity. Its structural replay equality excludes only command
-identity. Separating the family preserves its imported-ancestry contract and
-keeps its replay record distinct from the no-ancestry `CreateSession` family;
-the shared defaults-bearing storage versions are owned by
-[persistence-protocol](persistence-protocol.md).
+`ImportedSessionRelationship` (`Resume` or `Fork`), complete unversioned initial
+defaults, and the same optional complete session runner placement as ordinary
+creation, on the same replay-equality terms. The frontier itself names its
+`ImportedConversationId` and inclusive entry boundary; the command accepts no
+second independently supplied conversation identity. Its structural replay
+equality excludes only command identity. Separating the family preserves its
+imported-ancestry contract and keeps its replay record distinct from the
+no-ancestry `CreateSession` family; the shared defaults-bearing storage versions
+are owned by [persistence-protocol](persistence-protocol.md).
 
 The relationship records the client's creation-time intent: `Resume` declares a
 new Signalbox continuation from the selected imported point; `Fork` declares a
@@ -143,7 +167,7 @@ Import never chooses this relationship or a frontier. At any later time, and
 more than once, a client may invoke this session-creation command against any
 entry boundary of any imported conversation.
 
-Protocol version ten exposes that command as
+The process protocol exposes that command as
 `create_session_from_imported_frontier`. Its wire address is the imported
 conversation identity plus a positive inclusive imported position; the daemon
 resolves the immutable aggregate to the canonical sealed frontier before
@@ -184,7 +208,8 @@ The committing transaction atomically inserts:
   conversation and boundary derived from the selected frontier, plus the
   relationship;
 - defaults version one, its current pointer, scheduler registration, typed
-  command record, registry claim, and the ordinary `session_created` outbox
+  command record, registry claim, the initial `Unpinned` placement record when
+  the request carried a placement, and the ordinary `session_created` outbox
   event;
 - one imported-provenance semantic entry for every normalized imported entry in
   the exact prefix, including non-text content; and
@@ -257,10 +282,8 @@ truncating or rewriting, and equality is the exact ordered scalar sequence.
 Absence is typed `None`, never empty text. `CreateSession` and
 `CreateSessionFromImportedFrontier` carry the optional prompt inside their
 complete unversioned initial defaults, and `ReplaceSessionDefaults` replaces it
-only as part of the complete successor epoch — there is no prompt-only mutation;
-the
-[bound-and-placement decision](../decisions.md#2026-07-26--bound-the-session-system-prompt-as-a-defaults-epoch-value)
-records the capacity and epoch-placement choice. Matching
+only as part of the complete successor epoch — there is no prompt-only mutation.
+This section owns the capacity and epoch-placement contract. Matching
 `octet_length(convert_to(system_prompt, 'UTF8'))` CHECK constraints protect the
 durable epoch and command columns (migration
 `202607280303_session_system_prompt.sql`), and command/defaults schema agreement
@@ -275,11 +298,9 @@ version — so every call the turn prepares sets `ModelOperation.system` to
 exactly that epoch's prompt, or none. A replacement that changes only the system
 prompt appends no semantic transcript entry: the new instructions reach the
 provider whole and out of band on the successor turn's calls, and the turn's
-frozen epoch already records durably which prompt governed it, as recorded by
-the
-[no-transcript-boundary decision](../decisions.md#2026-07-26--deliver-system-prompt-changes-without-a-transcript-boundary).
-The `ModelIdentityChanged` boundary below remains keyed to the frozen direct
-model selection alone.
+frozen epoch already records durably which prompt governed it. The
+`ModelIdentityChanged` boundary below remains keyed to the frozen direct model
+selection alone.
 
 ### Session-template provenance
 
@@ -296,6 +317,13 @@ creation establishes the ordinary defaults version one from that complete copy
 and seals the name/digest alongside the session. The stored session has no
 template lookup operation: every later consumer reads its durable defaults and
 provenance only (INV-047).
+
+A template supplies no placement. Template-derived creation therefore carries
+the caller's optional placement exactly as explicit creation does, and its typed
+command record stores that placement in full. Why: silently discarding a typed
+flag a caller supplied is the false-confidence pattern — the session would run
+daemon-only while the caller believed it had a runner — so the two choices
+compose and neither excludes the other.
 
 Durable-command equality distinguishes the caller's two creation modes. An
 explicit command compares its complete caller-supplied defaults exactly. A
@@ -348,14 +376,12 @@ immediately before that turn's origin entry. The entry names the turn, its
 frozen defaults epoch, and its exact direct selection. It is absent for the
 first turn and for equal-selection successors. Thus the frontier records the
 model identity actually crossed by executed conversation history rather than
-unused or redundant replacement epochs (INV-046). The exact provider-message
-projection is recorded by the
-[model-identity injection decision](../decisions.md#2026-07-25--render-model-identity-boundaries-as-injected-user-role-events).
-Started frontiers committed before this boundary existed retain their exact
-historical membership: an immutable per-turn compatibility fact grandfathers
-only those already-active or terminal starts. Turns still queued at migration
-and every newly accepted turn require the boundary normally, as recorded by the
-[legacy-frontier decision](../decisions.md#2026-07-25--grandfather-pre-boundary-started-frontiers).
+unused or redundant replacement epochs (INV-046). The provider-message
+projection is owned by [model-call execution](model-call-execution.md). Started
+frontiers committed before this boundary existed retain their exact historical
+membership: an immutable per-turn compatibility fact grandfathers only those
+already-active or terminal starts. Turns still queued at migration and every
+newly accepted turn require the boundary normally.
 
 ## Session metadata and list projection
 
@@ -378,9 +404,7 @@ A snapshot carries at most 256 tags, at most 256 attributes, and at most 262,144
 total UTF-8 bytes across its present title, tags, attribute keys, and attribute
 values. Each tag and attribute key carries at most 1,024 UTF-8 bytes so its
 composite PostgreSQL index entry remains representable. Construction rejects any
-excess before command handling; the exact provisional capacity choice is
-recorded in the
-[metadata-bound decision](../decisions.md#2026-07-25--bound-session-metadata-for-storage-and-process-frames).
+excess before command handling; this section owns the capacity contract.
 
 The root `session_metadata` row and normalized
 `session_metadata_tag`/`session_metadata_attribute` rows (migration
@@ -539,8 +563,17 @@ and closed:
 - `ModelIdentityChanged { turn, defaults_version, selected }` — the exact
   successor-turn boundary at which execution first observes a different frozen
   direct model identity;
+- `ContextSummary { producing_call, summarized, value }` — exact model-produced
+  summary text retaining its dedicated physical call and the first and through
+  source-qualified entries of the inclusive range it represents;
 - `RunnerPlacementChanged { placement_revision }` — a reference to the complete
-  checked replacement record at the owner-explicit runner/workspace boundary;
+  checked successor placement record at an owner-explicit relocation boundary.
+  One entry kind covers every session-relocation fact: a move to a different
+  runner and a working-directory move on the same runner both require it, and
+  the referenced record is the authority for which of them occurred. Splitting
+  the kind so that a working-directory-only move carries its own payload variant
+  changes no other contract on this page, since every consumer resolves the
+  record rather than reading the payload;
 - `TurnFailed { turn }` — an explicit marker that the turn terminalized as
   failed;
 - `AssistantText { producing_call, value }` — exact assistant text with
@@ -573,8 +606,8 @@ sealed inside the domain crate — checked constructors are `pub(crate)`.
 `model_execution.rs` produces assistant and turn-terminal history;
 imported-frontier session creation is the only producer of `Imported`; sealed
 tool transitions produce tool-use/result references only through the atomic
-boundaries owned by [tool-loop](tool-loop.md); and the checked owner replacement
-transaction is the only producer of `RunnerPlacementChanged`.
+boundaries owned by [tool-loop](tool-loop.md); and the checked owner placement
+transactions are the only producers of `RunnerPlacementChanged`.
 
 `OriginAcceptedInput` and `SteeringAcceptedInput` reference the accepted input's
 identity; neither copies content. Steering additionally names the exact active
@@ -602,6 +635,59 @@ entry/turn-state trigger so an origin entry additionally requires its input's
 `semantic_transcript_entry_origin_disposition`); pending steering can never
 appear as a semantic origin.
 
+### Context compaction
+
+Context compaction changes model visibility, never durable history. A completed
+compaction has five correlated immutable facts: its identity and optional
+same-session predecessor, the complete source frontier, a dedicated physical
+model call, the exact inclusive source-qualified range summarized, and a result
+frontier equal to the source frontier plus one new `ContextSummary`. The summary
+entry names the producing call and repeats the exact range. Storage and domain
+reconstitution reject a missing endpoint, reversed range, mismatched summary,
+non-completing call, different source frontier, or result that is not exactly
+that one-entry append (INV-005, INV-015).
+
+The transcript therefore remains complete and addressable after compaction. No
+entry or frontier is deleted, replaced, reordered, or rewritten. The
+compaction-call record separately retains the session's current direct model
+selection, resolved provider target, source frontier, physical lifecycle and
+disposition, non-secret credential reference, and each independently optional
+provider-reported usage field. Summary production is its own model call; it is
+not assistant output attributed to an accepted-input turn.
+
+Compactions in one session form a forward-only chain. A successor's source must
+retain its predecessor's complete result frontier as a semantic prefix. A later
+ordinary turn cannot opt back into an uncompacted projection. The existing
+continue-from-boundary operation remains the escape hatch: choosing a position
+before the summary creates a different session whose ancestry frontier does not
+contain that compaction.
+
+Each compaction range starts at the current model-visible frontier start: the
+complete frontier's first entry for a root compaction, or the predecessor
+summary entry for a successor. Its through endpoint selects how much of that
+visible frontier the new summary replaces; a compaction cannot hide an
+unsummarized visible prefix. The through boundary is safe only when every
+assistant tool proposal inside the summarized range has its execution result,
+denial, or turn-end closure inside that same range; a boundary cannot leave a
+provider-visible tool result in the suffix after hiding its proposal.
+
+For model input only, summaries are applied in physical append order to the
+current model-visible sequence. Each summary replaces the visible prefix through
+its exact boundary with itself; entries after that boundary in the already
+projected sequence remain in order, even when a retained suffix physically
+precedes an earlier summary. The final sequence is therefore the latest summary
+plus its visible suffix. With no summary, projection is the complete frontier
+order. This rule deliberately separates the frontier a call durably records from
+the ordered subset the selected model sees.
+
+Explicit compaction chooses an optional through position, defaulting to the
+latest safe boundary. The daemon also compacts before an ordinary model send
+when that call's rendered input plus its full configured output-token
+reservation would exceed the current selection's declared context window. Both
+paths use the required deployment-configured compaction prompt and the session's
+current direct selection. Trigger and configuration mechanics are owned by
+[model-call-execution](model-call-execution.md).
+
 ### When entries come to exist
 
 An accepted input is durable at acceptance (INV-007) but becomes transcript
@@ -626,31 +712,38 @@ predecessor terminal prefix, then appends the model-identity boundary when the
 frozen direct selection changed, and finally appends its ordinary origin
 (INV-039, INV-046).
 
-Runner replacement has a session-level frontier boundary. The atomic replacement
-transaction appends one `RunnerPlacementChanged` entry after the latest
-authoritative semantic frontier, or establishes a one-entry root when no
-frontier exists, and advances the session placement-frontier pointer with the
-placement revision. Active continuation and the next eligible origin both extend
-that exact boundary before any successor-runner execution. A same-revision,
+Session relocation has a session-level frontier boundary. Every transaction that
+installs a successor placement — loss replacement today, and the committed
+owner-directed move of a healthy session or of its working directory later
+([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one))
+— appends one `RunnerPlacementChanged` entry after the latest authoritative
+semantic frontier, or establishes a one-entry root when no frontier exists, and
+advances the session placement-frontier pointer with the placement revision.
+Active continuation and the next eligible origin both extend that exact boundary
+before any execution on the successor placement. A same-revision,
 missing-record, non-prefix, cross-session, or second placement boundary fails
-closed. The entry copies no runner advertisement, workspace path, credential
-fact, or tool output; the placement record remains its content authority. The
-provider projection resolves that record to the exact injected placement event
-owned by [model-call execution](model-call-execution.md#frontier-rendering)
-(INV-015, INV-044).
+closed. When the installing command runs while an authorized model call is still
+in flight, the boundary is appended only after that call's observation commits,
+so the call's own entries precede it and the prefix-only law holds
+([turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#runner-loss-session-recovery)).
+The entry copies no runner advertisement, workspace path, credential fact, or
+tool output; the placement record remains its content authority. The provider
+projection resolves that record to the exact injected placement event owned by
+[model-call execution](model-call-execution.md#frontier-rendering) (INV-015,
+INV-044).
 
-Pending steering has a separate safe-point boundary (INV-036). A
-version-thirteen `steer` submit accepted while its exact source turn is active
-returns the accepted-input identity, immutable acceptance position, and source
-turn immediately; it creates no origin turn or semantic entry at acceptance.
-Immediately before an initial or continuation call is prepared, the transaction
-appends one `SteeringAcceptedInput` per pending input in ascending acceptance
-position, derives one frontier extending the starting frontier for the admitted
-initial call, changes every input to `ConsumedAsSteering { call }`, and inserts
-that exact `Prepared` call against the extended frontier. All four effects
-commit or roll back together. The entry therefore becomes semantic history only
-with the call that first observes it; the immutable accepted-input row remains
-the content authority.
+Pending steering has a separate safe-point boundary (INV-036). A `steer` submit
+accepted while its exact source turn is active returns the accepted-input
+identity, immutable acceptance position, and source turn immediately; it creates
+no origin turn or semantic entry at acceptance. Immediately before an initial or
+continuation call is prepared, the transaction appends one
+`SteeringAcceptedInput` per pending input in ascending acceptance position,
+derives one frontier extending the starting frontier for the admitted initial
+call, changes every input to `ConsumedAsSteering { call }`, and inserts that
+exact `Prepared` call against the extended frontier. All four effects commit or
+roll back together. The entry therefore becomes semantic history only with the
+call that first observes it; the immutable accepted-input row remains the
+content authority.
 
 Tool-use entries become history with the producing call's completed observation;
 tool-result entries become history only at the all-resolved continuation or
@@ -713,8 +806,8 @@ content ownership. An accepted omitted or explicit `start_when_idle` submit and
 a `queue` submit create an accepted origin turn with frozen configuration;
 `queue` binds its acceptance to the exact active turn it follows. A `steer`
 submit instead creates configuration-free pending steering bound to that exact
-source turn. The closed version-thirteen wire spelling and typed receipts are
-owned by [process-protocol](process-protocol.md#client-requests).
+source turn. The closed wire spelling and typed receipts are owned by
+[process-protocol](process-protocol.md#client-requests).
 
 The accepted input owns the one immutable authoritative content value; the
 `accepted_input` row admits exactly two guarded updates from pending steering:
@@ -738,8 +831,7 @@ Why (bytes, at admission): byte measurement matches wire and storage cost and
 keeps the domain value exactly as accepted; rejecting before construction can
 never truncate or rewrite content.
 
-This is a provisional owner-decided floor (decision log, 2026-07-20), not the
-resource-governance policy.
+This is a provisional owner-approved floor, not the resource-governance policy.
 
 ## Actor attribution
 

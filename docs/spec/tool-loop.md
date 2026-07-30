@@ -23,9 +23,10 @@ semantic entry vocabulary in
 provider translation in [model-call-execution](model-call-execution.md);
 durable-command identity in [identity-and-commands](identity-and-commands.md);
 and relational mechanics in [persistence-protocol](persistence-protocol.md).
-Invariant tags cite [the invariant catalog](../invariants.md). The runner-locus
-paragraphs in this page are the foundation proposal at the bottom of their
-implementing stack and become verified only with those child pull requests.
+Invariant tags cite [the invariant test index](../invariants.md). The
+runner-locus paragraphs in this page are the foundation proposal at the bottom
+of their implementing stack and become verified only with those child pull
+requests.
 
 ## Intra-turn rounds and request batches
 
@@ -127,7 +128,7 @@ An owner decision is the canonical `DecideToolRequest` command: owner-global
 `Deny { reason }`. A denial reason is absent or 1–1024 bytes of non-control
 Unicode with no leading/trailing POSIX whitespace; it is therefore safe to
 render without copying unbounded or terminal-control content. Equality excludes
-only the command identifier. The version-eight `decide_tool_request` request in
+only the command identifier. The `decide_tool_request` request in
 [process-protocol](process-protocol.md#client-requests) is the client surface
 that issues this command; its wire posture requires a denial reason even though
 the command admits an absent one. Registry lookup precedes current-state
@@ -171,15 +172,15 @@ classification used by the implemented local attempt machinery.
 The runner foundation adds one immutable daemon-owned `RunnerToolDeclaration`
 per runner-advertisable name. It carries a required checked model-facing
 description and canonical JSON-object argument schema, the required three-way
-`RunnerToolEffectClass` (`Pure`, `Idempotent`, or `SideEffecting`), and one
-nonempty `ToolAdmissibleLoci` value (`DaemonOnly`, `RunnerOnly { selector }`, or
-`DaemonOrRunner { selector }`). Pure implies idempotent; idempotent work may
-change state but is safe to repeat. The combined locus prefers the session's
-attached eligible runner, falling back to daemon-local execution. Declarations
-are static per tool; a model or runner cannot select another locus per call.
-Every runner-only tool therefore still has one authoritative definition for
-model advertisement and argument validation. The typed placement and
-runner-dispatch law is owned by
+`RunnerToolEffectClass` (`Pure`, `Idempotent`, or `SideEffecting`), one nonempty
+`ToolAdmissibleLoci` value (`DaemonOnly`, `RunnerOnly { selector }`, or
+`DaemonOrRunner { selector }`), and the session capability its execution
+requires. Pure implies idempotent; idempotent work may change state but is safe
+to repeat. The combined locus prefers the session's attached eligible runner,
+falling back to daemon-local execution. Declarations are static per tool; a
+model or runner cannot select another locus per call. Every runner-only tool
+therefore still has one authoritative definition for model advertisement and
+argument validation. The typed placement and runner-dispatch law is owned by
 [runner protocol and placement](runner-protocol.md).
 
 The current daemon-local application catalog remains one process-lifetime
@@ -210,12 +211,16 @@ effects:
 ### Version-one workstation tool contracts
 
 Every argument schema below is a JSON object with every named member required,
-`additionalProperties: false`, and no nullable member. A repository-relative
+`additionalProperties: false`, and no nullable member. A workspace-relative
 `path` is 1 through 4,096 UTF-8 bytes, uses `/` separators, has no U+0000,
 leading slash, empty component, or `.` or `..` component, and resolves beneath
-the exact session repository without following a symlink. A `cwd` is either `.`
-or such a path resolving to an existing real directory. Text is UTF-8 with no
-U+0000. File content and each edit operand are at most 1,048,576 bytes.
+the session's exact writable root without following a symlink. That root is the
+session repository when the placement requires a worktree and otherwise the
+session's writable directory
+([runner protocol and placement](runner-protocol.md#sandbox-profiles-and-approval)),
+so these paths never presume a repository exists. A `cwd` is either `.` or such
+a path resolving to an existing real directory. Text is UTF-8 with no U+0000.
+File content and each edit operand are at most 1,048,576 bytes.
 
 An `argv` is an array of 1 through 128 strings: element zero is nonempty and at
 most 4,096 bytes, every later element is at most 8,192 bytes, the complete array
@@ -223,24 +228,86 @@ contains at most 65,536 UTF-8 bytes, and no element contains U+0000. It is
 passed directly to `execve`; no shell, word splitting, interpolation, or
 response-file expansion is inserted. A timeout is a JSON integer from 1 through
 1,800 seconds. Captured bytes use exactly
-`{ "encoding": "base64", "data": canonical_padded_base64 }`; stdout and stderr
-are each bounded to 1,048,576 decoded bytes. Process success is
+`{ "encoding": "base64", "data": canonical_padded_base64, "total_bytes": canonical_decimal_string, "omitted_bytes": canonical_decimal_string }`.
+Process success is
 `{ "exit_code": 0, "stdout": captured_bytes, "stderr": captured_bytes }`.
-Crossing either bound terminates the process group and returns known failure
-`result_too_large`; timeout returns `timed_out`. A signal or nonzero exit is
-known failure carrying its signal or integer exit status and the bounded
-captured streams. Runner-side infrastructure uncertainty after process start
-remains ambiguous according to the tool effect.
+Timeout returns `timed_out`. A signal or nonzero exit is known failure carrying
+its signal or integer exit status and the bounded captured streams. Runner-side
+infrastructure uncertainty after process start remains ambiguous according to
+the tool effect.
+
+Output caps are derived from the durable evidence that has to hold them rather
+than chosen independently of it, and every cap is stated in decoded bytes so an
+executor enforces it while it reads. A success commits as one
+`ToolResultContent::Text` value under the 1 MiB bound below, so stdout and
+stderr are each captured to at most 262,144 decoded bytes: padded base64 makes
+each 349,528 bytes, and both encoded streams plus the result object's framing
+and counters fit that bound with room for worst-case JSON escaping. A known
+failure's durable detail is bounded at 4,096 bytes, which no pair of
+megabyte-class streams can fit, so a failure captures at most 1,024 decoded
+bytes per stream: 1,368 bytes of padded base64 each, 2,736 for the pair, leaving
+more than a kibibyte for the failure object's framing, its signal or exit
+status, and its per-stream size counters. The truncation marker below is
+retained inside a stream's cap rather than added to it, so no marker can push an
+encoded failure past the bound.
+
+Truncation has one shape for success and failure alike, and it is honest. The
+runner retains the head and tail of each stream within that stream's cap, keeps
+counting what it discards, and reports `total_bytes` as the true produced size
+and `omitted_bytes` as the exact count dropped; a truncated stream carries the
+fixed marker `[signalbox: N bytes omitted]` at the cut, with `N` the same count.
+Crossing a cap therefore neither terminates the process group nor changes the
+outcome: a process that writes far past the cap and exits zero commits as a
+success with truncated evidence and truthful sizes, never as a fabricated
+failure. The direct-process caps make `result_too_large` unreachable for these
+tools; it remains the admission backstop for any executor whose result exceeds
+the durable bound. Why: the caps exist because storage has a limit, so the
+honest report of a large success is a truncated success — reclassifying it as a
+failure would tell the model the command did not work when it did. Payloads
+genuinely larger than these caps need the storage architecture recorded under
+[Tool safety](../open-questions.md#tool-safety), not a wider constant here.
 
 Git `remote` is 1 through 64 ASCII bytes matching `[A-Za-z0-9][A-Za-z0-9._-]*`.
-Before network use its configured URL must equal a canonical URL from the runner
-repository map and that entry must name the exact granted credential profile. A
-`branch` is at most 255 bytes and must pass `git check-ref-format --branch`; a
-`ref` or refspec is 1 through 1,024 UTF-8 bytes, contains no U+0000, and is
-passed after option termination. A commit message is 1 through 65,536 UTF-8
-bytes with no U+0000. Git commands never use a credential-bearing URL, force,
-delete, tag, recurse-submodule, hook-bypass, amend, or signing option unless a
-later contract adds that operation explicitly.
+Before network use, the URL Git will actually use for it — resolved by Git
+itself under the runner-forced configuration, so that every `insteadOf` and
+`pushurl` expansion is already applied — must equal a canonical URL from the
+runner repository map, and when the placement selected a credential profile that
+entry must name the exact granted profile. A placement that selected no profile
+performs no authenticated network operation: a repository entry that requires
+one fails `credential_unavailable` rather than resolving a profile the owner
+never chose. Every Git invocation additionally runs under the runner-forced
+effective configuration — neutralized system and global configuration, a
+command-line transport allowlist, and disabled repository hooks — and that
+forced configuration is the transport boundary while the effective-URL check
+above is the repository boundary it cannot supply, both specified by
+[runner protocol and placement](runner-protocol.md#workspace-provisioning-and-recovery);
+validating the stored remote URL is defense in depth above the pair, not a
+boundary itself. A `branch` is at most 255 bytes and is validated as the
+complete ref form `refs/heads/<input>` rather than as a branch shorthand, so a
+token Git would expand — `@{-1}` and its kin — is rejected instead of admitted
+as a literal name; a `ref` or refspec is 1 through 1,024 UTF-8 bytes, contains
+no U+0000, and is passed after option termination. A commit message is 1 through
+65,536 UTF-8 bytes with no U+0000. Git commands never use a credential-bearing
+URL, force, delete, tag, recurse-submodule, hook-bypass, amend, or signing
+option unless a later contract adds that operation explicitly.
+
+Every Git tool carries the same required `timeout_seconds` member as
+`shell_exec`, on the same 1-through-1,800-second bound, and each declaration's
+model-facing description names the spec-fixed default for its operation: 1,800
+for `git_clone`, 900 for `git_push`, 600 for `git_fetch`, and 120 for
+`git_branch` and `git_commit`. The runner enforces the deadline by terminating
+the process group, so a stalled Git subprocess can no longer hold the runner's
+single global execution permit while heartbeats stay healthy. What a deadline
+produces is stated per operation rather than universally, because the operations
+differ in whether the runner still knows what happened. A timed-out `git_fetch`,
+`git_clone`, `git_branch`, or `git_commit` closes as the typed `timed_out` known
+failure and carries its own retry-safety: fetch is retry-safe, so is clone,
+whose incomplete destination the runner removes before reporting, and branch and
+commit are locally recoverable and honestly retain any ref or index change
+already made. A timed-out `git_push` is not a known failure at all: the remote
+may already have accepted the update, so it follows the `SideEffecting`
+runner-uncertainty law and is neither recorded as definitely failed nor retried
+as though it were.
 
 The exact tools are:
 
@@ -260,32 +327,44 @@ The exact tools are:
   file-content bound fails before mutation. The atomic write rules and result
   are exactly `workspace_write`.
 - `git_clone` takes
-  `{ "repository": checked_repository_key, "destination": path }`. Destination
-  must not exist and its parent must be real. The runner resolves the named
-  canonical URL and exact granted profile, clones without submodules into that
-  destination, and returns
-  `{ "head": canonical_full_commit_hex, "branch": string | null }`. The nullable
-  `branch` is result vocabulary, not an argument.
+  `{ "repository": checked_repository_key, "destination": path, "timeout_seconds": timeout }`.
+  Destination must not exist and its parent must be real. The runner resolves
+  the named entry's canonical URL and the granted credential profile that entry
+  names, requires Git's own expansion of that URL under the forced configuration
+  to return it unchanged, clones without submodules into that destination, and
+  returns
+  `{ "head": canonical_full_commit_hex | null, "branch": string | null, "unborn_branch": string | null }`.
+  A populated repository returns its exact `head` with the nullable `branch` and
+  a null `unborn_branch`. An empty repository is a success, not a failure and
+  not a reason to remove the destination: it returns a null `head` and null
+  `branch` together with `unborn_branch` naming the branch the first commit will
+  be born on, which is exactly what `git clone` reports and what
+  `git rev-parse HEAD` cannot. Exactly one of `head` and `unborn_branch` is
+  present in every success. The three result members are result vocabulary, not
+  arguments.
 - `git_fetch` takes
-  `{ "remote": remote, "refspecs": ref_array, "prune": boolean }`, where the
-  array has 0 through 32 unique refspecs. It validates the remote as above and
-  performs one noninteractive fetch with no tags or submodules and optional
-  prune. Success returns `{ "head": canonical_full_commit_hex }` for the
-  unchanged checked-out HEAD.
-- `git_branch` takes `{ "name": branch, "start_point": ref }`. The name must not
-  already exist and the start point must resolve to one commit. It creates and
-  checks out the branch without force, then returns
+  `{ "remote": remote, "refspecs": ref_array, "prune": boolean, "timeout_seconds": timeout }`,
+  where the array has 0 through 32 unique refspecs. It validates the remote as
+  above and performs one noninteractive fetch with no tags or submodules and
+  optional prune. Success returns `{ "head": canonical_full_commit_hex | null }`
+  for the unchanged checked-out HEAD, null when that HEAD is still unborn.
+- `git_branch` takes
+  `{ "name": branch, "start_point": ref, "timeout_seconds": timeout }`. The name
+  must not already exist and the start point must resolve to one commit. It
+  creates and checks out the branch without force, then returns
   `{ "branch": string, "head": canonical_full_commit_hex }`.
-- `git_commit` takes `{ "message": commit_message, "paths": path_array }`, where
-  the array contains 1 through 256 unique paths. It stages exactly those paths,
-  requires a nonempty resulting commit, uses the configured runner author name
-  and email, neither amends nor signs, and returns
+- `git_commit` takes
+  `{ "message": commit_message, "paths": path_array, "timeout_seconds": timeout }`,
+  where the array contains 1 through 256 unique paths. It stages exactly those
+  paths, requires a nonempty resulting commit, uses the configured runner author
+  name and email, neither amends nor signs, and returns
   `{ "commit": canonical_full_commit_hex }`. A failed commit honestly retains
   any index changes already made.
-- `git_push` takes `{ "remote": remote, "branch": branch }`. After validating
-  the remote and exact granted profile, it pushes exactly
-  `HEAD:refs/heads/{branch}` with upstream tracking and without force, deletion,
-  or tags. Success returns
+- `git_push` takes
+  `{ "remote": remote, "branch": branch, "timeout_seconds": timeout }`. After
+  validating the remote and, when one was granted, the exact credential profile,
+  it pushes exactly `HEAD:refs/heads/{branch}` with upstream tracking and
+  without force, deletion, or tags. Success returns
   `{ "remote": string, "branch": string, "commit": canonical_full_commit_hex }`.
 - `shell_exec` takes `{ "argv": argv, "cwd": cwd, "timeout_seconds": timeout }`
   and applies the common direct-process result.
@@ -310,6 +389,40 @@ host path, configured URL, credential path, or credential value.
 `workspace_read` to `Auto`. The runner derives advertisement and executor lookup
 from this same compiled registry, while the daemon remains the declaration and
 policy authority.
+
+Each runner declaration also states the session capability its execution
+requires, and that requirement — not registry membership — decides what a
+session advertises. `workspace_read`, `workspace_write`, `workspace_edit`,
+`shell_exec`, and `build_test` require only a writable root, which every
+runner-backed session has. `git_fetch`, `git_branch`, `git_commit`, and
+`git_push` require the session's writable root to be a repository worktree;
+`git_clone` requires a writable root and one configured repository entry,
+because it clones into that root instead of presuming the root is already a
+worktree; and each operation that reaches a remote additionally requires the
+granted credential profile its repository entry names. A session whose
+composition does not satisfy a declaration's requirement is never offered that
+declaration ([model-call execution](model-call-execution.md#frontier-rendering)
+prepares the snapshot), so a session whose writable root is not a worktree
+advertises the five writable-root tools, none of the four worktree Git tools,
+and `git_clone` only when its selected runner advertises at least one repository
+entry whose credential-profile name is exactly the profile that session was
+granted. Every configured repository entry names exactly one profile
+([configuration and credentials](configuration-and-credentials.md#runner-configuration)),
+and the advertisement carries each key together with the profile that key
+requires
+([runner protocol and placement](runner-protocol.md#advertised-catalogs-and-daemon-authority)),
+so preparation decides this from the registration snapshot alone: a profileless
+session, a session on a runner with no repository entry, and a session whose
+granted profile no advertised entry names each advertise no Git tool at all.
+Which of the matching keys a given request names remains the runner's admission
+check, and its `repository_unavailable` or `credential_unavailable` refusal
+names a specific rejected argument rather than a capability the session was told
+it had. Why: a requirement stated on the declaration is checked once at
+preparation, while a requirement implied only by a tool's argument contract can
+be discovered no earlier than the dispatch that fails — and the key/profile
+pairing is what makes this particular requirement decidable at preparation,
+because two independent inventories can each be nonempty with no usable pair
+between them, which is a promise of a tool no argument could execute.
 
 Each provider operation carries the exact session-executable definition and
 locus snapshot prepared under
@@ -511,7 +624,11 @@ error; oversized bytes are never persisted. Error evidence is a closed kind plus
 an optional detail and is stored once on the attempt row. A present detail is
 1–4,096 UTF-8 bytes, contains no control character, and has no leading or
 trailing POSIX whitespace; it is otherwise retained exactly. Domain construction
-and the database constraint enforce the same admission rule.
+and the database constraint enforce the same admission rule. These two bounds
+are the source of the direct-process output caps above: an executor that
+produces more output than its durable evidence can hold truncates honestly and
+reports the true sizes rather than widening the bound or converting a success
+into a failure.
 
 Semantic tool-result entries contain references only:
 
@@ -891,6 +1008,11 @@ one global version constant.
 - Rich result-content variants and durable tool-definition revisioning across
   outstanding requests are recorded in
   [Tool safety](../open-questions.md#tool-safety).
+- Durable storage for payloads larger than the 1 MiB result and 4,096-byte
+  detail bounds, and the abuse controls a larger bound requires, are recorded in
+  [Tool safety](../open-questions.md#tool-safety). The version-one output caps
+  above are those bounds restated, not a judgment about how much output is
+  useful.
 - General tool-attempt retry and ambiguous-wait resolution beyond the sealed
   runner-loss transitions are recorded in
   [Tool safety](../open-questions.md#tool-safety).

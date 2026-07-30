@@ -340,6 +340,24 @@ impl<'a> Output<'a> {
         writeln!(self.stdout, "{session_id}")
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn session_compacted(
+        &mut self,
+        session_id: CanonicalUuid,
+        context_compaction_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+        through_position: u64,
+        summary_entry_id: CanonicalUuid,
+        result_frontier_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "session={session_id} compaction={context_compaction_id} call={model_call_id} \
+             through_position={through_position} summary_entry={summary_entry_id} \
+             result_frontier={result_frontier_id}"
+        )
+    }
+
     pub(crate) fn template_summary(&mut self, name: &str, version: u64) -> io::Result<()> {
         writeln!(self.stdout, "name={name} version={version}")
     }
@@ -563,7 +581,7 @@ impl<'a> Output<'a> {
         writeln!(
             self.stdout,
             "finding={} target={} run={} pass={} status={} events={} line_start={} line_end={} \
-             diff_side={} severity={} confidence={}",
+             diff_side={} severity={} is_real_confidence={} severity_label_confidence={}",
             finding.finding.finding_id,
             finding.target_id,
             finding.run_id,
@@ -583,7 +601,8 @@ impl<'a> Output<'a> {
                 .diff_side
                 .map_or("none", review_diff_side_label),
             review_severity_label(finding.finding.severity),
-            finding.finding.confidence.value(),
+            finding.finding.is_real_confidence.value(),
+            finding.finding.severity_label_confidence.value(),
         )?;
         self.review_text_field("file_path", &finding.finding.file_path)?;
         self.review_text_field("title", &finding.finding.title)?;
@@ -911,6 +930,20 @@ impl<'a> Output<'a> {
                      tool_attempt={tool_attempt_id}"
                 ),
             },
+            SessionEvent::ContextCompacted {
+                context_compaction_id,
+                model_call_id,
+                through_position,
+                summary_entry_id,
+                result_frontier_id,
+            } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} context_compacted \
+                 compaction={context_compaction_id} call={model_call_id} \
+                 through={} summary_entry={summary_entry_id} \
+                 frontier={result_frontier_id}",
+                through_position.value()
+            ),
             SessionEvent::TurnCompleted {
                 turn_id,
                 model_call_id,
@@ -1165,6 +1198,15 @@ impl<'a> Output<'a> {
                     TranscriptTextEntry::Assistant { turn_id, .. } => {
                         format!("assistant turn={turn_id}")
                     }
+                    TranscriptTextEntry::ContextSummary {
+                        model_call_id,
+                        first_source_session_id,
+                        first_entry_id,
+                        through_source_session_id,
+                        through_entry_id,
+                    } => format!(
+                        "context_summary model_call={model_call_id} range={first_source_session_id}/{first_entry_id}..={through_source_session_id}/{through_entry_id}"
+                    ),
                     TranscriptTextEntry::Imported {
                         imported_conversation_id,
                         imported_entry_id,
@@ -1838,7 +1880,7 @@ mod tests {
 
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
-            finding=00000000-0000-0000-0000-000000000004 target=00000000-0000-0000-0000-000000000001 run=00000000-0000-0000-0000-000000000002 pass=00000000-0000-0000-0000-000000000003 status=open events=2 line_start=7 line_end=9 diff_side=right severity=high confidence=9000
+            finding=00000000-0000-0000-0000-000000000004 target=00000000-0000-0000-0000-000000000001 run=00000000-0000-0000-0000-000000000002 pass=00000000-0000-0000-0000-000000000003 status=open events=2 line_start=7 line_end=9 diff_side=right severity=high is_real_confidence=9000 severity_label_confidence=8500
             file_path=src/lib.rs
             title=Retain evidence
             body=First line\u{a}Second line
@@ -2922,7 +2964,8 @@ mod tests {
                 title: String::from("Retain evidence"),
                 body: String::from("First line\nSecond line"),
                 severity: ReviewSeverity::High,
-                confidence: CanonicalU64::new(9_000),
+                is_real_confidence: CanonicalU64::new(9_000),
+                severity_label_confidence: CanonicalU64::new(8_500),
                 category: String::from("correctness"),
                 recommended_fix: Some(String::from("Bind the exact\npass.")),
             },

@@ -1,10 +1,10 @@
 # Codex CLI subscription wire protocol
 
 > Dated research intake (2026-07-23), non-normative. This page records study
-> findings as input to future adapter work; it states no requirements. Decisions
-> live in the [decision ledger](../decisions.md); current requirements live in
-> the [living specification](../spec/README.md), which supersedes anything
-> stated here.
+> findings as input to future adapter work; it states no requirements.
+> Historical decisions live in git history; current requirements live in the
+> [living specification](../spec/README.md), which supersedes anything stated
+> here.
 
 - Date: 2026-07-23
 - Status: research intake, proposal-grade input only; describes the publicly

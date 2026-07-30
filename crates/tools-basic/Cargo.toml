@@ -29,6 +29,7 @@ signalbox-application = { path = "../application" }
 signalbox-domain = { path = "../domain" }
 signalbox-persistence = { path = "../persistence" }
 signalbox-tool-contract = { path = "../tool-contract" }
+signalbox-tool-schema-derive = { path = "../tool-schema-derive" }
 sqlx = { version = "0.9.0", default-features = false, features = ["postgres"] }
 tokio = { version = "1.53.0", default-features = false, features = [
     "io-util",

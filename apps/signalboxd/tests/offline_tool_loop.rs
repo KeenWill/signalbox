@@ -100,12 +100,16 @@ const OFFLINE_CODE_HOST_TOKEN: &[u8] = b"offline-code-host-token";
 const PROCESS_MODEL_CONFIGURATION: &str = r#"
 version = 1
 
+[compaction]
+prompt = "Summarize the prior conversation faithfully for continuation."
+
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000001"
 target_id = "00000000-0000-0000-0000-000000000002"
 provider = "anthropic"
 provider_model = "fixture-model"
 max_output_tokens = 64
+context_window_tokens = 200000
 "#;
 
 #[derive(Clone, Debug)]
@@ -224,6 +228,7 @@ impl ToolLoopFixture {
                 target,
                 String::from("scripted-tool-loop"),
                 64,
+                200_000,
             )
             .expect("fixture runtime definition is valid")])
             .expect("one fixture runtime target is unique");
@@ -3128,7 +3133,7 @@ async fn s02_s10_inv006_refused_continuation_call_admits_and_runs_later_turn()
 }
 
 /// S02 / S08 / S10 / INV-016 / INV-036: a NextSafePoint input accepted through
-/// process protocol version thirteen while a tool round is parked is consumed by the
+/// while a tool round is parked is consumed by the
 /// continuation call, the
 /// steering-bearing continuation completes the turn, and the committed shape
 /// reloads through the scheduling projection — the startup scan completes and
@@ -3159,7 +3164,7 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_completes()
 
     let steering_content = InputContent::new(String::from("steer the parked tool round"));
     let steering_frame = ClientFrame::try_new_for_version(
-        ProtocolVersion::Thirteen,
+        ProtocolVersion::One,
         RequestId::try_new(1)?,
         ClientRequest::SubmitInput {
             command_id: CommandId::try_from_uuid(Uuid::from_u128(0x3610))?,

@@ -7,8 +7,8 @@
 > stated here.
 
 - Date: 2026-07-20
-- Status: research intake, proposal-grade input only; where this document and a
-  merged ADR disagree, the ADR wins
+- Status: research intake, proposal-grade input only; where this document and
+  the living specification disagree, the living specification wins
 - Audited snapshot: `janfeddersen-wq/serdesAI` @
   `1424128b0c64d9c2403eb0896cde881777941669`, workspace version 0.2.6, MIT
 - Assessed against: ADR-0005 (retry and acceptance-boundary rules) and ADR-0043
@@ -325,12 +325,12 @@ account for 90 of 92 human-authored commits, with 73 attributed to Jan
 Feddersen. This full-history clone count differs from ADR-0047's earlier
 repository-health snapshot of roughly 43 commits and two human contributors;
 that record does not preserve its query or counting method, so the figures
-cannot be normalized after the fact. ADR-0047 remains authoritative for its
-accepted substrate posture, while these commands document this audit's
-reproducible pinned-clone measurement; the discrepancy does not change the
-shared concentration signal or reopen the later recorded hand-roll decision in
-the
-[decision log](../decisions.md#2026-07-20--hand-roll-the-typed-model-runtime-substrate).
+cannot be normalized after the fact. The current substrate posture lives in the
+[runtime-substrate specification](../spec/runtime-substrate.md), while these
+commands document this audit's reproducible pinned-clone measurement; the
+discrepancy does not change the shared concentration signal or the historical
+hand-roll choice recorded in
+[commit 3824b927](https://github.com/KeenWill/signalbox/commit/3824b9278a0e16314fda3ecef5db844081d0a4bb).
 Repo-health facts from the handoff (checked 2026-07-20, not re-verified here):
 20 stars, 4 forks, crates.io `serdes-ai` 0.2.6 published 2026-02-20 — five
 months behind repo activity — with 2,105 lifetime downloads. In-repo signals
@@ -382,16 +382,18 @@ usage-limit enforcement via in-process counters rather than durable budgets.
   `serdes-ai-models/src/openai/types.rs`), the SSE record parser
   (`serdes-ai-streaming/src/sse.rs`), the message/part vocabulary, and the
   profile/schema-transform design contain patterns worth studying. The error,
-  retry, and agent layers would not survive contact with the ADRs. The recorded
-  hand-roll decision permits design reference only and copies no SerdesAI code.
+  retry, and agent layers would not survive contact with the ADRs. The
+  implemented [runtime-substrate contract](../spec/runtime-substrate.md) permits
+  design reference only and copies no SerdesAI code.
 
 ## (c) Recommendation
 
 **Hand-roll a thin provider layer inside Signalbox, using SerdesAI strictly as a
 design reference and copying no code, rather than vendoring SerdesAI crates
-wholesale.** This audit recommendation is now recorded by the
-[hand-roll decision](../decisions.md#2026-07-20--hand-roll-the-typed-model-runtime-substrate),
-which is authoritative.
+wholesale.** The implemented contract now lives in
+[runtime-substrate](../spec/runtime-substrate.md);
+[commit 3824b927](https://github.com/KeenWill/signalbox/commit/3824b9278a0e16314fda3ecef5db844081d0a4bb)
+is the public provenance for the historical choice.
 
 "Depend on upstream releases" stays out on the maintenance signals (Q9: 90 of 92
 human-authored commits concentrated in two contributors, stale crates.io
@@ -426,8 +428,8 @@ so vendoring `serdes-ai-core` + `serdes-ai-models` and rewriting in place is
 [real-provider smoke milestone](../target-model.md#priority-order) (priority
 item 4) is implemented, compare the hand-rolled wire layer with the roughly
 sized relevant vendored code. If the former has ballooned past the latter,
-revisit this choice through the ADR process; the audit evidence supports either
-direction of that trade.
+revisit this choice through an owner-reviewed change to the owning
+specification; the audit evidence supports either direction of that trade.
 
 ### Implementation minimum and later audit coverage
 
@@ -438,10 +440,11 @@ the outbound TLS, response-size, and parsing-hardening posture in
 [runtime-substrate](../spec/runtime-substrate.md) are resolved, the remaining
 implementation minimum is one provider adapter; `signalbox-model-runtime`
 already supplies the provider-neutral core, shared SSE framing,
-structured-output schema generation, and tool decoding selected by the recorded
-hand-roll decision. `provider-anthropic` is the illustrative first adapter below
-because its stream integrity is the stronger audited design. OpenAI remains
-later audit coverage, not part of that smoke gate.
+structured-output schema generation, and tool decoding selected by the
+[runtime-substrate contract](../spec/runtime-substrate.md). `provider-anthropic`
+is the illustrative first adapter below because its stream integrity is the
+stronger audited design. OpenAI remains later audit coverage, not part of that
+smoke gate.
 
 | Module                    | Milestone scope  | Content                                                                                                                                                                                                                                   | Design reference                                                                                                                                                                                |
 | ------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

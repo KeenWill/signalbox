@@ -10,10 +10,14 @@ continuation reconstitution and terminal shapes were verified through PR #292
 (`agent/continuation-reconstitution`), and the steering-free continuation shapes
 at the refused, reconciliation-required, and model-call recovery gates were
 verified through PR #296 (`agent/continuation-reconstitution-siblings`); the
-version-thirteen delivery surface, queued restart behavior, and protocol-driven
+input-delivery surface, queued restart behavior, and protocol-driven
 continuation steering were verified through PR #302 (`agent/mid-turn-steering`);
 the template-specific home requirement and template-catalog startup order were
-verified through PR #311 (`agent/session-templates-spec`). Code homes:
+verified through PR #311 (`agent/session-templates-spec`); exact start-frontier
+reconstitution across a validated compaction boundary was verified through PR
+`#312` (`agent/context-compaction-core`); and the corresponding persistent
+final-state gate was verified through PR #314
+(`agent/context-compaction-protocol`). Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
@@ -27,9 +31,9 @@ owner reconciliation decision that releases an ambiguity wait, together with the
 startup scan's separate report of sessions holding their slot for that decision,
 were verified through PR #281 (`agent/turn-reconciliation-recovery`). The finite
 startup scan and removal of the superseded steering blocker were verified
-through PR #291 (`agent/turn-control-verbs`).
-[docs/invariants.md](../invariants.md) remains the law catalog; INV tags below
-reference its rows without restating them. Designed lifecycle behavior that has
+through PR #291 (`agent/turn-control-verbs`). INV-tagged tests are the
+enforcement of record; tags below resolve through the generated
+[invariant test index](../invariants.md). Designed lifecycle behavior that has
 no committed code path appears only under [Open edges](#open-edges). The
 runner-loss recovery and runner-socket startup paragraphs are the foundation
 proposal at the bottom of their implementing stack and become verified only with
@@ -410,10 +414,10 @@ concurrently.
 ## Occupied-slot input handling
 
 Command construction, owner-global deduplication, and acceptance atomicity are
-[identity-and-commands](identity-and-commands.md) scope. Process protocol
-version thirteen exposes the existing delivery algebra as the closed
-`start_when_idle`, `steer`, and `queue` intents, mapped respectively to
-`StartWhenNoActiveTurn`, `NextSafePoint`, and `AfterCurrentTurn`;
+[identity-and-commands](identity-and-commands.md) scope. The process protocol
+exposes the existing delivery algebra as the closed `start_when_idle`, `steer`,
+and `queue` intents, mapped respectively to `StartWhenNoActiveTurn`,
+`NextSafePoint`, and `AfterCurrentTurn`;
 [process-protocol](process-protocol.md#client-requests) owns the wire shapes.
 The occupied-slot delivery outcomes implemented here are:
 
@@ -439,13 +443,13 @@ The occupied-slot delivery outcomes implemented here are:
   activate in ascending acceptance order.
 - `Interrupt` targeting the active turn atomically accepts a configured
   immediate-successor origin, constructs the exact `AppliedInterruptProof`, and
-  applies the predecessor transition (INV-029, INV-037). The version-eight
-  `stop_turn` request in [process-protocol](process-protocol.md#client-requests)
-  is the client surface that submits this delivery; it adds no authority beyond
-  the treatment specified here. Before any terminal transition releases the
-  slot, the same transaction reclassifies every pending steering input against
-  the interrupted turn as an ordered queued successor origin. Call, attempt, and
-  turn terminalization follow
+  applies the predecessor transition (INV-029, INV-037). The `stop_turn` request
+  in [process-protocol](process-protocol.md#client-requests) is the client
+  surface that submits this delivery; it adds no authority beyond the treatment
+  specified here. Before any terminal transition releases the slot, the same
+  transaction reclassifies every pending steering input against the interrupted
+  turn as an ordered queued successor origin. Call, attempt, and turn
+  terminalization follow
   [model-call-execution](model-call-execution.md#terminal-outcomes). A matching
   interrupt against `AwaitingRecoveryDecision` preserves the already terminal
   ambiguous call and ended attempt, records the new proof on the turn's
@@ -493,31 +497,55 @@ after the first commit. Locking, page bounds, and crash recovery are owned by
 [persistence-protocol](persistence-protocol.md).
 
 Only two owner commands consume that state. `ReplaceLostRunner` requires the
-expected current placement revision and either a different live exact runner or
-the one pending replacement enrollment it atomically activates. For a pinned
-loss, its transaction installs the checked successor placement and grant
-lineage, provisions a new revisioned workspace, appends the reference-only
-`RunnerPlacementChanged` semantic entry, extends the next context frontier, and
-returns the turn to the phase justified by its retained work. Safe retry proof
-may be consumed only inside this command. For `RunnerLostBeforePin`, replacement
-installs the new exact selector and returns the placement to `Unpinned` at the
-successor revision; it creates no semantic boundary, workspace, grant, or lease.
-Workspace provisioning and the first pin remain part of the eventual initial
-dispatch. `AbandonLostRunner` requires the same exact lost revision and no
-active turn, then installs terminal `RunnerAbandoned` placement state. If a turn
-is active it records `ActiveTurnRequiresExistingControl`; the owner first uses
-the existing `stop_turn`, approval-decision, or reconciliation flow until the
-slot is empty, so abandonment never mints cancellation authority. With no active
-turn, including an idle session with queued turns, no turn or frontier is
-fabricated; queued work remains queued and later runs with the daemon-only
-executable-tool snapshot because the terminal placement can issue no runner
-lease. No case turns ambiguous effect evidence into known failure.
+expected current placement revision and either a different live exact runner,
+the one pending replacement enrollment it atomically activates, or — for a
+registration-triggered loss alone — a checked re-enrollment of the same runner
+against its current connection
+([runner protocol and placement](runner-protocol.md#identity-enrollment-and-registration)).
+For a pinned loss, its transaction installs the checked successor placement and
+grant lineage, provisions a new revisioned workspace when the successor request
+requires one, appends the reference-only `RunnerPlacementChanged` semantic
+entry, extends the next context frontier, and returns the turn to the phase
+justified by its retained work. Safe retry proof may be consumed only inside
+this command.
+
+Replacement is never refused because a model call is in flight; it is staged
+behind that call. The command claims its identity and provisioning authorization
+immediately, while the terminal transaction that installs the successor
+placement, appends the placement entry, and extends the next context frontier
+commits only after any authorized in-flight daemon-local call for that session
+has reached its observation boundary. That call's assistant and tool entries
+therefore append first, from the frozen source frontier it was prepared against,
+and the placement boundary appends after them: the prefix-only frontier law
+holds, and the model never meets a placement event ordered ahead of output that
+could not have observed it. A call that terminalizes known-failed, refused,
+cancelled, or ambiguous reaches an observation boundary too, so staging cannot
+wait indefinitely on a call that will never complete. Why: the two rules — a
+call keeping its ordinary completion law and a replacement extending the next
+context frontier — are jointly satisfiable in exactly this order, and the
+persistence triggers that enforce prefix-only extension reject every other order
+at commit, so an implementation that appends the boundary early fails loudly in
+its own tests rather than writing a mis-ordered transcript. For
+`RunnerLostBeforePin`, replacement installs the new exact selector and returns
+the placement to `Unpinned` at the successor revision; it creates no semantic
+boundary, workspace, grant, or lease. Workspace provisioning and the first pin
+remain part of the eventual initial dispatch. `AbandonLostRunner` requires the
+same exact lost revision and no active turn, then installs terminal
+`RunnerAbandoned` placement state. If a turn is active it records
+`ActiveTurnRequiresExistingControl`; the owner first uses the existing
+`stop_turn`, approval-decision, or reconciliation flow until the slot is empty,
+so abandonment never mints cancellation authority. With no active turn,
+including an idle session with queued turns, no turn or frontier is fabricated;
+queued work remains queued and later runs with the daemon-only executable-tool
+snapshot because the terminal placement can issue no runner lease. No case turns
+ambiguous effect evidence into known failure.
 
 Equal command replay returns the recorded receipt. Another revision, a live or
-ordinary unpinned placement, the same runner, a stale connection, or an already
-replaced or abandoned session fails closed. These commands are administrative
-recovery, not input delivery: they neither widen `Interrupt` nor create a
-standalone cancellation path (INV-026, INV-029, INV-037, INV-044).
+ordinary unpinned placement, the same runner outside the registration-triggered
+recovery above, a stale connection, or an already replaced or abandoned session
+fails closed. These commands are administrative recovery, not input delivery:
+they neither widen `Interrupt` nor create a standalone cancellation path
+(INV-026, INV-029, INV-037, INV-044).
 
 ## Context frontier snapshots
 
@@ -547,15 +575,40 @@ the header-plus-prefix-delta representation; a deferred constraint trigger
 resolved membership — exact declared count, positions `1..count` — at commit.
 Reconstitution rejects any stored snapshot whose resolved membership disagrees
 with the complete entry set — one identifier can never resolve differently.
-In-memory append derivation structurally shares the immutable ordered prefix,
-membership index, and lineage index; complete iteration and comparison retain
-the same values and ordering. Imported ancestry resolves only through the
-checked session-creation producer; its separate one-to-one `ImportedSessionSeed`
-must name the exact stored frontier identity whose membership matches the
-selected imported prefix. Substituting an equal-content reminted identity for
-that seed fails reconstitution. `SingleSource` ancestry resolution remains
-unimplemented. `TranscriptFrontier` itself is
-[sessions-and-transcript](sessions-and-transcript.md) scope.
+Before validating any stored turn start, the complete scheduling scan
+reconstructs every dedicated compaction call, summary entry, source and result
+snapshot, exact summarized range, and predecessor link. Every compaction record
+requires its terminal `Completed` call and an exact source-plus-summary result;
+the predecessor chain must be single-rooted, linear, and prefix-preserving. A
+standalone `Completed` call or any standalone summary fails closed. A standalone
+`Prepared` or `InFlight` call blocks ordinary activation until the finite
+startup scan recovers its exactly correlated pending command: Prepared
+terminalizes `KnownFailed`, InFlight terminalizes `Ambiguous`, the command
+becomes failed, and neither branch creates a summary or result frontier. A
+terminal non-completed call remains historical recovery evidence without a
+summary or result. Live authorization and terminalization serialize on the
+session row and exactly replay an already-landed transition after an ambiguous
+commit. Unreferenced snapshots and compaction records fail closed.
+
+The exact historical start law remains closed. Its prefix is either the
+immediate predecessor's terminal snapshot (or the imported seed for the first
+native turn), or the validated chain tip's result when the start follows that
+compaction. A historical start committed before the chain tip remains admissible
+only when its entire stored frontier is an exact semantic prefix of the tip's
+source; this preserves old starts without authorizing a later turn to omit the
+summary. In either shape, the only remaining suffix is the already-required
+model-identity boundary, when applicable, followed by the turn's exact origin. A
+summary entry is never accepted as an arbitrary extra suffix. New eligibility
+uses the unique latest result when it preserves the applicable seed or
+predecessor terminal prefix. In-memory append derivation structurally shares the
+immutable ordered prefix, membership index, and lineage index; complete
+iteration and comparison retain the same values and ordering. Imported ancestry
+resolves only through the checked session-creation producer; its separate
+one-to-one `ImportedSessionSeed` must name the exact stored frontier identity
+whose membership matches the selected imported prefix. Substituting an
+equal-content reminted identity for that seed fails reconstitution.
+`SingleSource` ancestry resolution remains unimplemented. `TranscriptFrontier`
+itself is [sessions-and-transcript](sessions-and-transcript.md) scope.
 
 ## Evidence-bearing reconstitution
 
@@ -720,6 +773,12 @@ clones over the shared pool; no shared locked service instance exists.
   (`fatal_mismatch` module) but no aggregate transition or commit path.
 - Dispatch fencing covers model calls, daemon tools, and local runner leases;
   remote runner transport and result envelopes remain deferred.
+- Loss replacement is the only version-one producer of a placement change.
+  Owner-directed relocation of a healthy session, and a working-directory move
+  on the same runner, are committed functionality with no command here yet; the
+  placement-revision, transcript-boundary, and runner-event mechanisms this page
+  drives must stay compatible with a relocation that no loss caused
+  ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)).
 - The eligible terminal-failure path (queued turn fixes its start and fails
   without an attempt for a structurally unexecutable configuration) is
   unimplemented; activation is the only eligibility outcome.

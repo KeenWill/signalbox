@@ -13,15 +13,18 @@ use signalbox_domain::{
     AcceptedInputTurnSchedulingRecordState, ActiveTurnSchedulingReconstitutionInput, Actor,
     AppliedInterruptCommandResult, AssistantText, CancellationStopDisposition,
     CancelledModelCallTurnIdentities, CancelledTurnExecutionReconstitutionInput,
-    ConsumedSteeringReconstitutionInput, ContextFrontierId, ContinuationRoundReconstitutionInput,
-    DeliveryRequest, DirectModelSelection, DurableCommandId,
-    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
-    IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
-    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
-    ModelSelectionOverride, ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
-    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
-    ProviderModelIdentity, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
-    ResolvedProviderTarget, SemanticTranscriptEntryId,
+    ConsumedSteeringReconstitutionInput, ContextCompactionId,
+    ContextCompactionModelCallReconstitutionInput, ContextCompactionModelCallState,
+    ContextCompactionRange, ContextCompactionReconstitutionInput, ContextCompactionTokenUsage,
+    ContextFrontierId, ContinuationRoundReconstitutionInput, DeliveryRequest, DirectModelSelection,
+    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
+    FrozenModelSelection, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
+    ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
+    ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest,
+    NonEmptyUnicodeTextFailure, OriginConfiguration, PerInputConfigurationChoices,
+    PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
+    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
+    SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -431,7 +434,7 @@ impl SubmitInputRepository {
                 signalbox_domain::ContextFrontierId,
             ) + Send,
     {
-        self.handle_with_candidates_and_alias_resolver(
+        self.handle_with_candidates_alias_resolver(
             command,
             accepted_input,
             turn,
@@ -443,10 +446,9 @@ impl SubmitInputRepository {
         .await
     }
 
-    /// Handles one command using hub-minted cancellation/reclassification
-    /// candidates and the deployment's immutable alias definitions.
+    /// Handles one command with deployment model-alias resolution.
     #[allow(clippy::too_many_arguments)]
-    pub async fn handle_with_candidates_and_alias_resolver<NextTurn, NextToolCancellation>(
+    pub async fn handle_with_candidates_alias_resolver<NextTurn, NextToolCancellation>(
         &self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
@@ -2607,6 +2609,119 @@ pub(crate) async fn load_scheduling_projection(
         ));
     }
 
+    let compaction_rows = sqlx::query(
+        "SELECT
+            call.model_call_id,
+            call.source_frontier_id AS call_source_frontier_id,
+            call.direct_model_selection_id,
+            call.resolved_provider_model_identity_id,
+            call.state_kind,
+            call.terminal_disposition_kind,
+            call.input_tokens,
+            call.output_tokens,
+            call.cache_creation_input_tokens,
+            call.cache_read_input_tokens,
+            compaction.context_compaction_id,
+            compaction.predecessor_compaction_id,
+            compaction.source_frontier_id AS compaction_source_frontier_id,
+            compaction.result_frontier_id,
+            compaction.producing_call_id,
+            compaction.first_source_session_id,
+            compaction.first_entry_id,
+            compaction.through_source_session_id,
+            compaction.through_entry_id,
+            compaction.summary_entry_id
+         FROM context_compaction_model_call AS call
+         LEFT JOIN context_compaction AS compaction
+           ON compaction.producing_call_id = call.model_call_id
+          AND compaction.session_id = call.session_id
+        WHERE call.session_id = $1
+        ORDER BY call.model_call_id",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut compaction_calls = Vec::with_capacity(compaction_rows.len());
+    let mut compactions = Vec::with_capacity(compaction_rows.len());
+    for row in compaction_rows {
+        let call_id = ModelCallId::from_uuid(required(&row, "model_call_id")?);
+        let call_source_frontier_uuid: Uuid = required(&row, "call_source_frontier_id")?;
+        required_frontiers.insert(call_source_frontier_uuid);
+        let state_kind: String = required(&row, "state_kind")?;
+        let disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
+        let state = match (state_kind.as_str(), disposition.as_deref()) {
+            ("prepared", None) => ContextCompactionModelCallState::Prepared,
+            ("in_flight", None) => ContextCompactionModelCallState::InFlight,
+            ("terminal", Some(value)) => {
+                ContextCompactionModelCallState::Terminal(decode_model_call_disposition(value)?)
+            }
+            ("prepared" | "in_flight" | "terminal", _) => {
+                return Err(SubmitInputCorruption::Inconsistent(
+                    "compaction model call state payload",
+                )
+                .into());
+            }
+            (value, _) => {
+                return Err(SubmitInputCorruption::Unsupported {
+                    field: "compaction model call state_kind",
+                    value: value.to_owned(),
+                }
+                .into());
+            }
+        };
+        let usage = ContextCompactionTokenUsage::unreported()
+            .with_input_tokens(decode_optional_token_count(&row, "input_tokens")?)
+            .with_output_tokens(decode_optional_token_count(&row, "output_tokens")?)
+            .with_cache_creation_input_tokens(decode_optional_token_count(
+                &row,
+                "cache_creation_input_tokens",
+            )?)
+            .with_cache_read_input_tokens(decode_optional_token_count(
+                &row,
+                "cache_read_input_tokens",
+            )?);
+        compaction_calls.push(ContextCompactionModelCallReconstitutionInput::new(
+            call_id,
+            session_id,
+            DirectModelSelection::from_uuid(required(&row, "direct_model_selection_id")?),
+            ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(required(
+                &row,
+                "resolved_provider_model_identity_id",
+            )?)),
+            ContextFrontierId::from_uuid(call_source_frontier_uuid),
+            state,
+            usage,
+        ));
+        let Some(compaction_uuid) = row.try_get::<Option<Uuid>, _>("context_compaction_id")? else {
+            continue;
+        };
+        let compaction_id = ContextCompactionId::from_uuid(compaction_uuid);
+        let producing_call = ModelCallId::from_uuid(required(&row, "producing_call_id")?);
+        let source_frontier_uuid: Uuid = required(&row, "compaction_source_frontier_id")?;
+        let result_frontier_uuid: Uuid = required(&row, "result_frontier_id")?;
+        required_frontiers.insert(source_frontier_uuid);
+        required_frontiers.insert(result_frontier_uuid);
+        let first = SemanticTranscriptEntryRef::from_source(
+            session_id_from_uuid(required(&row, "first_source_session_id")?),
+            SemanticTranscriptEntryId::from_uuid(required(&row, "first_entry_id")?),
+        );
+        let through = SemanticTranscriptEntryRef::from_source(
+            session_id_from_uuid(required(&row, "through_source_session_id")?),
+            SemanticTranscriptEntryId::from_uuid(required(&row, "through_entry_id")?),
+        );
+        let predecessor: Option<Uuid> = row.try_get("predecessor_compaction_id")?;
+        compactions.push(ContextCompactionReconstitutionInput::new(
+            compaction_id,
+            session_id,
+            predecessor.map(ContextCompactionId::from_uuid),
+            ContextFrontierId::from_uuid(source_frontier_uuid),
+            ContextFrontierId::from_uuid(result_frontier_uuid),
+            producing_call,
+            ContextCompactionRange::inclusive(first, through),
+            SemanticTranscriptEntryId::from_uuid(required(&row, "summary_entry_id")?),
+        ));
+    }
+
     let required_frontier_ids = required_frontiers.iter().copied().collect::<Vec<_>>();
     let frontier_rows = sqlx::query(
         "WITH RECURSIVE frontier_ids (context_frontier_id) AS (
@@ -2715,7 +2830,13 @@ pub(crate) async fn load_scheduling_projection(
             assistant_response_part_ordinal,
             model_identity_turn_id,
             model_identity_defaults_version,
-            model_identity_direct_selection_id
+            model_identity_direct_selection_id,
+            context_summary_value,
+            context_summary_producing_call_id,
+            context_summary_first_source_session_id,
+            context_summary_first_entry_id,
+            context_summary_through_source_session_id,
+            context_summary_through_entry_id
          FROM semantic_transcript_entry
         WHERE payload_kind <> 'imported_entry'
           AND (
@@ -2774,6 +2895,88 @@ pub(crate) async fn load_scheduling_projection(
             row.try_get("model_identity_defaults_version")?;
         let model_identity_direct_selection: Option<Uuid> =
             row.try_get("model_identity_direct_selection_id")?;
+        let summary_value: Option<String> = row.try_get("context_summary_value")?;
+        let summary_call: Option<Uuid> = row.try_get("context_summary_producing_call_id")?;
+        let summary_first_session: Option<Uuid> =
+            row.try_get("context_summary_first_source_session_id")?;
+        let summary_first_entry: Option<Uuid> = row.try_get("context_summary_first_entry_id")?;
+        let summary_through_session: Option<Uuid> =
+            row.try_get("context_summary_through_source_session_id")?;
+        let summary_through_entry: Option<Uuid> =
+            row.try_get("context_summary_through_entry_id")?;
+        if payload_kind == "context_summary" {
+            if origin.is_some()
+                || steering_source_turn.is_some()
+                || failed_turn.is_some()
+                || cancelled_turn.is_some()
+                || assistant_text.is_some()
+                || producing_call.is_some()
+                || tool_request.is_some()
+                || tool_result_request.is_some()
+                || tool_result_attempt.is_some()
+                || completed_turn.is_some()
+                || imported_conversation.is_some()
+                || imported_transcript_entry.is_some()
+                || assistant_response_part_ordinal.is_some()
+                || model_identity_turn.is_some()
+                || model_identity_defaults_version.is_some()
+                || model_identity_direct_selection.is_some()
+            {
+                return Err(SubmitInputCorruption::Inconsistent("semantic entry payload").into());
+            }
+            let (
+                Some(value),
+                Some(call),
+                Some(first_session),
+                Some(first_entry),
+                Some(through_session),
+                Some(through_entry),
+            ) = (
+                summary_value,
+                summary_call,
+                summary_first_session,
+                summary_first_entry,
+                summary_through_session,
+                summary_through_entry,
+            )
+            else {
+                return Err(SubmitInputCorruption::Inconsistent("semantic entry payload").into());
+            };
+            let payload = InitialSemanticTranscriptEntryPayload::ContextSummary {
+                producing_call: ModelCallId::from_uuid(call),
+                summarized: ContextCompactionRange::inclusive(
+                    SemanticTranscriptEntryRef::from_source(
+                        session_id_from_uuid(first_session),
+                        SemanticTranscriptEntryId::from_uuid(first_entry),
+                    ),
+                    SemanticTranscriptEntryRef::from_source(
+                        session_id_from_uuid(through_session),
+                        SemanticTranscriptEntryId::from_uuid(through_entry),
+                    ),
+                ),
+                value: AssistantText::try_new(value).map_err(|error| {
+                    SubmitInputCorruption::InvalidContent {
+                        field: "context_summary_value",
+                        failure: error.failure(),
+                    }
+                })?,
+            };
+            semantic_entries.push(SemanticTranscriptEntryReconstitutionInput::new(
+                entry,
+                source_session,
+                payload,
+            ));
+            continue;
+        }
+        if summary_value.is_some()
+            || summary_call.is_some()
+            || summary_first_session.is_some()
+            || summary_first_entry.is_some()
+            || summary_through_session.is_some()
+            || summary_through_entry.is_some()
+        {
+            return Err(SubmitInputCorruption::Inconsistent("semantic entry payload").into());
+        }
         if payload_kind == "model_identity_changed" {
             if origin.is_some()
                 || steering_source_turn.is_some()
@@ -3138,6 +3341,7 @@ pub(crate) async fn load_scheduling_projection(
     }
     input
         .with_model_call_facts(pinned_targets, model_calls)
+        .with_context_compaction_facts(compaction_calls, compactions)
         .with_consumed_steering_facts(consumed_steering)
         .with_steering_continuation_rounds(steering_continuation_rounds)
         .with_continuation_rounds(continuation_rounds)
@@ -5855,6 +6059,24 @@ fn decode_frozen_model(
         }
         .into()),
     }
+}
+
+fn decode_optional_token_count(
+    row: &PgRow,
+    field: &'static str,
+) -> Result<Option<u64>, SubmitInputRepositoryError> {
+    let value: Option<Decimal> = row.try_get(field)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !value.fract().is_zero() || value < Decimal::ZERO {
+        return Err(
+            SubmitInputCorruption::Inconsistent("compaction model call token usage").into(),
+        );
+    }
+    u64::try_from(value).map(Some).map_err(|_| {
+        SubmitInputCorruption::Inconsistent("compaction model call token usage").into()
+    })
 }
 
 fn decode_model_call_disposition(

@@ -10,12 +10,14 @@ members = [
     "crates/expect-table",
     "crates/model-runtime",
     "crates/model-runtime-anthropic",
+    "crates/model-runtime-claude-cli",
     "crates/model-runtime-codex-cli",
     "crates/model-runtime-openai",
     "crates/model-provider-runtime",
     "crates/persistence",
     "crates/process-protocol",
     "crates/tool-contract",
+    "crates/tool-schema-derive",
     "crates/tools-basic",
     "crates/tools-code-host",
 ]
@@ -33,6 +35,7 @@ publish = false
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
+disallowed_methods = "deny"
 expect_used = "deny"
 panic = "deny"
 todo = "deny"

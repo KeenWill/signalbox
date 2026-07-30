@@ -160,11 +160,12 @@ The shipped example contains exactly one credential entry:
 PAT file and whose `injection_env` is `GH_TOKEN`. The parser and resolver are
 otherwise name-generic: adding another credential shape is a configuration
 entry, not a code branch. The runner advertises the exact configured credential
-and repository names as availability; the daemon records no credential-specific
-effect or approval policy, and an owner placement may grant only a name the
-current registration advertised. Reserved model-provider profile and environment
-names are rejected. Because arbitrary secret bytes have no self-describing type,
-file contents cannot be classified as a provider key; the runner has no
+names, and each configured repository key paired with the profile name its own
+entry carries, as availability; the daemon records no credential-specific effect
+or approval policy, and an owner placement may grant only a name the current
+registration advertised. Reserved model-provider profile and environment names
+are rejected. Because arbitrary secret bytes have no self-describing type, file
+contents cannot be classified as a provider key; the runner has no
 model-provider config field or daemon path that supplies one.
 
 Startup opens or creates `runner_root` as an effective-user-owned real `0700`
@@ -326,7 +327,7 @@ credential presence is never consulted (INV-008):
   turn as a known failure before any model call exists; a credential or send
   failure occurs only after the call exists. Why: keeping configuration absence
   distinct from provider failure, with no silent model substitution, is what
-  INV-017 and INV-018 require. Lifecycle detail is
+  INV-018 requires. Lifecycle detail is
   [model-call-execution](model-call-execution.md) material.
 
 Each accepted origin retains the selection frozen from its defaults epoch.
@@ -391,15 +392,15 @@ deployment-side rules that code cannot enforce are stated in
 - **Failure behavior.** A failed resolution, or a value that cannot form an HTTP
   header (empty, non-UTF-8, non-header-safe bytes), is a typed known preparation
   failure: the call ends `KnownFailed`, the attempt ends with a known failure,
-  the turn fails — no automatic retry, no fallback (INV-014, INV-017, INV-018).
-  Why: a missing credential is deployment misconfiguration, and retry or
-  substitution would hide it. A provider rejecting the credential after send is
-  ordinary outcome evidence ([model-call-execution](model-call-execution.md)).
-  For a code-host tool, resolution or header failure is fixed known-failure
-  evidence naming the credential rather than the code host — the request never
-  left the daemon; definitive code-host rejection is likewise fixed under its
-  own detail, while an uncertain mutation acknowledgement follows the tool
-  loop's external-effect ambiguity contract.
+  the turn fails — no automatic retry, no fallback (INV-014, INV-018). Why: a
+  missing credential is deployment misconfiguration, and retry or substitution
+  would hide it. A provider rejecting the credential after send is ordinary
+  outcome evidence ([model-call-execution](model-call-execution.md)). For a
+  code-host tool, resolution or header failure is fixed known-failure evidence
+  naming the credential rather than the code host — the request never left the
+  daemon; definitive code-host rejection is likewise fixed under its own detail,
+  while an uncertain mutation acknowledgement follows the tool loop's
+  external-effect ambiguity contract.
 - **Durable references, never values.** Postgres never stores a credential
   value. Each model call durably pins its non-secret credential reference at the
   `Prepared` insert (`model_call.credential_reference`), immutable thereafter
@@ -417,6 +418,17 @@ and resolved only by `signalbox-runner`. The daemon, client, database,
 transcript, workspace manifest, and runner wire never receive a runner
 credential path or value (INV-035, INV-045).
 
+A session may hold no credential at all, and no boundary infers one. When the
+placement selected no profile the daemon issues no grant, the lease carries no
+credential dispatch authorization, and the runner resolves no path and injects
+no value for that session's dispatches; a repository whose configured entry
+requires a profile fails with the typed `credential_unavailable` class rather
+than resolving a profile the owner never selected. The converse is equally
+admitted: a named profile is granted to a session with no repository and no
+workspace, because the credential is scoped to that session's dispatches rather
+than to a clone
+([runner protocol and placement](runner-protocol.md#session-composition)).
+
 At lease admission the runner requires the exact granted name in its startup
 configuration; absence rejects the claim before any executable capability is
 issued. Immediately before each provisioning or tool dispatch, it opens the
@@ -431,14 +443,25 @@ between operations.
 The value is supplied only under the configured environment name inside the
 bubblewrap namespace. It does not appear in command arguments, Git remote URLs,
 Git configuration, inherited host environment, error details, or logs. Git tools
-use a fixed runner-owned credential helper inside the namespace. It returns the
-selected value only when protocol, exact `github.com` host, owner/repository
-path, repository key, and repository-bound credential profile all match the
-provisioned workspace; every other query returns no credential. The runner
-scrubs the exact value and its JSON-string-escaped form from admitted stdout,
-stderr, and result text before forwarding. This reduces accidental echo; it
-cannot prevent model-controlled code from transforming or using the value within
-its granted repository scope, which is an accepted restricted-profile cost.
+use a fixed runner-owned credential helper inside the namespace, and its
+authorization is bound to the repository entry that dispatch resolved rather
+than to the session's provisioned workspace. For a Git tool operating on an
+existing worktree that entry is the repository key the workspace manifest
+records; for `git_clone` it is the checked `repository` argument, whose
+configured entry the runner resolves before the invocation. The helper returns
+the selected value only when the query's protocol, exact `github.com` host, and
+owner/repository path all match that entry's configuration-validated canonical
+URL and that entry names exactly the granted credential profile; every other
+query returns no credential. Why: binding the helper to the provisioned
+workspace left the operation that introduces a session's first repository
+unauthorizable, because a clone runs in a writable root whose manifest names no
+repository key at all
+([runner protocol and placement](runner-protocol.md#workspace-provisioning-and-recovery)).
+The runner scrubs the exact value and its JSON-string-escaped form from admitted
+stdout, stderr, and result text before forwarding. This reduces accidental echo;
+it cannot prevent model-controlled code from transforming or using the value
+within its granted repository scope, which is an accepted restricted-profile
+cost.
 
 Unknown profiles fail before lease claim. A credential failure after a claimed
 dispatch is a fixed `ExecutionFailed` observation naming only the profile and

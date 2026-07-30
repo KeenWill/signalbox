@@ -69,6 +69,8 @@ const STEERING_INPUT_LINE: &str = ":steer inspect the cache\n";
 const STOP_INPUT_LINE: &str = ":stop successor owner line\n";
 const FIRST_DELTA: &str = "checking ";
 const FINAL_REPLY: &str = "approved tool reply";
+const COMPACTION_PROMPT: &str = "Summarize the prior conversation faithfully for continuation.";
+const CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 
 struct SocketDirectory {
     directory: PathBuf,
@@ -185,12 +187,16 @@ impl RunningIdleFixture {
             r#"
 version = 1
 
+[compaction]
+prompt = "{COMPACTION_PROMPT}"
+
 [[models]]
 selection_id = "{selection_uuid}"
 target_id = "{target_uuid}"
 provider = "anthropic"
 provider_model = "idle-chat"
 max_output_tokens = 64
+context_window_tokens = {CONTEXT_WINDOW_TOKENS}
 "#,
         ))?;
         let sweep = PostgresEligibilitySweep::new(pool.clone());
@@ -258,12 +264,16 @@ impl RunningChatFixture {
             r#"
 version = 1
 
+[compaction]
+prompt = "{COMPACTION_PROMPT}"
+
 [[models]]
 selection_id = "{}"
 target_id = "{}"
 provider = "anthropic"
 provider_model = "{SCRIPTED_PROVIDER}"
 max_output_tokens = 64
+context_window_tokens = {CONTEXT_WINDOW_TOKENS}
 "#,
             selection.into_uuid(),
             target_uuid,
@@ -277,6 +287,7 @@ max_output_tokens = 64
                 target,
                 String::from(SCRIPTED_PROVIDER),
                 64,
+                CONTEXT_WINDOW_TOKENS,
             )
             .expect("the fixture runtime definition is valid")])
             .expect("the fixture runtime target is unique");

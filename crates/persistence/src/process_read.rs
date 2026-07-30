@@ -10,8 +10,8 @@ use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, DirectModelSelection, ImportedConversationId,
     ImportedSourceAttestation, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias,
-    ModelCallId, SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId,
-    TurnId,
+    ModelCallId, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolAttemptId,
+    ToolRequestId, TurnAttemptId, TurnId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -535,6 +535,23 @@ pub enum ProcessTranscriptEntry {
         /// Exact direct model identity frozen for that turn.
         selected: DirectModelSelection,
     },
+    /// Model-produced summary of one exact earlier semantic range.
+    ContextSummary {
+        /// Zero-based position in the complete frontier.
+        entry_index: u64,
+        /// Session that owns the immutable summary entry.
+        source_session: SessionId,
+        /// Semantic summary-entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Dedicated producing model call.
+        model_call: ModelCallId,
+        /// Inclusive summarized-range first entry.
+        first: signalbox_domain::SemanticTranscriptEntryRef,
+        /// Inclusive summarized-range final entry.
+        through: signalbox_domain::SemanticTranscriptEntryRef,
+        /// Exact model-produced summary text.
+        content: String,
+    },
     /// Exact accepted owner input.
     User {
         /// Zero-based position in the projected frontier.
@@ -897,7 +914,14 @@ impl ProcessTranscriptReader {
 
         if self.entry_count.is_none() {
             let session = self.session;
-            let latest_frontier = self.latest_frontier;
+            let current_frontier = self.latest_frontier;
+            let latest_frontier = advance_through_latest_compaction(
+                self.transaction_mut()?,
+                session,
+                current_frontier,
+            )
+            .await?;
+            self.latest_frontier = latest_frontier;
             self.entry_count = Some(match latest_frontier {
                 Some(frontier) => {
                     open_transcript_entry_cursor(self.transaction_mut()?, session, frontier).await?
@@ -953,6 +977,70 @@ impl ProcessTranscriptReader {
         self.transaction
             .as_mut()
             .ok_or_else(|| ProcessReadCorruption::Missing("process read transaction").into())
+    }
+}
+
+async fn advance_through_latest_compaction(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+    current: Option<ContextFrontierId>,
+) -> Result<Option<ContextFrontierId>, ProcessReadError> {
+    let latest: Option<Uuid> = sqlx::query_scalar(
+        "SELECT candidate.result_frontier_id
+           FROM context_compaction AS candidate
+          WHERE candidate.session_id = $1
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM context_compaction AS successor
+                 WHERE successor.session_id = candidate.session_id
+                   AND successor.predecessor_compaction_id =
+                           candidate.context_compaction_id
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(latest) = latest.map(ContextFrontierId::from_uuid) else {
+        return Ok(current);
+    };
+    let Some(current) = current else {
+        return Ok(Some(latest));
+    };
+    if current == latest {
+        return Ok(Some(current));
+    }
+    let row: (bool, bool) = sqlx::query_as(
+        "SELECT
+            NOT EXISTS (
+                SELECT 1
+                  FROM resolve_context_frontier_members($1, $2) AS earlier
+                  LEFT JOIN resolve_context_frontier_members($1, $3) AS later
+                    ON later.member_position = earlier.member_position
+                   AND later.source_session_id = earlier.source_session_id
+                   AND later.semantic_entry_id = earlier.semantic_entry_id
+                 WHERE later.member_position IS NULL
+            ),
+            NOT EXISTS (
+                SELECT 1
+                  FROM resolve_context_frontier_members($1, $3) AS earlier
+                  LEFT JOIN resolve_context_frontier_members($1, $2) AS later
+                    ON later.member_position = earlier.member_position
+                   AND later.source_session_id = earlier.source_session_id
+                   AND later.semantic_entry_id = earlier.semantic_entry_id
+                 WHERE later.member_position IS NULL
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(current.into_uuid())
+    .bind(latest.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await?;
+    match row {
+        (true, false) => Ok(Some(latest)),
+        (false, true) => Ok(Some(current)),
+        _ => {
+            Err(ProcessReadCorruption::Inconsistent("turn and compaction frontier lineage").into())
+        }
     }
 }
 
@@ -1036,12 +1124,6 @@ impl From<ProcessReadCorruption> for ProcessReadError {
 #[derive(Clone, Debug)]
 pub struct ProcessReadRepository {
     pool: PgPool,
-}
-
-#[derive(Clone, Copy)]
-enum ModelCallUsageRead {
-    Included,
-    Omitted,
 }
 
 impl ProcessReadRepository {
@@ -1180,9 +1262,7 @@ impl ProcessReadRepository {
 
     /// Returns whether the selected session has durable tool-only history.
     ///
-    /// This narrow read lets a process adapter reject a retained protocol
-    /// version before mutating a session whose transcript that version cannot
-    /// represent.
+    /// This narrow read reports whether tool-only transcript evidence exists.
     pub async fn session_has_tool_history(
         &self,
         requested_session: SessionId,
@@ -1222,25 +1302,6 @@ impl ProcessReadRepository {
         Ok(row.map(SessionId::from_uuid))
     }
 
-    /// Returns whether the selected session has a model-identity boundary.
-    pub async fn session_has_model_identity_history(
-        &self,
-        requested_session: SessionId,
-    ) -> Result<bool, ProcessReadError> {
-        sqlx::query_scalar(
-            "SELECT EXISTS (
-                 SELECT 1
-                   FROM semantic_transcript_entry
-                  WHERE source_session_id = $1
-                    AND payload_kind = 'model_identity_changed'
-             )",
-        )
-        .bind(session_id_to_uuid(requested_session))
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Into::into)
-    }
-
     /// Reads whether the session exists and, when it does, whether its active
     /// turn is parked on the model-call recovery wait.
     ///
@@ -1277,6 +1338,147 @@ impl ProcessReadRepository {
                 turn: TurnId::from_uuid(turn),
             },
         })
+    }
+
+    /// Reads only the exact source-qualified semantic entries selected for a
+    /// compaction range, preserving their one-based physical positions.
+    pub async fn read_selected_transcript_entries(
+        &self,
+        positions: &[u64],
+        references: &[SemanticTranscriptEntryRef],
+    ) -> Result<Box<[ProcessTranscriptEntry]>, ProcessReadError> {
+        if positions.is_empty() || positions.len() != references.len() {
+            return Err(
+                ProcessReadCorruption::Inconsistent("selected transcript range shape").into(),
+            );
+        }
+        let stored_positions = positions
+            .iter()
+            .copied()
+            .map(Decimal::from)
+            .collect::<Vec<_>>();
+        let source_sessions = references
+            .iter()
+            .map(|reference| session_id_to_uuid(reference.source_session()))
+            .collect::<Vec<_>>();
+        let entry_ids = references
+            .iter()
+            .map(|reference| reference.entry().into_uuid())
+            .collect::<Vec<_>>();
+        let rows = sqlx::query(
+            "SELECT
+                selected.member_position,
+                selected.source_session_id,
+                selected.semantic_entry_id,
+                entry.payload_kind,
+                entry.origin_accepted_input_id,
+                entry.steering_source_turn_id,
+                entry.failed_turn_id,
+                entry.assistant_text_value,
+                entry.producing_model_call_id,
+                entry.assistant_tool_request_id,
+                entry.tool_result_request_id,
+                entry.tool_result_attempt_id,
+                entry.completed_turn_id,
+                entry.cancelled_turn_id,
+                entry.imported_conversation_id,
+                entry.imported_transcript_entry_id,
+                entry.model_identity_turn_id,
+                entry.model_identity_defaults_version,
+                entry.model_identity_direct_selection_id,
+                entry.context_summary_value,
+                entry.context_summary_producing_call_id,
+                entry.context_summary_first_source_session_id,
+                entry.context_summary_first_entry_id,
+                entry.context_summary_through_source_session_id,
+                entry.context_summary_through_entry_id,
+                imported.source_speaker_kind AS imported_source_speaker_kind,
+                imported.content_encoding AS imported_content_encoding,
+                accepted.content_text AS origin_content,
+                accepted.origin_turn_id,
+                call.turn_id AS assistant_turn_id,
+                result_attempt.request_id AS result_attempt_request_id,
+                transcript_request.tool_name AS transcript_tool_name,
+                transcript_request.arguments_text AS transcript_tool_arguments,
+                result_attempt.terminal_disposition_kind AS result_disposition,
+                result_attempt.result_text AS result_text,
+                result_attempt.error_kind AS result_error_kind,
+                result_attempt.error_detail AS result_error_detail,
+                transcript_approval.decision_kind AS transcript_decision_kind,
+                transcript_approval.denial_reason AS transcript_denial_reason
+               FROM UNNEST($1::numeric[], $2::uuid[], $3::uuid[])
+                    WITH ORDINALITY AS selected(
+                        member_position,
+                        source_session_id,
+                        semantic_entry_id,
+                        selected_ordinal
+                    )
+               JOIN semantic_transcript_entry AS entry
+                 ON entry.source_session_id = selected.source_session_id
+                AND entry.semantic_entry_id = selected.semantic_entry_id
+               LEFT JOIN accepted_input AS accepted
+                 ON accepted.session_id = entry.source_session_id
+                AND accepted.accepted_input_id = entry.origin_accepted_input_id
+               LEFT JOIN model_call AS call
+                 ON call.session_id = entry.source_session_id
+                AND call.model_call_id = entry.producing_model_call_id
+               LEFT JOIN tool_attempt AS result_attempt
+                 ON result_attempt.session_id = entry.source_session_id
+                AND result_attempt.attempt_id = entry.tool_result_attempt_id
+               LEFT JOIN tool_request AS transcript_request
+                 ON transcript_request.session_id = entry.source_session_id
+                AND transcript_request.request_id = COALESCE(
+                    entry.assistant_tool_request_id,
+                    entry.tool_result_request_id,
+                    result_attempt.request_id
+                )
+               LEFT JOIN tool_approval_decision AS transcript_approval
+                 ON transcript_approval.request_id = transcript_request.request_id
+               LEFT JOIN imported_transcript_entry AS imported
+                 ON imported.imported_conversation_id =
+                        entry.imported_conversation_id
+                AND imported.imported_transcript_entry_id =
+                        entry.imported_transcript_entry_id
+              ORDER BY selected.selected_ordinal",
+        )
+        .bind(&stored_positions)
+        .bind(&source_sessions)
+        .bind(&entry_ids)
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.len() != references.len() {
+            return Err(ProcessReadCorruption::Inconsistent(
+                "selected transcript range membership",
+            )
+            .into());
+        }
+        let mut entries = Vec::with_capacity(rows.len());
+        for ((row, expected_position), expected_reference) in
+            rows.iter().zip(positions).zip(references)
+        {
+            let stored_position = decode_positive(
+                required(row, "member_position")?,
+                "selected transcript member position",
+            )?;
+            let source_session = session_id_from_uuid(required(row, "source_session_id")?);
+            let entry = SemanticTranscriptEntryId::from_uuid(required(row, "semantic_entry_id")?);
+            if stored_position != *expected_position
+                || SemanticTranscriptEntryRef::from_source(source_session, entry)
+                    != *expected_reference
+            {
+                return Err(
+                    ProcessReadCorruption::Inconsistent("selected transcript entry order").into(),
+                );
+            }
+            let entry_index =
+                stored_position
+                    .checked_sub(1)
+                    .ok_or(ProcessReadCorruption::InvalidOrdinal(
+                        "selected transcript member position",
+                    ))?;
+            entries.push(decode_transcript_entry(row, entry_index)?);
+        }
+        Ok(entries.into_boxed_slice())
     }
 
     /// Reads one complete transcript snapshot, or `None` only when the session
@@ -1320,28 +1522,6 @@ impl ProcessReadRepository {
         &self,
         requested_session: SessionId,
     ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
-        self.open_transcript_with_model_call_usage(requested_session, ModelCallUsageRead::Included)
-            .await
-    }
-
-    /// Opens one repeatable-read transcript cursor without loading terminal
-    /// model-call usage.
-    ///
-    /// This keeps protocol versions whose closed vocabulary cannot carry usage
-    /// from traversing evidence that they must omit.
-    pub async fn open_transcript_without_model_call_usage(
-        &self,
-        requested_session: SessionId,
-    ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
-        self.open_transcript_with_model_call_usage(requested_session, ModelCallUsageRead::Omitted)
-            .await
-    }
-
-    async fn open_transcript_with_model_call_usage(
-        &self,
-        requested_session: SessionId,
-        model_call_usage: ModelCallUsageRead,
-    ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(REPEATABLE_READ_ONLY)
             .execute(&mut *transaction)
@@ -1374,13 +1554,8 @@ impl ProcessReadRepository {
             load_checked_imported_seed_frontier(&mut transaction, requested_session).await?;
         let expected_turn_count =
             load_transcript_turn_count(&mut transaction, requested_session).await?;
-        let (expected_model_call_count, model_calls_complete) = match model_call_usage {
-            ModelCallUsageRead::Included => (
-                load_terminal_model_call_count(&mut transaction, requested_session).await?,
-                false,
-            ),
-            ModelCallUsageRead::Omitted => (0, true),
-        };
+        let expected_model_call_count =
+            load_terminal_model_call_count(&mut transaction, requested_session).await?;
         Ok(Some(ProcessTranscriptReader {
             transaction: Some(transaction),
             session: requested_session,
@@ -1398,7 +1573,7 @@ impl ProcessReadRepository {
             expected_model_call_count,
             model_call_count: 0,
             next_model_call_after: None,
-            model_calls_complete,
+            model_calls_complete: false,
             entry_count: None,
             next_entry_index: 0,
             summary: None,
@@ -2437,6 +2612,12 @@ async fn open_transcript_entry_cursor(
             entry.model_identity_turn_id,
             entry.model_identity_defaults_version,
             entry.model_identity_direct_selection_id,
+            entry.context_summary_value,
+            entry.context_summary_producing_call_id,
+            entry.context_summary_first_source_session_id,
+            entry.context_summary_first_entry_id,
+            entry.context_summary_through_source_session_id,
+            entry.context_summary_through_entry_id,
             imported.source_speaker_kind AS imported_source_speaker_kind,
             imported.content_encoding AS imported_content_encoding,
             accepted.content_text AS origin_content,
@@ -2554,6 +2735,16 @@ fn decode_transcript_entry(
         row.try_get("model_identity_defaults_version")?;
     let model_identity_direct_selection: Option<Uuid> =
         row.try_get("model_identity_direct_selection_id")?;
+    let context_summary_value: Option<String> = row.try_get("context_summary_value")?;
+    let context_summary_call: Option<Uuid> = row.try_get("context_summary_producing_call_id")?;
+    let context_summary_first_source_session: Option<Uuid> =
+        row.try_get("context_summary_first_source_session_id")?;
+    let context_summary_first_entry: Option<Uuid> =
+        row.try_get("context_summary_first_entry_id")?;
+    let context_summary_through_source_session: Option<Uuid> =
+        row.try_get("context_summary_through_source_session_id")?;
+    let context_summary_through_entry: Option<Uuid> =
+        row.try_get("context_summary_through_entry_id")?;
     let imported_source_speaker: Option<String> = row.try_get("imported_source_speaker_kind")?;
     let imported_content: Option<Vec<u8>> = row.try_get("imported_content_encoding")?;
     let origin_content: Option<String> = row.try_get("origin_content")?;
@@ -2568,6 +2759,71 @@ fn decode_transcript_entry(
     let result_error_detail: Option<String> = row.try_get("result_error_detail")?;
     let transcript_decision_kind: Option<String> = row.try_get("transcript_decision_kind")?;
     let transcript_denial_reason: Option<String> = row.try_get("transcript_denial_reason")?;
+
+    if payload_kind == "context_summary" {
+        let (
+            Some(content),
+            Some(call),
+            Some(first_source_session),
+            Some(first_entry),
+            Some(through_source_session),
+            Some(through_entry),
+        ) = (
+            context_summary_value,
+            context_summary_call,
+            context_summary_first_source_session,
+            context_summary_first_entry,
+            context_summary_through_source_session,
+            context_summary_through_entry,
+        )
+        else {
+            return Err(ProcessReadCorruption::Inconsistent("context-summary entry shape").into());
+        };
+        if origin.is_some()
+            || steering_source_turn.is_some()
+            || failed_turn.is_some()
+            || assistant_text.is_some()
+            || producing_call.is_some()
+            || tool_request.is_some()
+            || tool_result_request.is_some()
+            || tool_result_attempt.is_some()
+            || completed_turn.is_some()
+            || cancelled_turn.is_some()
+            || imported_conversation.is_some()
+            || imported_entry.is_some()
+            || model_identity_turn.is_some()
+            || model_identity_defaults_version.is_some()
+            || model_identity_direct_selection.is_some()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("context-summary entry shape").into());
+        }
+        return Ok(ProcessTranscriptEntry::ContextSummary {
+            entry_index,
+            source_session,
+            entry,
+            model_call: ModelCallId::from_uuid(call),
+            first: signalbox_domain::SemanticTranscriptEntryRef::from_source(
+                session_id_from_uuid(first_source_session),
+                SemanticTranscriptEntryId::from_uuid(first_entry),
+            ),
+            through: signalbox_domain::SemanticTranscriptEntryRef::from_source(
+                session_id_from_uuid(through_source_session),
+                SemanticTranscriptEntryId::from_uuid(through_entry),
+            ),
+            content,
+        });
+    }
+    if context_summary_value.is_some()
+        || context_summary_call.is_some()
+        || context_summary_first_source_session.is_some()
+        || context_summary_first_entry.is_some()
+        || context_summary_through_source_session.is_some()
+        || context_summary_through_entry.is_some()
+    {
+        return Err(
+            ProcessReadCorruption::Inconsistent("non-summary context-summary fields").into(),
+        );
+    }
 
     if payload_kind == "model_identity_changed" {
         if origin.is_some()

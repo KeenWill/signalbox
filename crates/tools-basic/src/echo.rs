@@ -14,15 +14,16 @@ use signalbox_domain::{
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
+use signalbox_tool_schema_derive::ToolSchema;
 
 pub const ECHO_NAME: &str = "echo";
 const INVALID_ARGUMENTS_DETAIL: &str = "expected an object containing exactly one text string";
 
 /// Typed `echo` argument shape; decoder and rendered schema share it.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize, ToolSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EchoArguments {
-    /// Exact text to return.
+    #[tool_schema(description = "Exact text to return.")]
     #[expect(dead_code, reason = "execution returns the canonical argument text")]
     text: String,
 }
@@ -177,9 +178,26 @@ fn echo_evidence(
 
 #[cfg(test)]
 mod tests {
-    use signalbox_application::{ToolCatalog, ToolCatalogValidationFailure};
+    use signalbox_application::{ToolCatalog, ToolCatalogValidationFailure, ToolInputSchema};
 
     use super::*;
+
+    const SHIPPED_ECHO_SCHEMA: &str = r#"{
+        "type": "object",
+        "properties": {
+            "text": {
+                "type": "string",
+                "description": "Exact text to return."
+            }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+    }"#;
+
+    fn shipped_echo_schema() -> ToolInputSchema {
+        ToolInputSchema::try_new(String::from(SHIPPED_ECHO_SCHEMA))
+            .expect("shipped echo schema remains admitted")
+    }
 
     fn arguments(value: &str) -> NormalizedToolArguments {
         NormalizedToolArguments::try_from_provider_text(value.to_owned())
@@ -202,15 +220,15 @@ mod tests {
         assert_eq!(definition.effect_class(), ToolEffectClass::EffectFree);
     }
 
-    /// The complete rendered wire schema. The pretty golden is the review
-    /// surface; the byte-exact assertion pins the canonical compact form the
-    /// registry stores and providers receive as its exact serialization.
+    /// The derived schema remains byte-identical to the canonical artifact
+    /// produced from the hand-written schema that shipped before derivation.
     #[test]
-    fn echo_rendered_schema_is_the_exact_wire_artifact() {
+    fn echo_derived_schema_is_byte_identical_to_shipped_schema() {
         let (catalog, _executor) = EchoTool::try_new()
             .expect("static echo tool compiles")
             .into_parts();
         let definition = &catalog.definitions()[0];
+        let shipped = shipped_echo_schema();
         let schema: serde_json::Value = serde_json::from_str(definition.input_schema().as_str())
             .expect("registry schema is valid JSON");
 
@@ -229,7 +247,11 @@ mod tests {
               "type": "object"
             }"#]]
         .assert_eq(&format!("{schema:#}"));
-        assert_eq!(definition.input_schema().as_str(), schema.to_string());
+        assert_eq!(definition.input_schema().as_str(), shipped.as_str());
+        assert_eq!(
+            <EchoArguments as signalbox_tool_contract::ToolSchema>::schema().to_string(),
+            shipped.as_str()
+        );
     }
 
     /// Typed decoding accepts one exact text field.

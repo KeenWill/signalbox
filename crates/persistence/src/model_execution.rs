@@ -55,6 +55,34 @@ use crate::{
     },
 };
 
+/// Exact prospective first-call material derived from one activation preview.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProspectiveModelCall {
+    request: PreparedModelCallRequest,
+    credential_reference: ModelCallCredentialReference,
+    system_prompt: Option<signalbox_domain::SessionSystemPrompt>,
+    tool_entries: Box<[ResolvedToolConversationEntry]>,
+}
+
+impl ProspectiveModelCall {
+    /// Applies the canonical application frontier renderer with the supplied tool catalog.
+    pub fn render(
+        self,
+        tools: Box<[signalbox_application::ToolDefinition]>,
+    ) -> Result<
+        signalbox_application::PreparedModelOperation,
+        signalbox_application::ModelFrontierRenderingError,
+    > {
+        signalbox_application::PreparedModelOperation::render(
+            self.request,
+            self.credential_reference,
+            self.system_prompt,
+            tools,
+            &self.tool_entries,
+        )
+    }
+}
+
 /// Which fresh execution identity collided with an existing durable record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelCallIdentityCollision {
@@ -256,6 +284,11 @@ impl PostgresModelCallRepository {
         }
     }
 
+    /// Borrows the shared pool for composition-owned adjacent transactions.
+    pub const fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     /// Derives tool-loop storage from this repository's exact database and
     /// continuation configuration.
     pub fn tool_loop_repository(&self) -> crate::tool_loop::PostgresToolLoopRepository {
@@ -264,6 +297,118 @@ impl PostgresModelCallRepository {
             self.targets.clone(),
             self.credential_reference.clone(),
         )
+    }
+
+    /// Reconstitutes the exact first-call operation for one read-only activation preview.
+    pub async fn preview_activation_operation(
+        &self,
+        preview: &signalbox_domain::PreparedAcceptedInputTurnActivation,
+        call: ModelCallId,
+    ) -> Result<ProspectiveModelCall, ModelCallRepositoryError> {
+        let session_id = preview.turn().session();
+        let mut transaction = self.pool.begin().await?;
+        let session = match load_session_from_connection(&mut transaction, session_id).await {
+            Ok(Some(session)) => session,
+            Ok(None) => return Err(ModelCallRepositoryError::NoLiveExecution),
+            Err(SessionRepositoryError::Database(error)) => return Err(error.into()),
+            Err(SessionRepositoryError::Corruption(error)) => {
+                return Err(ModelCallCorruption::CurrentSession(error).into());
+            }
+        };
+        let scheduling = load_scheduling_projection(&mut transaction, session)
+            .await
+            .map_err(map_scheduling_error)?;
+        let starting_entries = preview
+            .starting_entries()
+            .iter()
+            .map(|entry| (entry.reference(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let frontier_entries = preview
+            .starting_snapshot()
+            .ordered_entries()
+            .map(|reference| {
+                starting_entries
+                    .get(&reference)
+                    .copied()
+                    .or_else(|| scheduling.semantic_entry(reference))
+                    .cloned()
+                    .ok_or_else(|| {
+                        ModelCallCorruption::Missing("preview frontier semantic entry").into()
+                    })
+            })
+            .collect::<Result<Vec<_>, ModelCallRepositoryError>>()?;
+        let origin_contents =
+            load_origin_contents(&mut transaction, &frontier_entries, &[]).await?;
+        let tool_result_correlations =
+            load_tool_result_correlations(&mut transaction, &frontier_entries).await?;
+        let tool_denial_correlations =
+            load_tool_denial_correlations(&mut transaction, &frontier_entries).await?;
+        let execution = ModelCallExecutionReconstitutionInput::new(
+            preview.turn().clone(),
+            self.targets.clone(),
+            preview.starting_snapshot().clone(),
+            frontier_entries,
+            origin_contents,
+            None,
+            Vec::new(),
+        )
+        .with_tool_result_correlations(tool_result_correlations)
+        .with_tool_denial_correlations(tool_denial_correlations)
+        .reconstitute()
+        .map_err(|error| {
+            let (_, failure) = error.into_parts();
+            ModelCallCorruption::Execution(failure)
+        })?;
+        let request = execution
+            .preview_initial_call(call)
+            .map_err(|_| ModelCallRepositoryError::InvalidTransition("preview initial call"))?;
+        let system_prompt = load_frozen_epoch_system_prompt(
+            &mut transaction,
+            session_id,
+            preview.turn().configuration().session_defaults_version(),
+        )
+        .await?;
+        let tool_entries = load_tool_conversation_entries(&mut transaction, &request).await?;
+        transaction.rollback().await?;
+        Ok(ProspectiveModelCall {
+            request,
+            credential_reference: self.credential_reference.clone(),
+            system_prompt,
+            tool_entries,
+        })
+    }
+
+    /// Checkpoints the exact no-steering initial call in the transaction that
+    /// just committed its counted activation.
+    pub(crate) async fn checkpoint_counted_activation_in_transaction(
+        &self,
+        connection: &mut PgConnection,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> Result<(), ModelCallRepositoryError> {
+        let execution = require_live_execution_with_targets(
+            connection,
+            session,
+            Some(&self.targets),
+            None,
+            None,
+        )
+        .await?;
+        if execution.current_call().is_some()
+            || !execution.active_turn().pending_steering().is_empty()
+        {
+            return Err(ModelCallRepositoryError::InvalidTransition(
+                "counted activation gained uncounted call input",
+            ));
+        }
+        let prepared = execution
+            .prepare_initial_call_consuming_steering(call, Vec::new(), None)
+            .map_err(|_| {
+                ModelCallRepositoryError::InvalidTransition(
+                    "counted activation initial call cannot be prepared",
+                )
+            })?;
+        insert_prepared_call(connection, &prepared, &self.credential_reference).await
     }
 
     /// Commits Prepared while consuming the complete locked steering inventory.
@@ -2659,6 +2804,7 @@ async fn load_origin_contents(
             }
             SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
@@ -3029,6 +3175,7 @@ async fn load_tool_conversation_entries(
             }
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
@@ -3125,6 +3272,7 @@ async fn load_tool_conversation_entries(
             }
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
@@ -4555,6 +4703,71 @@ fn encode_attempt_end(
     }
 }
 
+pub(crate) struct SnapshotAppend<I> {
+    pub(crate) owning_session: SessionId,
+    pub(crate) frontier: signalbox_domain::ContextFrontierId,
+    pub(crate) prefix: Option<signalbox_domain::ContextFrontierId>,
+    pub(crate) member_count: u64,
+    pub(crate) prefix_member_count: u64,
+    pub(crate) appended_entries: I,
+}
+
+pub(crate) enum SnapshotAppendError {
+    FrontierInsert(sqlx::Error),
+    MemberInsert(sqlx::Error),
+    MemberPositionOverflow,
+}
+
+pub(crate) async fn insert_snapshot_append<I>(
+    connection: &mut PgConnection,
+    append: SnapshotAppend<I>,
+) -> Result<(), SnapshotAppendError>
+where
+    I: IntoIterator<Item = SemanticTranscriptEntryRef>,
+{
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id,
+             prefix_context_frontier_id, member_count)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(session_id_to_uuid(append.owning_session))
+    .bind(append.frontier.into_uuid())
+    .bind(
+        append
+            .prefix
+            .map(signalbox_domain::ContextFrontierId::into_uuid),
+    )
+    .bind(Decimal::from(append.member_count))
+    .execute(&mut *connection)
+    .await
+    .map_err(SnapshotAppendError::FrontierInsert)?;
+    for (index, entry) in append.appended_entries.into_iter().enumerate() {
+        let index =
+            u64::try_from(index).map_err(|_| SnapshotAppendError::MemberPositionOverflow)?;
+        let position = append
+            .prefix_member_count
+            .checked_add(index)
+            .and_then(|index| index.checked_add(1))
+            .ok_or(SnapshotAppendError::MemberPositionOverflow)?;
+        sqlx::query(
+            "INSERT INTO context_frontier_delta
+                (owning_session_id, context_frontier_id, member_position,
+                 source_session_id, semantic_entry_id)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(session_id_to_uuid(append.owning_session))
+        .bind(append.frontier.into_uuid())
+        .bind(Decimal::from(position))
+        .bind(session_id_to_uuid(entry.source_session()))
+        .bind(entry.entry().into_uuid())
+        .execute(&mut *connection)
+        .await
+        .map_err(SnapshotAppendError::MemberInsert)?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn insert_snapshot(
     connection: &mut PgConnection,
     snapshot: &signalbox_domain::ResolvedContextFrontierSnapshot,
@@ -4565,48 +4778,32 @@ pub(crate) async fn insert_snapshot(
     let prefix_member_count = snapshot
         .entry_count()
         .checked_sub(appended_entry_count)
+        .and_then(|count| u64::try_from(count).ok())
         .ok_or(ModelCallCorruption::Inconsistent(
             "frontier prefix member count",
         ))?;
-    sqlx::query(
-        "INSERT INTO context_frontier
-            (owning_session_id, context_frontier_id,
-             prefix_context_frontier_id, member_count)
-         VALUES ($1, $2, $3, $4)",
+    insert_snapshot_append(
+        connection,
+        SnapshotAppend {
+            owning_session: snapshot.frontier().owning_session(),
+            frontier: snapshot.frontier().snapshot(),
+            prefix: snapshot
+                .immediate_semantic_prefix()
+                .map(|prefix| prefix.snapshot()),
+            member_count,
+            prefix_member_count,
+            appended_entries: snapshot.appended_entries(),
+        },
     )
-    .bind(session_id_to_uuid(snapshot.frontier().owning_session()))
-    .bind(snapshot.frontier().snapshot().into_uuid())
-    .bind(
-        snapshot
-            .immediate_semantic_prefix()
-            .map(|prefix| prefix.snapshot().into_uuid()),
-    )
-    .bind(Decimal::from(member_count))
-    .execute(&mut *connection)
-    .await?;
-    for (index, entry) in snapshot.appended_entries().enumerate() {
-        let position = prefix_member_count
-            .checked_add(index)
-            .and_then(|index| index.checked_add(1))
-            .and_then(|position| u64::try_from(position).ok())
-            .ok_or(ModelCallCorruption::Inconsistent(
-                "frontier member position",
-            ))?;
-        sqlx::query(
-            "INSERT INTO context_frontier_delta
-                (owning_session_id, context_frontier_id, member_position,
-                 source_session_id, semantic_entry_id)
-             VALUES ($1, $2, $3, $4, $5)",
-        )
-        .bind(session_id_to_uuid(snapshot.frontier().owning_session()))
-        .bind(snapshot.frontier().snapshot().into_uuid())
-        .bind(Decimal::from(position))
-        .bind(session_id_to_uuid(entry.source_session()))
-        .bind(entry.entry().into_uuid())
-        .execute(&mut *connection)
-        .await?;
-    }
-    Ok(())
+    .await
+    .map_err(|error| match error {
+        SnapshotAppendError::FrontierInsert(error) | SnapshotAppendError::MemberInsert(error) => {
+            error.into()
+        }
+        SnapshotAppendError::MemberPositionOverflow => {
+            ModelCallCorruption::Inconsistent("frontier member position").into()
+        }
+    })
 }
 
 async fn terminalize_lifecycle(
@@ -4778,7 +4975,9 @@ fn identity_collision(error: &sqlx::Error) -> Option<ModelCallIdentityCollision>
         .as_database_error()
         .and_then(|database| database.constraint())
     {
-        Some("model_call_pkey") => Some(ModelCallIdentityCollision::ModelCall),
+        Some("model_call_pkey" | "model_call_identity_pkey") => {
+            Some(ModelCallIdentityCollision::ModelCall)
+        }
         Some("semantic_transcript_entry_pk" | "semantic_transcript_entry_id_global") => {
             Some(ModelCallIdentityCollision::SemanticEntry)
         }

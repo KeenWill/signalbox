@@ -15,6 +15,10 @@ sys.dont_write_bytecode = True
 
 import check_docs_consistency
 from check_docs_consistency import PR_TOKEN, Violation, github_slug, run_checks
+from generate_invariants import (
+    orphan_invariant_references,
+    render as render_invariant_index,
+)
 
 
 def failure_categories(failures: list[Violation]) -> list[str]:
@@ -135,13 +139,6 @@ class DocsConsistencyTests(unittest.TestCase):
         (self.root / "src/tests.rs").write_text(
             "#[test]\nfn named_test() {}\n", encoding="utf-8"
         )
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-25 — New\n\n"
-            "## 2026-07-25 — Same day\n\n"
-            "## 2026-07-24 — Old\n",
-            encoding="utf-8",
-        )
         (self.root / "docs/spec/example.md").write_text(
             "# Example\n\n"
             "Verified against the implementing stack through PR #12 "
@@ -181,6 +178,64 @@ class DocsConsistencyTests(unittest.TestCase):
 
     def test_valid_fixture_passes(self) -> None:
         self.assertEqual(run_checks(self.root), [])
+
+    def test_generator_renders_an_empty_index_without_tagged_tests(self) -> None:
+        rendered = render_invariant_index(self.root)
+
+        self.assertIn("| ID | Enforcement |", rendered)
+        self.assertNotIn("| INV-", rendered)
+
+    def test_generator_ignores_bannered_planning_references(self) -> None:
+        planning = self.root / "docs/agents/backlog.md"
+        planning.parent.mkdir()
+        planning.write_text(
+            "# Backlog\n\n"
+            "> **Non-authoritative planning scratchpad — do not review.**\n\n"
+            "A prospective item may reserve INV-999.\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(orphan_invariant_references(self.root), {})
+
+    def test_generator_rejects_an_invariant_reference_without_a_tagged_test(
+        self,
+    ) -> None:
+        orphan_tag = "INV-999"
+        test_source = self.root / "src/tests.rs"
+        test_source.write_text(
+            "#[test]\nfn inv001_named_test() {}\n", encoding="utf-8"
+        )
+        spec_source = self.root / "docs/spec/example.md"
+        spec_source.write_text(
+            spec_source.read_text(encoding="utf-8")
+            + f"\nAn unsupported claim cites {orphan_tag}.\n",
+            encoding="utf-8",
+        )
+        expected_location = (
+            f"docs/spec/example.md:{len(spec_source.read_text(encoding='utf-8').splitlines())}"
+        )
+
+        self.assertEqual(
+            orphan_invariant_references(self.root),
+            {orphan_tag: (expected_location,)},
+        )
+
+    def test_generator_rejects_rust_comment_orphans_but_not_literals(
+        self,
+    ) -> None:
+        orphan_tag = "INV-999"
+        source = self.root / "src/context.rs"
+        source.write_text(
+            'const EXAMPLE: &str = "INV-998";\n'
+            f"/// A live Rust contract cites {orphan_tag}.\n"
+            "pub fn context() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            orphan_invariant_references(self.root),
+            {orphan_tag: ("src/context.rs:2",)},
+        )
 
     def test_git_fixture_commands_disable_signing_and_hooks(self) -> None:
         hooks = self.root / ".fixture-hooks"
@@ -286,6 +341,179 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_ignored_test_does_not_register_invariant_enforcement(self) -> None:
+        ignored = self.root / "src/ignored.rs"
+        ignored.write_text(
+            "#[test]\n"
+            '#[ignore = "requires an external service"]\n'
+            "fn inv_001_ignored_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+        self.assertNotIn(
+            ignored.relative_to(self.root).as_posix(),
+            render_invariant_index(self.root),
+        )
+
+    def test_cfg_ignored_test_does_not_register_invariant_enforcement(self) -> None:
+        (self.root / "src/ignored.rs").write_text(
+            "#[test]\n"
+            "#[cfg_attr(test, ignore)]\n"
+            "fn inv_001_ignored_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_ci_executed_ignored_test_registers_invariant_enforcement(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text(
+            "mod ignored;\nmod tests;\n", encoding="utf-8"
+        )
+        ignored = self.root / "src/ignored.rs"
+        ignored.write_text(
+            "#[test]\n"
+            '#[ignore = "requires an external service"]\n'
+            "fn inv_001_ignored_test() {}\n",
+            encoding="utf-8",
+        )
+        workflow = self.root / ".github/workflows/rust.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text(
+            "jobs:\n"
+            "  integration:\n"
+            "    strategy:\n"
+            "      matrix:\n"
+            "        include:\n"
+            "          - suite: fixture\n"
+            "            command: >-\n"
+            "              cargo test --no-fail-fast -p fixture\n"
+            "              --tests -- --ignored\n",
+            encoding="utf-8",
+        )
+
+        self.assertIn(
+            ignored.relative_to(self.root).as_posix(),
+            render_invariant_index(self.root),
+        )
+
+    def test_ci_ignored_test_filters_select_only_matching_enforcement(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        selected = self.root / "tests/selected.rs"
+        selected.parent.mkdir()
+        selected.write_text(
+            "#[test]\n"
+            "#[ignore]\n"
+            "fn inv_001_selected_by_ci_filter() {}\n"
+            "#[test]\n"
+            "#[ignore]\n"
+            "fn inv_002_not_selected_by_ci_filter() {}\n",
+            encoding="utf-8",
+        )
+        workflow = self.root / ".github/workflows/rust.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text(
+            "jobs:\n"
+            "  integration:\n"
+            "    strategy:\n"
+            "      matrix:\n"
+            "        include:\n"
+            "          - suite: fixture\n"
+            "            command: >-\n"
+            "              cargo test -p fixture --test selected\n"
+            "              inv_001 -- --ignored\n",
+            encoding="utf-8",
+        )
+
+        rendered = render_invariant_index(self.root)
+
+        self.assertIn("| INV-001", rendered)
+        self.assertNotIn("| INV-002", rendered)
+
+    def test_ci_ignored_test_skips_exclude_only_named_enforcement(self) -> None:
+        selected_invariant = "INV-001"
+        skipped_invariant = "INV-002"
+        also_skipped_invariant = "INV-003"
+        selected_test = selected_invariant.lower().replace("-", "_")
+        skipped_test = skipped_invariant.lower().replace("-", "_")
+        also_skipped_test = also_skipped_invariant.lower().replace("-", "_")
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        selected = self.root / "tests/selected.rs"
+        selected.parent.mkdir()
+        selected.write_text(
+            "#[test]\n"
+            "#[ignore]\n"
+            f"fn {selected_test}_selected_by_ci() {{}}\n"
+            "#[test]\n"
+            "#[ignore]\n"
+            f"fn {skipped_test}_skipped_by_ci() {{}}\n"
+            "#[test]\n"
+            "#[ignore]\n"
+            f"fn {also_skipped_test}_also_skipped_by_ci() {{}}\n",
+            encoding="utf-8",
+        )
+        workflow = self.root / ".github/workflows/rust.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text(
+            "jobs:\n"
+            "  integration:\n"
+            "    strategy:\n"
+            "      matrix:\n"
+            "        include:\n"
+            "          - suite: fixture\n"
+            "            command: >-\n"
+            "              cargo test --no-fail-fast -p fixture --test selected\n"
+            f"              -- --ignored --skip {skipped_test} --skip={also_skipped_test}\n",
+            encoding="utf-8",
+        )
+
+        rendered = render_invariant_index(self.root)
+
+        self.assertIn(f"| {selected_invariant}", rendered)
+        self.assertNotIn(f"| {skipped_invariant}", rendered)
+        self.assertNotIn(f"| {also_skipped_invariant}", rendered)
+
+    def test_windows_only_test_does_not_register_invariant_enforcement(self) -> None:
+        disabled = self.root / "src/windows.rs"
+        disabled.write_text(
+            "#[cfg(windows)]\n"
+            "#[test]\n"
+            "fn inv_001_windows_only_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+        self.assertNotIn(
+            disabled.relative_to(self.root).as_posix(),
+            render_invariant_index(self.root),
+        )
+
+    def test_linux_only_test_registers_invariant_enforcement(self) -> None:
+        enabled = self.root / "src/linux.rs"
+        enabled.write_text(
+            '#[cfg(target_os = "linux")]\n'
+            "#[test]\n"
+            "fn inv_001_linux_only_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["invariant-registration"])
+        self.assertIn(enabled.relative_to(self.root).as_posix(), failures[0].message)
+
     def test_unrelated_test_attribute_does_not_register_invariant(self) -> None:
         (self.root / "src/ignored.rs").write_text(
             '#[ignore = "INV-001 is temporarily flaky"]\n'
@@ -310,6 +538,25 @@ class DocsConsistencyTests(unittest.TestCase):
             "| -- | -- | -- | -- | -- |\n"
             "| INV-001 | Law. | Domain | Accepted | INV-001-tagged tests in "
             "[`src/tests.rs`](../src/tests.rs). |\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["invariant-tag"])
+        self.assertIn("test name or attached doc comment", failures[0].message)
+
+    def test_generated_index_link_requires_tagged_test_declaration(
+        self,
+    ) -> None:
+        (self.root / "src/tests.rs").write_text(
+            "#[test]\nfn untagged_test() {}\n", encoding="utf-8"
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Enforcement |\n"
+            "| -- | -- |\n"
+            "| INV-001 | [`src/tests.rs`](../src/tests.rs) |\n",
             encoding="utf-8",
         )
 
@@ -489,7 +736,7 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
-    def test_reverse_discovers_invariant_tag_in_module_path(self) -> None:
+    def test_inline_module_name_does_not_supply_invariant_tag(self) -> None:
         (self.root / "src/uncited.rs").write_text(
             "mod inv_001 {\n"
             "    #[test]\n"
@@ -498,20 +745,14 @@ class DocsConsistencyTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        failures = run_checks(self.root)
+        self.assertEqual(run_checks(self.root), [])
 
-        self.assertEqual(
-            failure_categories(failures),
-            ["invariant-registration"],
-        )
-        self.assertIn("src/uncited.rs", failures[0].message)
-
-    def test_reverse_discovers_out_of_line_module_path(self) -> None:
+    def test_reverse_discovers_local_tag_through_out_of_line_module(self) -> None:
         (self.root / "src/uncited_root.rs").write_text(
             '#[path = "generic.rs"]\nmod inv_001;\n', encoding="utf-8"
         )
         (self.root / "src/generic.rs").write_text(
-            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_rejects() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -522,7 +763,7 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("src/generic.rs", failures[0].message)
 
-    def test_reverse_discovers_nested_out_of_line_module_path(self) -> None:
+    def test_reverse_discovers_local_tag_through_nested_module(self) -> None:
         (self.root / "src/uncited_root.rs").write_text(
             "mod inv_001;\n", encoding="utf-8"
         )
@@ -531,7 +772,7 @@ class DocsConsistencyTests(unittest.TestCase):
             "mod deeper;\n", encoding="utf-8"
         )
         (self.root / "src/inv_001/deeper.rs").write_text(
-            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_rejects() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -827,7 +1068,7 @@ class DocsConsistencyTests(unittest.TestCase):
             "mod inv_001 {\n"
             "    fn helper<'a>() -> char { let c = 'x'; c }\n"
             "    #[test]\n"
-            "    fn rejects() {}\n"
+            "    fn inv_001_rejects() {}\n"
             "}\n",
             encoding="utf-8",
         )
@@ -845,7 +1086,7 @@ class DocsConsistencyTests(unittest.TestCase):
             "mod inv_001 {\n"
             "    fn helper() { 'outer: loop { let c = 'x'; break 'outer; } }\n"
             "    #[test]\n"
-            "    fn rejects() {}\n"
+            "    fn inv_001_rejects() {}\n"
             "}\n",
             encoding="utf-8",
         )
@@ -897,7 +1138,7 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
-    def test_every_active_out_of_line_module_prefix_is_read(self) -> None:
+    def test_out_of_line_module_names_do_not_supply_tags(self) -> None:
         (self.root / "src/uncited_root.rs").write_text(
             '#[path = "generic.rs"]\nmod ordinary;\n'
             '#[path = "generic.rs"]\nmod inv_001;\n',
@@ -907,13 +1148,15 @@ class DocsConsistencyTests(unittest.TestCase):
             "#[test]\nfn rejects() {}\n", encoding="utf-8"
         )
 
-        failures = run_checks(self.root)
+        self.assertEqual(run_checks(self.root), [])
 
-        self.assertEqual(
-            failure_categories(failures),
-            ["invariant-registration"],
+    def test_inline_module_names_do_not_supply_tags(self) -> None:
+        (self.root / "src/ordinary.rs").write_text(
+            "mod inv_999 {\n    #[test]\n    fn ordinary_name() {}\n}\n",
+            encoding="utf-8",
         )
-        self.assertIn("src/generic.rs", failures[0].message)
+
+        self.assertEqual(run_checks(self.root), [])
 
     def test_matcher_only_test_attribute_generates_no_test(self) -> None:
         (self.root / "src/generated.rs").write_text(
@@ -1021,7 +1264,7 @@ class DocsConsistencyTests(unittest.TestCase):
             '#[path = "second.rs"]\nmod inv_001;\n', encoding="utf-8"
         )
         (self.root / "src/second.rs").write_text(
-            '#[path = "first.rs"]\nmod back;\n#[test]\nfn rejects() {}\n',
+            '#[path = "first.rs"]\nmod back;\n#[test]\nfn inv_001_rejects() {}\n',
             encoding="utf-8",
         )
 
@@ -1041,7 +1284,7 @@ class DocsConsistencyTests(unittest.TestCase):
             '#[path = "../outer.rs"]\nmod inv_001;\n', encoding="utf-8"
         )
         (self.root / "outer.rs").write_text(
-            "#[test]\nfn rejects() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_rejects() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -1100,7 +1343,7 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         (self.root / "src/uncited_root/inv_001").mkdir(parents=True)
         (self.root / "src/uncited_root/inv_001/cases.rs").write_text(
-            "#[test]\nfn generic() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_generic() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -1195,7 +1438,7 @@ class DocsConsistencyTests(unittest.TestCase):
             "pub fn ordinary() {}\n", encoding="utf-8"
         )
         (self.root / "src/uncited_root/generic.rs").write_text(
-            "#[test]\nfn generic() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_generic() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -1218,7 +1461,7 @@ class DocsConsistencyTests(unittest.TestCase):
             "pub fn windows() {}\n", encoding="utf-8"
         )
         (self.root / "src/uncited_root/unix.rs").write_text(
-            "#[test]\nfn generic() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_generic() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -1345,7 +1588,7 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         (self.root / "src/uncited_root").mkdir()
         (self.root / "src/uncited_root/generic.rs").write_text(
-            "#[test]\nfn generic() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_generic() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -1362,7 +1605,7 @@ class DocsConsistencyTests(unittest.TestCase):
             encoding="utf-8",
         )
         (self.root / "src/generic.rs").write_text(
-            "#[test]\nfn generic() {}\n", encoding="utf-8"
+            "#[test]\nfn inv_001_generic() {}\n", encoding="utf-8"
         )
 
         failures = run_checks(self.root)
@@ -2476,148 +2719,6 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
-    def test_newer_decision_after_older_entry_is_reported(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-24 — Old\n\n"
-            "## 2026-07-25 — New\n",
-            encoding="utf-8",
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertEqual(
-            failure_categories(failures),
-            ["decision-order"],
-        )
-        self.assertIn("newer than the preceding", failures[0].message)
-
-    def test_invalid_decision_date_is_reported(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n## 2026-13-40 — Invalid\n",
-            encoding="utf-8",
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertEqual(
-            failure_categories(failures),
-            ["decision-order"],
-        )
-        self.assertIn("invalid ISO date", failures[0].message)
-
-    def test_setext_h2_decision_entry_is_rejected(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-24 — Old\n\n"
-            "2026-07-26 — New\n"
-            "----------------\n",
-            encoding="utf-8",
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertEqual(
-            failure_categories(failures),
-            ["decision-order"],
-        )
-        self.assertIn(
-            "Setext H2 headings are not permitted",
-            failures[0].message,
-        )
-
-    def test_list_wrapped_h2_decision_entry_is_rejected(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-24 — Old\n\n"
-            "- ## 2026-07-25 — Hidden newer\n",
-            encoding="utf-8",
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertEqual(
-            failure_categories(failures),
-            ["decision-order"],
-        )
-        self.assertIn(
-            "H2 headings nested inside a list are not permitted",
-            failures[0].message,
-        )
-
-    def test_block_quoted_h2_decision_entry_is_rejected(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-24 — Old\n\n"
-            "> ## 2026-07-25 — Hidden newer\n",
-            encoding="utf-8",
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertEqual(
-            failure_categories(failures),
-            ["decision-order"],
-        )
-        self.assertIn(
-            "H2 headings nested inside a block quote are not permitted",
-            failures[0].message,
-        )
-
-    def test_thematic_break_after_list_item_is_not_a_decision_entry(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-25 — Entry\n\n"
-            "- first point\n"
-            "---\n",
-            encoding="utf-8",
-        )
-
-        self.assertEqual(run_checks(self.root), [])
-
-    def test_thematic_break_after_block_quote_is_not_a_decision_entry(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-25 — Entry\n\n"
-            "> A quoted remark.\n"
-            "---\n",
-            encoding="utf-8",
-        )
-
-        self.assertEqual(run_checks(self.root), [])
-
-    def test_indented_atx_decision_heading_is_validated(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-24 — Old\n\n"
-            "  ## 2026-07-30 — Indented newer entry\n",
-            encoding="utf-8",
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertEqual(failure_categories(failures), ["decision-order"])
-        self.assertIn(
-            "entry date 2026-07-30 is newer than the preceding 2026-07-24",
-            failures[0].message,
-        )
-
-    def test_indented_malformed_decision_heading_is_reported(self) -> None:
-        (self.root / "docs/decisions.md").write_text(
-            "# Decisions\n\n"
-            "## 2026-07-24 — Old\n\n"
-            "   ## Untitled entry\n",
-            encoding="utf-8",
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertEqual(failure_categories(failures), ["decision-order"])
-        self.assertIn(
-            "entry heading must be `## YYYY-MM-DD — <title>`",
-            failures[0].message,
-        )
-
     def test_missing_and_malformed_verification_refs_are_reported(self) -> None:
         (self.root / "docs/spec/example.md").write_text(
             "# Example\n\n"
@@ -3690,7 +3791,7 @@ class DocsConsistencyTests(unittest.TestCase):
     def test_verification_clause_stops_at_markup_sentence_start(self) -> None:
         (self.root / "docs/spec/example.md").write_text(
             "# Example\n\n"
-            "The checksum is verified. [Historical context](../decisions.md) "
+            "The checksum is verified. [Historical context](../invariants.md) "
             "describes a change made through PR #12 (`agent/example`).\n\n"
             "## Provider bridge and `current_time`\n\n"
             "## Repeat\n",

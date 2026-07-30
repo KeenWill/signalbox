@@ -122,6 +122,151 @@ remembered to read it. This repository's domain crate already works this way —
 see the exemplars below; the rule extends that standard to test fixtures and
 helper signatures, where it is applied least consistently today.
 
+## Conventions at component seams
+
+The core principles imply the following narrower rules where representations,
+errors, or durable data cross a boundary. These rules are normative for new and
+modified code in their stated scope.
+
+### One owner for bounds and durable spellings
+
+A validation guard or numeric bound used by more than one constructor has one
+named constant or checking function. A bound admitted by the process protocol is
+a public constant in the protocol crate; consumers import it rather than
+restating its literal.
+
+Each closed discriminator written to PostgreSQL has one encoder and one decoder
+in `crates/persistence/src/mapping.rs`. A module lifts an unknown spelling into
+its own typed corruption error, but does not define another spelling table.
+
+Every schema-evolution threshold is distinct from the version a module writes.
+Name the first version that admits the feature and compare stored versions only
+against that threshold. Advancing a writer version must not reinterpret rows
+written under an older feature threshold.
+
+### Rows carry labels and failed reads stay typed
+
+Decode a SQL projection into a named `FromRow` record with aliased columns, or
+read it field by field with `try_get`. Do not decode a production row as an
+anonymous tuple, including through a tuple alias or `query_as::<_, (...)>`.
+Where a projected boolean represents a closed axis, decode it into an enum named
+for that axis.
+
+`sqlx::Row::get` and `get_unchecked` are forbidden. A malformed row is a typed,
+fail-closed persistence error, never a panic in an open transaction.
+
+A persistence corruption variant remains closed and matchable: it may carry a
+static field or relationship label and, when needed, the observed durable
+discriminator. Do not construct corruption classifications from free-form
+formatted prose.
+
+### Owned enums are exhaustive
+
+A decision over a project-owned enum enumerates every variant. Do not use a
+wildcard arm, a chain of `if let`, a tuple `matches!` expression with an
+implicit fallthrough, or a hand-maintained variant inventory as the source of
+truth. Collapsed outcomes use or-patterns; repeated decisions belong behind one
+named, exhaustive accessor. Wildcards remain appropriate for foreign enums and
+for non-enum or structurally open scrutinees.
+
+### Diagnostics retain attribution and context
+
+Reserve protocol-error classifications for facts derived from received protocol
+values; a violated local invariant is an internal error and must not attribute
+the fault to the peer.
+
+A public error type implements `Display` and `Error`. Its display distinguishes
+payload-bearing variants and includes the offending value when that value is
+safe to expose; `source()` forwards wrapped errors. Human-facing error rendering
+includes the source chain, and I/O variants retain the path, socket, or other
+resource that failed.
+
+Do not silently erase a typed error when mapping it into a coarser runtime
+outcome. Emit a safe closed discriminant immediately before the mapping. A
+startup configuration rejection additionally records the sanitized reason and,
+for environment input, the variable name.
+
+A tracing event for session work carries `session_id`; turn-scoped work also
+carries `turn_id`. A subordinate identity such as a request or model-call ID
+does not replace those join keys.
+
+### Comments and presentation labels state their source
+
+A code comment states a constraint, rationale, or contract directly. Process
+artifacts, dates, reviews, and decision-history documents are provenance for git
+history, not authorities cited in source comments. Cite an owning spec by name,
+or an applicable scenario or invariant identifier, without a process-rule or
+section number.
+
+When code defends against a failure the type system cannot express, such as
+stack depth, timing, or resource exhaustion, its comment names the failure the
+defense prevents. A helper that exists only for that defense says so in its own
+documentation.
+
+Derive a user-visible label from the state it describes. Expose the label as a
+computed property on the state type; do not accept independently varying state
+and label inputs.
+
+Every bounded or unit-bearing CLI argument has an explicit value name and help
+text stating the bound and unit. Optional arguments also state what omission
+does.
+
+## Mechanical enforcement
+
+The workspace compiler configuration forbids unsafe code. In production code,
+Clippy denies panicking convenience paths (`expect`, `panic`, `unwrap`, `todo`,
+`unimplemented`, and `unreachable`); the repository configuration permits
+`expect`, `panic`, and `unwrap` in test targets. Clippy also denies
+`sqlx::Row::get` plus `get_unchecked` in every target. These are whole-tree
+gates: CI promotes every warning to an error, so a lint is configured only when
+the whole workspace passes it at `deny`.
+
+`missing_docs` is not configured yet. A whole-workspace probe reports 425
+remaining violations:
+
+- `signalbox-domain`: 291; `signalbox-process-protocol`: 48; `signalboxd`: 26;
+  `signalbox-application`: 24; `signalbox-tools-code-host`: 14;
+  `signalbox-persistence`: 8; `signalbox-tools-basic`: 4; `signalbox-client`: 3;
+  `signalbox-model-runtime-claude-cli` and `signalbox-tool-schema-derive`: 2
+  each; `signalbox-conversation-import-claude-code`,
+  `signalbox-conversation-import-codex`, and
+  `signalbox-model-runtime-codex-cli`: 1 each.
+
+The largest block is `crates/domain/src/runner.rs`, owned by the concurrent
+runner-domain follow-up; audit-fixes also owns outstanding items in
+`apps/signalboxd/`, `apps/client/src/`, the model-runtime crates, and the tool
+crates. The persistence remainder is crate-level and integration-test
+documentation outside the hardened `runner_protocol.rs` surface. A follow-up
+enables `missing_docs` at `deny` only after those owners clear the complete
+inventory.
+
+`clippy::wildcard_enum_match_arm` is also not configured. A whole-workspace
+probe reports 211 remaining violations:
+
+- `signalbox-client`: 47; `signalbox-persistence`: 41; `signalbox-domain`: 34;
+  `signalboxd`: 23; `signalbox-model-runtime-anthropic`: 15;
+  `signalbox-model-runtime-openai`: 11; `signalbox-model-runtime-claude-cli`: 7;
+  `signalbox-model-runtime-codex-cli`: 6; `signalbox-application`,
+  `signalbox-expect-table`, and `signalbox-tools-code-host`: 5 each;
+  `signalbox-conversation-import-codex`: 3; `signalbox-model-runtime`,
+  `signalbox-model-provider-runtime`, and `signalbox-process-protocol`: 2 each;
+  `signalbox-conversation-import-claude-code`, `signalbox-tool-contract`, and
+  `signalbox-tool-schema-derive`: 1 each.
+
+The audit-fixes effort owns active violations in `apps/client/src/`,
+`apps/signalboxd/`, `crates/domain/src/model_execution.rs`, the model-runtime
+crates, `crates/process-protocol/`, and `crates/tools-code-host/`; the remaining
+domain and persistence matches require a separate exhaustive-match follow-up.
+Review enforces explicit matching until that complete inventory reaches zero and
+the lint can be enabled at `deny`.
+
+Review continues to enforce the semantic halves that syntax alone cannot prove:
+which crate owns a bound or durable spelling, whether a row record's labels are
+correct, whether an enum is project-owned, whether an error value is safe to
+render, whether diagnostic context is sufficient, and whether comments and
+presentation labels name the fact they actually describe. A lint warning is
+never treated as permission to add a blanket crate-level allowance.
+
 ## Rust mechanics (appendix)
 
 ### A. Function-local record types in tests

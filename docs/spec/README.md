@@ -1,11 +1,11 @@
 # Living specification
 
-These pages, together with [invariants.md](../invariants.md) (laws, with
-INV-tagged tests as the enforcement of record) and
-[domain-spine.md](../domain-spine.md) (public API shapes), are the normative
-specification of Signalbox's implemented behavior; `AGENTS.md` defines the
-authority model. Each page names the code ref it was last verified against and
-is updated in the same pull request as any behavior change it describes. A
+These pages, together with INV-tagged tests indexed in
+[invariants.md](../invariants.md) and public API shapes in
+[domain-spine.md](../domain-spine.md), are the normative specification of
+Signalbox's implemented cross-component and wire behavior; `AGENTS.md` defines
+the authority model. Each page names the code ref it was last verified against
+and is updated in the same pull request as any behavior change it describes. A
 verification reference names that pull request as `` PR #N (`branch-ref`) `` and
 may narrow the claim to the surface the pull request settled, either as a
 semicolon tail inside the parentheses — `` PR #N (`branch-ref`; <scope>) `` — or
@@ -18,12 +18,14 @@ historical ADR corpus these pages distilled is retired: the
 [ADR mapping](#adr-mapping) below resolves every record number to its
 destination, and git history is the archive.
 
-Conventions: pages state implemented behavior only; load-bearing design choices
-carry one-sentence "Why:" rationales; invariant references use INV tags resolved
-in [invariants.md](../invariants.md); deferred or undecided items are recorded
-in [open-questions.md](../open-questions.md) and surfaced as pointers in each
-page's "Open edges" section; a topic normatively owned by a sibling page is
-linked, never restated.
+Conventions: pages state implemented behavior, plus the committed unimplemented
+functionality that constrains it, per the three prose categories
+[AGENTS.md](../../AGENTS.md) defines and normatively owns; load-bearing design
+choices carry one-sentence "Why:" rationales; invariant references use INV tags
+resolved through the generated [invariants.md](../invariants.md) index; deferred
+or undecided items are recorded in [open-questions.md](../open-questions.md) and
+surfaced as pointers in each page's "Open edges" section; a topic normatively
+owned by a sibling page is linked, never restated.
 
 ## Pages
 
@@ -93,7 +95,7 @@ consumed by several pages appears once per page.
 | ADR-0036 | model-call-execution          | linked: baseline semantic-entry set owned by sessions-and-transcript                                                                                                                                                                                                                                                                                                                                                |
 | ADR-0036 | sessions-and-transcript       | distilled here (ADR-0036's initial origin/failure payloads, now part of the wider closed payload set that ADR-0042 grew; reference-not-copy, commit-at-eligibility, bidirectional entry/turn-state schema triggers); activation/recovery transaction mechanics in turn-lifecycle-and-scheduling; static eligible-failure path unimplemented, reported as open edge                                                  |
 | ADR-0036 | turn-lifecycle-and-scheduling | referenced only (TurnFailed marker and origin-entry payloads consumed by activation and recovery); distilled in sessions-and-transcript                                                                                                                                                                                                                                                                             |
-| ADR-0037 | sessions-and-transcript       | distilled here, together with the 2026-07-20 decision-log 1 MiB UTF-8 admission bound the ADR left open                                                                                                                                                                                                                                                                                                             |
+| ADR-0037 | sessions-and-transcript       | distilled here, together with the owner-approved 1 MiB UTF-8 admission bound the ADR left open                                                                                                                                                                                                                                                                                                                      |
 | ADR-0038 | sessions-and-transcript       | distilled here (three-fact aggregate, receipt/candidate/session distinction, pointer-authoritative load, fail-closed reconstitution)                                                                                                                                                                                                                                                                                |
 | ADR-0039 | identity-and-commands         | distilled here; transition-record adoption and non-owner admission remain open edges                                                                                                                                                                                                                                                                                                                                |
 | ADR-0039 | sessions-and-transcript       | distilled here (SubmitInput-only adoption in code; ReplaceSessionDefaults missing-actor divergence and unexercised CreateSession amendment reported as open edges)                                                                                                                                                                                                                                                  |

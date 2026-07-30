@@ -6,10 +6,11 @@
 > orientation, not design. Every design choice, accepted cost, blocker, and open
 > question named here is settled elsewhere and that record governs, never this
 > file: design in the owning `docs/spec/` page's diff at pickup, decisions in
-> `docs/decisions.md`, open questions in `docs/open-questions.md`. Do not hold
-> entries to cross-document consistency or treat their prose as normative — it
-> is deliberately loose and is superseded by the real record when an item is
-> picked up. The owner revises this file freely; agents never reorder it.
+> pull-request descriptions and git history, open questions in
+> `docs/open-questions.md`. Do not hold entries to cross-document consistency or
+> treat their prose as normative — it is deliberately loose and is superseded by
+> the real record when an item is picked up. The owner revises this file freely;
+> agents never reorder it.
 
 The owner-curated menu of pullable work for goal runs, a granular companion to
 the target model's [priority order](../target-model.md#priority-order). Entries
@@ -79,18 +80,18 @@ catalog question at the moment of change.
 
 ## De-hub naming pass [server rename executed; remainder blocked-on: in-flight stacks landing] [size: S]
 
-The server rename executed on 2026-07-25 (`agent/signalboxd-rename`, recorded in
-`docs/decisions.md`): crate, binary, and directory are `signalboxd`, and "hub"
-vocabulary left the living docs and config. Owns what remains: hub-named code
-identifiers and comment vocabulary — `single_hub`/`SingleHubGuard`,
-`FencedHubDatabase`, `run_hub`, `hub.sock` test fixtures, the persistence
-`hub_fence` module, and "hub-minted"/"hub-resolved" comment vocabulary across
-crates; whether the migration-committed `hub_fence_state` SQL names follow is
-the owner's call (needs a new migration). Collides-with: broad — that vocabulary
-reaches `crates/process-protocol`, persistence internals, and `apps/signalboxd`
-— so it runs effectively solo and waits for the current stacks. "Hub" survives
-only as occasional prose metaphor, never as the name of a binary, crate, module,
-or protocol concept. The Swift client's naming is not this entry's job — it was
+The server rename executed on 2026-07-25 (`agent/signalboxd-rename`): crate,
+binary, and directory are `signalboxd`, and "hub" vocabulary left the living
+docs and config. Owns what remains: hub-named code identifiers and comment
+vocabulary — `single_hub`/`SingleHubGuard`, `FencedHubDatabase`, `run_hub`,
+`hub.sock` test fixtures, the persistence `hub_fence` module, and
+"hub-minted"/"hub-resolved" comment vocabulary across crates; whether the
+migration-committed `hub_fence_state` SQL names follow is the owner's call
+(needs a new migration). Collides-with: broad — that vocabulary reaches
+`crates/process-protocol`, persistence internals, and `apps/signalboxd` — so it
+runs effectively solo and waits for the current stacks. "Hub" survives only as
+occasional prose metaphor, never as the name of a binary, crate, module, or
+protocol concept. The Swift client's naming is not this entry's job — it was
 renamed to Signalbox-prefixed names in its own pass, and the native client
 rewire owns any protocol-driven renames that remain.
 
@@ -106,12 +107,10 @@ Owns: naming across domain types, spec prose, and client-facing surfaces.
 Collides-with: a broad prose surface, so it pairs with the de-hub pass after the
 board quiets. Rename the platform actor "owner" to "user" everywhere except
 three carve-outs the owner set: (1) process documents where "the owner" means
-the repository owner personally (`AGENTS.md`, `goal-mode.md`, this backlog, the
-decision-log voice); (2) uses meaning ownership in the computer-science sense —
-a row, aggregate, or state machine owning data; (3) historical
-`docs/decisions.md` entries — the log is append-only, so past entries keep their
-original actor spellings and the rename is recorded there as a new terminology
-entry, never as edits. Starts with an inventory pass classifying every
+the repository owner personally (`AGENTS.md`, `goal-mode.md`, and this backlog);
+(2) uses meaning ownership in the computer-science sense — a row, aggregate, or
+state machine owning data; (3) historical commits and pull-request descriptions,
+which remain unchanged. Starts with an inventory pass classifying every
 occurrence before any mechanical rename.
 
 ## Conversation import [in-flight] [size: L]
@@ -523,11 +522,30 @@ Owns: model-call observation path, follow protocol, persistence checkpoints.
 Collides-with: turn machinery. Deltas are collected today but not delivered; the
 deferred draft-streaming policy decides what is durable versus transient.
 
-## Compaction [blocked-on: frontier-policy decision] [size: L]
+## Compaction [in-flight] [size: L]
 
 Owns: frontier machinery, compaction entries, new spec section. Collides-with:
-turn machinery. The frontier-snapshot substrate is ready. Never expose the state
-before the semantics.
+turn machinery. Owner-commissioned implementation started 2026-07-28.
+
+## Smarter compaction timing [blocked-on: compaction] [size: M]
+
+Owner direction, 2026-07-28. Compact at coherent task and turn boundaries before
+the context limit becomes the immediate constraint. Owns: compaction trigger
+policy and timing evidence. Collides-with: turn machinery and goal mode.
+
+## Agent-controlled self-compaction [blocked-on: compaction; tool policy] [size: M]
+
+Owner direction, 2026-07-28. Give an agent an explicit tool for compacting its
+current session when its own task state indicates a useful boundary. Owns: tool
+contract and compaction authorization. Collides-with: tool registry and context
+assembly.
+
+## Cross-session read tools for agents [blocked-on: read-tool policy] [size: M]
+
+Owner direction, 2026-07-28. Add bounded tools through which an agent can
+inspect other durable sessions without flattening their transcripts into the
+current session. Owns: read contracts and actor authorization. Collides-with:
+tool registry, conversation listing, and context assembly.
 
 ## Templates [delivered by session-templates stack] [size: M]
 

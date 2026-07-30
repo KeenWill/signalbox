@@ -308,6 +308,18 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(tool.toolName, ProcessProjectionFixture.proposedToolName)
   }
 
+  func testContextCompactionSideProjectionIncludesItsSummary() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithContextSummary()
+    let trigger = try ProcessProjectionFixture.contextCompactedTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    let message = try ProcessProjectionFixture.onlyMessage(in: projection)
+
+    XCTAssertEqual(message.text, ProcessProjectionFixture.contextSummaryText)
+    XCTAssertEqual(message.role, .assistant)
+  }
+
   func testSnapshotPreservesPendingAcceptanceOrderAndActiveActivity() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithQueuedAndActiveTurns()
     var projector = SignalboxProcessTranscriptProjector()
@@ -3426,7 +3438,7 @@ private enum ProcessDriverFixture {
       from: Data(
         """
         {
-          "version":21,
+          "version":1,
           "request_id":"1",
           "message":\(message)
         }
@@ -3450,6 +3462,9 @@ private enum ProcessProjectionFixture {
   static let completedUserEntry = "aaaaaaaa-2222-4222-8222-222222222222"
   static let completedAssistantEntry = "bbbbbbbb-2222-4222-8222-222222222222"
   static let completedAssistantText = "Fixture terminal assistant response."
+  static let contextSummaryText = "Fixture compacted context summary."
+  static let contextSummaryEntry = "cccccccc-2222-4222-8222-222222222222"
+  static let contextCompactionID = "dddddddd-2222-4222-8222-222222222222"
   static let closedToolID = "cccccccc-1111-4111-8111-111111111111"
   static let closedToolName = "closed_fixture_tool"
   static let firstPendingID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
@@ -3635,6 +3650,54 @@ private enum ProcessProjectionFixture {
           "cursor":"1",
           "turn_count":"0",
           "entry_count":"2"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithContextSummary() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(contextSummaryEntry)",
+          "entry":{
+            "type":"context_summary",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)",
+            "first_source_session_id":"\(ProcessDriverFixture.session)",
+            "first_entry_id":"\(completedUserEntry)",
+            "through_source_session_id":"\(ProcessDriverFixture.session)",
+            "through_entry_id":"\(completedAssistantEntry)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"0",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(contextSummaryText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"1"
         }
         """,
       ]
@@ -3949,6 +4012,21 @@ private enum ProcessProjectionFixture {
       throw ProcessDriverUpdateRecorderError.missingFixtureEvent
     }
     return event
+  }
+
+  static func contextCompactedTrigger() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"context_compacted",
+        "context_compaction_id":"\(contextCompactionID)",
+        "model_call_id":"\(ProcessDriverFixture.modelCall)",
+        "through_position":"19",
+        "summary_entry_id":"\(contextSummaryEntry)",
+        "result_frontier_id":"\(ProcessDriverFixture.frontier)"
+      }
+      """
+    )
   }
 
   static func proposedToolTrigger() throws -> SignalboxFollowedSessionEvent {

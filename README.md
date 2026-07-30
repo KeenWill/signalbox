@@ -57,10 +57,9 @@ boundaries and important qualifications behind this sketch.
 - [Architecture](docs/architecture.md)
 - [Glossary](docs/glossary.md)
 - [Scenarios](docs/scenarios.md)
-- [Invariant catalog](docs/invariants.md)
+- [Invariant test index](docs/invariants.md)
 - [Domain spine](docs/domain-spine.md)
 - [Testing style](docs/agents/testing-style.md)
-- [Decision log](docs/decisions.md)
 - [Open questions](docs/open-questions.md)
 - [Living specification](docs/spec/README.md)
 
@@ -93,10 +92,9 @@ repository root.
 `signalboxd` built from the working tree. The cluster asks for port 54341 and
 devenv allocates upward from there if it is taken, so the port is resolved
 rather than fixed — `echo $PGPORT` inside `devenv shell` names the one in use,
-and the daemon is given the same resolved value. What `devenv up` launches, in
-what order, and why test databases stay deliberately outside its scope are
-recorded in the [decision log](docs/decisions.md); everything below is
-operational usage.
+and the daemon is given the same resolved value. The devenv configuration owns
+what `devenv up` launches, in what order, and why test databases stay
+deliberately outside its scope; everything below is operational usage.
 
 State lives under the gitignored `.devenv/state/`: the cluster in `postgres/`,
 and everything the daemon needs in `dev-instance/` — a locally generated
@@ -122,15 +120,15 @@ socket parent meeting the ownership and permission rules the
 [process protocol](docs/spec/process-protocol.md#transport-and-trust-boundary)
 states. The devenv dev-instance launcher creates that directory and sets mode
 `0700` before executing the daemon; the daemon then binds the socket there. The
-devenv shell
-[exports that path as `SIGNALBOX_SOCKET_PATH` and provides a `signalbox <verb>` convenience](docs/decisions.md#2026-07-28--expose-the-dev-instance-client-from-every-shell-directory).
-That convenience execs Cargo's resolved binary directly rather than through
-`cargo run`, so a shell carrying an ambient `-C prefer-dynamic` (in `RUSTFLAGS`
-or inherited Cargo configuration) produces an executable that needs Cargo's
-runtime library search path, which the direct `exec` does not set; the command
-then exits `127` naming the missing shared object. This is a recorded, loud
-failure under an unusual global setting, not a silent one, and is left as a
-known limitation rather than reproducing `cargo run`'s environment here.
+devenv shell exports that path as `SIGNALBOX_SOCKET_PATH` and provides a
+`signalbox <verb>` convenience. That convenience execs Cargo's resolved binary
+directly rather than through `cargo run`, so a shell carrying an ambient
+`-C prefer-dynamic` (in `RUSTFLAGS` or inherited Cargo configuration) produces
+an executable that needs Cargo's runtime library search path, which the direct
+`exec` does not set; the command then exits `127` naming the missing shared
+object. This is a recorded, loud failure under an unusual global setting, not a
+silent one, and is left as a known limitation rather than reproducing
+`cargo run`'s environment here.
 
 The daemon's default Anthropic key path is
 `$HOME/.config/signalbox/anthropic-api-key` and its default code-host token path
@@ -224,7 +222,8 @@ Production process configuration is specified in
 [configuration and credentials](docs/spec/configuration-and-credentials.md#process-configuration).
 The process boundary is specified in the
 [process protocol](docs/spec/process-protocol.md); model configuration and
-credential delivery are recorded in the [decision log](docs/decisions.md).
+credential delivery are specified in
+[configuration and credentials](docs/spec/configuration-and-credentials.md).
 
 ## License
 

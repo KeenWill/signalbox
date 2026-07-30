@@ -37,7 +37,8 @@ durably even when a client disconnects.
 
 The initial daemon may be a modular monolith. This boundary does not require
 microservices and does not prevent provider execution from moving behind a
-dedicated service after a recorded decision in [the decision log](decisions.md).
+dedicated service after an owner-accepted pull request changes the owning
+cross-component contract.
 
 ## Why runners are separate
 

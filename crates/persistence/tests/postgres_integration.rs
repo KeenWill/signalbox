@@ -91,8 +91,9 @@ use signalbox_persistence::{
     scheduler::PostgresEligibilitySweep,
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
     start_eligible_turn::{
-        StartEligibleTurnCorruption, StartEligibleTurnIdentityCollision,
-        StartEligibleTurnRepository, StartEligibleTurnRepositoryError,
+        CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
+        StartEligibleTurnIdentityCollision, StartEligibleTurnRepository,
+        StartEligibleTurnRepositoryError,
     },
     startup::PostgresStartupScanRepository,
     submit_input::{
@@ -467,6 +468,49 @@ async fn insert_origin_frontier(
         &[(Decimal::ONE, session, semantic_entry)],
     )
     .await
+}
+
+async fn insert_completed_context_compaction_call(
+    connection: &mut PgConnection,
+    call: Uuid,
+    session: Uuid,
+    selection: Uuid,
+    target: Uuid,
+    source_frontier: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO context_compaction_model_call
+            (model_call_id, session_id, direct_model_selection_id,
+             resolved_provider_model_identity_id, source_frontier_id,
+             credential_reference, state_kind)
+         VALUES ($1, $2, $3, $4, $5, 'synthetic-compaction-credential',
+                 'prepared')",
+    )
+    .bind(call)
+    .bind(session)
+    .bind(selection)
+    .bind(target)
+    .bind(source_frontier)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "UPDATE context_compaction_model_call
+         SET state_kind = 'in_flight'
+         WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "UPDATE context_compaction_model_call
+         SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
+             input_tokens = 17, output_tokens = 5
+         WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
 }
 
 async fn insert_frontier(
@@ -11366,7 +11410,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     Ok(())
 }
 
-/// Decision log 2026-07-20: the provisional one-mebibyte accepted-input
+/// The persistence contract mirrors the one-mebibyte accepted-input
 /// content bound is one contract enforced at correlated layers — oversized
 /// text fails application admission before the typed command and never reaches SQL,
 /// exact-bound text commits through the real adapter, and a direct SQL
@@ -19742,6 +19786,413 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
         panic!("the dangling-pointer named read must be typed corruption");
     };
     assert_eq!(dangling_field, "current defaults epoch");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / S03 / S08 / INV-009 / INV-014: the operation counted before
+/// activation is the exact no-steering Prepared call committed with that
+/// activation; steering accepted afterward remains pending for a later call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_before_steering()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0xcd01));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0xcd02));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xcd03));
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(
+            0xcd04,
+            0xcd01,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    let origin = AcceptedInputId::from_uuid(Uuid::from_u128(0xcd05));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xcd06));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0xcd07,
+                0xcd01,
+                "counted origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            origin,
+            Some(turn),
+        )
+        .await?;
+
+    let activation = StartEligibleTurnRepository::new(pool.clone());
+    let preview = activation
+        .preview(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcd08)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcd09)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xcd0a)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(0xcd0b)),
+            ),
+        )
+        .await?
+        .expect("the queued origin has one exact activation preview");
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one fixture target forms a catalog");
+    let model_calls =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let counted_call = ModelCallId::from_uuid(Uuid::from_u128(0xcd0c));
+    let counted_operation = model_calls
+        .preview_activation_operation(preview.prepared(), counted_call)
+        .await?
+        .render(Box::new([]))?;
+    let counted_entries = counted_operation
+        .request()
+        .frontier_entries()
+        .map(signalbox_domain::SemanticTranscriptEntry::reference)
+        .collect::<Vec<_>>();
+
+    let committed = activation
+        .commit_counted_preview(preview, counted_call, &model_calls)
+        .await?;
+    let CommitActivationPreviewOutcome::Activated(activated) = committed else {
+        panic!("the unchanged counted activation must commit");
+    };
+    assert_eq!(activated.turn(), turn);
+
+    let steering = input_with_delivery(
+        0xcd0d,
+        0xcd01,
+        "later steering",
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: turn,
+        },
+    );
+    let steering_outcome = SubmitInputRepository::new(pool.clone())
+        .handle(
+            steering,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xcd0e)),
+            None,
+        )
+        .await?;
+    assert!(matches!(
+        steering_outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+
+    let ready = model_calls
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(0xcd0f)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcd10)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xcd11)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xcd12)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcd13)),
+                    TurnId::from_uuid(Uuid::from_u128(0xcd14)),
+                )
+            },
+        )
+        .await?;
+    let PrepareInitialModelCallOutcome::Ready { request, .. } = ready else {
+        panic!("the atomically checkpointed counted call must resume Prepared");
+    };
+    assert_eq!(request.call().id(), counted_call);
+    let prepared_entries = request
+        .frontier_entries()
+        .map(signalbox_domain::SemanticTranscriptEntry::reference)
+        .collect::<Vec<_>>();
+    assert_eq!(prepared_entries, counted_entries);
+    let pending_steering: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM accepted_input
+          WHERE session_id = $1
+            AND disposition_kind = 'pending_steering'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(pending_steering, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S03 / INV-015: deferred compaction evidence accepts successor ranges in
+/// model-visible order even when the retained suffix physically precedes the
+/// prior summary, while reverse correlation rejects an orphan summary.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s03_inv015_context_compaction_constraints_use_projected_successor_order()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0xcc01));
+    let session_uuid = session.into_uuid();
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0xcc02));
+    let mut create_service = CreateSessionService::new(
+        FixedSessionIds::new([session]),
+        CreateSessionRepository::new(pool.clone()),
+    );
+    create_service
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0xcc03)),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )?)
+        .await?;
+
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0xcc04));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xcc05));
+    let mut submit_service = SubmitInputService::new(
+        FixedSubmitInputIds::new([accepted_input], [turn]),
+        SubmitInputRepository::new(pool.clone()),
+        AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
+    );
+    submit_service
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0xcc06)),
+            session,
+            UserContent::try_text("synthetic compaction source".to_owned())
+                .expect("fixture user content is valid"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        )?)
+        .await?;
+
+    let origin_entry = Uuid::from_u128(0xcc07);
+    let initial_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xcc08));
+    let mut activation_service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(origin_entry)],
+            [initial_frontier],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xcc09))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    activation_service.execute(session).await?;
+
+    let retained_suffix = Uuid::from_u128(0xcc0a);
+    let root_source = Uuid::from_u128(0xcc0b);
+    let mut startup = StartupScanService::new(
+        FixedStartupScanIds::new(
+            [SemanticTranscriptEntryId::from_uuid(retained_suffix)],
+            [ContextFrontierId::from_uuid(root_source)],
+        ),
+        PostgresStartupScanRepository::new(pool.clone()),
+    );
+    startup.execute().await?;
+
+    let root_call = Uuid::from_u128(0xcc0c);
+    let root_summary = Uuid::from_u128(0xcc0d);
+    let root_result = Uuid::from_u128(0xcc0e);
+    let root_compaction = Uuid::from_u128(0xcc0f);
+    let target = Uuid::from_u128(0xcc10);
+    let mut root_transaction = pool.begin().await?;
+    insert_completed_context_compaction_call(
+        &mut root_transaction,
+        root_call,
+        session_uuid,
+        selection.into_uuid(),
+        target,
+        root_source,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             context_summary_value, context_summary_producing_call_id,
+             context_summary_first_source_session_id,
+             context_summary_first_entry_id,
+             context_summary_through_source_session_id,
+             context_summary_through_entry_id)
+         VALUES ($1, $2, 'context_summary', 'synthetic root summary', $3,
+                 $1, $4, $1, $4)",
+    )
+    .bind(session_uuid)
+    .bind(root_summary)
+    .bind(root_call)
+    .bind(origin_entry)
+    .execute(&mut *root_transaction)
+    .await?;
+    insert_frontier(
+        &mut root_transaction,
+        session_uuid,
+        root_result,
+        Decimal::from(3),
+        &[
+            (Decimal::ONE, session_uuid, origin_entry),
+            (Decimal::from(2), session_uuid, retained_suffix),
+            (Decimal::from(3), session_uuid, root_summary),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_compaction
+            (context_compaction_id, session_id, predecessor_compaction_id,
+             source_frontier_id, result_frontier_id, producing_call_id,
+             first_source_session_id, first_entry_id,
+             through_source_session_id, through_entry_id, summary_entry_id)
+         VALUES ($1, $2, NULL, $3, $4, $5, $2, $6, $2, $6, $7)",
+    )
+    .bind(root_compaction)
+    .bind(session_uuid)
+    .bind(root_source)
+    .bind(root_result)
+    .bind(root_call)
+    .bind(origin_entry)
+    .bind(root_summary)
+    .execute(&mut *root_transaction)
+    .await?;
+    root_transaction.commit().await?;
+
+    let successor_call = Uuid::from_u128(0xcc11);
+    let successor_summary = Uuid::from_u128(0xcc12);
+    let successor_result = Uuid::from_u128(0xcc13);
+    let successor_compaction = Uuid::from_u128(0xcc14);
+    let mut successor_transaction = pool.begin().await?;
+    insert_completed_context_compaction_call(
+        &mut successor_transaction,
+        successor_call,
+        session_uuid,
+        selection.into_uuid(),
+        target,
+        root_result,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             context_summary_value, context_summary_producing_call_id,
+             context_summary_first_source_session_id,
+             context_summary_first_entry_id,
+             context_summary_through_source_session_id,
+             context_summary_through_entry_id)
+         VALUES ($1, $2, 'context_summary', 'synthetic successor summary', $3,
+                 $1, $4, $1, $5)",
+    )
+    .bind(session_uuid)
+    .bind(successor_summary)
+    .bind(successor_call)
+    .bind(root_summary)
+    .bind(retained_suffix)
+    .execute(&mut *successor_transaction)
+    .await?;
+    insert_frontier(
+        &mut successor_transaction,
+        session_uuid,
+        successor_result,
+        Decimal::from(4),
+        &[
+            (Decimal::ONE, session_uuid, origin_entry),
+            (Decimal::from(2), session_uuid, retained_suffix),
+            (Decimal::from(3), session_uuid, root_summary),
+            (Decimal::from(4), session_uuid, successor_summary),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_compaction
+            (context_compaction_id, session_id, predecessor_compaction_id,
+             source_frontier_id, result_frontier_id, producing_call_id,
+             first_source_session_id, first_entry_id,
+             through_source_session_id, through_entry_id, summary_entry_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $2, $7, $2, $8, $9)",
+    )
+    .bind(successor_compaction)
+    .bind(session_uuid)
+    .bind(root_compaction)
+    .bind(root_result)
+    .bind(successor_result)
+    .bind(successor_call)
+    .bind(root_summary)
+    .bind(retained_suffix)
+    .bind(successor_summary)
+    .execute(&mut *successor_transaction)
+    .await?;
+    successor_transaction.commit().await?;
+
+    let malformed_summary = Uuid::from_u128(0xcc17);
+    let malformed_error = sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             context_summary_value, context_summary_producing_call_id,
+             context_summary_first_source_session_id,
+             context_summary_first_entry_id,
+             context_summary_through_source_session_id,
+             context_summary_through_entry_id,
+             model_identity_defaults_version,
+             model_identity_direct_selection_id)
+         VALUES ($1, $2, 'context_summary', 'synthetic malformed summary', $3,
+                 $1, $4, $1, $4, 1, $5)",
+    )
+    .bind(session_uuid)
+    .bind(malformed_summary)
+    .bind(successor_call)
+    .bind(successor_summary)
+    .bind(selection.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("summary payloads cannot carry model-identity fields");
+    assert_eq!(
+        malformed_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("semantic_transcript_entry_payload_shape")
+    );
+
+    let orphan_call = Uuid::from_u128(0xcc15);
+    let orphan_summary = Uuid::from_u128(0xcc16);
+    let mut orphan_transaction = pool.begin().await?;
+    insert_completed_context_compaction_call(
+        &mut orphan_transaction,
+        orphan_call,
+        session_uuid,
+        selection.into_uuid(),
+        target,
+        successor_result,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             context_summary_value, context_summary_producing_call_id,
+             context_summary_first_source_session_id,
+             context_summary_first_entry_id,
+             context_summary_through_source_session_id,
+             context_summary_through_entry_id)
+         VALUES ($1, $2, 'context_summary', 'synthetic orphan summary', $3,
+                 $1, $4, $1, $4)",
+    )
+    .bind(session_uuid)
+    .bind(orphan_summary)
+    .bind(orphan_call)
+    .bind(successor_summary)
+    .execute(&mut *orphan_transaction)
+    .await?;
+    let orphan_error = orphan_transaction
+        .commit()
+        .await
+        .expect_err("a summary without its exact compaction cannot commit");
+
+    assert_eq!(
+        orphan_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
 
     pool.close().await;
     drop(container);
