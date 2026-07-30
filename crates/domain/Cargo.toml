@@ -19,5 +19,17 @@ uuid = { version = "1.24.0", default-features = false }
 workspace = true
 
 [dev-dependencies]
+divan = "0.1.21"
 expect-test = "1.5.1"
+gungraun = "0.19.4"
 signalbox-expect-table = { path = "../expect-table" }
+
+[[bench]]
+name = "instruction_counts"
+harness = false
+test = false
+
+[[bench]]
+name = "wall_clock"
+harness = false
+test = false
