@@ -619,10 +619,12 @@ new response vocabulary. Each status carries issued request, runner, enrollment,
 and registration identities, connection state (`connected`, `suspect`, or
 `lost`), registration revision, advertised capability classes, tool names,
 credential-profile names, repository entries — each naming its repository key
-and the optional credential-profile name that key requires, with absence meaning
-anonymous HTTPS — workspace capabilities, and sandbox profiles. Each
-`runner_operation_failure` names its runner, the refused operation's
-correlation, one closed daemon-actionable `category` (`credential_unavailable`,
+and optional credential-profile name, with the configuration meaning of absence
+owned by
+[runner credential lifecycle](configuration-and-credentials.md#runner-credential-lifecycle)
+— workspace capabilities, and sandbox profiles. Each `runner_operation_failure`
+names its runner, the refused operation's correlation, one closed
+daemon-actionable `category` (`credential_unavailable`,
 `repository_unavailable`, `sandbox_unavailable`, `workspace_conflict`,
 `workspace_cleanup_failed`, or `lease_admission_refused`), and the
 runner-authored `detail` object carrying its bounded `code`, `message`, and
@@ -643,10 +645,18 @@ Each leak names its exact runner id and carries the exact closed `kind`, bounded
 runner-root-relative `locator`, lowercase manifest-or-entry SHA-256 digest, and
 nullable `session_id` and positive `placement_revision` admitted by that runner
 final acknowledged wire report. It never carries an absolute host path,
-repository URL, or credential fact. Failures precede leaks; failures use
-runner-id then operation-correlation order, and leaks use runner-id then
-locator-byte order. The closed cursor object is therefore either
-`operation_failure { runner_id, correlation }` or
+repository URL, or credential fact. Evidence-kind order is failures before
+leaks. A failure key compares the runner identity first, then the correlation
+discriminator in the fixed order `workspace_provision`, `workspace_release`,
+`lease_offer`, then only that arm's fields in this fixed sequence: provisioning
+authorization identity; retired session identity, placement revision,
+workspace-manifest identity; or offered lease identity, generation. Each
+identity, integer, and manifest identity uses its runner-protocol canonical wire
+bytes; comparison is unsigned lexicographic-byte order, and a shorter value
+precedes a longer value when one is a prefix. No absent field or field from
+another arm participates. A leak key compares runner-identity canonical bytes
+and then locator UTF-8 bytes under that same byte order. The closed cursor
+object is therefore either `operation_failure { runner_id, correlation }` or
 `workspace_leak { runner_id, locator }` and exactly reproduces the last emitted
 evidence key. The daemon fetches at most `page_size + 1` checked evidence rows,
 using the extra row only to determine `next_after`; it never materializes the

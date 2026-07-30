@@ -1374,27 +1374,28 @@ literal URL resolves through `ls-remote --get-url` and must produce exactly one
 canonical URL. A named fetch enumerates `remote get-url --all`; the result must
 contain exactly one URL, and it must be canonical, because Git fetch consumes
 only the first configured fetch URL. A named push enumerates
-`remote get-url --push --all`; the nonempty result has exactly the destination
-count Git push will use after `remote.<name>.pushurl` fallback, and every
-destination must be canonical. Any count mismatch, empty result, or unequal
-member fails before network use. Extra fetch URLs are rejected rather than left
-unchecked even though Git would consume only the first; duplicate canonical push
-URLs remain admissible because every actual destination is still bound.
+`remote get-url --push --all`; the returned nonempty sequence is exactly the
+destination sequence Git push will use after `remote.<name>.pushurl` fallback,
+and it must contain exactly one canonical URL. An empty result, a count other
+than one, or an unequal member fails before network use. Extra fetch URLs and
+additional push URLs are rejected, including a repeated canonical push URL.
 
 A singular check is insufficient for push: `remote.<name>.pushurl` is
 multi-valued, Git pushes to every configured value, and `remote get-url --push`
 returns only the first. A canonical first value could therefore pass while a
 later attacker-controlled destination received the pack, or while its later
-failure obscured an already completed canonical push. Fetch does not share that
-fan-out — it consumes only its first URL — but enumerating and rejecting fetch
-multiplicity makes the checked count equal the operation's count instead of
-preserving another implicit singular assumption. Validating the stored
-`remote.<name>.url` remains defense in depth above these checks rather than the
-boundary itself. Why: every pre-rewrite reading of the configuration reads
-exactly the value the model left in place to be read, so only the complete
-effective sequence is evidence — and the canonical binding is the whole of what
-stands between an auto-approved remote operation and an attacker-chosen
-repository.
+failure obscured an already completed canonical push. Repeating the canonical
+URL is also rejected: Git invokes the same destination twice, so a second
+failure could report known process failure after the first invocation already
+changed external state. Fetch does not share that fan-out — it consumes only its
+first URL — but enumerating and rejecting fetch multiplicity makes the checked
+count equal the operation's count instead of preserving another implicit
+singular assumption. Validating the stored `remote.<name>.url` remains defense
+in depth above these checks rather than the boundary itself. Why: every
+pre-rewrite reading of the configuration reads exactly the value the model left
+in place to be read, so only the complete effective sequence is evidence — and
+the canonical binding is the whole of what stands between an auto-approved
+remote operation and an attacker-chosen repository.
 
 What that check covers is worth stating exactly, because the root cause survives
 it. It resolves and then uses, and it holds because the two invocations are
