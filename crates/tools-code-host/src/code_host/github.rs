@@ -2063,13 +2063,16 @@ mod tests {
     /// returned as evidence from any single revision.
     #[tokio::test]
     async fn file_patch_fails_closed_when_head_moves_during_pagination() {
-        let (failure, requests) = file_patch_revision_change_failure(
-            FILE_PATCH_BASE_REVISION,
-            FILE_PATCH_HEAD_REVISION,
-            FILE_PATCH_BASE_REVISION,
-            FILE_PATCH_MOVED_REVISION,
-        )
-        .await;
+        let before_revision = ChangeRequestDiffRevision {
+            base: String::from(FILE_PATCH_BASE_REVISION),
+            head: String::from(FILE_PATCH_HEAD_REVISION),
+        };
+        let after_revision = ChangeRequestDiffRevision {
+            base: String::from(FILE_PATCH_BASE_REVISION),
+            head: String::from(FILE_PATCH_MOVED_REVISION),
+        };
+        let (failure, requests) =
+            file_patch_revision_change_failure(before_revision, after_revision).await;
 
         assert_file_patch_revision_change(failure, requests);
     }
@@ -2078,22 +2081,23 @@ mod tests {
     /// revision moves during the search.
     #[tokio::test]
     async fn file_patch_fails_closed_when_base_moves_without_head() {
-        let (failure, requests) = file_patch_revision_change_failure(
-            FILE_PATCH_BASE_REVISION,
-            FILE_PATCH_HEAD_REVISION,
-            FILE_PATCH_MOVED_REVISION,
-            FILE_PATCH_HEAD_REVISION,
-        )
-        .await;
+        let before_revision = ChangeRequestDiffRevision {
+            base: String::from(FILE_PATCH_BASE_REVISION),
+            head: String::from(FILE_PATCH_HEAD_REVISION),
+        };
+        let after_revision = ChangeRequestDiffRevision {
+            base: String::from(FILE_PATCH_MOVED_REVISION),
+            head: String::from(FILE_PATCH_HEAD_REVISION),
+        };
+        let (failure, requests) =
+            file_patch_revision_change_failure(before_revision, after_revision).await;
 
         assert_file_patch_revision_change(failure, requests);
     }
 
     async fn file_patch_revision_change_failure(
-        initial_base: &'static str,
-        initial_head: &'static str,
-        final_base: &'static str,
-        final_head: &'static str,
+        before_revision: ChangeRequestDiffRevision,
+        after_revision: ChangeRequestDiffRevision,
     ) -> (CodeHostTransportFailure, [String; 4]) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -2103,10 +2107,8 @@ mod tests {
             .expect("listener address is available");
         let server = tokio::spawn(serve_changed_file_patch_revision(
             listener,
-            initial_base,
-            initial_head,
-            final_base,
-            final_head,
+            before_revision,
+            after_revision,
         ));
         let mut transport = GitHubCodeHostTransport::try_new().expect("fixed transport constructs");
         transport.rest_base =
@@ -2165,12 +2167,10 @@ mod tests {
 
     async fn serve_changed_file_patch_revision(
         listener: tokio::net::TcpListener,
-        initial_base: &str,
-        initial_head: &str,
-        final_base: &str,
-        final_head: &str,
+        before_revision: ChangeRequestDiffRevision,
+        after_revision: ChangeRequestDiffRevision,
     ) -> [String; 4] {
-        let initial_revision = change_request_revision_value(initial_base, initial_head);
+        let initial_revision = change_request_revision_value(&before_revision);
         let target_page = serde_json::Value::Array(vec![changed_file_value(String::from(
             FILE_PATCH_TARGET_PATH,
         ))]);
@@ -2184,7 +2184,7 @@ mod tests {
         .await;
         let target_page_request =
             serve_json_response(&listener, &target_page.to_string(), None).await;
-        let final_revision = change_request_revision_value(final_base, final_head);
+        let final_revision = change_request_revision_value(&after_revision);
         let final_request = serve_json_response(&listener, &final_revision.to_string(), None).await;
         [
             initial_request,
@@ -2194,11 +2194,11 @@ mod tests {
         ]
     }
 
-    fn change_request_revision_value(base: &str, head: &str) -> serde_json::Value {
+    fn change_request_revision_value(revision: &ChangeRequestDiffRevision) -> serde_json::Value {
         serde_json::json!({
             "number": FILE_PATCH_NUMBER,
-            "base": {"sha": base},
-            "head": {"sha": head},
+            "base": {"sha": revision.base},
+            "head": {"sha": revision.head},
         })
     }
 
