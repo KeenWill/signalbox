@@ -5186,13 +5186,18 @@ pub enum ReviewPassIncompleteStatus {
     Blocked,
     Cancelled,
 }
+pub struct ReviewImportedContextEvidence { /* producing pass + digest */ }
+impl ReviewImportedContextEvidence {
+    pub const fn new(producer: ReviewPassRef, digest: [u8; 32]) -> Self;
+    // accessors: producer(), digest()
+}
 pub enum ReviewImportOutcome {
     Succeeded {
         pass: Box<ReviewPassEvidence>,
         run: ReviewRunEvidence,
         external_link: Option<Box<ReviewExternalLink>>,
         template_digest: ReviewTemplateDigest,
-        context_digest: [u8; 32],
+        context: ReviewImportedContextEvidence,
     },
     Incomplete {
         pass: Option<Box<ReviewPassEvidence>>,
@@ -5205,6 +5210,7 @@ pub enum ReviewImportEvidenceFailure {
     ForeignTarget,
     ForeignPolicy,
     ForeignTemplate,
+    IncompatibleContext,
     IncompatiblePass,
 }
 
@@ -7474,7 +7480,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop                             | 23 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 5 (incl. 1 trait)    |
-| application: review_orchestration                  | 36 (incl. 2 traits)  |
+| application: review_orchestration                  | 37 (incl. 2 traits)  |
 | application: review_workflow                       | 8 (incl. 2 traits)   |
 | application: session_metadata                      | 12 (incl. 4 traits)  |
 | application: scheduler                             | 12 (incl. 4 traits)  |
@@ -7483,4 +7489,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **191**              |
+| **signalbox-application total**                    | **192**              |

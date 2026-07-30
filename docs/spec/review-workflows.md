@@ -380,9 +380,11 @@ successful import pass may be result-free or carry one domain-compatible
 attachment, observation, or no-change result. A result-bearing success also
 carries the canonical external-link aggregate; its association must own the
 attempt target and its exact attachment, observation, or durable no-change claim
-must authenticate the pass result. Only cancellation before pass admission may
-omit both pass and run; every other passless or partially populated terminal
-outcome fails closed.
+must authenticate the pass result. Every success carries the imported-context
+digest as evidence bound to that exact import pass; a context value naming
+another pass fails before it can be sealed or fanned out. Only cancellation
+before pass admission may omit both pass and run; every other passless or
+partially populated terminal outcome fails closed.
 
 Concrete provider, model, and workspace adapters are committed but
 unimplemented; no present daemon surface supplies them. Future workspace
@@ -394,11 +396,12 @@ comparison revision.
 
 After a validated external-context-import result is durable, the service calls
 its session-backed pass port concurrently once for every configured concern.
-Each work item carries the immutable attempt, imported-context digest, and one
-exact concern specification. Successful members must report the same target,
-equal frozen policy, and exact resolved concern-template digest from their own
-runner evidence. `ReviewConcernWork` carries no repair or publication handle and
-no other member's uncommitted output.
+Each work item carries the immutable attempt, the digest from the authenticated
+pass-bound imported-context evidence, and one exact concern specification.
+Successful members must report the same target, equal frozen policy, and exact
+resolved concern-template digest from their own runner evidence.
+`ReviewConcernWork` carries no repair or publication handle and no other
+member's uncommitted output.
 
 The attempt durably records the complete expected concern inventory before any
 member starts. Judgment is eligible only after every expected member has
@@ -537,8 +540,11 @@ judgment and deduplication events through the existing single-effect pass
 primitives in canonical finding order. An `Applied` result carries the canonical
 finding event, its independently loaded pass and run evidence, and the exact
 judgment-template digest. The service validates the exact planned disposition
-and committed pass result before recording the durable effect receipt. Until
-every planned event is durably admitted, repair and publication remain
+and committed pass result before recording the durable effect receipt. On
+resume, loaded receipts must equal the first `k` members of the plan in that
+canonical order. A gap, reordering, duplicate, foreign attempt, or unknown
+finding fails before runner invocation; only the remaining suffix may execute.
+Until every planned event is durably admitted, repair and publication remain
 ineligible; a crash resumes the plan rather than asking a model for a different
 partial judgment.
 

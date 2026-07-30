@@ -245,6 +245,30 @@ pub enum ReviewPassIncompleteStatus {
     Cancelled,
 }
 
+/// Imported-context digest bound to the exact pass that produced it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReviewImportedContextEvidence {
+    producer: ReviewPassRef,
+    digest: [u8; 32],
+}
+
+impl ReviewImportedContextEvidence {
+    /// Binds an imported-context digest to its producing import pass.
+    pub const fn new(producer: ReviewPassRef, digest: [u8; 32]) -> Self {
+        Self { producer, digest }
+    }
+
+    /// Returns the exact pass that produced the imported context.
+    pub const fn producer(self) -> ReviewPassRef {
+        self.producer
+    }
+
+    /// Returns the digest of the frozen imported context.
+    pub const fn digest(self) -> [u8; 32] {
+        self.digest
+    }
+}
+
 /// Durable outcome of the external-context import pass.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewImportOutcome {
@@ -258,8 +282,8 @@ pub enum ReviewImportOutcome {
         external_link: Option<Box<ReviewExternalLink>>,
         /// Exact resolved import template.
         template_digest: ReviewTemplateDigest,
-        /// Digest of the frozen imported external context.
-        context_digest: [u8; 32],
+        /// Imported context bound to the exact producing pass.
+        context: ReviewImportedContextEvidence,
     },
     /// Import did not produce usable context.
     Incomplete {
@@ -283,6 +307,8 @@ pub enum ReviewImportEvidenceFailure {
     ForeignPolicy,
     /// Resolved import template differs.
     ForeignTemplate,
+    /// Imported context names a different producing pass.
+    IncompatibleContext,
     /// Pass and run are not a canonical succeeded import pair.
     IncompatiblePass,
 }
@@ -293,6 +319,7 @@ impl Display for ReviewImportEvidenceFailure {
             Self::ForeignTarget => "review import target differs from the attempt",
             Self::ForeignPolicy => "review import policy differs from the attempt",
             Self::ForeignTemplate => "review import template differs from the attempt",
+            Self::IncompatibleContext => "review imported context differs from its producing pass",
             Self::IncompatiblePass => "review import pass and run evidence are incompatible",
         })
     }
@@ -304,14 +331,20 @@ fn validate_import(
     attempt: &ReviewOrchestrationAttempt,
     outcome: &ReviewImportOutcome,
 ) -> Result<(), ReviewImportEvidenceFailure> {
-    let (pass, run, template_digest, external_link) = match outcome {
+    let (pass, run, template_digest, external_link, context) = match outcome {
         ReviewImportOutcome::Succeeded {
             pass,
             run,
             external_link,
             template_digest,
-            ..
-        } => (pass, run, template_digest, external_link.as_deref()),
+            context,
+        } => (
+            pass,
+            run,
+            template_digest,
+            external_link.as_deref(),
+            Some(*context),
+        ),
         ReviewImportOutcome::Incomplete {
             pass: None,
             run: None,
@@ -339,7 +372,7 @@ fn validate_import(
             run: Some(run),
             template_digest,
             ..
-        } => (pass, run, template_digest, None),
+        } => (pass, run, template_digest, None, None),
     };
     let pass_ref = pass.reference();
     if pass_ref.target() != attempt.target
@@ -352,6 +385,9 @@ fn validate_import(
     }
     if *template_digest != attempt.stage_templates.import {
         return Err(ReviewImportEvidenceFailure::ForeignTemplate);
+    }
+    if context.is_some_and(|context| context.producer() != pass_ref) {
+        return Err(ReviewImportEvidenceFailure::IncompatibleContext);
     }
     let compatible_state = match outcome {
         ReviewImportOutcome::Succeeded { .. } => {
@@ -2102,7 +2138,7 @@ where
         };
         validate_import(&attempt, &imported)
             .map_err(ReviewOrchestrationServiceError::InvalidImportEvidence)?;
-        let ReviewImportOutcome::Succeeded { context_digest, .. } = imported else {
+        let ReviewImportOutcome::Succeeded { context, .. } = imported else {
             return Ok(ReviewOrchestrationOutcome::ImportIncomplete(Box::new(
                 imported,
             )));
@@ -2122,7 +2158,7 @@ where
             let runner = Arc::clone(&self.runner);
             let work = ReviewConcernWork {
                 attempt: attempt.clone(),
-                imported_context_digest: context_digest,
+                imported_context_digest: context.digest(),
                 concern,
             };
             tasks.spawn(async move {
@@ -2220,22 +2256,11 @@ where
             .load_applied_judgment_effects(attempt.id)
             .await
             .map_err(ReviewOrchestrationServiceError::Store)?;
-        let mut applied_set = BTreeSet::new();
-        if applied.iter().any(|effect| {
-            effect.attempt != attempt.id
-                || !plan
-                    .members
-                    .iter()
-                    .any(|member| member.finding == effect.finding)
-                || !applied_set.insert(*effect)
-        }) {
-            return Err(ReviewOrchestrationServiceError::InvalidAppliedEffects);
-        }
-        for member in &plan.members {
+        let applied_prefix_len =
+            applied_judgment_effect_prefix_len(&attempt, &plan.members, &applied)
+                .ok_or(ReviewOrchestrationServiceError::InvalidAppliedEffects)?;
+        for member in plan.members.iter().skip(applied_prefix_len) {
             let effect = ReviewJudgmentEffectId::new(attempt.id, member.finding);
-            if applied_set.contains(&effect) {
-                continue;
-            }
             let outcome = self
                 .runner
                 .apply_judgment_effect(ReviewJudgmentEffectWork {
@@ -2354,6 +2379,21 @@ fn retain_first_error<Error>(first: &mut Option<Error>, candidate: Error) {
     }
 }
 
+fn applied_judgment_effect_prefix_len(
+    attempt: &ReviewOrchestrationAttempt,
+    members: &[ReviewJudgmentPlanMember],
+    applied: &[ReviewJudgmentEffectId],
+) -> Option<usize> {
+    if applied.len() > members.len() {
+        return None;
+    }
+    applied
+        .iter()
+        .zip(members)
+        .all(|(actual, member)| *actual == ReviewJudgmentEffectId::new(attempt.id, member.finding))
+        .then_some(applied.len())
+}
+
 fn ensure_sealed<StoreError, RunnerError>(
     outcome: ReviewDurableSealOutcome,
 ) -> Result<(), ReviewOrchestrationServiceError<StoreError, RunnerError>> {
@@ -2458,11 +2498,11 @@ mod tests {
                 None,
             );
             Ok(ReviewImportOutcome::Succeeded {
+                context: ReviewImportedContextEvidence::new(pass.reference(), [90; 32]),
                 pass: Box::new(pass),
                 run,
                 external_link: None,
                 template_digest: attempt.stage_templates.import,
-                context_digest: [90; 32],
             })
         }
 
@@ -3348,11 +3388,11 @@ mod tests {
             ))
             .expect("attachment is canonical pass evidence");
         let imported = ReviewImportOutcome::Succeeded {
+            context: ReviewImportedContextEvidence::new(pass.reference(), [90; 32]),
             pass: Box::new(pass),
             run,
             external_link: Some(Box::new(external_link)),
             template_digest: immutable_attempt.stage_templates().import(),
-            context_digest: [90; 32],
         };
 
         let result = validate_import(&immutable_attempt, &imported);
@@ -3379,11 +3419,11 @@ mod tests {
             Some(result),
         );
         let imported = ReviewImportOutcome::Succeeded {
+            context: ReviewImportedContextEvidence::new(pass.reference(), [90; 32]),
             pass: Box::new(pass),
             run,
             external_link: None,
             template_digest: immutable_attempt.stage_templates().import(),
-            context_digest: [90; 32],
         };
 
         let error = validate_import(&immutable_attempt, &imported)
@@ -3420,11 +3460,11 @@ mod tests {
         )
         .expect("foreign reservation is internally canonical");
         let imported = ReviewImportOutcome::Succeeded {
+            context: ReviewImportedContextEvidence::new(pass.reference(), [90; 32]),
             pass: Box::new(pass),
             run,
             external_link: Some(Box::new(foreign_link)),
             template_digest: immutable_attempt.stage_templates().import(),
-            context_digest: [90; 32],
         };
 
         let error = validate_import(&immutable_attempt, &imported)
@@ -3503,6 +3543,38 @@ mod tests {
         let result = validate_import(&immutable_attempt, &incomplete);
 
         assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn successful_import_rejects_cross_wired_context_evidence() {
+        let immutable_attempt = attempt();
+        let (pass, run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            1_150,
+            ReviewPassKind::ImportExternalContext,
+            ReviewWorkflowKind::ImportExternalContext,
+            None,
+        );
+        let foreign_producer = ReviewPassRef::new(
+            ReviewRunRef::new(
+                immutable_attempt.target(),
+                ReviewRunId::from_uuid(Uuid::from_u128(1_160)),
+            ),
+            ReviewPassId::from_uuid(Uuid::from_u128(1_161)),
+        );
+        let imported = ReviewImportOutcome::Succeeded {
+            pass: Box::new(pass),
+            run,
+            external_link: None,
+            template_digest: immutable_attempt.stage_templates().import(),
+            context: ReviewImportedContextEvidence::new(foreign_producer, [91; 32]),
+        };
+
+        let error = validate_import(&immutable_attempt, &imported)
+            .expect_err("context from another import pass must fail closed");
+
+        assert_eq!(error, ReviewImportEvidenceFailure::IncompatibleContext);
     }
 
     #[test]
@@ -3594,6 +3666,40 @@ mod tests {
                 concern: expected_concern,
             }
         );
+    }
+
+    #[test]
+    fn applied_judgment_effects_reject_non_prefix_receipt() {
+        let immutable_attempt = attempt();
+        let first =
+            ReviewJudgmentPlanMember::new(finding_ref(1_340), ReviewPlannedDisposition::Accepted);
+        let second =
+            ReviewJudgmentPlanMember::new(finding_ref(1_350), ReviewPlannedDisposition::Accepted);
+        let second_receipt = ReviewJudgmentEffectId::new(immutable_attempt.id(), second.finding());
+
+        let prefix = applied_judgment_effect_prefix_len(
+            &immutable_attempt,
+            &[first, second],
+            &[second_receipt],
+        );
+
+        assert_eq!(prefix, None);
+    }
+
+    #[test]
+    fn applied_judgment_effects_accept_exact_prefix() {
+        let immutable_attempt = attempt();
+        let first =
+            ReviewJudgmentPlanMember::new(finding_ref(1_360), ReviewPlannedDisposition::Accepted);
+        let second =
+            ReviewJudgmentPlanMember::new(finding_ref(1_370), ReviewPlannedDisposition::Accepted);
+        let first_receipt = ReviewJudgmentEffectId::new(immutable_attempt.id(), first.finding());
+        let members = [first, second];
+        let applied = [first_receipt];
+
+        let prefix = applied_judgment_effect_prefix_len(&immutable_attempt, &members, &applied);
+
+        assert_eq!(prefix, Some(applied.len()));
     }
 
     #[test]
