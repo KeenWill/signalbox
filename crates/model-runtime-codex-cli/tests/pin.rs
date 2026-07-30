@@ -1,13 +1,12 @@
-//! The pinned Codex CLI version and the adapter's supported version agree.
+//! The Codex CLI installation manifest keeps an exact version pin.
 //!
 //! This check is offline and unconditional, so it runs in the ordinary Rust
-//! workflow on every pull request. It is the drift trip-wire behind the
-//! Renovate pin: a bump to `tooling/codex-cli/package.json` fails this test
-//! until someone moves [`SUPPORTED_CODEX_CLI_VERSION`] with it, and moving
-//! that constant is what forces the fixture corpus and the gated compatibility
-//! smoke to be re-examined. Verifying the *installed* executable against the
-//! pin is the smoke's job (`tests/live_smoke.rs`); a model dispatch never
-//! spends a process on a version probe.
+//! workflow on every pull request. `build.rs` derives the adapter's exported
+//! supported-version marker from this manifest, while the binding smoke
+//! verifies the installed executable. The smoke proves a live exchange, not
+//! that the offline fixture corpus still represents the current CLI event
+//! shapes; fixture regeneration or validation against the installed CLI would
+//! close that residual gap.
 
 #![allow(
     clippy::expect_used,
@@ -15,32 +14,11 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-use signalbox_model_runtime_codex_cli::SUPPORTED_CODEX_CLI_VERSION;
-
 /// The pin manifest, relative to the workspace root.
 const PIN_MANIFEST: &str = "tooling/codex-cli/package.json";
 
 /// The pinned package, whose executable this adapter spawns.
 const PIN_PACKAGE: &str = "@openai/codex";
-
-#[test]
-fn the_pin_manifest_names_the_supported_codex_cli_version() {
-    let manifest = read_pin_manifest();
-    let pinned = manifest
-        .get("dependencies")
-        .and_then(|dependencies| dependencies.get(PIN_PACKAGE))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_else(|| panic!("{PIN_MANIFEST} declares a {PIN_PACKAGE} dependency"));
-
-    assert_eq!(
-        pinned, SUPPORTED_CODEX_CLI_VERSION,
-        "{PIN_MANIFEST} pins {PIN_PACKAGE} at {pinned}, but this adapter's \
-         fixtures and smoke cover {SUPPORTED_CODEX_CLI_VERSION}; run \
-         `python3 tooling/codex-cli/sync-supported-version.py`, re-verify the \
-         fixture corpus, and push so the gated smoke proves the exact pin, or \
-         revert the pin"
-    );
-}
 
 /// A range, tag, or alias would let the installed executable drift away from
 /// the version the fixtures cover while this manifest still looked current.
