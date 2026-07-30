@@ -25,6 +25,7 @@ use signalbox_domain::{
     ReviewProducedFindings, ReviewReferencedFindingEvidence, ReviewRun, ReviewRunEvidence,
     ReviewRunId, ReviewRunReconstitutionInput, ReviewRunRef, ReviewRunState, ReviewTarget,
     ReviewTargetId, ReviewTargetSubject, ReviewText, ReviewWorkflowKind, SessionId, TurnId,
+    validate_complete_review_finding_reference_graph,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -175,6 +176,8 @@ impl ReviewWorkflowStore {
                         AS evidence_pass_result_referenced_finding_id,
                     canonical_pass.result_referenced_finding_run_id
                         AS evidence_pass_result_referenced_finding_run_id,
+                    canonical_pass.result_referenced_finding_target_id
+                        AS evidence_pass_result_referenced_finding_target_id,
                     canonical_pass.result_referenced_finding_pass_id
                         AS evidence_pass_result_referenced_finding_pass_id,
                     canonical_pass.result_referenced_finding_status
@@ -588,8 +591,8 @@ impl ReviewWorkflowStore {
             _ => None,
         };
         let mut locked_findings = vec![finding.into_uuid()];
-        if let Some(referenced) = encoded.referenced_finding {
-            locked_findings.push(referenced.into_uuid());
+        if let Some(referenced) = encoded.referenced {
+            locked_findings.push(referenced.reference().finding().into_uuid());
         }
         locked_findings.sort_unstable();
         locked_findings.dedup();
@@ -670,6 +673,62 @@ impl ReviewWorkflowStore {
         connection: &mut PgConnection,
         finding: ReviewFindingId,
     ) -> Result<Option<ReviewFinding>, ReviewWorkflowStoreError> {
+        let target = sqlx::query_scalar::<_, Uuid>(
+            "SELECT target_id
+               FROM review_finding
+              WHERE finding_id = $1",
+        )
+        .bind(finding.into_uuid())
+        .fetch_optional(&mut *connection)
+        .await?;
+        let Some(target) = target else {
+            return Ok(None);
+        };
+        let identifiers = sqlx::query_scalar::<_, Uuid>(
+            "SELECT finding_id
+               FROM review_finding
+              WHERE target_id = $1
+              ORDER BY finding_id",
+        )
+        .bind(target)
+        .fetch_all(&mut *connection)
+        .await?;
+        let mut findings = Vec::with_capacity(identifiers.len());
+        for identifier in identifiers {
+            findings.push(
+                self.load_finding_projection_on_connection(connection, finding_id(identifier))
+                    .await?
+                    .ok_or_else(|| {
+                        corruption(
+                            "review_finding",
+                            String::from("target graph finding disappeared"),
+                        )
+                    })?,
+            );
+        }
+        validate_complete_review_finding_reference_graph(&findings).map_err(|error| {
+            corruption(
+                "review_finding",
+                format!("reference graph is corrupt: {error:?}"),
+            )
+        })?;
+        findings
+            .into_iter()
+            .find(|candidate| candidate.proposal().reference().finding() == finding)
+            .map(Some)
+            .ok_or_else(|| {
+                corruption(
+                    "review_finding",
+                    String::from("requested target graph finding disappeared"),
+                )
+            })
+    }
+
+    async fn load_finding_projection_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        finding: ReviewFindingId,
+    ) -> Result<Option<ReviewFinding>, ReviewWorkflowStoreError> {
         let row = sqlx::query(
             "SELECT finding.finding_id, finding.run_id, finding.target_id,
                     finding.producing_pass_id, finding.file_path,
@@ -715,6 +774,8 @@ impl ReviewWorkflowStore {
                         AS producing_pass_result_referenced_finding_id,
                     producing_pass.result_referenced_finding_run_id
                         AS producing_pass_result_referenced_finding_run_id,
+                    producing_pass.result_referenced_finding_target_id
+                        AS producing_pass_result_referenced_finding_target_id,
                     producing_pass.result_referenced_finding_pass_id
                         AS producing_pass_result_referenced_finding_pass_id,
                     producing_pass.result_referenced_finding_status
@@ -820,6 +881,8 @@ impl ReviewWorkflowStore {
                         AS event_pass_result_referenced_finding_id,
                     event_pass.result_referenced_finding_run_id
                         AS event_pass_result_referenced_finding_run_id,
+                    event_pass.result_referenced_finding_target_id
+                        AS event_pass_result_referenced_finding_target_id,
                     event_pass.result_referenced_finding_pass_id
                         AS event_pass_result_referenced_finding_pass_id,
                     event_pass.result_referenced_finding_status
@@ -841,10 +904,13 @@ impl ReviewWorkflowStore {
                     event_run.state_pass_id AS event_run_state_pass_id,
                     event.event_kind, event.reason,
                     event.referenced_finding_id,
+                    event.referenced_finding_run_id,
+                    event.referenced_finding_target_id,
+                    event.referenced_finding_pass_id,
                     event.referenced_finding_status,
                     event.external_link_id,
-                    referenced_finding.producing_pass_id
-                        AS referenced_finding_pass_id,
+                    referenced_finding.finding_id
+                        AS canonical_referenced_finding_id,
                     referenced_finding_pass.pass_id
                         AS canonical_referenced_finding_pass_id
                FROM review_finding_event AS event
@@ -858,8 +924,12 @@ impl ReviewWorkflowStore {
                LEFT JOIN review_finding AS referenced_finding
                  ON referenced_finding.finding_id =
                     event.referenced_finding_id
-                AND referenced_finding.run_id = event.finding_run_id
-                AND referenced_finding.target_id = event.target_id
+                AND referenced_finding.run_id =
+                    event.referenced_finding_run_id
+                AND referenced_finding.target_id =
+                    event.referenced_finding_target_id
+                AND referenced_finding.producing_pass_id =
+                    event.referenced_finding_pass_id
                LEFT JOIN review_pass AS referenced_finding_pass
                  ON referenced_finding_pass.pass_id =
                     referenced_finding.producing_pass_id
@@ -891,6 +961,12 @@ impl ReviewWorkflowStore {
                 .try_get::<Option<Uuid>, _>("referenced_finding_id")?
                 .is_some()
             {
+                require_joined_reference(
+                    &row,
+                    "canonical_referenced_finding_id",
+                    "review_finding_event",
+                    "referenced finding row is missing",
+                )?;
                 require_joined_reference(
                     &row,
                     "canonical_referenced_finding_pass_id",
@@ -1489,6 +1565,8 @@ impl ReviewWorkflowStore {
                         AS pass_result_referenced_finding_id,
                     pass.result_referenced_finding_run_id
                         AS pass_result_referenced_finding_run_id,
+                    pass.result_referenced_finding_target_id
+                        AS pass_result_referenced_finding_target_id,
                     pass.result_referenced_finding_pass_id
                         AS pass_result_referenced_finding_pass_id,
                     pass.result_referenced_finding_status
@@ -1618,6 +1696,7 @@ impl ReviewWorkflowStore {
                     pass.result_reason,
                     pass.result_referenced_finding_id,
                     pass.result_referenced_finding_run_id,
+                    pass.result_referenced_finding_target_id,
                     pass.result_referenced_finding_pass_id,
                     pass.result_referenced_finding_status,
                     pass.result_external_link_id,
@@ -1710,7 +1789,7 @@ impl ReviewWorkflowStore {
                 ));
             }
             let turn_evidence = decode_pass_turn_evidence(&row)?;
-            let pass = reconstitute_pass(&row, turn_evidence, Vec::new())?;
+            let pass = reconstitute_pass(&row, turn_evidence, Vec::new(), None)?;
             require_joined_reference(
                 &row,
                 "canonical_origin_turn_id",
@@ -1901,6 +1980,7 @@ async fn load_pass_on_connection(
                 workflow_pass.result_reason,
                 workflow_pass.result_referenced_finding_id,
                 workflow_pass.result_referenced_finding_run_id,
+                workflow_pass.result_referenced_finding_target_id,
                 workflow_pass.result_referenced_finding_pass_id,
                 workflow_pass.result_referenced_finding_status,
                 workflow_pass.result_external_link_id,
@@ -1960,8 +2040,15 @@ async fn load_pass_on_connection(
         "referenced target row is missing",
     )?;
     let produced_findings = load_produced_findings_on_connection(connection, pass).await?;
+    let referenced_producer =
+        load_referenced_producer_on_connection(connection, &row, pass).await?;
     let turn_evidence = decode_pass_turn_evidence(&row)?;
-    let pass = reconstitute_pass(&row, turn_evidence, produced_findings)?;
+    let pass = reconstitute_pass(
+        &row,
+        turn_evidence,
+        produced_findings,
+        referenced_producer.as_ref(),
+    )?;
     require_joined_reference(
         &row,
         "canonical_origin_turn_id",
@@ -2005,6 +2092,97 @@ async fn load_pass_on_connection(
         turn_evidence,
         run,
     }))
+}
+
+async fn load_referenced_producer_on_connection(
+    connection: &mut PgConnection,
+    row: &PgRow,
+    loading_pass: ReviewPassId,
+) -> Result<Option<LoadedReviewPass>, ReviewWorkflowStoreError> {
+    let finding: Option<Uuid> = row.try_get("result_referenced_finding_id")?;
+    let run: Option<Uuid> = row.try_get("result_referenced_finding_run_id")?;
+    let target: Option<Uuid> = row.try_get("result_referenced_finding_target_id")?;
+    let pass: Option<Uuid> = row.try_get("result_referenced_finding_pass_id")?;
+    let (finding, run, target, pass) = match (finding, run, target, pass) {
+        (None, None, None, None) => return Ok(None),
+        (Some(finding), Some(run), Some(target), Some(pass)) => (finding, run, target, pass),
+        _ => {
+            return Err(corruption(
+                "review_pass",
+                String::from("referenced result ancestry is incomplete"),
+            ));
+        }
+    };
+    if pass == loading_pass.into_uuid() {
+        return Err(corruption(
+            "review_pass",
+            String::from("referenced result names its own pass as producer"),
+        ));
+    }
+    let canonical = sqlx::query(
+        "SELECT finding.finding_id AS canonical_finding_id,
+                producer.pass_id AS canonical_pass_id,
+                producer.pass_kind, producer.state_kind,
+                producer.result_kind
+           FROM review_finding AS finding
+           LEFT JOIN review_pass AS producer
+             ON producer.pass_id = finding.producing_pass_id
+            AND producer.run_id = finding.run_id
+            AND producer.target_id = finding.target_id
+          WHERE finding.finding_id = $1
+            AND finding.run_id = $2
+            AND finding.target_id = $3
+            AND finding.producing_pass_id = $4",
+    )
+    .bind(finding)
+    .bind(run)
+    .bind(target)
+    .bind(pass)
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or_else(|| {
+        corruption(
+            "review_pass",
+            String::from("referenced result finding ancestry is missing"),
+        )
+    })?;
+    require_joined_reference(
+        &canonical,
+        "canonical_pass_id",
+        "review_pass",
+        "referenced result producer is missing",
+    )?;
+    if canonical.try_get::<String, _>("pass_kind")? != "read_only_review"
+        || canonical.try_get::<String, _>("state_kind")? != "succeeded"
+        || canonical
+            .try_get::<Option<String>, _>("result_kind")?
+            .as_deref()
+            != Some("produced_findings")
+    {
+        return Err(corruption(
+            "review_pass",
+            String::from("referenced result producer is not sealed read-only success"),
+        ));
+    }
+    let loaded = Box::pin(load_pass_on_connection(connection, pass_id(pass)))
+        .await?
+        .ok_or_else(|| {
+            corruption(
+                "review_pass",
+                String::from("referenced result producer disappeared"),
+            )
+        })?;
+    let expected = ReviewPassRef::new(
+        ReviewRunRef::new(target_id(target), run_id(run)),
+        pass_id(pass),
+    );
+    if loaded.pass.reference() != expected {
+        return Err(corruption(
+            "review_pass",
+            String::from("referenced result producer ancestry is cross-wired"),
+        ));
+    }
+    Ok(Some(loaded))
 }
 
 async fn load_external_link_claims_on_connection(
@@ -2224,9 +2402,14 @@ async fn insert_finding_event(
         "INSERT INTO review_finding_event
             (finding_id, event_ordinal, finding_run_id, target_id,
              event_pass_id, event_pass_run_id, event_kind, reason,
-             referenced_finding_id, referenced_finding_status,
+             referenced_finding_id, referenced_finding_run_id,
+             referenced_finding_target_id, referenced_finding_pass_id,
+             referenced_finding_status,
              external_link_id, external_link_association_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+         VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+             $13, $14, $15
+         )",
     )
     .bind(finding.finding().into_uuid())
     .bind(i64::from(event.ordinal().get()))
@@ -2236,7 +2419,26 @@ async fn insert_finding_event(
     .bind(event.pass().run().run().into_uuid())
     .bind(encoded.kind)
     .bind(encoded.reason)
-    .bind(encoded.referenced_finding.map(ReviewFindingId::into_uuid))
+    .bind(
+        encoded
+            .referenced
+            .map(|evidence| evidence.reference().finding().into_uuid()),
+    )
+    .bind(
+        encoded
+            .referenced
+            .map(|evidence| evidence.reference().run().run().into_uuid()),
+    )
+    .bind(
+        encoded
+            .referenced
+            .map(|evidence| evidence.reference().target().into_uuid()),
+    )
+    .bind(
+        encoded
+            .referenced
+            .map(|evidence| evidence.reference().pass().pass().into_uuid()),
+    )
     .bind(encoded.referenced_status.map(encode_finding_status))
     .bind(encoded.external_link.map(ReviewExternalLinkId::into_uuid))
     .bind(encoded.external_link.map(|_| "finding"))
@@ -2269,17 +2471,18 @@ async fn bind_pass_result(
                 result_reason = $12,
                 result_referenced_finding_id = $13,
                 result_referenced_finding_run_id = $14,
-                result_referenced_finding_pass_id = $15,
-                result_referenced_finding_status = $16,
-                result_external_link_id = $17,
-                result_external_object_key = $18,
-                result_observation_state = $19
+                result_referenced_finding_target_id = $15,
+                result_referenced_finding_pass_id = $16,
+                result_referenced_finding_status = $17,
+                result_external_link_id = $18,
+                result_external_object_key = $19,
+                result_observation_state = $20
           WHERE pass_id = $1
             AND run_id = $2
             AND target_id = $3
             AND state_kind = $4
             AND turn_id IS NOT DISTINCT FROM $5
-            AND output_frontier_id IS NOT DISTINCT FROM $20
+            AND output_frontier_id IS NOT DISTINCT FROM $21
             AND (
                 result_kind IS NULL
                 OR (
@@ -2292,6 +2495,7 @@ async fn bind_pass_result(
                     result_reason,
                     result_referenced_finding_id,
                     result_referenced_finding_run_id,
+                    result_referenced_finding_target_id,
                     result_referenced_finding_pass_id,
                     result_referenced_finding_status,
                     result_external_link_id,
@@ -2299,7 +2503,7 @@ async fn bind_pass_result(
                     result_observation_state
                 ) IS NOT DISTINCT FROM (
                     $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                    $16, $17, $18, $19
+                    $16, $17, $18, $19, $20
                 )
             )
         RETURNING pass_id",
@@ -2326,6 +2530,7 @@ async fn bind_pass_result(
     .bind(result.reason)
     .bind(referenced.map(|finding| finding.finding().into_uuid()))
     .bind(referenced.map(|finding| finding.run().run().into_uuid()))
+    .bind(referenced.map(|finding| finding.target().into_uuid()))
     .bind(referenced.map(|finding| finding.pass().pass().into_uuid()))
     .bind(
         result
@@ -2904,7 +3109,7 @@ fn decode_pass_for_transition(
     let state = decode_pass_row_state(&row)?;
     let current_evidence = projected_current_pass_turn_evidence(state, canonical_evidence)?;
     Ok((
-        reconstitute_pass(&row, current_evidence, Vec::new())?,
+        reconstitute_pass(&row, current_evidence, Vec::new(), None)?,
         canonical_evidence,
     ))
 }
@@ -2913,6 +3118,7 @@ fn reconstitute_pass(
     row: &PgRow,
     turn_evidence: Option<ReviewPassTurnEvidence>,
     produced_findings: Vec<ReviewFindingRef>,
+    referenced_producer: Option<&LoadedReviewPass>,
 ) -> Result<ReviewPass, ReviewWorkflowStoreError> {
     let reference = ReviewPassRef::new(
         ReviewRunRef::new(
@@ -2944,6 +3150,7 @@ fn reconstitute_pass(
             frontier,
             stored_pass_result(row, "target_id", "")?,
             produced_findings,
+            referenced_producer,
         )?,
         turn_evidence,
     ))
@@ -2985,6 +3192,7 @@ fn decode_pass_row_state(row: &PgRow) -> Result<ReviewPassState, ReviewWorkflowS
         row.try_get("output_frontier_id")?,
         stored_pass_result(row, "target_id", "")?,
         Vec::new(),
+        None,
     )
 }
 
@@ -3182,6 +3390,8 @@ fn decode_finding_event(
     let kind: String = row.try_get("event_kind")?;
     let reason: Option<String> = row.try_get("reason")?;
     let referenced: Option<Uuid> = row.try_get("referenced_finding_id")?;
+    let referenced_run: Option<Uuid> = row.try_get("referenced_finding_run_id")?;
+    let referenced_target: Option<Uuid> = row.try_get("referenced_finding_target_id")?;
     let referenced_pass: Option<Uuid> = row.try_get("referenced_finding_pass_id")?;
     let referenced_status: Option<String> = row.try_get("referenced_finding_status")?;
     let external_link: Option<Uuid> = row.try_get("external_link_id")?;
@@ -3189,60 +3399,66 @@ fn decode_finding_event(
         kind.as_str(),
         reason,
         referenced,
+        referenced_run,
+        referenced_target,
         referenced_pass,
         referenced_status,
         external_link,
     ) {
-        ("accepted", None, None, None, None, None) => ReviewFindingEventKind::Accepted,
-        ("rejected", Some(reason), None, None, None, None) => ReviewFindingEventKind::Rejected {
-            reason: review_text(reason, "review_finding_event")?,
-        },
+        ("accepted", None, None, None, None, None, None, None) => ReviewFindingEventKind::Accepted,
+        ("rejected", Some(reason), None, None, None, None, None, None) => {
+            ReviewFindingEventKind::Rejected {
+                reason: review_text(reason, "review_finding_event")?,
+            }
+        }
         (
             "duplicate",
             None,
             Some(referenced),
+            Some(referenced_run),
+            Some(referenced_target),
             Some(referenced_pass),
             Some(referenced_status),
             None,
         ) => ReviewFindingEventKind::Duplicate {
-            canonical: ReviewReferencedFindingEvidence::try_reconstitute(
+            canonical: decode_event_referenced_finding(
+                &pass,
+                "duplicate",
                 ReviewFindingRef::new(
-                    ReviewPassRef::new(finding.run(), pass_id(referenced_pass)),
+                    ReviewPassRef::new(
+                        ReviewRunRef::new(target_id(referenced_target), run_id(referenced_run)),
+                        pass_id(referenced_pass),
+                    ),
                     finding_id(referenced),
                 ),
-                decode_finding_status(&referenced_status)?,
-            )
-            .ok_or_else(|| {
-                corruption(
-                    "review_finding_event",
-                    String::from("referenced finding status is ineligible"),
-                )
-            })?,
+                &referenced_status,
+            )?,
         },
         (
             "superseded",
             None,
             Some(referenced),
+            Some(referenced_run),
+            Some(referenced_target),
             Some(referenced_pass),
             Some(referenced_status),
             None,
         ) => ReviewFindingEventKind::Superseded {
-            successor: ReviewReferencedFindingEvidence::try_reconstitute(
+            successor: decode_event_referenced_finding(
+                &pass,
+                "superseded",
                 ReviewFindingRef::new(
-                    ReviewPassRef::new(finding.run(), pass_id(referenced_pass)),
+                    ReviewPassRef::new(
+                        ReviewRunRef::new(target_id(referenced_target), run_id(referenced_run)),
+                        pass_id(referenced_pass),
+                    ),
                     finding_id(referenced),
                 ),
-                decode_finding_status(&referenced_status)?,
-            )
-            .ok_or_else(|| {
-                corruption(
-                    "review_finding_event",
-                    String::from("referenced finding status is ineligible"),
-                )
-            })?,
+                &referenced_status,
+            )?,
         },
-        ("stale", None, None, None, None, None) => ReviewFindingEventKind::Stale,
-        ("posted", None, None, None, None, Some(link)) => {
+        ("stale", None, None, None, None, None, None, None) => ReviewFindingEventKind::Stale,
+        ("posted", None, None, None, None, None, None, Some(link)) => {
             let canonical =
                 require_finding_event_external_link(canonical_link, external_link_id(link))?;
             ReviewFindingEventKind::Posted {
@@ -3256,8 +3472,8 @@ fn decode_finding_event(
                 ),
             }
         }
-        ("fixed", None, None, None, None, None) => ReviewFindingEventKind::Fixed,
-        ("blocked_with_reason", Some(reason), None, None, None, link) => {
+        ("fixed", None, None, None, None, None, None, None) => ReviewFindingEventKind::Fixed,
+        ("blocked_with_reason", Some(reason), None, None, None, None, None, link) => {
             let link = link
                 .map(|link| {
                     let canonical = require_finding_event_external_link(
@@ -3311,6 +3527,39 @@ fn decode_finding_event(
         run,
         kind,
     ))
+}
+
+fn decode_event_referenced_finding(
+    pass: &ReviewPassEvidence,
+    expected_kind: &str,
+    reference: ReviewFindingRef,
+    stored_status: &str,
+) -> Result<ReviewReferencedFindingEvidence, ReviewWorkflowStoreError> {
+    let canonical = match (expected_kind, pass_state_result(pass.state())) {
+        ("duplicate", Some(ReviewPassResult::FindingEvent(result))) => match result.kind() {
+            ReviewFindingEventResultKind::Duplicate { canonical } => Some(*canonical),
+            _ => None,
+        },
+        ("superseded", Some(ReviewPassResult::FindingEvent(result))) => match result.kind() {
+            ReviewFindingEventResultKind::Superseded { successor } => Some(*successor),
+            _ => None,
+        },
+        _ => None,
+    }
+    .ok_or_else(|| {
+        corruption(
+            "review_finding_event",
+            String::from("event pass omitted its authenticated reference result"),
+        )
+    })?;
+    let status = decode_finding_status(stored_status)?;
+    if canonical.reference() != reference || canonical.status() != status {
+        return Err(corruption(
+            "review_finding_event",
+            String::from("event reference differs from its pass result"),
+        ));
+    }
+    Ok(canonical)
 }
 
 fn require_finding_event_external_link(
@@ -3720,6 +3969,7 @@ struct StoredPassResult {
     reason: Option<String>,
     referenced_finding: Option<Uuid>,
     referenced_run: Option<Uuid>,
+    referenced_target: Option<Uuid>,
     referenced_pass: Option<Uuid>,
     referenced_status: Option<String>,
     external_link: Option<Uuid>,
@@ -3733,6 +3983,14 @@ fn stored_pass_result(
     prefix: &str,
 ) -> Result<StoredPassResult, ReviewWorkflowStoreError> {
     let column = |suffix: &str| format!("{prefix}{suffix}");
+    let referenced_finding: Option<Uuid> =
+        row.try_get(column("result_referenced_finding_id").as_str())?;
+    let referenced_target =
+        match row.try_get(column("result_referenced_finding_target_id").as_str()) {
+            Ok(target) => target,
+            Err(sqlx::Error::ColumnNotFound(_)) if referenced_finding.is_none() => None,
+            Err(error) => return Err(error.into()),
+        };
     Ok(StoredPassResult {
         kind: row.try_get(column("result_kind").as_str())?,
         target: row.try_get(target_column)?,
@@ -3742,8 +4000,9 @@ fn stored_pass_result(
         ordinal: row.try_get(column("result_event_ordinal").as_str())?,
         event_kind: row.try_get(column("result_event_kind").as_str())?,
         reason: row.try_get(column("result_reason").as_str())?,
-        referenced_finding: row.try_get(column("result_referenced_finding_id").as_str())?,
+        referenced_finding,
         referenced_run: row.try_get(column("result_referenced_finding_run_id").as_str())?,
+        referenced_target,
         referenced_pass: row.try_get(column("result_referenced_finding_pass_id").as_str())?,
         referenced_status: row.try_get(column("result_referenced_finding_status").as_str())?,
         external_link: row.try_get(column("result_external_link_id").as_str())?,
@@ -3758,8 +4017,9 @@ fn decode_pass_state(
     frontier: Option<Uuid>,
     stored: StoredPassResult,
     produced_findings: Vec<ReviewFindingRef>,
+    referenced_producer: Option<&LoadedReviewPass>,
 ) -> Result<ReviewPassState, ReviewWorkflowStoreError> {
-    let result = decode_pass_result(stored, produced_findings)?;
+    let result = decode_pass_result(stored, produced_findings, referenced_producer)?;
     match (kind, turn, frontier, result) {
         ("queued", None, None, None) => Ok(ReviewPassState::Queued),
         ("running", Some(turn), None, None) => Ok(ReviewPassState::Running {
@@ -3790,6 +4050,7 @@ fn decode_pass_state(
 fn decode_pass_result(
     stored: StoredPassResult,
     produced_findings: Vec<ReviewFindingRef>,
+    referenced_producer: Option<&LoadedReviewPass>,
 ) -> Result<Option<ReviewPassResult>, ReviewWorkflowStoreError> {
     let scalar_empty = stored.finding.is_none()
         && stored.finding_run.is_none()
@@ -3799,6 +4060,7 @@ fn decode_pass_result(
         && stored.reason.is_none()
         && stored.referenced_finding.is_none()
         && stored.referenced_run.is_none()
+        && stored.referenced_target.is_none()
         && stored.referenced_pass.is_none()
         && stored.referenced_status.is_none()
         && stored.external_link.is_none()
@@ -3818,7 +4080,7 @@ fn decode_pass_result(
             if stored.external_object.is_none() && stored.observation_state.is_none() =>
         {
             Ok(Some(ReviewPassResult::FindingEvent(
-                decode_stored_finding_event(&stored)?,
+                decode_stored_finding_event(&stored, referenced_producer)?,
             )))
         }
         Some("external_link_attachment") if stored.observation_state.is_none() => {
@@ -3838,7 +4100,7 @@ fn decode_pass_result(
                 "review_pass",
             )?;
             let finding_event = if stored.finding.is_some() {
-                Some(decode_stored_finding_event(&stored)?)
+                Some(decode_stored_finding_event(&stored, referenced_producer)?)
             } else {
                 None
             };
@@ -3950,6 +4212,7 @@ fn decode_pass_result(
 
 fn decode_stored_finding_event(
     stored: &StoredPassResult,
+    referenced_producer: Option<&LoadedReviewPass>,
 ) -> Result<ReviewFindingEventResult, ReviewWorkflowStoreError> {
     let finding = ReviewFindingRef::new(
         ReviewPassRef::new(
@@ -4000,10 +4263,10 @@ fn decode_stored_finding_event(
             )?,
         },
         "duplicate" => ReviewFindingEventResultKind::Duplicate {
-            canonical: decode_stored_referenced_finding(stored)?,
+            canonical: decode_stored_referenced_finding(stored, referenced_producer)?,
         },
         "superseded" => ReviewFindingEventResultKind::Superseded {
-            successor: decode_stored_referenced_finding(stored)?,
+            successor: decode_stored_referenced_finding(stored, referenced_producer)?,
         },
         "stale" => ReviewFindingEventResultKind::Stale,
         "posted" => ReviewFindingEventResultKind::Posted {
@@ -4033,11 +4296,17 @@ fn decode_stored_finding_event(
 
 fn decode_stored_referenced_finding(
     stored: &StoredPassResult,
+    referenced_producer: Option<&LoadedReviewPass>,
 ) -> Result<ReviewReferencedFindingEvidence, ReviewWorkflowStoreError> {
     let reference = ReviewFindingRef::new(
         ReviewPassRef::new(
             ReviewRunRef::new(
-                target_id(stored.target),
+                target_id(stored.referenced_target.ok_or_else(|| {
+                    corruption(
+                        "review_pass",
+                        String::from("referenced result omitted target"),
+                    )
+                })?),
                 run_id(stored.referenced_run.ok_or_else(|| {
                     corruption("review_pass", String::from("referenced result omitted run"))
                 })?),
@@ -4062,10 +4331,23 @@ fn decode_stored_referenced_finding(
             String::from("referenced result omitted status"),
         )
     })?)?;
-    ReviewReferencedFindingEvidence::try_reconstitute(reference, status).ok_or_else(|| {
+    let producer = referenced_producer.ok_or_else(|| {
         corruption(
             "review_pass",
-            String::from("referenced result carried ineligible status"),
+            String::from("referenced result producer is missing"),
+        )
+    })?;
+    let producer_pass = producer.evidence();
+    ReviewReferencedFindingEvidence::try_reconstitute(
+        reference,
+        status,
+        &producer_pass,
+        producer.run_evidence(),
+    )
+    .ok_or_else(|| {
+        corruption(
+            "review_pass",
+            String::from("referenced result producer or status is invalid"),
         )
     })
 }
@@ -4138,7 +4420,7 @@ fn encode_link_association(association: ReviewExternalLinkAssociation) -> Encode
 struct EncodedFindingEvent<'a> {
     kind: &'static str,
     reason: Option<&'a str>,
-    referenced_finding: Option<ReviewFindingId>,
+    referenced: Option<ReviewReferencedFindingEvidence>,
     referenced_status: Option<ReviewFindingStatus>,
     external_link: Option<ReviewExternalLinkId>,
 }
@@ -4147,7 +4429,7 @@ fn encode_finding_event(event: &ReviewFindingEventKind) -> EncodedFindingEvent<'
     let empty = |kind| EncodedFindingEvent {
         kind,
         reason: None,
-        referenced_finding: None,
+        referenced: None,
         referenced_status: None,
         external_link: None,
     };
@@ -4156,21 +4438,21 @@ fn encode_finding_event(event: &ReviewFindingEventKind) -> EncodedFindingEvent<'
         ReviewFindingEventKind::Rejected { reason } => EncodedFindingEvent {
             kind: "rejected",
             reason: Some(reason.as_str()),
-            referenced_finding: None,
+            referenced: None,
             referenced_status: None,
             external_link: None,
         },
         ReviewFindingEventKind::Duplicate { canonical } => EncodedFindingEvent {
             kind: "duplicate",
             reason: None,
-            referenced_finding: Some(canonical.reference().finding()),
+            referenced: Some(*canonical),
             referenced_status: Some(canonical.status()),
             external_link: None,
         },
         ReviewFindingEventKind::Superseded { successor } => EncodedFindingEvent {
             kind: "superseded",
             reason: None,
-            referenced_finding: Some(successor.reference().finding()),
+            referenced: Some(*successor),
             referenced_status: Some(successor.status()),
             external_link: None,
         },
@@ -4178,7 +4460,7 @@ fn encode_finding_event(event: &ReviewFindingEventKind) -> EncodedFindingEvent<'
         ReviewFindingEventKind::Posted { link } => EncodedFindingEvent {
             kind: "posted",
             reason: None,
-            referenced_finding: None,
+            referenced: None,
             referenced_status: None,
             external_link: Some(link.link()),
         },
@@ -4186,7 +4468,7 @@ fn encode_finding_event(event: &ReviewFindingEventKind) -> EncodedFindingEvent<'
         ReviewFindingEventKind::BlockedWithReason { reason, link } => EncodedFindingEvent {
             kind: "blocked_with_reason",
             reason: Some(reason.as_str()),
-            referenced_finding: None,
+            referenced: None,
             referenced_status: None,
             external_link: link.as_ref().map(|link| link.link()),
         },

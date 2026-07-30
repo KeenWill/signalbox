@@ -1378,6 +1378,23 @@ fn assert_read_only_success_requires_atomic_inventory(error: ReviewWorkflowStore
     );
 }
 
+#[track_caller]
+fn assert_finding_reference_load_corruption(
+    loaded: Result<Option<ReviewFinding>, ReviewWorkflowStoreError>,
+) {
+    let error = loaded.expect_err("corrupt finding reference must fail loading closed");
+    let ReviewWorkflowStoreError::Corruption(error) = error else {
+        panic!("expected typed finding-reference corruption");
+    };
+    assert!(
+        error.aggregate() == "review_finding_event"
+            || error.aggregate() == "review_pass"
+            || error.aggregate() == "review_finding"
+            || error.aggregate() == "review_run"
+            || error.aggregate() == "review_pass_produced_finding"
+    );
+}
+
 async fn load_review_aggregate(
     store: &ReviewWorkflowStore,
     reference: ReviewPassRef,
@@ -2760,44 +2777,45 @@ async fn inv040_finding_event_rejects_foreign_owner() -> Result<(), Box<dyn Erro
 async fn inv040_referenced_finding_retains_producing_pass() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
+    let canonical_pass = insert_fixture_pass(&fixture, 0x332, ReviewPassKind::ReadOnlyReview).await;
     let dedupe_pass = insert_fixture_pass(&fixture, 0x333, ReviewPassKind::Dedupe).await;
-    let evidence =
-        succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass, dedupe_pass]).await;
+    let evidence = succeed_fixture_passes(
+        &pool,
+        &fixture.store,
+        &[fixture.pass, canonical_pass, dedupe_pass],
+    )
+    .await;
     let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x330)));
     let canonical_ref =
-        ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x331)));
-    let review_evidence =
-        pass_with_produced_findings(vec![finding_ref, canonical_ref], evidence[0].clone());
-    let dedupe_evidence = evidence[1].clone();
+        ReviewFindingRef::new(canonical_pass, ReviewFindingId::from_uuid(uuid(0x331)));
+    let review_evidence = pass_with_produced_findings(vec![finding_ref], evidence[0].clone());
+    let canonical_evidence = pass_with_produced_findings(vec![canonical_ref], evidence[1].clone());
+    let dedupe_evidence = evidence[2].clone();
     let open = finding(
         finding_ref,
         review_evidence.clone(),
         &fixture.target_snapshot,
     );
+    let canonical = finding(
+        canonical_ref,
+        canonical_evidence.clone(),
+        &fixture.target_snapshot,
+    );
     fixture
         .store
-        .insert_findings(
-            &review_evidence,
-            &[
-                open.clone(),
-                finding(
-                    canonical_ref,
-                    review_evidence.clone(),
-                    &fixture.target_snapshot,
-                ),
-            ],
-        )
+        .insert_findings(&review_evidence, std::slice::from_ref(&open))
+        .await?;
+    fixture
+        .store
+        .insert_findings(&canonical_evidence, std::slice::from_ref(&canonical))
         .await?;
     let event = finding_event(
         finding_ref,
         ReviewEventOrdinal::one(),
         dedupe_evidence,
         ReviewFindingEventKind::Duplicate {
-            canonical: ReviewReferencedFindingEvidence::try_reconstitute(
-                canonical_ref,
-                ReviewFindingStatus::Open,
-            )
-            .expect("open finding is eligible reference evidence"),
+            canonical: ReviewReferencedFindingEvidence::try_from_finding(&canonical)
+                .expect("open finding is eligible reference evidence"),
         },
     );
     let expected = open
@@ -2815,6 +2833,504 @@ async fn inv040_referenced_finding_retains_producing_pass() -> Result<(), Box<dy
     Ok(())
 }
 
+/// INV-040: a superseded event round-trips a successor from another sealed
+/// producer run without rewriting either finding's ancestry.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_cross_run_superseded_retains_independent_ancestry() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let successor_pass =
+        insert_fixture_pass(&fixture, 0x4332, ReviewPassKind::ReadOnlyReview).await;
+    let dedupe_pass = insert_fixture_pass(&fixture, 0x4333, ReviewPassKind::Dedupe).await;
+    let evidence = succeed_fixture_passes(
+        &pool,
+        &fixture.store,
+        &[fixture.pass, successor_pass, dedupe_pass],
+    )
+    .await;
+    let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x4330)));
+    let successor_ref =
+        ReviewFindingRef::new(successor_pass, ReviewFindingId::from_uuid(uuid(0x4331)));
+    let review_evidence = pass_with_produced_findings(vec![finding_ref], evidence[0].clone());
+    let successor_evidence = pass_with_produced_findings(vec![successor_ref], evidence[1].clone());
+    let open = finding(
+        finding_ref,
+        review_evidence.clone(),
+        &fixture.target_snapshot,
+    );
+    let successor = finding(
+        successor_ref,
+        successor_evidence.clone(),
+        &fixture.target_snapshot,
+    );
+    fixture
+        .store
+        .insert_findings(&review_evidence, std::slice::from_ref(&open))
+        .await?;
+    fixture
+        .store
+        .insert_findings(&successor_evidence, std::slice::from_ref(&successor))
+        .await?;
+    let event = finding_event(
+        finding_ref,
+        ReviewEventOrdinal::one(),
+        evidence[2].clone(),
+        ReviewFindingEventKind::Superseded {
+            successor: ReviewReferencedFindingEvidence::try_from_finding(&successor)
+                .expect("open finding is eligible successor evidence"),
+        },
+    );
+    let expected = open
+        .apply(event.clone())
+        .expect("dedupe pass may identify the successor finding");
+    fixture
+        .store
+        .append_finding_event(finding_ref.finding(), event)
+        .await?;
+
+    assert_eq!(
+        fixture.store.load_finding(finding_ref.finding()).await?,
+        Some(expected)
+    );
+    Ok(())
+}
+
+/// INV-040: the persistence boundary rejects a complete reference whose
+/// authenticated producer belongs to another immutable target.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_store_rejects_cross_target_finding_reference() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let foreign_target = ReviewTargetId::from_uuid(uuid(0x6330));
+    let foreign_snapshot = ReviewTarget::try_new(
+        foreign_target,
+        key("example-code-host"),
+        key("example/repository"),
+        ReviewTargetSubject::Commit,
+        key("foreign-head"),
+        Some(key("foreign-base")),
+        None,
+    )
+    .expect("foreign target is valid");
+    fixture.store.insert_target(&foreign_snapshot).await?;
+    let foreign_producer = insert_isolated_pass_for_target(
+        &pool,
+        &fixture.store,
+        foreign_target,
+        0x6331,
+        ReviewPassKind::ReadOnlyReview,
+    )
+    .await
+    .0;
+    let dedupe_pass = insert_fixture_pass(&fixture, 0x6332, ReviewPassKind::Dedupe).await;
+    let evidence = succeed_fixture_passes(
+        &pool,
+        &fixture.store,
+        &[fixture.pass, foreign_producer, dedupe_pass],
+    )
+    .await;
+    let subject_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x6333)));
+    let foreign_ref =
+        ReviewFindingRef::new(foreign_producer, ReviewFindingId::from_uuid(uuid(0x6334)));
+    let subject_evidence = pass_with_produced_findings(vec![subject_ref], evidence[0].clone());
+    let foreign_evidence = pass_with_produced_findings(vec![foreign_ref], evidence[1].clone());
+    let subject = finding(
+        subject_ref,
+        subject_evidence.clone(),
+        &fixture.target_snapshot,
+    );
+    let foreign = finding(foreign_ref, foreign_evidence.clone(), &foreign_snapshot);
+    fixture
+        .store
+        .insert_findings(&subject_evidence, std::slice::from_ref(&subject))
+        .await?;
+    fixture
+        .store
+        .insert_findings(&foreign_evidence, std::slice::from_ref(&foreign))
+        .await?;
+    let error = sqlx::query(
+        "UPDATE review_pass
+            SET result_kind = 'finding_event',
+                result_finding_id = $2,
+                result_finding_run_id = $3,
+                result_finding_pass_id = $4,
+                result_event_ordinal = 1,
+                result_event_kind = 'duplicate',
+                result_referenced_finding_id = $5,
+                result_referenced_finding_run_id = $6,
+                result_referenced_finding_target_id = $7,
+                result_referenced_finding_pass_id = $8,
+                result_referenced_finding_status = 'open'
+          WHERE pass_id = $1",
+    )
+    .bind(dedupe_pass.pass().into_uuid())
+    .bind(subject_ref.finding().into_uuid())
+    .bind(subject_ref.run().run().into_uuid())
+    .bind(subject_ref.pass().pass().into_uuid())
+    .bind(foreign_ref.finding().into_uuid())
+    .bind(foreign_ref.run().run().into_uuid())
+    .bind(foreign_ref.target().into_uuid())
+    .bind(foreign_ref.pass().pass().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("cross-target reference must fail relational admission");
+    assert_sqlstate(&error, "23514");
+    Ok(())
+}
+
+/// INV-040: reconstitution rejects a referenced producer whose durable frozen
+/// policy differs or whose canonical pass is no longer read-only review.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_loader_rejects_reference_policy_or_producer_mismatch() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let canonical_pass =
+        insert_fixture_pass(&fixture, 0x6431, ReviewPassKind::ReadOnlyReview).await;
+    let dedupe_pass = insert_fixture_pass(&fixture, 0x6432, ReviewPassKind::Dedupe).await;
+    let evidence = succeed_fixture_passes(
+        &pool,
+        &fixture.store,
+        &[fixture.pass, canonical_pass, dedupe_pass],
+    )
+    .await;
+    let subject_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x6433)));
+    let canonical_ref =
+        ReviewFindingRef::new(canonical_pass, ReviewFindingId::from_uuid(uuid(0x6434)));
+    let subject_evidence = pass_with_produced_findings(vec![subject_ref], evidence[0].clone());
+    let canonical_evidence = pass_with_produced_findings(vec![canonical_ref], evidence[1].clone());
+    let subject = finding(
+        subject_ref,
+        subject_evidence.clone(),
+        &fixture.target_snapshot,
+    );
+    let canonical = finding(
+        canonical_ref,
+        canonical_evidence.clone(),
+        &fixture.target_snapshot,
+    );
+    fixture
+        .store
+        .insert_findings(&subject_evidence, std::slice::from_ref(&subject))
+        .await?;
+    fixture
+        .store
+        .insert_findings(&canonical_evidence, std::slice::from_ref(&canonical))
+        .await?;
+    fixture
+        .store
+        .append_finding_event(
+            subject_ref.finding(),
+            finding_event(
+                subject_ref,
+                ReviewEventOrdinal::one(),
+                evidence[2].clone(),
+                ReviewFindingEventKind::Duplicate {
+                    canonical: ReviewReferencedFindingEvidence::try_from_finding(&canonical)
+                        .expect("open canonical finding is reference evidence"),
+                },
+            ),
+        )
+        .await?;
+
+    sqlx::query(
+        "ALTER TABLE review_run
+         DROP CONSTRAINT review_run_confidence_bounds",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_run
+         DISABLE TRIGGER review_run_change_is_guarded",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE review_run
+            SET minimum_judge_confidence = 7001
+          WHERE run_id = $1",
+    )
+    .bind(canonical_ref.run().run().into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let error = fixture
+        .store
+        .load_finding(subject_ref.finding())
+        .await
+        .expect_err("different frozen producer policy must fail loading closed");
+    let ReviewWorkflowStoreError::Corruption(error) = error else {
+        panic!("expected typed referenced-policy corruption");
+    };
+    assert_finding_reference_load_corruption(Err(ReviewWorkflowStoreError::Corruption(error)));
+    sqlx::query(
+        "UPDATE review_run
+            SET minimum_judge_confidence = 7000
+          WHERE run_id = $1",
+    )
+    .bind(canonical_ref.run().run().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_pass
+         DISABLE TRIGGER review_pass_change_is_guarded",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET pass_kind = 'judge'
+          WHERE pass_id = $1",
+    )
+    .bind(canonical_ref.pass().pass().into_uuid())
+    .execute(&pool)
+    .await?;
+    assert_finding_reference_load_corruption(
+        fixture.store.load_finding(subject_ref.finding()).await,
+    );
+    Ok(())
+}
+
+/// INV-040: target/run/pass/finding legs are independently retained; corrupting
+/// any one leg cannot be normalized into a plausible reference during load.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_loader_rejects_each_cross_wired_reference_ancestry_leg()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let canonical_pass =
+        insert_fixture_pass(&fixture, 0x6531, ReviewPassKind::ReadOnlyReview).await;
+    let dedupe_pass = insert_fixture_pass(&fixture, 0x6532, ReviewPassKind::Dedupe).await;
+    let evidence = succeed_fixture_passes(
+        &pool,
+        &fixture.store,
+        &[fixture.pass, canonical_pass, dedupe_pass],
+    )
+    .await;
+    let subject_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x6533)));
+    let canonical_ref =
+        ReviewFindingRef::new(canonical_pass, ReviewFindingId::from_uuid(uuid(0x6534)));
+    let subject_evidence = pass_with_produced_findings(vec![subject_ref], evidence[0].clone());
+    let canonical_evidence = pass_with_produced_findings(vec![canonical_ref], evidence[1].clone());
+    let subject = finding(
+        subject_ref,
+        subject_evidence.clone(),
+        &fixture.target_snapshot,
+    );
+    let canonical = finding(
+        canonical_ref,
+        canonical_evidence.clone(),
+        &fixture.target_snapshot,
+    );
+    fixture
+        .store
+        .insert_findings(&subject_evidence, std::slice::from_ref(&subject))
+        .await?;
+    fixture
+        .store
+        .insert_findings(&canonical_evidence, std::slice::from_ref(&canonical))
+        .await?;
+    fixture
+        .store
+        .append_finding_event(
+            subject_ref.finding(),
+            finding_event(
+                subject_ref,
+                ReviewEventOrdinal::one(),
+                evidence[2].clone(),
+                ReviewFindingEventKind::Duplicate {
+                    canonical: ReviewReferencedFindingEvidence::try_from_finding(&canonical)
+                        .expect("open canonical finding is reference evidence"),
+                },
+            ),
+        )
+        .await?;
+
+    sqlx::query(
+        "ALTER TABLE review_finding_event
+         DROP CONSTRAINT review_finding_event_referenced_finding_fk,
+         DROP CONSTRAINT review_finding_event_referenced_inventory_fk,
+         DROP CONSTRAINT review_finding_event_referenced_ancestry_shape,
+         DISABLE TRIGGER review_finding_event_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE review_finding_event
+            SET referenced_finding_target_id = $2
+          WHERE finding_id = $1",
+    )
+    .bind(subject_ref.finding().into_uuid())
+    .bind(uuid(0x65f1))
+    .execute(&pool)
+    .await?;
+    assert_finding_reference_load_corruption(
+        fixture.store.load_finding(subject_ref.finding()).await,
+    );
+    sqlx::query(
+        "UPDATE review_finding_event
+            SET referenced_finding_target_id = $2,
+                referenced_finding_run_id = $3
+          WHERE finding_id = $1",
+    )
+    .bind(subject_ref.finding().into_uuid())
+    .bind(canonical_ref.target().into_uuid())
+    .bind(uuid(0x65f2))
+    .execute(&pool)
+    .await?;
+    assert_finding_reference_load_corruption(
+        fixture.store.load_finding(subject_ref.finding()).await,
+    );
+    sqlx::query(
+        "UPDATE review_finding_event
+            SET referenced_finding_run_id = $2,
+                referenced_finding_pass_id = $3
+          WHERE finding_id = $1",
+    )
+    .bind(subject_ref.finding().into_uuid())
+    .bind(canonical_ref.run().run().into_uuid())
+    .bind(uuid(0x65f3))
+    .execute(&pool)
+    .await?;
+    assert_finding_reference_load_corruption(
+        fixture.store.load_finding(subject_ref.finding()).await,
+    );
+    sqlx::query(
+        "UPDATE review_finding_event
+            SET referenced_finding_pass_id = $2,
+                referenced_finding_id = $3
+          WHERE finding_id = $1",
+    )
+    .bind(subject_ref.finding().into_uuid())
+    .bind(canonical_ref.pass().pass().into_uuid())
+    .bind(uuid(0x65f4))
+    .execute(&pool)
+    .await?;
+    assert_finding_reference_load_corruption(
+        fixture.store.load_finding(subject_ref.finding()).await,
+    );
+    Ok(())
+}
+
+/// INV-040: referenced producer reconstitution requires both its immutable
+/// inventory seal and the exact referenced finding member.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_loader_rejects_unsealed_or_nonmember_referenced_producer()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let canonical_pass =
+        insert_fixture_pass(&fixture, 0x6631, ReviewPassKind::ReadOnlyReview).await;
+    let dedupe_pass = insert_fixture_pass(&fixture, 0x6632, ReviewPassKind::Dedupe).await;
+    let evidence = succeed_fixture_passes(
+        &pool,
+        &fixture.store,
+        &[fixture.pass, canonical_pass, dedupe_pass],
+    )
+    .await;
+    let subject_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x6633)));
+    let canonical_ref =
+        ReviewFindingRef::new(canonical_pass, ReviewFindingId::from_uuid(uuid(0x6634)));
+    let subject_evidence = pass_with_produced_findings(vec![subject_ref], evidence[0].clone());
+    let canonical_evidence = pass_with_produced_findings(vec![canonical_ref], evidence[1].clone());
+    let subject = finding(
+        subject_ref,
+        subject_evidence.clone(),
+        &fixture.target_snapshot,
+    );
+    let canonical = finding(
+        canonical_ref,
+        canonical_evidence.clone(),
+        &fixture.target_snapshot,
+    );
+    fixture
+        .store
+        .insert_findings(&subject_evidence, std::slice::from_ref(&subject))
+        .await?;
+    fixture
+        .store
+        .insert_findings(&canonical_evidence, std::slice::from_ref(&canonical))
+        .await?;
+    fixture
+        .store
+        .append_finding_event(
+            subject_ref.finding(),
+            finding_event(
+                subject_ref,
+                ReviewEventOrdinal::one(),
+                evidence[2].clone(),
+                ReviewFindingEventKind::Duplicate {
+                    canonical: ReviewReferencedFindingEvidence::try_from_finding(&canonical)
+                        .expect("open canonical finding is reference evidence"),
+                },
+            ),
+        )
+        .await?;
+
+    sqlx::query(
+        "ALTER TABLE review_pass_finding_inventory_seal
+         DISABLE TRIGGER review_pass_finding_inventory_seal_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM review_pass_finding_inventory_seal
+          WHERE pass_id = $1",
+    )
+    .bind(canonical_pass.pass().into_uuid())
+    .execute(&pool)
+    .await?;
+    assert_finding_reference_load_corruption(
+        fixture.store.load_finding(subject_ref.finding()).await,
+    );
+    sqlx::query(
+        "INSERT INTO review_pass_finding_inventory_seal
+            (pass_id, finding_count)
+         VALUES ($1, 1)",
+    )
+    .bind(canonical_pass.pass().into_uuid())
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE review_pass
+         DROP CONSTRAINT review_pass_result_referenced_inventory_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_finding_event
+         DROP CONSTRAINT review_finding_event_referenced_inventory_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_pass_produced_finding
+         DISABLE TRIGGER review_pass_produced_finding_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM review_pass_produced_finding
+          WHERE pass_id = $1
+            AND finding_id = $2",
+    )
+    .bind(canonical_pass.pass().into_uuid())
+    .bind(canonical_ref.finding().into_uuid())
+    .execute(&pool)
+    .await?;
+    assert_finding_reference_load_corruption(
+        fixture.store.load_finding(subject_ref.finding()).await,
+    );
+    Ok(())
+}
+
 /// INV-040: duplicate/superseded references cannot close a cycle by
 /// referencing a finding whose current status is already terminal.
 #[tokio::test(flavor = "multi_thread")]
@@ -2822,26 +3338,29 @@ async fn inv040_referenced_finding_retains_producing_pass() -> Result<(), Box<dy
 async fn inv040_finding_references_reject_cycles() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
+    let second_producer =
+        insert_fixture_pass(&fixture, 0x335, ReviewPassKind::ReadOnlyReview).await;
     let first_dedupe = insert_fixture_pass(&fixture, 0x336, ReviewPassKind::Dedupe).await;
     let second_dedupe = insert_fixture_pass(&fixture, 0x337, ReviewPassKind::Dedupe).await;
     let evidence = succeed_fixture_passes(
         &pool,
         &fixture.store,
-        &[fixture.pass, first_dedupe, second_dedupe],
+        &[fixture.pass, second_producer, first_dedupe, second_dedupe],
     )
     .await;
     let first = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x338)));
-    let second = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x339)));
-    let review_evidence = pass_with_produced_findings(vec![first, second], evidence[0].clone());
+    let second = ReviewFindingRef::new(second_producer, ReviewFindingId::from_uuid(uuid(0x339)));
+    let review_evidence = pass_with_produced_findings(vec![first], evidence[0].clone());
+    let second_evidence = pass_with_produced_findings(vec![second], evidence[1].clone());
+    let first_finding = finding(first, review_evidence.clone(), &fixture.target_snapshot);
+    let second_finding = finding(second, second_evidence.clone(), &fixture.target_snapshot);
     fixture
         .store
-        .insert_findings(
-            &review_evidence,
-            &[
-                finding(first, review_evidence.clone(), &fixture.target_snapshot),
-                finding(second, review_evidence.clone(), &fixture.target_snapshot),
-            ],
-        )
+        .insert_findings(&review_evidence, std::slice::from_ref(&first_finding))
+        .await?;
+    fixture
+        .store
+        .insert_findings(&second_evidence, std::slice::from_ref(&second_finding))
         .await?;
     fixture
         .store
@@ -2850,13 +3369,10 @@ async fn inv040_finding_references_reject_cycles() -> Result<(), Box<dyn Error>>
             finding_event(
                 first,
                 ReviewEventOrdinal::one(),
-                evidence[1].clone(),
+                evidence[2].clone(),
                 ReviewFindingEventKind::Duplicate {
-                    canonical: ReviewReferencedFindingEvidence::try_reconstitute(
-                        second,
-                        ReviewFindingStatus::Open,
-                    )
-                    .expect("open finding is eligible reference evidence"),
+                    canonical: ReviewReferencedFindingEvidence::try_from_finding(&second_finding)
+                        .expect("open finding is eligible reference evidence"),
                 },
             ),
         )
@@ -2870,13 +3386,10 @@ async fn inv040_finding_references_reject_cycles() -> Result<(), Box<dyn Error>>
             finding_event(
                 second,
                 ReviewEventOrdinal::one(),
-                evidence[2].clone(),
+                evidence[3].clone(),
                 ReviewFindingEventKind::Duplicate {
-                    canonical: ReviewReferencedFindingEvidence::try_reconstitute(
-                        first,
-                        ReviewFindingStatus::Open,
-                    )
-                    .expect("open finding is eligible reference evidence"),
+                    canonical: ReviewReferencedFindingEvidence::try_from_finding(&first_finding)
+                        .expect("open finding is eligible reference evidence"),
                 },
             ),
         )
@@ -2886,6 +3399,163 @@ async fn inv040_finding_references_reject_cycles() -> Result<(), Box<dyn Error>>
         panic!("cycle prevention must be a database rejection");
     };
     assert_sqlstate(&cycle, "23514");
+    Ok(())
+}
+
+/// INV-040: complete-target loading rejects a transitive cross-run cycle even
+/// when corrupt SQL bypassed the admission trigger that prevents it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_loader_rejects_transitive_cross_run_reference_cycle() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let second_producer =
+        insert_fixture_pass(&fixture, 0x5331, ReviewPassKind::ReadOnlyReview).await;
+    let third_producer =
+        insert_fixture_pass(&fixture, 0x5332, ReviewPassKind::ReadOnlyReview).await;
+    let first_dedupe = insert_fixture_pass(&fixture, 0x5333, ReviewPassKind::Dedupe).await;
+    let second_dedupe = insert_fixture_pass(&fixture, 0x5334, ReviewPassKind::Dedupe).await;
+    let third_dedupe = insert_fixture_pass(&fixture, 0x5335, ReviewPassKind::Dedupe).await;
+    let evidence = succeed_fixture_passes(
+        &pool,
+        &fixture.store,
+        &[
+            fixture.pass,
+            second_producer,
+            third_producer,
+            first_dedupe,
+            second_dedupe,
+            third_dedupe,
+        ],
+    )
+    .await;
+    let first = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x5340)));
+    let second = ReviewFindingRef::new(second_producer, ReviewFindingId::from_uuid(uuid(0x5341)));
+    let third = ReviewFindingRef::new(third_producer, ReviewFindingId::from_uuid(uuid(0x5342)));
+    let first_evidence = pass_with_produced_findings(vec![first], evidence[0].clone());
+    let second_evidence = pass_with_produced_findings(vec![second], evidence[1].clone());
+    let third_evidence = pass_with_produced_findings(vec![third], evidence[2].clone());
+    let first_finding = finding(first, first_evidence.clone(), &fixture.target_snapshot);
+    let second_finding = finding(second, second_evidence.clone(), &fixture.target_snapshot);
+    let third_finding = finding(third, third_evidence.clone(), &fixture.target_snapshot);
+    fixture
+        .store
+        .insert_findings(&first_evidence, std::slice::from_ref(&first_finding))
+        .await?;
+    fixture
+        .store
+        .insert_findings(&second_evidence, std::slice::from_ref(&second_finding))
+        .await?;
+    fixture
+        .store
+        .insert_findings(&third_evidence, std::slice::from_ref(&third_finding))
+        .await?;
+    fixture
+        .store
+        .append_finding_event(
+            first.finding(),
+            finding_event(
+                first,
+                ReviewEventOrdinal::one(),
+                evidence[3].clone(),
+                ReviewFindingEventKind::Duplicate {
+                    canonical: ReviewReferencedFindingEvidence::try_from_finding(&second_finding)
+                        .expect("open second finding is reference evidence"),
+                },
+            ),
+        )
+        .await?;
+    fixture
+        .store
+        .append_finding_event(
+            second.finding(),
+            finding_event(
+                second,
+                ReviewEventOrdinal::one(),
+                evidence[4].clone(),
+                ReviewFindingEventKind::Duplicate {
+                    canonical: ReviewReferencedFindingEvidence::try_from_finding(&third_finding)
+                        .expect("open third finding is reference evidence"),
+                },
+            ),
+        )
+        .await?;
+
+    sqlx::query(
+        "ALTER TABLE review_finding_event
+         DISABLE TRIGGER review_finding_event_sequence_is_guarded",
+    )
+    .execute(&pool)
+    .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET result_kind = 'finding_event',
+                result_finding_id = $2,
+                result_finding_run_id = $3,
+                result_finding_pass_id = $4,
+                result_event_ordinal = 1,
+                result_event_kind = 'duplicate',
+                result_referenced_finding_id = $5,
+                result_referenced_finding_run_id = $6,
+                result_referenced_finding_target_id = $7,
+                result_referenced_finding_pass_id = $8,
+                result_referenced_finding_status = 'open'
+          WHERE pass_id = $1",
+    )
+    .bind(third_dedupe.pass().into_uuid())
+    .bind(third.finding().into_uuid())
+    .bind(third.run().run().into_uuid())
+    .bind(third.pass().pass().into_uuid())
+    .bind(first.finding().into_uuid())
+    .bind(first.run().run().into_uuid())
+    .bind(first.target().into_uuid())
+    .bind(first.pass().pass().into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO review_finding_event
+            (finding_id, event_ordinal, finding_run_id, target_id,
+             event_pass_id, event_pass_run_id, event_kind, reason,
+             referenced_finding_id, referenced_finding_run_id,
+             referenced_finding_target_id, referenced_finding_pass_id,
+             referenced_finding_status, external_link_id,
+             external_link_association_kind)
+         VALUES (
+             $1, 1, $2, $3, $4, $5, 'duplicate', NULL,
+             $6, $7, $8, $9, 'open', NULL, NULL
+         )",
+    )
+    .bind(third.finding().into_uuid())
+    .bind(third.run().run().into_uuid())
+    .bind(third.target().into_uuid())
+    .bind(third_dedupe.pass().into_uuid())
+    .bind(third_dedupe.run().run().into_uuid())
+    .bind(first.finding().into_uuid())
+    .bind(first.run().run().into_uuid())
+    .bind(first.target().into_uuid())
+    .bind(first.pass().pass().into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    sqlx::query(
+        "ALTER TABLE review_finding_event
+         ENABLE TRIGGER review_finding_event_sequence_is_guarded",
+    )
+    .execute(&pool)
+    .await?;
+
+    let error = fixture
+        .store
+        .load_finding(first.finding())
+        .await
+        .expect_err("transitive reference cycle must fail complete graph loading");
+    let ReviewWorkflowStoreError::Corruption(error) = error else {
+        panic!("expected typed finding reference-graph corruption");
+    };
+    assert_eq!(error.aggregate(), "review_finding");
+    assert!(error.detail().contains("reference graph"));
     Ok(())
 }
 
@@ -2904,23 +3574,19 @@ async fn inv040_finding_load_rejects_missing_referenced_producer() -> Result<(),
         ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x33c)));
     let review_evidence =
         pass_with_produced_findings(vec![finding_ref, canonical_ref], evidence[0].clone());
+    let subject = finding(
+        finding_ref,
+        review_evidence.clone(),
+        &fixture.target_snapshot,
+    );
+    let canonical = finding(
+        canonical_ref,
+        review_evidence.clone(),
+        &fixture.target_snapshot,
+    );
     fixture
         .store
-        .insert_findings(
-            &review_evidence,
-            &[
-                finding(
-                    finding_ref,
-                    review_evidence.clone(),
-                    &fixture.target_snapshot,
-                ),
-                finding(
-                    canonical_ref,
-                    review_evidence.clone(),
-                    &fixture.target_snapshot,
-                ),
-            ],
-        )
+        .insert_findings(&review_evidence, &[subject, canonical.clone()])
         .await?;
     fixture
         .store
@@ -2931,11 +3597,8 @@ async fn inv040_finding_load_rejects_missing_referenced_producer() -> Result<(),
                 ReviewEventOrdinal::one(),
                 evidence[1].clone(),
                 ReviewFindingEventKind::Duplicate {
-                    canonical: ReviewReferencedFindingEvidence::try_reconstitute(
-                        canonical_ref,
-                        ReviewFindingStatus::Open,
-                    )
-                    .expect("open finding is eligible reference evidence"),
+                    canonical: ReviewReferencedFindingEvidence::try_from_finding(&canonical)
+                        .expect("open finding is eligible reference evidence"),
                 },
             ),
         )
@@ -2949,13 +3612,21 @@ async fn inv040_finding_load_rejects_missing_referenced_producer() -> Result<(),
     .await?;
     sqlx::query(
         "ALTER TABLE review_pass
-         DROP CONSTRAINT review_pass_result_referenced_finding_fk",
+         DROP CONSTRAINT review_pass_result_referenced_finding_fk,
+         DROP CONSTRAINT review_pass_result_referenced_inventory_fk",
     )
     .execute(&pool)
     .await?;
     sqlx::query(
         "ALTER TABLE review_pass_produced_finding
          DROP CONSTRAINT review_pass_produced_finding_finding_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_finding_event
+         DROP CONSTRAINT review_finding_event_referenced_finding_fk,
+         DROP CONSTRAINT review_finding_event_referenced_inventory_fk",
     )
     .execute(&pool)
     .await?;
@@ -2975,16 +3646,9 @@ async fn inv040_finding_load_rejects_missing_referenced_producer() -> Result<(),
     .execute(&pool)
     .await?;
 
-    let error = fixture
-        .store
-        .load_finding(finding_ref.finding())
-        .await
-        .expect_err("missing referenced producer must fail closed");
-    let ReviewWorkflowStoreError::Corruption(error) = error else {
-        panic!("expected typed produced-finding inventory corruption");
-    };
-    assert_eq!(error.aggregate(), "review_pass_produced_finding");
-    assert!(error.detail().contains("no canonical finding"));
+    assert_finding_reference_load_corruption(
+        fixture.store.load_finding(finding_ref.finding()).await,
+    );
     Ok(())
 }
 
