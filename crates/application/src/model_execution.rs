@@ -1563,7 +1563,6 @@ where
         };
         let acceptance_possible = move || drop(permit);
         let invocation_cancellation = self.authorization.cancellation_signal(session, call);
-        report_model_call_dispatch(session, turn, attempt, call);
         let observation = self
             .provider
             .invoke(
@@ -1820,24 +1819,6 @@ where
             })
             .collect()
     }
-}
-
-/// Records the exact point where durable authorization permits a provider send.
-///
-/// Sanitized by construction: only daemon-minted aggregate identities appear.
-fn report_model_call_dispatch(
-    session: SessionId,
-    turn: TurnId,
-    attempt: TurnAttemptId,
-    call: ModelCallId,
-) {
-    tracing::info!(
-        session_id = %session.as_uuid(),
-        turn_id = %turn.as_uuid(),
-        model_call_id = %call.as_uuid(),
-        turn_attempt_id = %attempt.as_uuid(),
-        "model call dispatched"
-    );
 }
 
 /// Closed terminal labels admitted to the turn lifecycle event.

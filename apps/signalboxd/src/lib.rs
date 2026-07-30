@@ -120,6 +120,14 @@ pub trait ActivatedTurnExecution {
         true
     }
 
+    /// Returns the durable turn known before a resumed execution failed.
+    ///
+    /// Read-only lookup failures have no turn. Implementations that begin
+    /// executing a found turn preserve it in their typed error evidence.
+    fn active_resume_failure_turn(_error: &Self::Error) -> Option<TurnId> {
+        None
+    }
+
     /// Reports that durable activation may require startup recovery.
     fn report_post_activation_failure(&self) {}
 }
@@ -221,6 +229,10 @@ where
 
     fn active_resume_failure_requires_recovery(error: &Self::Error) -> bool {
         Execution::active_resume_failure_requires_recovery(error)
+    }
+
+    fn active_resume_failure_turn(error: &Self::Error) -> Option<TurnId> {
+        Execution::active_resume_failure_turn(error)
     }
 
     fn report_post_activation_failure(&self) {
@@ -530,10 +542,12 @@ where
         let activation = self.activation.execute_with_cloned_transaction(session);
         let execution = self.execution.clone();
         async move {
-            execution
-                .resume_active(session)
-                .await
-                .map_err(|source| ActivatedTurnPassError::Execution { turn: None, source })?;
+            execution.resume_active(session).await.map_err(|source| {
+                ActivatedTurnPassError::Execution {
+                    turn: Execution::active_resume_failure_turn(&source),
+                    source,
+                }
+            })?;
             let outcome = match activation.await {
                 Ok(outcome) => outcome,
                 Err(error) => {
@@ -660,6 +674,13 @@ pub type PostgresProviderToolExecutionError<ExecutorError> =
 pub enum PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError> {
     /// Read-only active-turn lookup failed before durable execution began.
     ResumeLookup(ToolLoopRepositoryError),
+    /// A found active turn failed while resumed execution was in progress.
+    ResumeExecution {
+        /// Exact durable turn selected by the resume lookup.
+        turn: TurnId,
+        /// Classified model/tool-loop execution failure.
+        source: Box<Self>,
+    },
     /// Model-call execution or same-incarnation reconciliation failed.
     Model(Box<PostgresProviderModelExecutionError<ProviderError>>),
     /// Tool preparation, execution, evidence commit, or continuation failed.
@@ -675,6 +696,7 @@ where
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ResumeLookup(error) => error.fmt(formatter),
+            Self::ResumeExecution { source, .. } => source.fmt(formatter),
             Self::Model(error) => error.fmt(formatter),
             Self::Tool(error) => error.fmt(formatter),
         }
@@ -690,6 +712,7 @@ where
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::ResumeLookup(error) => Some(error),
+            Self::ResumeExecution { source, .. } => Some(source),
             Self::Model(error) => Some(error),
             Self::Tool(error) => Some(error),
         }
@@ -705,6 +728,7 @@ where
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
             Self::ResumeLookup(error) => error.operator_failure_class(),
+            Self::ResumeExecution { source, .. } => source.operator_failure_class(),
             Self::Model(error) => error.operator_failure_class(),
             Self::Tool(error) => error.operator_failure_class(),
         }
@@ -713,6 +737,7 @@ where
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
             Self::ResumeLookup(_) => "tool_loop_resume_lookup",
+            Self::ResumeExecution { source, .. } => source.operator_failure_cause_code(),
             Self::Model(error) => error.operator_failure_cause_code(),
             Self::Tool(error) => error.operator_failure_cause_code(),
         }
@@ -989,7 +1014,16 @@ where
                 .await
                 .map_err(PostgresProviderToolLoopExecutionError::ResumeLookup)?;
             match turn {
-                Some(turn) => execution.execute_scope(session, turn).await,
+                Some(turn) => execution
+                    .execute_scope(session, turn)
+                    .instrument(turn_work_span(session, turn))
+                    .await
+                    .map_err(
+                        |source| PostgresProviderToolLoopExecutionError::ResumeExecution {
+                            turn,
+                            source: Box::new(source),
+                        },
+                    ),
                 None => Ok(()),
             }
         }
@@ -1000,6 +1034,15 @@ where
             error,
             PostgresProviderToolLoopExecutionError::ResumeLookup(_)
         )
+    }
+
+    fn active_resume_failure_turn(error: &Self::Error) -> Option<TurnId> {
+        match error {
+            PostgresProviderToolLoopExecutionError::ResumeExecution { turn, .. } => Some(*turn),
+            PostgresProviderToolLoopExecutionError::ResumeLookup(_)
+            | PostgresProviderToolLoopExecutionError::Model(_)
+            | PostgresProviderToolLoopExecutionError::Tool(_) => None,
+        }
     }
 }
 
@@ -1096,7 +1139,7 @@ mod tests {
     };
     use signalbox_domain::{
         AcceptedInputTurnActivationIdentities, ActivatedAcceptedInputTurn, ContextFrontierId,
-        SemanticTranscriptEntryId, SessionId, TurnAttemptId,
+        SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
     };
     use tokio::sync::watch;
     use uuid::Uuid;
@@ -1310,6 +1353,10 @@ mod tests {
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Err(ExecutionFailure))
         }
+
+        fn active_resume_failure_turn(_error: &Self::Error) -> Option<TurnId> {
+            Some(TurnId::from_uuid(Uuid::from_u128(10)))
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -1472,6 +1519,30 @@ mod tests {
         );
         signal.wait().await;
         assert!(signal.is_triggered());
+    }
+
+    #[tokio::test]
+    async fn resumed_execution_failure_preserves_the_known_turn() {
+        let (execution, _signal) =
+            FatalExecutionSupervisor::new(PostMutationResumeFailureExecution);
+        let mut pass = ActivatedTurnPass::new(
+            StartEligibleTurnService::new(AdvancingIds::new(), RecordingTransaction::default()),
+            execution,
+        );
+
+        let error = pass
+            .run(SessionId::from_uuid(Uuid::from_u128(9)))
+            .await
+            .expect_err("the resumed execution fails");
+
+        assert_eq!(
+            <ActivatedTurnPass<
+                AdvancingIds,
+                RecordingTransaction,
+                FatalExecutionSupervisor<PostMutationResumeFailureExecution>,
+            > as EligibilityPass>::failure_turn(&error),
+            Some(TurnId::from_uuid(Uuid::from_u128(10))),
+        );
     }
 
     #[tokio::test]

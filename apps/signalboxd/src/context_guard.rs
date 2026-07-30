@@ -257,10 +257,12 @@ where
         let compaction_credential_reference = Arc::clone(&self.compaction_credential_reference);
         let execution = self.execution.clone();
         async move {
-            execution
-                .resume_active(session)
-                .await
-                .map_err(|source| ContextGuardedTurnPassError::Execution { turn: None, source })?;
+            execution.resume_active(session).await.map_err(|source| {
+                ContextGuardedTurnPassError::Execution {
+                    turn: Execution::active_resume_failure_turn(&source),
+                    source,
+                }
+            })?;
             let outcome: Result<
                 (),
                 ContextGuardedTurnPassError<Counter::Error, Execution::Error>,

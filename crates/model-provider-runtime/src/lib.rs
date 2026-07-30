@@ -605,6 +605,7 @@ fn diagnostic_model_identity(reported: &str) -> String {
 struct ModelCallTelemetry {
     session: SessionId,
     turn: TurnId,
+    attempt: TurnAttemptId,
     call: ModelCallId,
 }
 
@@ -738,6 +739,7 @@ struct AcceptanceObservations<AcceptancePossible, Correlation> {
     expected_correlation: Correlation,
     correlation_mismatch: bool,
     acceptance_possible: Option<AcceptancePossible>,
+    telemetry: ModelCallTelemetry,
     text_deltas: Option<ProviderTextDeltaContext>,
     observations: Vec<Observation<Correlation>>,
 }
@@ -764,6 +766,7 @@ where
         if matches!(&observation.fact, ObservationFact::SendCommenced)
             && let Some(acceptance_possible) = self.acceptance_possible.take()
         {
+            report_model_call_dispatch(self.telemetry);
             acceptance_possible();
         }
         if let (Some(context), ObservationFact::TextDelta { index, text }) =
@@ -949,6 +952,7 @@ where
         let telemetry = ModelCallTelemetry {
             session: request.session(),
             turn: request.turn(),
+            attempt: request.attempt(),
             call: correlation,
         };
         let definition = self.models.resolve(call.target()).ok_or_else(|| {
@@ -1057,6 +1061,7 @@ where
         let telemetry = ModelCallTelemetry {
             session: authorized.session(),
             turn: authorized.turn(),
+            attempt: authorized.attempt().id(),
             call: correlation,
         };
         if !capability.binding.matches(&authorized) {
@@ -1070,6 +1075,7 @@ where
             expected_correlation: correlation,
             correlation_mismatch: false,
             acceptance_possible: Some(acceptance_possible),
+            telemetry,
             text_deltas: Some(ProviderTextDeltaContext {
                 session: capability.binding.session,
                 turn: capability.binding.turn,
@@ -1111,6 +1117,22 @@ where
             _ => correlation.bind_terminal_observation_with_usage(classified.observation, usage),
         })
     }
+}
+
+/// Records a provider dispatch only from correctly correlated send evidence.
+///
+/// This orchestration-layer site is downstream of the adapter observation
+/// boundary and fires once at `SendCommenced`, never for work proven unsent.
+/// Its fields are daemon-minted identities; provider prose, credentials, and
+/// model content are neither inspected nor formatted.
+fn report_model_call_dispatch(telemetry: ModelCallTelemetry) {
+    tracing::info!(
+        session_id = %telemetry.session.as_uuid(),
+        turn_id = %telemetry.turn.as_uuid(),
+        model_call_id = %telemetry.call.as_uuid(),
+        turn_attempt_id = %telemetry.attempt.as_uuid(),
+        "model call dispatched"
+    );
 }
 
 /// Records typed preparation evidence at the provider orchestration boundary.
@@ -1676,7 +1698,8 @@ mod tests {
         ModelCallTerminalObservation, NormalizedToolArguments, ProviderModelCallFailureCause,
         ProviderModelIdentity, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
         SessionConfigurationDefaultsVersion, SessionId, ToolExecutionError, ToolExecutionErrorKind,
-        ToolRequest, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, TurnId,
+        ToolRequest, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        TurnAttemptId, TurnId,
     };
     use signalbox_expect_table::table;
     use signalbox_model_runtime::{
@@ -1690,15 +1713,25 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AcceptanceObservations, ProviderTextDelta, ProviderTextDeltaContext, ProviderTextDeltaSink,
-        RuntimeModelCallProviderError, RuntimeModelCatalog, RuntimeModelCatalogError,
-        RuntimeModelDefinition, RuntimeModelDefinitionError, classify_terminal,
-        decode_checked_raw_json, provider_reported_token_usage, render_runtime_messages,
+        AcceptanceObservations, ModelCallTelemetry, ProviderTextDelta, ProviderTextDeltaContext,
+        ProviderTextDeltaSink, RuntimeModelCallProviderError, RuntimeModelCatalog,
+        RuntimeModelCatalogError, RuntimeModelDefinition, RuntimeModelDefinitionError,
+        classify_terminal, decode_checked_raw_json, provider_reported_token_usage,
+        render_runtime_messages,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
     fn call() -> ModelCallId {
         ModelCallId::from_uuid(Uuid::from_u128(1))
+    }
+
+    fn telemetry() -> ModelCallTelemetry {
+        ModelCallTelemetry {
+            session: SessionId::from_uuid(Uuid::from_u128(10)),
+            turn: TurnId::from_uuid(Uuid::from_u128(11)),
+            attempt: TurnAttemptId::from_uuid(Uuid::from_u128(12)),
+            call: call(),
+        }
     }
 
     /// The exact provider-model spelling one deployment configures.
@@ -1991,6 +2024,7 @@ mod tests {
             acceptance_possible: Some(move || {
                 callback_count.fetch_add(1, Ordering::SeqCst);
             }),
+            telemetry: telemetry(),
             text_deltas: None,
             observations: Vec::new(),
         };
@@ -2026,6 +2060,7 @@ mod tests {
             acceptance_possible: Some(move || {
                 callback_count.fetch_add(1, Ordering::SeqCst);
             }),
+            telemetry: telemetry(),
             text_deltas: None,
             observations: Vec::new(),
         };
@@ -2067,6 +2102,11 @@ mod tests {
             expected_correlation: expected_call,
             correlation_mismatch: false,
             acceptance_possible: Some(|| {}),
+            telemetry: ModelCallTelemetry {
+                session: expected_session,
+                turn: expected_turn,
+                ..telemetry()
+            },
             text_deltas: Some(ProviderTextDeltaContext {
                 session: expected_session,
                 turn: expected_turn,
