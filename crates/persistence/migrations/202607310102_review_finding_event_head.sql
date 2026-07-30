@@ -3,7 +3,7 @@
 -- after a wait because terminalization appends an event rather than updating
 -- the root.
 
-CREATE TABLE review_finding_event_head (
+CREATE TABLE public.review_finding_event_head (
     finding_id uuid PRIMARY KEY,
     event_ordinal bigint,
     status text NOT NULL,
@@ -41,18 +41,18 @@ CREATE TABLE review_finding_event_head (
         ),
     CONSTRAINT review_finding_event_head_finding_fk
         FOREIGN KEY (finding_id)
-        REFERENCES review_finding (finding_id)
+        REFERENCES public.review_finding (finding_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT,
     CONSTRAINT review_finding_event_head_event_fk
         FOREIGN KEY (finding_id, event_ordinal)
-        REFERENCES review_finding_event (finding_id, event_ordinal)
+        REFERENCES public.review_finding_event (finding_id, event_ordinal)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED
 );
 
-INSERT INTO review_finding_event_head (
+INSERT INTO public.review_finding_event_head (
     finding_id,
     event_ordinal,
     status,
@@ -64,7 +64,7 @@ SELECT finding.finding_id,
        COALESCE(latest.event_kind, 'open'),
        event_pass.pass_kind,
        latest.external_link_id
-  FROM review_finding AS finding
+  FROM public.review_finding AS finding
   LEFT JOIN LATERAL (
       SELECT event.event_ordinal,
              event.event_kind,
@@ -72,12 +72,12 @@ SELECT finding.finding_id,
              event.event_pass_run_id,
              event.target_id,
              event.external_link_id
-        FROM review_finding_event AS event
+        FROM public.review_finding_event AS event
        WHERE event.finding_id = finding.finding_id
        ORDER BY event.event_ordinal DESC
        LIMIT 1
   ) AS latest ON true
-  LEFT JOIN review_pass AS event_pass
+  LEFT JOIN public.review_pass AS event_pass
     ON event_pass.pass_id = latest.event_pass_id
    AND event_pass.run_id = latest.event_pass_run_id
    AND event_pass.target_id = latest.target_id;
@@ -87,7 +87,7 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    INSERT INTO review_finding_event_head (
+    INSERT INTO public.review_finding_event_head (
         finding_id,
         event_ordinal,
         status,
@@ -100,7 +100,7 @@ END;
 $$;
 
 CREATE TRIGGER review_finding_event_head_is_created
-AFTER INSERT ON review_finding
+AFTER INSERT ON public.review_finding
 FOR EACH ROW
 EXECUTE FUNCTION create_review_finding_event_head();
 
@@ -120,7 +120,7 @@ BEGIN
            OR NEW.external_link_id IS NOT NULL
            OR EXISTS (
                SELECT 1
-                 FROM review_finding_event
+                 FROM public.review_finding_event
                 WHERE finding_id = NEW.finding_id
            )
         THEN
@@ -143,7 +143,7 @@ END;
 $$;
 
 CREATE TRIGGER review_finding_event_head_change_is_guarded
-BEFORE INSERT OR UPDATE OR DELETE ON review_finding_event_head
+BEFORE INSERT OR UPDATE OR DELETE ON public.review_finding_event_head
 FOR EACH ROW
 EXECUTE FUNCTION guard_review_finding_event_head_change();
 
@@ -166,7 +166,7 @@ BEGIN
                head.status,
                head.event_pass_kind,
                head.external_link_id
-          FROM review_finding_event_head AS head
+          FROM public.review_finding_event_head AS head
          WHERE head.finding_id IN (
                    NEW.finding_id,
                    NEW.referenced_finding_id
@@ -262,7 +262,7 @@ BEGIN
     END IF;
 
     SELECT pass_kind INTO new_event_pass_kind
-      FROM review_pass
+      FROM public.review_pass
      WHERE pass_id = NEW.event_pass_id
        AND run_id = NEW.event_pass_run_id
        AND target_id = NEW.target_id;
@@ -271,7 +271,7 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    UPDATE review_finding_event_head
+    UPDATE public.review_finding_event_head
        SET event_ordinal = NEW.event_ordinal,
            status = NEW.event_kind,
            event_pass_kind = new_event_pass_kind,
@@ -286,7 +286,7 @@ $$;
 -- immutable finding roots first; the transition-head lock then follows one
 -- global root-to-head order for store and direct relational admission alike.
 CREATE TRIGGER review_finding_event_transition_head_is_guarded
-BEFORE INSERT ON review_finding_event
+BEFORE INSERT ON public.review_finding_event
 FOR EACH ROW
 EXECUTE FUNCTION advance_review_finding_event_head();
 
@@ -299,13 +299,13 @@ AS $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1
-          FROM review_finding AS finding
-          JOIN review_finding_event_head AS head
+          FROM public.review_finding AS finding
+          JOIN public.review_finding_event_head AS head
             ON head.finding_id = finding.finding_id
-          LEFT JOIN review_finding_event AS event
+          LEFT JOIN public.review_finding_event AS event
             ON event.finding_id = head.finding_id
            AND event.event_ordinal = head.event_ordinal
-          LEFT JOIN review_pass AS event_pass
+          LEFT JOIN public.review_pass AS event_pass
             ON event_pass.pass_id = event.event_pass_id
            AND event_pass.run_id = event.event_pass_run_id
            AND event_pass.target_id = event.target_id
@@ -318,7 +318,7 @@ BEGIN
                    AND head.external_link_id IS NULL
                    AND NOT EXISTS (
                        SELECT 1
-                         FROM review_finding_event AS existing
+                         FROM public.review_finding_event AS existing
                         WHERE existing.finding_id = checked_finding
                    )
                )
@@ -330,7 +330,7 @@ BEGIN
                         IS NOT DISTINCT FROM head.external_link_id
                    AND head.event_ordinal = (
                        SELECT max(latest.event_ordinal)
-                         FROM review_finding_event AS latest
+                         FROM public.review_finding_event AS latest
                         WHERE latest.finding_id = checked_finding
                    )
                )
@@ -357,24 +357,24 @@ END;
 $$;
 
 CREATE CONSTRAINT TRIGGER review_finding_requires_event_head
-AFTER INSERT ON review_finding
+AFTER INSERT ON public.review_finding
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_review_finding_event_head_complete();
 
 CREATE CONSTRAINT TRIGGER review_finding_event_rechecks_head
-AFTER INSERT OR UPDATE OR DELETE ON review_finding_event
+AFTER INSERT OR UPDATE OR DELETE ON public.review_finding_event
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_review_finding_event_head_complete();
 
 CREATE CONSTRAINT TRIGGER review_finding_event_head_rechecks_finding
-AFTER INSERT OR UPDATE OR DELETE ON review_finding_event_head
+AFTER INSERT OR UPDATE OR DELETE ON public.review_finding_event_head
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_review_finding_event_head_complete();
 
 CREATE TRIGGER review_finding_event_head_reject_truncate
-BEFORE TRUNCATE ON review_finding_event_head
+BEFORE TRUNCATE ON public.review_finding_event_head
 FOR EACH STATEMENT
 EXECUTE FUNCTION reject_review_workflow_truncate();

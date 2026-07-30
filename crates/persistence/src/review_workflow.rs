@@ -1085,7 +1085,7 @@ impl ReviewWorkflowStore {
              )",
         )
         .bind(finding.proposal().reference().finding().into_uuid())
-        .bind("open")
+        .bind(encode_finding_status(ReviewFindingStatus::Open))
         .fetch_one(&mut *connection)
         .await?;
         if !head_is_complete {
