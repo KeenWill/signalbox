@@ -20,7 +20,9 @@ cargo bench -p signalbox-domain --bench instruction_counts
 The detailed profiles are written below `target/gungraun`. The Rust workflow
 runs this command and copies its complete terminal report into the GitHub job
 summary. That job is explicitly report-only and allowed to fail. It has no
-limit, comparison threshold, or required status.
+limit, comparison threshold, or required status. A structurally invalid fixed
+fixture exits nonzero instead of publishing a meaningless count; because the job
+is tolerated, that correctness check cannot block a merge.
 
 Wall-clock measurements use [Divan](https://github.com/nvzqz/divan) and are
 local only:

@@ -30,7 +30,7 @@ fn prove_shared_prefix(input: targets::PrefixProofFixture) -> (bool, targets::Pr
 #[bench::fixed(setup = targets::total_order_fixture)]
 fn derive_interrupt_total_order(
     input: Vec<signalbox_domain::AcceptedInputQueueWork>,
-) -> Result<Vec<signalbox_domain::TurnId>, signalbox_domain::AcceptedInputQueueOrderError> {
+) -> Vec<signalbox_domain::TurnId> {
     black_box(targets::derive_interrupt_total_order(input))
 }
 
@@ -45,9 +45,7 @@ fn project_compaction_frontier(
 
 #[library_benchmark]
 #[bench::fixed(setup = targets::tool_arguments_fixture)]
-fn canonicalize_tool_arguments(
-    input: String,
-) -> Result<signalbox_domain::NormalizedToolArguments, signalbox_domain::ToolArgumentsError> {
+fn canonicalize_tool_arguments(input: String) -> signalbox_domain::NormalizedToolArguments {
     black_box(targets::canonicalize_tool_arguments(input))
 }
 

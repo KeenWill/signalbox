@@ -1,10 +1,9 @@
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
-    AcceptedInputQueueOrderError, AcceptedInputQueueWork, AcceptedInputSchedulingProjection,
-    AcceptedInputSchedulingReconstitutionError, AcceptedInputSchedulingReconstitutionInput,
-    AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
-    ActiveTurnSchedulingReconstitutionInput, ContextFrontierId, ContextFrontierProjection,
-    ContextFrontierProjectionFailure, DeliveryRequest, DirectModelSelection,
+    AcceptedInputQueueWork, AcceptedInputSchedulingProjection,
+    AcceptedInputSchedulingReconstitutionInput, AcceptedInputTurnSchedulingRecord,
+    AcceptedInputTurnSchedulingRecordState, ActiveTurnSchedulingReconstitutionInput,
+    ContextFrontierId, ContextFrontierProjection, DeliveryRequest, DirectModelSelection,
     ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments, OriginConfiguration,
     PerInputConfigurationChoices, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, SemanticTranscriptEntry, SemanticTranscriptEntryId,
@@ -20,6 +19,7 @@ const TERMINAL_TURN_COUNT: u64 = 48;
 const QUEUED_TURN_COUNT: u64 = 15;
 const FRONTIER_LAYER_COUNT: u128 = 64;
 const FRONTIER_ENTRIES_PER_LAYER: u128 = 8;
+const PREFIX_LAYER_COUNT: usize = 48;
 const TOTAL_ORDER_CHAIN_COUNT: u64 = 64;
 const TOTAL_ORDER_CHAIN_LENGTH: u64 = 4;
 
@@ -28,33 +28,14 @@ pub enum FixtureError {
     Session,
     Configuration,
     Position,
+    Frontier,
     SemanticEntryMissing,
 }
 
-pub type SchedulingFixture = Result<AcceptedInputSchedulingReconstitutionInput, FixtureError>;
-pub type SchedulingResult = Result<AcceptedInputSchedulingProjection, SchedulingBenchmarkError>;
-pub type ProjectionFixture = Result<Vec<SemanticTranscriptEntry>, FixtureError>;
-pub type ProjectionResult = Result<ContextFrontierProjection, ProjectionBenchmarkError>;
-
-#[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "the harness returns the complete failure so a debugger can inspect it"
-)]
-pub enum SchedulingBenchmarkError {
-    Fixture(FixtureError),
-    Domain(AcceptedInputSchedulingReconstitutionError),
-}
-
-#[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "the harness returns the complete failure so a debugger can inspect it"
-)]
-pub enum ProjectionBenchmarkError {
-    Fixture(FixtureError),
-    Domain(ContextFrontierProjectionFailure),
-}
+pub type SchedulingFixture = AcceptedInputSchedulingReconstitutionInput;
+pub type SchedulingResult = AcceptedInputSchedulingProjection;
+pub type ProjectionFixture = Vec<SemanticTranscriptEntry>;
+pub type ProjectionResult = ContextFrontierProjection;
 
 pub struct FrontierBuildInput {
     session: SessionId,
@@ -63,10 +44,23 @@ pub struct FrontierBuildInput {
     later_layers: Vec<(ContextFrontierId, Vec<SemanticTranscriptEntryRef>)>,
 }
 
-pub type PrefixProofFixture = Option<(
+pub type PrefixProofFixture = (
     ResolvedContextFrontierSnapshot,
     ResolvedContextFrontierSnapshot,
-)>;
+);
+
+fn fixture_or_exit<T, Failure>(result: Result<T, Failure>) -> T
+where
+    Failure: std::fmt::Debug,
+{
+    match result {
+        Ok(value) => value,
+        Err(failure) => {
+            eprintln!("domain benchmark fixture is invalid: {failure:?}");
+            std::process::exit(2);
+        }
+    }
+}
 
 fn session_id(seed: u128) -> SessionId {
     SessionId::from_uuid(Uuid::from_u128(seed))
@@ -188,7 +182,7 @@ fn lifecycle(ordinal: u64) -> AcceptedInputLifecycle {
 /// (an origin and failure marker per terminal turn plus the active origin) and
 /// 97 structurally shared snapshots. The active acceptance tail has 16
 /// entries, covering the active origin and all 15 later queued origins.
-pub fn scheduling_fixture() -> SchedulingFixture {
+fn try_scheduling_fixture() -> Result<SchedulingFixture, FixtureError> {
     let session = current_session()?;
     let configuration = configuration(&session)?;
     let mut turns = Vec::with_capacity(
@@ -357,12 +351,13 @@ pub fn scheduling_fixture() -> SchedulingFixture {
     ))
 }
 
+pub fn scheduling_fixture() -> SchedulingFixture {
+    fixture_or_exit(try_scheduling_fixture())
+}
+
 /// Measures complete scheduling reconstruction, including `reconstitute_inner`.
 pub fn reconstitute_scheduling(input: SchedulingFixture) -> SchedulingResult {
-    input
-        .map_err(SchedulingBenchmarkError::Fixture)?
-        .reconstitute()
-        .map_err(SchedulingBenchmarkError::Domain)
+    fixture_or_exit(input.reconstitute())
 }
 
 /// Supplies a fixed 64-layer, 512-entry frontier construction workload.
@@ -383,12 +378,8 @@ pub fn frontier_build_input() -> FrontierBuildInput {
             .collect::<Vec<_>>();
         (frontier_id(62_000 + layer), entries)
     });
-    let (first_snapshot, first_entries) = layers.next().unwrap_or_else(|| {
-        (
-            frontier_id(62_000),
-            Vec::<SemanticTranscriptEntryRef>::new(),
-        )
-    });
+    let (first_snapshot, first_entries) =
+        fixture_or_exit(layers.next().ok_or(FixtureError::Frontier));
     FrontierBuildInput {
         session,
         first_snapshot,
@@ -427,21 +418,22 @@ pub fn prefix_proof_fixture() -> PrefixProofFixture {
     let mut prefix = None;
     for (index, (snapshot, entries)) in input.later_layers.into_iter().enumerate() {
         frontier = frontier.derive_appending(snapshot, entries);
-        if index == 46 {
+        if index + 2 == PREFIX_LAYER_COUNT {
             prefix = Some(frontier.clone());
         }
     }
-    prefix
-        .and_then(ResolvedContextFrontierReconstitutionInput::reconstitute)
-        .zip(frontier.reconstitute())
+    fixture_or_exit(
+        prefix
+            .and_then(ResolvedContextFrontierReconstitutionInput::reconstitute)
+            .zip(frontier.reconstitute())
+            .ok_or(FixtureError::Frontier),
+    )
 }
 
 /// Proves the fixed 384-entry frontier is a semantic prefix of the 512-entry
 /// frontier.
 pub fn prove_shared_prefix(input: &PrefixProofFixture) -> bool {
-    input
-        .as_ref()
-        .is_some_and(|(prefix, later)| prefix.is_semantic_prefix_of(later))
+    input.0.is_semantic_prefix_of(&input.1)
 }
 
 /// Supplies a fixed total-order workload with realistic interrupt chaining.
@@ -452,14 +444,15 @@ pub fn prove_shared_prefix(input: &PrefixProofFixture) -> bool {
 /// preventing identity order from coinciding with durable acceptance order.
 pub fn total_order_fixture() -> Vec<AcceptedInputQueueWork> {
     let session = session_id(70_000);
-    let mut work = Vec::with_capacity(
-        usize::try_from(TOTAL_ORDER_CHAIN_COUNT * TOTAL_ORDER_CHAIN_LENGTH).unwrap_or(0),
+    let capacity = fixture_or_exit(
+        usize::try_from(TOTAL_ORDER_CHAIN_COUNT * TOTAL_ORDER_CHAIN_LENGTH)
+            .map_err(|_| FixtureError::Position),
     );
+    let mut work = Vec::with_capacity(capacity);
     for chain in 0..TOTAL_ORDER_CHAIN_COUNT {
         let root_ordinal = chain * TOTAL_ORDER_CHAIN_LENGTH + 1;
         let root = turn_id(80_000 + u128::from(u64::MAX - root_ordinal));
-        let root_position = SessionInputPosition::try_from_u64(root_ordinal)
-            .unwrap_or(SessionInputPosition::first());
+        let root_position = fixture_or_exit(position(root_ordinal));
         work.push(AcceptedInputQueueWork::new(
             session,
             root,
@@ -469,8 +462,7 @@ pub fn total_order_fixture() -> Vec<AcceptedInputQueueWork> {
         for offset in 1..TOTAL_ORDER_CHAIN_LENGTH {
             let ordinal = root_ordinal + offset;
             let turn = turn_id(80_000 + u128::from(u64::MAX - ordinal));
-            let accepted_position = SessionInputPosition::try_from_u64(ordinal)
-                .unwrap_or(SessionInputPosition::first());
+            let accepted_position = fixture_or_exit(position(ordinal));
             work.push(AcceptedInputQueueWork::new(
                 session,
                 turn,
@@ -486,10 +478,8 @@ pub fn total_order_fixture() -> Vec<AcceptedInputQueueWork> {
 }
 
 /// Derives total order for the fixed interrupt-chain inventory.
-pub fn derive_interrupt_total_order(
-    work: Vec<AcceptedInputQueueWork>,
-) -> Result<Vec<TurnId>, AcceptedInputQueueOrderError> {
-    derive_accepted_input_total_order(work)
+pub fn derive_interrupt_total_order(work: Vec<AcceptedInputQueueWork>) -> Vec<TurnId> {
+    fixture_or_exit(derive_accepted_input_total_order(work))
 }
 
 /// Supplies 97 validated transcript entries from the shared scheduling input.
@@ -497,11 +487,12 @@ pub fn derive_interrupt_total_order(
 /// The entries contain 48 origin/failure pairs plus one active origin and no
 /// summary yet. This measures the common pre-compaction projection of a
 /// realistic complete frontier, including its reference-position index.
-pub fn compaction_projection_fixture() -> ProjectionFixture {
-    let projection = reconstitute_scheduling(scheduling_fixture())
-        .map_err(|_| FixtureError::SemanticEntryMissing)?;
+fn try_compaction_projection_fixture() -> Result<ProjectionFixture, FixtureError> {
+    let projection = reconstitute_scheduling(scheduling_fixture());
     let session = projection.session().id();
-    let mut entries = Vec::with_capacity(usize::try_from(TERMINAL_TURN_COUNT * 2 + 1).unwrap_or(0));
+    let capacity =
+        usize::try_from(TERMINAL_TURN_COUNT * 2 + 1).map_err(|_| FixtureError::Position)?;
+    let mut entries = Vec::with_capacity(capacity);
     for ordinal in 1..=TERMINAL_TURN_COUNT {
         let origin =
             SemanticTranscriptEntryRef::from_source(session, origin_entry_for_ordinal(ordinal));
@@ -533,16 +524,14 @@ pub fn compaction_projection_fixture() -> ProjectionFixture {
     Ok(entries)
 }
 
+pub fn compaction_projection_fixture() -> ProjectionFixture {
+    fixture_or_exit(try_compaction_projection_fixture())
+}
+
 /// Projects the fixed complete transcript through the compaction visibility
 /// algorithm.
 pub fn project_compaction_frontier(input: &ProjectionFixture) -> ProjectionResult {
-    input
-        .as_ref()
-        .map_err(|failure| ProjectionBenchmarkError::Fixture(*failure))
-        .and_then(|entries| {
-            ContextFrontierProjection::from_complete_entries(entries)
-                .map_err(ProjectionBenchmarkError::Domain)
-        })
+    fixture_or_exit(ContextFrontierProjection::from_complete_entries(input))
 }
 
 /// Supplies one fixed 20,169-byte JSON tool-argument document.
@@ -574,8 +563,6 @@ pub fn tool_arguments_fixture() -> String {
 }
 
 /// Canonicalizes the fixed provider tool-argument document.
-pub fn canonicalize_tool_arguments(
-    input: String,
-) -> Result<NormalizedToolArguments, signalbox_domain::ToolArgumentsError> {
-    NormalizedToolArguments::try_from_provider_text(input)
+pub fn canonicalize_tool_arguments(input: String) -> NormalizedToolArguments {
+    fixture_or_exit(NormalizedToolArguments::try_from_provider_text(input))
 }
