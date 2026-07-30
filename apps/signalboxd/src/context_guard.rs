@@ -105,8 +105,9 @@ where
         match self {
             Self::Activation { source, .. } => source.operator_failure_class(),
             Self::Operation { source, .. } => source.operator_failure_class(),
-            Self::Render { .. } | Self::CountCancelled(_) | Self::ActivationSessionMismatch(_) => {
-                OperatorFailureClass::FailClosedCorruption
+            Self::Render { .. } => OperatorFailureClass::FailClosedCorruption,
+            Self::CountCancelled(_) | Self::ActivationSessionMismatch(_) => {
+                OperatorFailureClass::CallerOrHubBug
             }
             Self::Count { source, .. } => source.operator_failure_class(),
             Self::ContextWindowUnavailable(_) | Self::ContextStillExceeded(_) => {
@@ -345,11 +346,11 @@ where
                     match committed {
                         CommitActivationPreviewOutcome::Stale => continue,
                         CommitActivationPreviewOutcome::Activated(activated) => {
-                            report_guarded_turn_activation(activated.session(), activated.turn());
                             if activated.session() != session {
                                 execution.report_post_activation_failure();
                                 return Err(ContextGuardedTurnPassError::ActivationSessionMismatch(turn));
                             }
+                            report_guarded_turn_activation(activated.session(), activated.turn());
                             return execution
                                 .execute(activated)
                                 .instrument(guarded_turn_span(session, turn))

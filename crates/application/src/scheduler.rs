@@ -634,16 +634,26 @@ where
             let failure_class = error.operator_failure_class();
             let cause_code = error.operator_failure_cause_code();
             let stage = Pass::failure_stage(&error);
-            let turn = Pass::failure_turn(&error);
-            tracing::error!(
-                ?failure_class,
-                cause_code,
-                stage,
-                session_id = %session.as_uuid(),
-                turn_id = ?turn.map(TurnId::into_uuid),
-                "authoritative eligibility pass failed; \
-                 a later nudge or sweep will retry"
-            );
+            match Pass::failure_turn(&error) {
+                Some(turn) => tracing::error!(
+                    ?failure_class,
+                    cause_code,
+                    stage,
+                    session_id = %session.as_uuid(),
+                    turn_id = %turn.as_uuid(),
+                    "authoritative eligibility pass failed; \
+                     a later nudge or sweep will retry"
+                ),
+                None => tracing::error!(
+                    ?failure_class,
+                    cause_code,
+                    stage,
+                    session_id = %session.as_uuid(),
+                    turn_id = tracing::field::Empty,
+                    "authoritative eligibility pass failed; \
+                     a later nudge or sweep will retry"
+                ),
+            };
         }
         Err(_) => {
             tracing::error!(

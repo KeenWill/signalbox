@@ -3186,19 +3186,16 @@ where
             .await;
         }
         Err(
-            ImportedSessionRepositoryError::Preparation(_)
+            error @ (ImportedSessionRepositoryError::Preparation(_)
             | ImportedSessionRepositoryError::IdentityCollision(_)
-            | ImportedSessionRepositoryError::Corruption(_),
+            | ImportedSessionRepositoryError::Corruption(_)),
         ) => {
+            let (failure_class, cause_code) = imported_session_operator_evidence(&error);
             return write_error(
                 writer,
                 version,
                 request_id,
-                internal_protocol_error(
-                    None,
-                    OperatorFailureClass::FailClosedCorruption,
-                    "imported_session_lookup_integrity_failure",
-                ),
+                internal_protocol_error(None, failure_class, cause_code),
             )
             .await;
         }
@@ -3237,18 +3234,15 @@ where
             .await;
         }
         Err(
-            ImportedConversationRepositoryError::IdentityCollision(_)
-            | ImportedConversationRepositoryError::Corruption(_),
+            error @ (ImportedConversationRepositoryError::IdentityCollision(_)
+            | ImportedConversationRepositoryError::Corruption(_)),
         ) => {
+            let (failure_class, cause_code) = imported_conversation_operator_evidence(&error);
             return write_error(
                 writer,
                 version,
                 request_id,
-                internal_protocol_error(
-                    None,
-                    OperatorFailureClass::FailClosedCorruption,
-                    "imported_conversation_corruption",
-                ),
+                internal_protocol_error(None, failure_class, cause_code),
             )
             .await;
         }
@@ -3351,20 +3345,17 @@ where
             .await
         }
         Err(
-            ImportedSessionRepositoryError::DifferentCommandKind { .. }
+            error @ (ImportedSessionRepositoryError::DifferentCommandKind { .. }
             | ImportedSessionRepositoryError::Preparation(_)
             | ImportedSessionRepositoryError::IdentityCollision(_)
-            | ImportedSessionRepositoryError::Corruption(_),
+            | ImportedSessionRepositoryError::Corruption(_)),
         ) => {
+            let (failure_class, cause_code) = imported_session_operator_evidence(&error);
             write_error(
                 writer,
                 version,
                 request_id,
-                internal_protocol_error(
-                    None,
-                    OperatorFailureClass::FailClosedCorruption,
-                    "imported_session_creation_integrity_failure",
-                ),
+                internal_protocol_error(None, failure_class, cause_code),
             )
             .await
         }
@@ -4927,21 +4918,18 @@ where
             .await
         }
         Err(
-            CreateSessionError::Preparation(_)
+            error @ (CreateSessionError::Preparation(_)
             | CreateSessionError::Transaction(
                 CreateSessionRepositoryError::DifferentCommandKind { .. }
                 | CreateSessionRepositoryError::Corruption(_),
-            ),
+            )),
         ) => {
+            let (failure_class, cause_code) = create_session_operator_evidence(&error);
             write_error(
                 writer,
                 version,
                 request_id,
-                internal_protocol_error(
-                    None,
-                    OperatorFailureClass::FailClosedCorruption,
-                    "session_creation_integrity_failure",
-                ),
+                internal_protocol_error(None, failure_class, cause_code),
             )
             .await
         }
@@ -5744,18 +5732,15 @@ where
             .await
         }
         Err(
-            SessionMetadataRepositoryError::DifferentCommandKind { .. }
-            | SessionMetadataRepositoryError::Corruption(_),
+            error @ (SessionMetadataRepositoryError::DifferentCommandKind { .. }
+            | SessionMetadataRepositoryError::Corruption(_)),
         ) => {
+            let (failure_class, cause_code) = session_metadata_operator_evidence(&error);
             write_error(
                 writer,
                 version,
                 request_id,
-                internal_protocol_error(
-                    Some(session_id.into_uuid()),
-                    OperatorFailureClass::FailClosedCorruption,
-                    "session_metadata_integrity_failure",
-                ),
+                internal_protocol_error(Some(session_id.into_uuid()), failure_class, cause_code),
             )
             .await
         }
@@ -5964,18 +5949,15 @@ where
             .await
         }
         Err(
-            ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { .. }
-            | ReplaceSessionDefaultsRepositoryError::Corruption(_),
+            error @ (ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { .. }
+            | ReplaceSessionDefaultsRepositoryError::Corruption(_)),
         ) => {
+            let (failure_class, cause_code) = session_defaults_operator_evidence(&error);
             write_error(
                 writer,
                 version,
                 request_id,
-                internal_protocol_error(
-                    Some(session_id.into_uuid()),
-                    OperatorFailureClass::FailClosedCorruption,
-                    "session_defaults_integrity_failure",
-                ),
+                internal_protocol_error(Some(session_id.into_uuid()), failure_class, cause_code),
             )
             .await
         }
@@ -6525,6 +6507,150 @@ where
         }
     };
     write_error(writer, version, request_id, protocol_error).await
+}
+
+/// Classifies imported-session repository evidence into closed telemetry fields.
+fn imported_session_operator_evidence(
+    error: &ImportedSessionRepositoryError,
+) -> (OperatorFailureClass, &'static str) {
+    match error {
+        ImportedSessionRepositoryError::Database(_) => (
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            "imported_session_database",
+        ),
+        ImportedSessionRepositoryError::CommitAmbiguous(_) => (
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            },
+            "imported_session_commit_ambiguous",
+        ),
+        ImportedSessionRepositoryError::DifferentCommandKind { .. } => (
+            OperatorFailureClass::CallerOrHubBug,
+            "imported_session_command_kind_mismatch",
+        ),
+        ImportedSessionRepositoryError::Preparation(_) => (
+            OperatorFailureClass::CallerOrHubBug,
+            "imported_session_preparation",
+        ),
+        ImportedSessionRepositoryError::IdentityCollision(_) => (
+            OperatorFailureClass::IdentityCollision,
+            "imported_session_identity_collision",
+        ),
+        ImportedSessionRepositoryError::Corruption(_) => (
+            OperatorFailureClass::FailClosedCorruption,
+            "imported_session_corruption",
+        ),
+    }
+}
+
+/// Classifies imported-conversation evidence without formatting its payload.
+fn imported_conversation_operator_evidence(
+    error: &ImportedConversationRepositoryError,
+) -> (OperatorFailureClass, &'static str) {
+    match error {
+        ImportedConversationRepositoryError::Database(_) => (
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            "imported_conversation_database",
+        ),
+        ImportedConversationRepositoryError::IdentityCollision(_) => (
+            OperatorFailureClass::IdentityCollision,
+            "imported_conversation_identity_collision",
+        ),
+        ImportedConversationRepositoryError::Corruption(_) => (
+            OperatorFailureClass::FailClosedCorruption,
+            "imported_conversation_corruption",
+        ),
+    }
+}
+
+/// Classifies create-session evidence without formatting command or database detail.
+fn create_session_operator_evidence(
+    error: &CreateSessionError<CreateSessionRepositoryError>,
+) -> (OperatorFailureClass, &'static str) {
+    match error {
+        CreateSessionError::Preparation(_) => (
+            OperatorFailureClass::CallerOrHubBug,
+            "session_creation_preparation",
+        ),
+        CreateSessionError::Transaction(CreateSessionRepositoryError::Database(_)) => (
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            "session_creation_database",
+        ),
+        CreateSessionError::Transaction(CreateSessionRepositoryError::CommitAmbiguous(_)) => (
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            },
+            "session_creation_commit_ambiguous",
+        ),
+        CreateSessionError::Transaction(CreateSessionRepositoryError::DifferentCommandKind {
+            ..
+        }) => (
+            OperatorFailureClass::CallerOrHubBug,
+            "session_creation_command_kind_mismatch",
+        ),
+        CreateSessionError::Transaction(CreateSessionRepositoryError::Corruption(_)) => (
+            OperatorFailureClass::FailClosedCorruption,
+            "session_creation_corruption",
+        ),
+    }
+}
+
+/// Classifies metadata evidence without formatting command or durable content.
+fn session_metadata_operator_evidence(
+    error: &SessionMetadataRepositoryError,
+) -> (OperatorFailureClass, &'static str) {
+    match error {
+        SessionMetadataRepositoryError::Database(_) => (
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            "session_metadata_database",
+        ),
+        SessionMetadataRepositoryError::CommitAmbiguous(_) => (
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            },
+            "session_metadata_commit_ambiguous",
+        ),
+        SessionMetadataRepositoryError::DifferentCommandKind { .. } => (
+            OperatorFailureClass::CallerOrHubBug,
+            "session_metadata_command_kind_mismatch",
+        ),
+        SessionMetadataRepositoryError::Corruption(_) => (
+            OperatorFailureClass::FailClosedCorruption,
+            "session_metadata_corruption",
+        ),
+    }
+}
+
+/// Classifies defaults-replacement evidence into closed telemetry fields.
+fn session_defaults_operator_evidence(
+    error: &ReplaceSessionDefaultsRepositoryError,
+) -> (OperatorFailureClass, &'static str) {
+    match error {
+        ReplaceSessionDefaultsRepositoryError::Database {
+            commit_ambiguous, ..
+        } => (
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: *commit_ambiguous,
+            },
+            "session_defaults_database",
+        ),
+        ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { .. } => (
+            OperatorFailureClass::CallerOrHubBug,
+            "session_defaults_command_kind_mismatch",
+        ),
+        ReplaceSessionDefaultsRepositoryError::Corruption(_) => (
+            OperatorFailureClass::FailClosedCorruption,
+            "session_defaults_corruption",
+        ),
+    }
 }
 
 /// Classifies submit-input failures before the wire match consumes them.

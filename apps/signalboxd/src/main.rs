@@ -446,6 +446,37 @@ async fn wait_for_guard_loss(database: &mut FencedHubDatabase) {
     }
 }
 
+/// Derives the shared operator class from one content-free runtime variant.
+///
+/// Nested error values are inspected only by variant; database, protocol, socket,
+/// I/O, and join-error prose is never formatted into the classification.
+fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailureClass {
+    use signalbox_persistence::outbox::OutboxDispatchError;
+
+    match error {
+        ProcessRuntimeError::Accept(_)
+        | ProcessRuntimeError::SpoolIo(_)
+        | ProcessRuntimeError::InsufficientPoolCapacity
+        | ProcessRuntimeError::CleanupSocket(_)
+        | ProcessRuntimeError::Dispatch(OutboxDispatchError::Database(_)) => {
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            }
+        }
+        ProcessRuntimeError::Dispatch(OutboxDispatchError::Corruption(_)) => {
+            OperatorFailureClass::FailClosedCorruption
+        }
+        ProcessRuntimeError::Encode(_)
+        | ProcessRuntimeError::EncodeInvariant
+        | ProcessRuntimeError::InboundFrameBudgetClosed
+        | ProcessRuntimeError::ImportBudgetClosed
+        | ProcessRuntimeError::ReviewCommandBudgetClosed
+        | ProcessRuntimeError::SnapshotReaderBudgetClosed
+        | ProcessRuntimeError::ConnectionTask(_)
+        | ProcessRuntimeError::UnexpectedDispatcherRetry => OperatorFailureClass::CallerOrHubBug,
+    }
+}
+
 /// Records a fatal local-process runtime error before supervision erases it.
 ///
 /// `ProcessRuntimeError::Display` is deliberately content-free across all
@@ -454,9 +485,7 @@ async fn wait_for_guard_loss(database: &mut FencedHubDatabase) {
 fn report_process_runtime_failure(error: &ProcessRuntimeError) {
     tracing::error!(
         phase = ?RuntimePhase::Runtime,
-        failure_class = ?OperatorFailureClass::Infrastructure {
-            commit_ambiguous: false,
-        },
+        failure_class = ?process_runtime_failure_class(error),
         cause = %error,
         "local process runtime failed"
     );
@@ -849,6 +878,9 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
 fn operator_filter(value: Option<&str>) -> (tracing_subscriber::EnvFilter, bool) {
     match value {
         None => (tracing_subscriber::EnvFilter::new("info"), false),
+        Some(value) if value.trim().is_empty() => {
+            (tracing_subscriber::EnvFilter::new("info"), false)
+        }
         Some(value) => match tracing_subscriber::EnvFilter::try_new(value) {
             Ok(filter) => (filter, false),
             Err(_) => (tracing_subscriber::EnvFilter::new("info"), true),
@@ -988,12 +1020,13 @@ mod tests {
     use super::{
         AnthropicConstructionError, DATABASE_URL_ENVIRONMENT, GITHUB_TOKEN_FILE_ENVIRONMENT,
         HubConfiguration, HubConfigurationError, HubRuntimeError,
-        MODEL_CONFIGURATION_FILE_ENVIRONMENT, PROCESS_SOCKET_PATH_ENVIRONMENT,
+        MODEL_CONFIGURATION_FILE_ENVIRONMENT, PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError,
         RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
         SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
         TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
         completed_runtime_outcome, erase_startup_cause, migrate_scan_then_schedule,
-        operator_filter, run_scheduler_until_shutdown, should_close_pool,
+        operator_filter, process_runtime_failure_class, run_scheduler_until_shutdown,
+        should_close_pool,
     };
 
     #[derive(Clone, Default)]
@@ -1044,28 +1077,29 @@ mod tests {
         output.text()
     }
 
-    fn synthetic_adapter_detail() -> &'static str {
-        "synthetic-credential-and-prompt-content"
+    #[test]
+    fn runtime_failure_class_reports_dispatch_corruption() {
+        let corruption = ProcessRuntimeError::Dispatch(
+            signalbox_persistence::outbox::OutboxDispatchError::Corruption(
+                signalbox_persistence::outbox::OutboxCorruption::MissingDeliveryState,
+            ),
+        );
+        assert_eq!(
+            process_runtime_failure_class(&corruption),
+            OperatorFailureClass::FailClosedCorruption,
+        );
     }
 
-    fn expected_configuration_cause() -> &'static str {
-        "required setting DATABASE_URL is missing"
-    }
-
-    fn expected_anthropic_cause() -> &'static str {
-        "anthropic_invalid_base_url"
-    }
-
-    fn default_filter_directive() -> &'static str {
-        "info"
-    }
-
-    fn debug_filter_directive() -> &'static str {
-        "debug"
-    }
-
-    fn invalid_filter_directive() -> &'static str {
-        "not a valid directive ["
+    #[test]
+    fn runtime_failure_class_reports_internal_defects() {
+        assert_eq!(
+            process_runtime_failure_class(&ProcessRuntimeError::EncodeInvariant),
+            OperatorFailureClass::CallerOrHubBug,
+        );
+        assert_eq!(
+            process_runtime_failure_class(&ProcessRuntimeError::UnexpectedDispatcherRetry),
+            OperatorFailureClass::CallerOrHubBug,
+        );
     }
 
     #[test]
@@ -1073,30 +1107,34 @@ mod tests {
         let error =
             HubConfigurationError::new(DATABASE_URL_ENVIRONMENT, RequiredSettingFailure::Missing);
         let encoded = capture_startup_cause(SanitizedStartupCause::Configuration(&error));
-        assert!(encoded.contains(expected_configuration_cause()));
+        assert!(encoded.contains("required setting DATABASE_URL is missing"));
     }
 
     #[test]
     fn startup_failure_omits_dynamic_adapter_detail() {
+        let adapter_detail = "synthetic-credential-and-prompt-content";
         let error = AnthropicConstructionError::InvalidBaseUrl {
-            detail: synthetic_adapter_detail().to_owned(),
+            detail: adapter_detail.to_owned(),
         };
         let cause_code = anthropic_construction_cause(&error);
         let encoded = capture_startup_cause(SanitizedStartupCause::Static(cause_code));
-        assert!(encoded.contains(expected_anthropic_cause()));
-        assert!(!encoded.contains(synthetic_adapter_detail()));
+        assert!(encoded.contains("anthropic_invalid_base_url"));
+        assert!(!encoded.contains(adapter_detail));
     }
 
     #[test]
     fn tracing_filter_defaults_to_info_and_admits_debug() {
         let (default_filter, default_rejected) = operator_filter(None);
-        let (debug_filter, debug_rejected) = operator_filter(Some(debug_filter_directive()));
-        let (invalid_filter, invalid_rejected) = operator_filter(Some(invalid_filter_directive()));
-        assert_eq!(default_filter.to_string(), default_filter_directive());
+        let (empty_filter, empty_rejected) = operator_filter(Some(""));
+        let (debug_filter, debug_rejected) = operator_filter(Some("debug"));
+        let (invalid_filter, invalid_rejected) = operator_filter(Some("not a valid directive ["));
+        assert_eq!(default_filter.to_string(), "info");
         assert!(!default_rejected);
-        assert_eq!(debug_filter.to_string(), debug_filter_directive());
+        assert_eq!(empty_filter.to_string(), "info");
+        assert!(!empty_rejected);
+        assert_eq!(debug_filter.to_string(), "debug");
         assert!(!debug_rejected);
-        assert_eq!(invalid_filter.to_string(), default_filter_directive());
+        assert_eq!(invalid_filter.to_string(), "info");
         assert!(invalid_rejected);
     }
 

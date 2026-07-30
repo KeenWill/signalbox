@@ -123,7 +123,7 @@ where
         );
 
         let outcome = self.transaction.handle(session, identities).await?;
-        report_turn_activation(&outcome);
+        report_turn_activation(session, &outcome);
         Ok(outcome)
     }
 
@@ -149,7 +149,7 @@ where
         let mut transaction = self.transaction.clone();
         async move {
             let outcome = transaction.handle(session, identities).await?;
-            report_turn_activation(&outcome);
+            report_turn_activation(session, &outcome);
             Ok(outcome)
         }
     }
@@ -160,10 +160,13 @@ where
 /// This event separates an idle scheduler from one that has committed work and
 /// is about to dispatch it. Sanitized by construction: the only fields are
 /// daemon-minted aggregate identities, never input or configuration content.
-fn report_turn_activation(outcome: &StartEligibleTurnOutcome) {
+fn report_turn_activation(requested_session: SessionId, outcome: &StartEligibleTurnOutcome) {
     let StartEligibleTurnOutcome::Activated(activated) = outcome else {
         return;
     };
+    if activated.session() != requested_session {
+        return;
+    }
     tracing::info!(
         session_id = %activated.session().as_uuid(),
         turn_id = %activated.turn().as_uuid(),

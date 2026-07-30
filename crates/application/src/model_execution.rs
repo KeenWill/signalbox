@@ -1433,7 +1433,11 @@ where
                     );
                 }
                 Ok(PrepareModelCallOutcome::TargetUnavailable(failed)) => {
-                    report_failed_turn_terminalization(&failed, "target_unavailable");
+                    report_turn_terminalization(
+                        failed.session(),
+                        failed.turn(),
+                        TurnTerminalOutcome::TargetUnavailable,
+                    );
                     return Ok(ModelCallExecutionOutcome::TargetUnavailable(failed));
                 }
                 Err(error)
@@ -1604,7 +1608,11 @@ where
                 .await
             {
                 Ok(failed) => {
-                    report_failed_turn_terminalization(&failed, "capability_known_failure");
+                    report_turn_terminalization(
+                        failed.session(),
+                        failed.turn(),
+                        TurnTerminalOutcome::CapabilityKnownFailure,
+                    );
                     return Ok(ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(
                         failed,
                     )));
@@ -1832,14 +1840,35 @@ fn report_model_call_dispatch(
     );
 }
 
-/// Projects an already-committed failed-turn result into the lifecycle signal.
+/// Closed terminal labels admitted to the turn lifecycle event.
 ///
-/// The typed result supplies identities; no failure detail or content is read.
-fn report_failed_turn_terminalization(
-    failed: &FailedModelCallTurn,
-    terminal_outcome: &'static str,
-) {
-    report_turn_terminalization(failed.session(), failed.turn(), terminal_outcome);
+/// Callers select a typed variant from their exhaustive domain outcome instead
+/// of supplying a positional string that could drift from committed state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TurnTerminalOutcome {
+    Completed,
+    CancelledWithToolResponse,
+    Failed,
+    Cancelled,
+    Refused,
+    ReconciliationRequired,
+    TargetUnavailable,
+    CapabilityKnownFailure,
+}
+
+impl TurnTerminalOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::CancelledWithToolResponse => "cancelled_with_tool_response",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Refused => "refused",
+            Self::ReconciliationRequired => "reconciliation_required",
+            Self::TargetUnavailable => "target_unavailable",
+            Self::CapabilityKnownFailure => "capability_known_failure",
+        }
+    }
 }
 
 /// Records terminal model-call commits while excluding nonterminal waits.
@@ -1848,18 +1877,32 @@ fn report_failed_turn_terminalization(
 /// derived from the committed state rather than supplied independently.
 fn report_model_call_terminalization(outcome: &ModelCallTerminalOutcome) {
     let (session, turn, terminal_outcome) = match outcome {
-        ModelCallTerminalOutcome::Completed(value) => (value.session(), value.turn(), "completed"),
+        ModelCallTerminalOutcome::Completed(value) => (
+            value.session(),
+            value.turn(),
+            TurnTerminalOutcome::Completed,
+        ),
         ModelCallTerminalOutcome::CancelledWithToolResponse(value) => (
             value.session(),
             value.turn(),
-            "cancelled_with_tool_response",
+            TurnTerminalOutcome::CancelledWithToolResponse,
         ),
-        ModelCallTerminalOutcome::Failed(value) => (value.session(), value.turn(), "failed"),
-        ModelCallTerminalOutcome::Cancelled(value) => (value.session(), value.turn(), "cancelled"),
-        ModelCallTerminalOutcome::Refused(value) => (value.session(), value.turn(), "refused"),
-        ModelCallTerminalOutcome::ReconciliationRequired(value) => {
-            (value.session(), value.turn(), "reconciliation_required")
+        ModelCallTerminalOutcome::Failed(value) => {
+            (value.session(), value.turn(), TurnTerminalOutcome::Failed)
         }
+        ModelCallTerminalOutcome::Cancelled(value) => (
+            value.session(),
+            value.turn(),
+            TurnTerminalOutcome::Cancelled,
+        ),
+        ModelCallTerminalOutcome::Refused(value) => {
+            (value.session(), value.turn(), TurnTerminalOutcome::Refused)
+        }
+        ModelCallTerminalOutcome::ReconciliationRequired(value) => (
+            value.session(),
+            value.turn(),
+            TurnTerminalOutcome::ReconciliationRequired,
+        ),
         ModelCallTerminalOutcome::ToolRound(_) | ModelCallTerminalOutcome::AwaitingRecovery(_) => {
             return;
         }
@@ -1871,11 +1914,15 @@ fn report_model_call_terminalization(outcome: &ModelCallTerminalOutcome) {
 ///
 /// Session, turn, and the closed outcome token are sufficient to distinguish
 /// completed work from an active or parked daemon without exposing payloads.
-fn report_turn_terminalization(session: SessionId, turn: TurnId, terminal_outcome: &'static str) {
+fn report_turn_terminalization(
+    session: SessionId,
+    turn: TurnId,
+    terminal_outcome: TurnTerminalOutcome,
+) {
     tracing::info!(
         session_id = %session.as_uuid(),
         turn_id = %turn.as_uuid(),
-        terminal_outcome,
+        terminal_outcome = terminal_outcome.as_str(),
         "turn terminalized"
     );
 }
