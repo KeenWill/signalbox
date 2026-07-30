@@ -5107,6 +5107,300 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 }
 ```
 
+## application: review_orchestration
+
+```rust
+pub struct ReviewOrchestrationAttemptId(/* private UUID */);
+impl ReviewOrchestrationAttemptId {
+    pub const fn from_uuid(value: uuid::Uuid) -> Self;
+    pub const fn as_uuid(self) -> uuid::Uuid;
+}
+
+pub struct ReviewTemplateDigest(/* private 32 bytes */);
+impl ReviewTemplateDigest {
+    pub const fn new(bytes: [u8; 32]) -> Self;
+    pub const fn bytes(self) -> [u8; 32];
+}
+
+pub struct ReviewStageTemplateDigests { /* private */ }
+impl ReviewStageTemplateDigests {
+    pub const fn new(
+        import: ReviewTemplateDigest,
+        judgment: ReviewTemplateDigest,
+        repair: ReviewTemplateDigest,
+        publication: ReviewTemplateDigest,
+    ) -> Self;
+    // accessors: import(), judgment(), repair(), publication()
+}
+
+pub struct ReviewConcernSpec { /* private */ }
+impl ReviewConcernSpec {
+    pub const fn new(key: ReviewKey, template_digest: ReviewTemplateDigest) -> Self;
+    // accessors: key(), template_digest()
+}
+
+pub struct ReviewOrchestrationAttempt { /* private immutable attempt */ }
+impl ReviewOrchestrationAttempt {
+    pub fn try_new(
+        id: ReviewOrchestrationAttemptId,
+        target: ReviewTargetId,
+        policy: ReviewPolicy,
+        concern_set_version: ReviewKey,
+        stage_templates: ReviewStageTemplateDigests,
+        concerns: Vec<ReviewConcernSpec>,
+    ) -> Result<Self, ReviewOrchestrationAttemptError>;
+    // accessors: id(), target(), policy(), concern_set_version(),
+    //   stage_templates(), concerns()
+}
+pub enum ReviewOrchestrationAttemptError {
+    EmptyConcernInventory,
+    RepeatedConcern { concern: ReviewKey },
+}
+
+pub enum ReviewDurableSealOutcome {
+    Recorded,
+    EqualReplay,
+    Conflict,
+}
+pub enum ReviewPassIncompleteStatus {
+    Failed,
+    Blocked,
+    Cancelled,
+}
+pub enum ReviewImportOutcome {
+    Succeeded {
+        pass: Box<ReviewPassEvidence>,
+        run: ReviewRunEvidence,
+        template_digest: ReviewTemplateDigest,
+        context_digest: [u8; 32],
+    },
+    Incomplete {
+        pass: Option<ReviewPassRef>,
+        status: ReviewPassIncompleteStatus,
+    },
+}
+pub enum ReviewImportEvidenceFailure {
+    ForeignTarget,
+    ForeignPolicy,
+    ForeignTemplate,
+    IncompatiblePass,
+}
+
+pub struct ReviewConcernSuccess { /* private */ }
+impl ReviewConcernSuccess {
+    pub fn new(
+        producer: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+        findings: Vec<ReviewFinding>,
+    ) -> Self;
+    // accessors: producer(), producer_evidence(), run_evidence(), findings()
+}
+pub enum ReviewConcernOutcome {
+    Succeeded(Box<ReviewConcernSuccess>),
+    Failed { pass: ReviewPassRef },
+    Blocked { pass: ReviewPassRef },
+    Cancelled { pass: Option<ReviewPassRef> },
+    Superseded { pass: ReviewPassRef },
+}
+pub struct ReviewConcernClaim { /* private */ }
+impl ReviewConcernClaim {
+    pub const fn new(
+        concern: ReviewKey,
+        template_digest: ReviewTemplateDigest,
+        outcome: ReviewConcernOutcome,
+    ) -> Self;
+    // accessors: concern(), template_digest(), outcome()
+}
+pub struct ReviewConcernWork { /* private; produced by service */ }
+impl ReviewConcernWork {
+    // accessors: attempt(), imported_context_digest(), concern()
+}
+pub enum ReviewFanoutBarrierFailure {
+    MissingConcern { concern: ReviewKey },
+    ExtraConcern { concern: ReviewKey },
+    RepeatedConcern { concern: ReviewKey },
+    TemplateMismatch { concern: ReviewKey },
+    MemberIncomplete { concern: ReviewKey },
+    ForeignProducerTarget { concern: ReviewKey },
+    ForeignProducerPolicy { concern: ReviewKey },
+    InvalidSealedFinding {
+        concern: ReviewKey,
+        finding: ReviewFindingRef,
+    },
+    RepeatedFinding { finding: ReviewFindingRef },
+}
+
+pub enum ReviewPlannedDisposition {
+    Accepted,
+    Rejected { reason: ReviewText },
+    Duplicate { canonical: ReviewFindingRef },
+    Superseded { successor: ReviewFindingRef },
+    Stale,
+}
+pub struct ReviewJudgmentPlanMember { /* private */ }
+impl ReviewJudgmentPlanMember {
+    pub const fn new(
+        finding: ReviewFindingRef,
+        disposition: ReviewPlannedDisposition,
+    ) -> Self;
+    // accessors: finding(), disposition()
+}
+pub struct ReviewJudgmentPlan { /* private */ }
+impl ReviewJudgmentPlan {
+    pub fn new(
+        analysis_pass: ReviewPassEvidence,
+        analysis_run: ReviewRunEvidence,
+        template_digest: ReviewTemplateDigest,
+        members: Vec<ReviewJudgmentPlanMember>,
+    ) -> Self;
+    // accessors: analysis_pass(), analysis_pass_evidence(),
+    //   analysis_run_evidence(), template_digest(), members()
+}
+pub enum ReviewJudgmentPlanFailure {
+    ForeignAnalysisTarget,
+    ForeignAnalysisPolicy,
+    ForeignAnalysisTemplate,
+    InexactFindingInventory,
+    AcceptedBelowThreshold { finding: ReviewFindingRef },
+    InvalidReferencedFinding { finding: ReviewFindingRef },
+    ReferenceCycle { finding: ReviewFindingRef },
+    ReferencedFindingTerminalBeforeAdmission { finding: ReviewFindingRef },
+}
+
+pub struct ReviewJudgmentEffectId { /* attempt + finding */ }
+impl ReviewJudgmentEffectId {
+    pub const fn new(
+        attempt: ReviewOrchestrationAttemptId,
+        finding: ReviewFindingRef,
+    ) -> Self;
+    // accessors: attempt(), finding()
+}
+pub struct ReviewJudgmentEffectWork { /* private; produced by service */ }
+impl ReviewJudgmentEffectWork {
+    // accessors: id(), attempt(), member()
+}
+pub enum ReviewJudgmentEffectOutcome {
+    Applied,
+    Failed,
+    Blocked,
+    Cancelled,
+}
+pub enum ReviewRepairMemberOutcome {
+    Fixed(ReviewFindingRef),
+    Failed(ReviewFindingRef),
+    Cancelled(ReviewFindingRef),
+    Blocked(ReviewFindingRef),
+}
+pub struct ReviewRepairWork { /* private; produced by service */ }
+impl ReviewRepairWork {
+    // accessors: attempt(), findings()
+}
+pub enum ReviewPublicationMemberOutcome {
+    Published(ReviewFindingRef),
+    Failed(ReviewFindingRef),
+    Blocked(ReviewFindingRef),
+    Cancelled(ReviewFindingRef),
+}
+pub struct ReviewPublicationWork { /* private; produced by service */ }
+impl ReviewPublicationWork {
+    // accessors: attempt(), findings()
+}
+pub enum ReviewTerminalBarrierFailure {
+    InexactFindingInventory,
+}
+
+pub trait ReviewOrchestrationAttemptStore {
+    type Error;
+    fn record_attempt(&mut self, attempt: ReviewOrchestrationAttempt)
+        -> impl Future<Output = Result<ReviewDurableSealOutcome, Self::Error>> + Send;
+    fn load_import(&self, attempt: ReviewOrchestrationAttemptId)
+        -> impl Future<Output = Result<Option<ReviewImportOutcome>, Self::Error>> + Send;
+    fn record_import(&mut self, attempt: ReviewOrchestrationAttemptId, outcome: ReviewImportOutcome)
+        -> impl Future<Output = Result<ReviewDurableSealOutcome, Self::Error>> + Send;
+    fn load_concern_claims(&self, attempt: ReviewOrchestrationAttemptId)
+        -> impl Future<Output = Result<Vec<ReviewConcernClaim>, Self::Error>> + Send;
+    fn record_concern_claim(&mut self, attempt: ReviewOrchestrationAttemptId, claim: ReviewConcernClaim)
+        -> impl Future<Output = Result<ReviewDurableSealOutcome, Self::Error>> + Send;
+    fn seal_complete_fanout(&mut self, attempt: ReviewOrchestrationAttemptId, claims: Vec<ReviewConcernClaim>)
+        -> impl Future<Output = Result<ReviewDurableSealOutcome, Self::Error>> + Send;
+    fn seal_judgment_plan(&mut self, attempt: ReviewOrchestrationAttemptId, plan: ReviewJudgmentPlan)
+        -> impl Future<Output = Result<ReviewDurableSealOutcome, Self::Error>> + Send;
+    fn load_judgment_plan(&self, attempt: ReviewOrchestrationAttemptId)
+        -> impl Future<Output = Result<Option<ReviewJudgmentPlan>, Self::Error>> + Send;
+    fn load_applied_judgment_effects(&self, attempt: ReviewOrchestrationAttemptId)
+        -> impl Future<Output = Result<Vec<ReviewJudgmentEffectId>, Self::Error>> + Send;
+    fn record_applied_judgment_effect(&mut self, effect: ReviewJudgmentEffectId)
+        -> impl Future<Output = Result<ReviewDurableSealOutcome, Self::Error>> + Send;
+    fn seal_repair_inventory(&mut self, attempt: ReviewOrchestrationAttemptId, findings: Vec<ReviewFindingRef>)
+        -> impl Future<Output = Result<ReviewDurableSealOutcome, Self::Error>> + Send;
+    fn record_repair_outcomes(&mut self, attempt: ReviewOrchestrationAttemptId, outcomes: Vec<ReviewRepairMemberOutcome>)
+        -> impl Future<Output = Result<ReviewDurableSealOutcome, Self::Error>> + Send;
+    fn load_repair_outcomes(&self, attempt: ReviewOrchestrationAttemptId)
+        -> impl Future<Output = Result<Option<Vec<ReviewRepairMemberOutcome>>, Self::Error>> + Send;
+    fn seal_publication_inventory(&mut self, attempt: ReviewOrchestrationAttemptId, findings: Vec<ReviewFindingRef>)
+        -> impl Future<Output = Result<ReviewDurableSealOutcome, Self::Error>> + Send;
+    fn record_publication_outcomes(&mut self, attempt: ReviewOrchestrationAttemptId, outcomes: Vec<ReviewPublicationMemberOutcome>)
+        -> impl Future<Output = Result<ReviewDurableSealOutcome, Self::Error>> + Send;
+    fn load_publication_outcomes(&self, attempt: ReviewOrchestrationAttemptId)
+        -> impl Future<Output = Result<Option<Vec<ReviewPublicationMemberOutcome>>, Self::Error>> + Send;
+}
+
+pub trait ReviewOrchestrationPassRunner: Send + Sync + 'static {
+    type Error: Send + 'static;
+    fn import_external_context(&self, attempt: ReviewOrchestrationAttempt)
+        -> impl Future<Output = Result<ReviewImportOutcome, Self::Error>> + Send;
+    fn run_concern(&self, work: ReviewConcernWork)
+        -> impl Future<Output = Result<ReviewConcernOutcome, Self::Error>> + Send + 'static;
+    fn judge(&self, attempt: ReviewOrchestrationAttempt, findings: Vec<ReviewFinding>)
+        -> impl Future<Output = Result<ReviewJudgmentPlan, Self::Error>> + Send;
+    fn apply_judgment_effect(&self, work: ReviewJudgmentEffectWork)
+        -> impl Future<Output = Result<ReviewJudgmentEffectOutcome, Self::Error>> + Send;
+    fn repair(&self, work: ReviewRepairWork)
+        -> impl Future<Output = Result<Vec<ReviewRepairMemberOutcome>, Self::Error>> + Send;
+    fn publish(&self, work: ReviewPublicationWork)
+        -> impl Future<Output = Result<Vec<ReviewPublicationMemberOutcome>, Self::Error>> + Send;
+}
+
+pub enum ReviewOrchestrationOutcome {
+    ImportIncomplete(Box<ReviewImportOutcome>),
+    FanoutIncomplete(ReviewFanoutBarrierFailure),
+    JudgmentIncomplete {
+        effect: ReviewJudgmentEffectId,
+        outcome: ReviewJudgmentEffectOutcome,
+    },
+    RepairIncomplete { repairs: Vec<ReviewRepairMemberOutcome> },
+    PublicationIncomplete { publications: Vec<ReviewPublicationMemberOutcome> },
+    Complete { publications: Vec<ReviewPublicationMemberOutcome> },
+}
+pub enum ReviewOrchestrationServiceError<StoreError, RunnerError> {
+    Store(StoreError),
+    InvalidImportEvidence(ReviewImportEvidenceFailure),
+    Runner(RunnerError),
+    ConcernTaskTerminated,
+    DurableConflict,
+    InvalidJudgmentPlan(ReviewJudgmentPlanFailure),
+    InvalidAppliedEffects,
+    InvalidTerminalBarrier(ReviewTerminalBarrierFailure),
+}
+pub struct ReviewOrchestrationService<Store, Runner> { /* private */ }
+impl<Store, Runner> ReviewOrchestrationService<Store, Runner> {
+    pub fn new(store: Store, runner: Runner) -> Self;
+}
+impl<Store, Runner> ReviewOrchestrationService<Store, Runner>
+where
+    Store: ReviewOrchestrationAttemptStore,
+    Runner: ReviewOrchestrationPassRunner,
+{
+    pub async fn execute(
+        &mut self,
+        attempt: ReviewOrchestrationAttempt,
+    ) -> Result<
+        ReviewOrchestrationOutcome,
+        ReviewOrchestrationServiceError<Store::Error, Runner::Error>,
+    >;
+}
+```
+
 ## application: review_workflow
 
 ```rust
@@ -6509,14 +6803,18 @@ pub enum ReviewPassResult {
     ExternalLinkNoChange(ReviewExternalLinkNoChangeResult),
     ExternalLinkPublicationBlocked(ReviewExternalLinkPublicationBlockedResult),
 }
-pub struct ReviewReferencedFindingEvidence { /* reference + frozen status */ }
+pub struct ReviewReferencedFindingEvidence {
+    /* reference + frozen eligible status + authenticated producer policy */
+}
 impl ReviewReferencedFindingEvidence {
-    pub fn from_finding(finding: &ReviewFinding) -> Self;
-    pub const fn try_reconstitute(
+    pub fn try_from_finding(finding: &ReviewFinding) -> Option<Self>;
+    pub fn try_reconstitute(
         reference: ReviewFindingRef,
         status: ReviewFindingStatus,
+        producing_pass: &ReviewPassEvidence,
+        producing_run: ReviewRunEvidence,
     ) -> Option<Self>;
-    // accessors: reference(), status(), producing_pass()
+    // accessors: reference(), status(), producer_policy(), producing_pass()
 }
 
 pub enum ReviewWorkflowKind {
@@ -6870,6 +7168,24 @@ impl ReviewFinding {
         -> Result<Self, ReviewFindingTransitionError>;
     // accessors: proposal(), events(), status()
 }
+pub fn validate_complete_review_finding_reference_graph(
+    findings: &[ReviewFinding],
+) -> Result<(), Box<ReviewFindingReferenceGraphError>>;
+pub enum ReviewFindingReferenceGraphError {
+    DuplicateFinding { reference: ReviewFindingRef },
+    ForeignTargetRoot {
+        expected: ReviewTargetId,
+        actual: ReviewTargetId,
+    },
+    MissingReferencedFinding {
+        finding: ReviewFindingRef,
+        referenced: ReviewFindingRef,
+    },
+    Cycle {
+        finding: ReviewFindingRef,
+        referenced: ReviewFindingRef,
+    },
+}
 pub enum ReviewFindingTransitionFailure {
     ForeignTarget,
     MissingDiffBase,
@@ -6888,6 +7204,7 @@ pub enum ReviewFindingTransitionFailure {
     BelowJudgmentThreshold,
     BelowPublicationThreshold,
     ForeignReferencedFinding,
+    ReferencedFindingPolicyMismatch,
     IneligibleReferencedFinding,
     SelfReference,
     ForeignExternalLink,
@@ -7068,10 +7385,10 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: review_workflow                            | 82                   |
+| domain: review_workflow                            | 84                   |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 53                   |
-| **signalbox-domain total**                         | **537 (+1 free fn)** |
+| **signalbox-domain total**                         | **539 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
@@ -7081,6 +7398,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop                             | 23 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 5 (incl. 1 trait)    |
+| application: review_orchestration                  | 32 (incl. 2 traits)  |
 | application: review_workflow                       | 8 (incl. 2 traits)   |
 | application: session_metadata                      | 12 (incl. 4 traits)  |
 | application: scheduler                             | 12 (incl. 4 traits)  |
@@ -7089,4 +7407,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **155**              |
+| **signalbox-application total**                    | **187**              |

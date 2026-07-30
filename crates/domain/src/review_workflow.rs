@@ -3556,7 +3556,7 @@ impl ReviewFinding {
 /// target, rejecting missing roots and direct or transitive cycles.
 pub fn validate_complete_review_finding_reference_graph(
     findings: &[ReviewFinding],
-) -> Result<(), ReviewFindingReferenceGraphError> {
+) -> Result<(), Box<ReviewFindingReferenceGraphError>> {
     let mut references = BTreeMap::new();
     let Some(expected_target) = findings
         .first()
@@ -3567,10 +3567,12 @@ pub fn validate_complete_review_finding_reference_graph(
     for finding in findings {
         let reference = finding.proposal.reference;
         if expected_target != reference.target() {
-            return Err(ReviewFindingReferenceGraphError::ForeignTargetRoot {
-                expected: expected_target,
-                actual: reference.target(),
-            });
+            return Err(Box::new(
+                ReviewFindingReferenceGraphError::ForeignTargetRoot {
+                    expected: expected_target,
+                    actual: reference.target(),
+                },
+            ));
         }
         let referenced = finding.events.iter().find_map(|event| match &event.kind {
             ReviewFindingEventKind::Duplicate { canonical } => Some(canonical.reference()),
@@ -3583,17 +3585,21 @@ pub fn validate_complete_review_finding_reference_graph(
             | ReviewFindingEventKind::BlockedWithReason { .. } => None,
         });
         if references.insert(reference, referenced).is_some() {
-            return Err(ReviewFindingReferenceGraphError::DuplicateFinding { reference });
+            return Err(Box::new(
+                ReviewFindingReferenceGraphError::DuplicateFinding { reference },
+            ));
         }
     }
     for (&finding, referenced) in &references {
         if let Some(referenced) = referenced
             && !references.contains_key(referenced)
         {
-            return Err(ReviewFindingReferenceGraphError::MissingReferencedFinding {
-                finding,
-                referenced: *referenced,
-            });
+            return Err(Box::new(
+                ReviewFindingReferenceGraphError::MissingReferencedFinding {
+                    finding,
+                    referenced: *referenced,
+                },
+            ));
         }
     }
 
@@ -3607,10 +3613,10 @@ pub fn validate_complete_review_finding_reference_graph(
                 break;
             };
             if path.contains(referenced) {
-                return Err(ReviewFindingReferenceGraphError::Cycle {
+                return Err(Box::new(ReviewFindingReferenceGraphError::Cycle {
                     finding: current,
                     referenced: *referenced,
-                });
+                }));
             }
             current = *referenced;
         }
@@ -10492,7 +10498,7 @@ mod tests {
             .expect_err("complete graph reconstitution must reject a direct cycle");
 
         assert_eq!(
-            error,
+            *error,
             ReviewFindingReferenceGraphError::Cycle {
                 finding: second_reference,
                 referenced: first_reference,
@@ -10558,7 +10564,7 @@ mod tests {
             .expect_err("complete graph reconstitution must reject a transitive cycle");
 
         assert_eq!(
-            error,
+            *error,
             ReviewFindingReferenceGraphError::Cycle {
                 finding: third_reference,
                 referenced: first_reference,
@@ -10596,7 +10602,7 @@ mod tests {
             .expect_err("complete graph cannot omit a referenced root");
 
         assert_eq!(
-            error,
+            *error,
             ReviewFindingReferenceGraphError::MissingReferencedFinding {
                 finding: subject_reference,
                 referenced: canonical_reference,
@@ -10788,7 +10794,7 @@ mod tests {
             .expect_err("complete graph cannot repeat a finding root");
 
         assert_eq!(
-            error,
+            *error,
             ReviewFindingReferenceGraphError::DuplicateFinding { reference },
         );
     }
@@ -10808,7 +10814,7 @@ mod tests {
             .expect_err("complete target graph cannot mix immutable targets");
 
         assert_eq!(
-            error,
+            *error,
             ReviewFindingReferenceGraphError::ForeignTargetRoot {
                 expected: expected_target,
                 actual: foreign_target,

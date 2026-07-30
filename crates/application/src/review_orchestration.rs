@@ -1015,14 +1015,27 @@ fn accepted_findings(plan: &ReviewJudgmentPlan) -> Vec<ReviewFindingRef> {
         .collect()
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum CompletedRepairStage {
+    Blocked(Vec<ReviewRepairMemberOutcome>),
+    Complete(Box<CompleteRepairBarrier>),
+}
+
 fn complete_repairs(
-    applied: &AppliedJudgmentPlan,
+    attempt: &ReviewOrchestrationAttempt,
+    plan: &ReviewJudgmentPlan,
     outcomes: Vec<ReviewRepairMemberOutcome>,
-) -> Result<CompleteRepairBarrier, ReviewTerminalBarrierFailure> {
-    let expected = accepted_findings(&applied.plan);
+) -> Result<CompletedRepairStage, ReviewTerminalBarrierFailure> {
+    let expected = accepted_findings(plan);
     let actual: Vec<_> = outcomes.iter().map(|outcome| outcome.finding()).collect();
     if actual != expected {
         return Err(ReviewTerminalBarrierFailure::InexactFindingInventory);
+    }
+    if outcomes
+        .iter()
+        .any(|outcome| matches!(outcome, ReviewRepairMemberOutcome::Blocked(_)))
+    {
+        return Ok(CompletedRepairStage::Blocked(outcomes));
     }
     let surviving = outcomes
         .into_iter()
@@ -1032,10 +1045,12 @@ fn complete_repairs(
             ReviewRepairMemberOutcome::Fixed(_) | ReviewRepairMemberOutcome::Blocked(_) => None,
         })
         .collect();
-    Ok(CompleteRepairBarrier {
-        attempt: applied.fanout.attempt.clone(),
-        surviving,
-    })
+    Ok(CompletedRepairStage::Complete(Box::new(
+        CompleteRepairBarrier {
+            attempt: attempt.clone(),
+            surviving,
+        },
+    )))
 }
 
 fn validate_publication(
@@ -1167,6 +1182,9 @@ pub enum ReviewOrchestrationOutcome {
     JudgmentIncomplete {
         effect: ReviewJudgmentEffectId,
         outcome: ReviewJudgmentEffectOutcome,
+    },
+    RepairIncomplete {
+        repairs: Vec<ReviewRepairMemberOutcome>,
     },
     PublicationIncomplete {
         publications: Vec<ReviewPublicationMemberOutcome>,
@@ -1401,7 +1419,7 @@ where
                     .repair(repairs)
                     .await
                     .map_err(ReviewOrchestrationServiceError::Runner)?;
-                let barrier = complete_repairs(&applied, outcomes.clone())
+                complete_repairs(&attempt, &applied.plan, outcomes.clone())
                     .map_err(ReviewOrchestrationServiceError::InvalidTerminalBarrier)?;
                 ensure_sealed(
                     self.store
@@ -1409,12 +1427,17 @@ where
                         .await
                         .map_err(ReviewOrchestrationServiceError::Store)?,
                 )?;
-                let _ = barrier;
                 outcomes
             }
         };
-        let repair_barrier = complete_repairs(&applied, repair_outcomes)
+        let repair_barrier = complete_repairs(&attempt, &applied.plan, repair_outcomes)
             .map_err(ReviewOrchestrationServiceError::InvalidTerminalBarrier)?;
+        let repair_barrier = match repair_barrier {
+            CompletedRepairStage::Blocked(repairs) => {
+                return Ok(ReviewOrchestrationOutcome::RepairIncomplete { repairs });
+            }
+            CompletedRepairStage::Complete(barrier) => *barrier,
+        };
 
         ensure_sealed(
             self.store
@@ -1939,6 +1962,35 @@ mod tests {
             error,
             ReviewJudgmentPlanFailure::ReferencedFindingTerminalBeforeAdmission { finding: second }
         );
+    }
+
+    #[test]
+    fn blocked_repair_stage_cannot_form_publication_barrier() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let (analysis_pass, analysis_run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            40,
+            ReviewPassKind::Judge,
+            ReviewWorkflowKind::JudgeFindings,
+            None,
+        );
+        let plan = ReviewJudgmentPlan::new(
+            analysis_pass,
+            analysis_run,
+            immutable_attempt.stage_templates().judgment(),
+            vec![ReviewJudgmentPlanMember::new(
+                finding,
+                ReviewPlannedDisposition::Accepted,
+            )],
+        );
+        let repairs = vec![ReviewRepairMemberOutcome::Blocked(finding)];
+
+        let stage = complete_repairs(&immutable_attempt, &plan, repairs.clone())
+            .expect("exact blocked repair inventory is classified");
+
+        assert_eq!(stage, CompletedRepairStage::Blocked(repairs));
     }
 
     #[tokio::test]
