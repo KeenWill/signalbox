@@ -121,6 +121,8 @@ const INVALID_ARGUMENTS_DETAIL: &str = "code-host tool arguments are invalid";
 const CREDENTIAL_UNAVAILABLE_DETAIL: &str = "code-host credential is unavailable";
 const CODE_HOST_REJECTED_DETAIL: &str =
     "code host rejected the request or returned an invalid bounded response";
+const CHANGED_FILE_NOT_FOUND_DETAIL: &str =
+    "requested changed file was not found in the change request";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CodeHostToolKind {
@@ -387,6 +389,8 @@ pub enum CodeHostTransportFailure {
     InvalidCredential,
     /// A definitive response rejected the operation.
     Rejected,
+    /// A complete changed-file search did not contain the requested path.
+    NotFound,
     /// The bounded response did not match the typed result contract.
     InvalidResponse,
     /// Response bytes exceeded the fixed operation cap.
@@ -451,6 +455,9 @@ impl<Credentials, Transport> CodeHostTools<Credentials, Transport> {
         let code_host_rejected_detail =
             ToolExecutionErrorDetail::try_new(String::from(CODE_HOST_REJECTED_DETAIL))
                 .map_err(|_| CodeHostToolsConstructionError::ErrorDetail)?;
+        let changed_file_not_found_detail =
+            ToolExecutionErrorDetail::try_new(String::from(CHANGED_FILE_NOT_FOUND_DETAIL))
+                .map_err(|_| CodeHostToolsConstructionError::ErrorDetail)?;
         let mut compiled = Vec::with_capacity(CodeHostToolKind::ALL.len());
         for kind in CodeHostToolKind::ALL {
             let definition = kind.definition().map_err(|error| match error {
@@ -475,6 +482,7 @@ impl<Credentials, Transport> CodeHostTools<Credentials, Transport> {
                 transport,
                 credential_unavailable_detail,
                 code_host_rejected_detail,
+                changed_file_not_found_detail,
             },
         })
     }
@@ -519,6 +527,7 @@ pub struct CodeHostExecutor<Credentials, Transport> {
     transport: Transport,
     credential_unavailable_detail: ToolExecutionErrorDetail,
     code_host_rejected_detail: ToolExecutionErrorDetail,
+    changed_file_not_found_detail: ToolExecutionErrorDetail,
 }
 
 /// Sanitized code-host executor failure.
@@ -582,6 +591,9 @@ where
                         self.credential_unavailable_detail.clone()
                     }
                     KnownFailureDetail::CodeHostRejected => self.code_host_rejected_detail.clone(),
+                    KnownFailureDetail::ChangedFileNotFound => {
+                        self.changed_file_not_found_detail.clone()
+                    }
                 };
                 return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
                     detail: Some(detail),
@@ -615,6 +627,8 @@ enum KnownFailureDetail {
     CredentialUnavailable,
     /// The code host answered, and its answer ends the attempt.
     CodeHostRejected,
+    /// A complete changed-file search did not contain the requested path.
+    ChangedFileNotFound,
 }
 
 /// Shapes a known-failure detail after its class is known to be non-fatal.
@@ -626,6 +640,7 @@ enum KnownFailureDetail {
 const fn transport_failure_detail(failure: CodeHostTransportFailure) -> KnownFailureDetail {
     match failure {
         CodeHostTransportFailure::InvalidCredential => KnownFailureDetail::CredentialUnavailable,
+        CodeHostTransportFailure::NotFound => KnownFailureDetail::ChangedFileNotFound,
         CodeHostTransportFailure::Rejected
         | CodeHostTransportFailure::InvalidResponse
         | CodeHostTransportFailure::ResponseTooLarge
@@ -638,7 +653,9 @@ const fn transport_failure_class(
     failure: CodeHostTransportFailure,
 ) -> Option<OperatorFailureClass> {
     match failure {
-        CodeHostTransportFailure::InvalidCredential | CodeHostTransportFailure::Rejected => None,
+        CodeHostTransportFailure::InvalidCredential
+        | CodeHostTransportFailure::Rejected
+        | CodeHostTransportFailure::NotFound => None,
         CodeHostTransportFailure::InvalidResponse | CodeHostTransportFailure::ResponseTooLarge
             if !kind.mutates() =>
         {
@@ -1561,6 +1578,16 @@ mod tests {
         assert_eq!(
             transport_failure_detail(CodeHostTransportFailure::Rejected),
             KnownFailureDetail::CodeHostRejected
+        );
+    }
+
+    /// A complete changed-file search miss reports its actual semantic result
+    /// rather than claiming the host rejected a valid request.
+    #[test]
+    fn missing_changed_file_presents_the_not_found_detail() {
+        assert_eq!(
+            transport_failure_detail(CodeHostTransportFailure::NotFound),
+            KnownFailureDetail::ChangedFileNotFound
         );
     }
 

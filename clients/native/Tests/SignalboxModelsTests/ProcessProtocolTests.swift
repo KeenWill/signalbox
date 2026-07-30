@@ -246,6 +246,48 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testTranscriptModelCallEvidenceFramesDecodeAsKnownMessages() throws {
+    let usageFrame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.modelCallUsageFrame(turnID: turnID)
+    )
+    let endFrame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.modelCallsEndFrame()
+    )
+    let evidence = try ProcessProtocolFixture.modelCallUsage(in: usageFrame.message)
+
+    XCTAssertEqual(evidence.modelCallIndex.rawValue, 0)
+    XCTAssertEqual(evidence.turnID.rawValue, turnID)
+    XCTAssertEqual(evidence.modelCallID.rawValue, ProcessProtocolFixture.modelCallID)
+    XCTAssertEqual(evidence.usage.inputTokens?.rawValue, 10)
+    XCTAssertEqual(evidence.usage.outputTokens?.rawValue, 0)
+    XCTAssertNil(evidence.usage.cacheCreationInputTokens)
+    XCTAssertEqual(evidence.usage.cacheReadInputTokens?.rawValue, 4)
+    XCTAssertEqual(try ProcessProtocolFixture.modelCallCount(in: endFrame.message), 1)
+  }
+
+  func testFailedTerminalProviderCauseDecodesAsAClosedClassification() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.failedTurnFrame(
+        turnID: turnID, cause: "quota_exhausted"
+      )
+    )
+
+    XCTAssertEqual(
+      try ProcessProtocolFixture.failedProviderCause(in: frame.message),
+      .quotaExhausted
+    )
+  }
+
+  func testCancelledTerminalModelCallRejectsProviderFailureCause() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.failedTurnFrame(
+        turnID: turnID, cause: "quota_exhausted", disposition: "cancelled"
+      )
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.turnStateDecodingDiagnostic(in: frame.message))
+  }
+
   func testMalformedKnownMessageDegradesWithDiagnostic() throws {
     let encoded = Data(
       """
@@ -787,11 +829,124 @@ private enum ProcessProtocolFixture {
     )
   }
 
+  static let modelCallID = "55555555-5555-4555-8555-555555555555"
+  private static let attemptID = "66666666-6666-4666-8666-666666666666"
+  private static let frontierID = "77777777-7777-4777-8777-777777777777"
+
+  static func modelCallUsageFrame(turnID: String) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_model_call_usage",
+          "model_call_index":"0",
+          "turn_id":"\(turnID)",
+          "model_call_id":"\(modelCallID)",
+          "usage":{
+            "input_tokens":"10",
+            "output_tokens":"0",
+            "cache_creation_input_tokens":null,
+            "cache_read_input_tokens":"4"
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func modelCallsEndFrame() -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func failedTurnFrame(
+    turnID: String, cause: String, disposition: String = "known_failed"
+  ) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_turn",
+          "turn_id":"\(turnID)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"failed",
+            "terminal_frontier_id":"\(frontierID)",
+            "terminal_attempt_id":"\(attemptID)",
+            "terminal_model_call":{
+              "model_call_id":"\(modelCallID)",
+              "disposition":"\(disposition)",
+              "cause":"\(cause)"
+            }
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func modelCallUsage(
+    in message: SignalboxProcessServerMessage
+  ) throws -> SignalboxTranscriptModelCallUsage {
+    guard case .transcriptModelCallUsage(let evidence) = message else {
+      throw ProcessProtocolFixtureError.missingModelCallUsage
+    }
+    return evidence
+  }
+
+  static func modelCallCount(
+    in message: SignalboxProcessServerMessage
+  ) throws -> UInt64 {
+    guard case .transcriptModelCallsEnd(let count) = message else {
+      throw ProcessProtocolFixtureError.missingModelCallsEnd
+    }
+    return count.rawValue
+  }
+
+  static func failedProviderCause(
+    in message: SignalboxProcessServerMessage
+  ) throws -> SignalboxFailedModelCallCause {
+    guard
+      case .transcriptTurn(let turn) = message,
+      case .failed(_, _, let terminalModelCall) = turn.state,
+      let cause = terminalModelCall?.cause
+    else {
+      throw ProcessProtocolFixtureError.missingProviderFailureCause
+    }
+    return cause
+  }
+
   static func oversizedFrame() -> Data {
     Data(
       repeating: 0x20,
       count: SignalboxProcessProtocol.maximumFrameBytes + 1
     )
+  }
+
+  static func turnStateDecodingDiagnostic(
+    in message: SignalboxProcessServerMessage
+  ) -> SignalboxDecodingDiagnostic? {
+    guard
+      case .transcriptTurn(let turn) = message,
+      case .unknown(_, _, let diagnostic) = turn.state
+    else {
+      return nil
+    }
+    return diagnostic
   }
 
   static func decodingDiagnostic(
@@ -806,4 +961,7 @@ private enum ProcessProtocolFixture {
 
 private enum ProcessProtocolFixtureError: Error {
   case missingRejectionDetail
+  case missingModelCallUsage
+  case missingModelCallsEnd
+  case missingProviderFailureCause
 }

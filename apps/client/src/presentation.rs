@@ -5,12 +5,13 @@ use std::{
 };
 
 use signalbox_process_protocol::{
-    CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ImportedContentKind,
-    ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, MetadataActor, MetadataLastWriter,
-    ModelCallDisposition, ModelCallState, ReviewDiffSide, ReviewFindingSnapshot,
-    ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle, ReviewRunLifecycle,
-    ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject, ReviewWorkflow,
-    SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
+    CanonicalUuid, CurrentModelCallState, FailedModelCallCause, FailedModelCallDisposition,
+    ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
+    MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState, ReviewDiffSide,
+    ReviewFindingSnapshot, ReviewFindingStatus, ReviewPassKind, ReviewPassLifecycle,
+    ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
+    ReviewTargetSubject, ReviewWorkflow, SessionEvent, ToolBatchState, ToolDecision,
+    TranscriptEntry, TranscriptTextEntry, TurnState,
 };
 
 use crate::{
@@ -1119,9 +1120,10 @@ impl<'a> Output<'a> {
                     self.stdout,
                     "turn={turn_id} position={position} state=failed \
                      frontier={terminal_frontier_id} attempt={attempt_id} call={} \
-                     call_disposition={}",
+                     call_disposition={} call_cause={}",
                     call.model_call_id(),
-                    failed_model_call_disposition(call.disposition())
+                    failed_model_call_disposition(call.disposition()),
+                    call.cause().map_or("none", failed_model_call_cause)
                 ),
                 (None, Some(_)) => Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -1677,6 +1679,21 @@ const fn failed_model_call_disposition(disposition: FailedModelCallDisposition) 
     match disposition {
         FailedModelCallDisposition::KnownFailed => "known_failed",
         FailedModelCallDisposition::Cancelled => "cancelled",
+    }
+}
+
+const fn failed_model_call_cause(cause: FailedModelCallCause) -> &'static str {
+    match cause {
+        FailedModelCallCause::CredentialRejected => "credential_rejected",
+        FailedModelCallCause::PermissionDenied => "permission_denied",
+        FailedModelCallCause::InvalidRequest => "invalid_request",
+        FailedModelCallCause::TargetNotFound => "target_not_found",
+        FailedModelCallCause::RequestTooLarge => "request_too_large",
+        FailedModelCallCause::RateLimited => "rate_limited",
+        FailedModelCallCause::QuotaExhausted => "quota_exhausted",
+        FailedModelCallCause::Overloaded => "overloaded",
+        FailedModelCallCause::ProviderInternal => "provider_internal",
+        FailedModelCallCause::Unrecognized => "unrecognized",
     }
 }
 
@@ -2684,7 +2701,7 @@ mod tests {
         });
 
         expect![[r#"
-            turn=00000000-0000-0000-0000-000000000001 position=1 state=failed frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=00000000-0000-0000-0000-000000000004 call_disposition=cancelled
+            turn=00000000-0000-0000-0000-000000000001 position=1 state=failed frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=00000000-0000-0000-0000-000000000004 call_disposition=cancelled call_cause=none
             usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
         "#]]
         .assert_eq(&rendered);
