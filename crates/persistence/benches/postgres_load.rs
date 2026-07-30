@@ -42,7 +42,7 @@ use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
-use tokio::{sync::Barrier, task::JoinSet};
+use tokio::{sync::mpsc, task::JoinSet, time::timeout};
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_USER: &str = "signalbox";
@@ -52,6 +52,8 @@ const DEFAULT_DURATION_SECONDS: u64 = 10;
 const DEFAULT_POOL_SIZE: u32 = 80;
 const DEFAULT_CONCURRENCIES: [usize; 7] = [1, 2, 4, 8, 16, 32, 64];
 const SERVER_CONNECTION_HEADROOM: u32 = 4;
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
+const WARMUP_COORDINATION_TIMEOUT: Duration = Duration::from_secs(65);
 const IDENTITY_PREFIX: u128 = 0x5b00_0000_u128 << 96;
 // These synthetic fixtures provide stable, valid payloads; their wording has no
 // domain meaning.
@@ -456,6 +458,12 @@ struct WorkerMeasurements {
     completed_during_offered_load: usize,
 }
 
+#[derive(Clone, Copy)]
+struct MeasurementWindow {
+    started: Instant,
+    deadline: Instant,
+}
+
 struct PointResult {
     scenario: Scenario,
     fsync: FsyncMode,
@@ -493,7 +501,10 @@ impl PointResult {
         if self.latencies.is_empty() {
             return None;
         }
-        let index = (self.latencies.len() - 1) * percentile / 100;
+        let sample_count = u128::try_from(self.latencies.len()).ok()?;
+        let percentile = u128::try_from(percentile).ok()?;
+        let rank = sample_count.checked_mul(percentile)?.div_ceil(100);
+        let index = usize::try_from(rank.checked_sub(1)?).ok()?;
         self.latencies
             .get(index)
             .map(|duration| duration.as_secs_f64() * 1_000.0)
@@ -505,60 +516,90 @@ async fn run_point(
     pool: PgPool,
     identities: Arc<LoadContext>,
 ) -> HarnessResult<PointResult> {
-    let mut warmups = JoinSet::new();
-    for _ in 0..config.concurrency {
-        let warmup_pool = pool.clone();
-        let warmup_identities = Arc::clone(&identities);
-        warmups.spawn(async move {
-            let operation_ids = warmup_identities.next_ids();
-            perform_operation(config.scenario, &warmup_pool, operation_ids).await
-        });
-    }
-    while let Some(warmup) = warmups.join_next().await {
-        warmup
-            .map_err(|join_error| error(format!("warmup worker failed to join: {join_error}")))??;
-    }
-
-    let barrier = Arc::new(Barrier::new(config.concurrency + 1));
-    let deadline = Arc::new(OnceLock::new());
+    let window = Arc::new(OnceLock::<MeasurementWindow>::new());
+    let (warmup_ready, mut warmup_readiness) = mpsc::channel(config.concurrency);
     let mut workers = JoinSet::new();
 
     for _ in 0..config.concurrency {
         let worker_pool = pool.clone();
-        let worker_barrier = Arc::clone(&barrier);
-        let worker_deadline = Arc::clone(&deadline);
+        let worker_window = Arc::clone(&window);
+        let worker_warmup_ready = warmup_ready.clone();
         let worker_identities = Arc::clone(&identities);
         workers.spawn(async move {
-            worker_barrier.wait().await;
-            let stop = worker_deadline
-                .get()
-                .copied()
-                .ok_or_else(|| error("measurement deadline was not initialized"))?;
             let mut measurements = WorkerMeasurements::default();
-            while Instant::now() < stop {
-                let operation_ids = worker_identities.next_ids();
+            let mut warmup_announced = false;
+            loop {
                 let started = Instant::now();
-                perform_operation(config.scenario, &worker_pool, operation_ids).await?;
+                if let Some(measurement) = worker_window.get().copied()
+                    && started >= measurement.deadline
+                {
+                    break;
+                }
+                let operation_ids = worker_identities.next_ids();
+                perform_operation_with_timeout(config.scenario, &worker_pool, operation_ids)
+                    .await?;
                 let completed = Instant::now();
-                measurements
-                    .latencies
-                    .push(completed.duration_since(started));
-                if completed <= stop {
-                    measurements.completed_during_offered_load += 1;
+
+                if !warmup_announced {
+                    worker_warmup_ready.send(()).await.map_err(|_| {
+                        error("warmup coordinator stopped before workers were ready")
+                    })?;
+                    warmup_announced = true;
+                }
+
+                if let Some(measurement) = worker_window.get().copied() {
+                    if completed >= measurement.started && completed <= measurement.deadline {
+                        measurements.completed_during_offered_load += 1;
+                    }
+                    if started >= measurement.started && started < measurement.deadline {
+                        measurements
+                            .latencies
+                            .push(completed.duration_since(started));
+                    }
                 }
             }
             Ok::<_, Box<dyn Error + Send + Sync + 'static>>(measurements)
         });
+    }
+    drop(warmup_ready);
+
+    let readiness = timeout(WARMUP_COORDINATION_TIMEOUT, async {
+        for _ in 0..config.concurrency {
+            warmup_readiness
+                .recv()
+                .await
+                .ok_or_else(|| error("a load worker stopped during warmup"))?;
+        }
+        Ok::<_, Box<dyn Error + Send + Sync + 'static>>(())
+    })
+    .await;
+    match readiness {
+        Ok(Ok(())) => {}
+        Ok(Err(readiness_error)) => {
+            workers.abort_all();
+            while workers.join_next().await.is_some() {}
+            return Err(readiness_error);
+        }
+        Err(_) => {
+            workers.abort_all();
+            while workers.join_next().await.is_some() {}
+            return Err(error(format!(
+                "workers did not complete warmup within {} seconds",
+                WARMUP_COORDINATION_TIMEOUT.as_secs()
+            )));
+        }
     }
 
     let measurement_started = Instant::now();
     let measurement_deadline = measurement_started
         .checked_add(config.duration)
         .ok_or_else(|| error("measurement duration exceeds the platform timer range"))?;
-    deadline
-        .set(measurement_deadline)
-        .map_err(|_| error("measurement deadline was initialized twice"))?;
-    barrier.wait().await;
+    window
+        .set(MeasurementWindow {
+            started: measurement_started,
+            deadline: measurement_deadline,
+        })
+        .map_err(|_| error("measurement window was initialized twice"))?;
     let mut latencies = Vec::new();
     let mut completed_during_offered_load = 0;
     while let Some(worker) = workers.join_next().await {
@@ -582,6 +623,22 @@ async fn run_point(
         host_cpus: config.host_cpus,
         latencies,
     })
+}
+
+async fn perform_operation_with_timeout(
+    scenario: Scenario,
+    pool: &PgPool,
+    ids: OperationIds,
+) -> HarnessResult<()> {
+    timeout(OPERATION_TIMEOUT, perform_operation(scenario, pool, ids))
+        .await
+        .map_err(|_| {
+            error(format!(
+                "{} operation exceeded the {}-second liveness timeout",
+                scenario.label(),
+                OPERATION_TIMEOUT.as_secs()
+            ))
+        })?
 }
 
 async fn perform_operation(
