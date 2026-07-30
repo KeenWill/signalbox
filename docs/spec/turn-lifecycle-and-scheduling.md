@@ -497,31 +497,55 @@ after the first commit. Locking, page bounds, and crash recovery are owned by
 [persistence-protocol](persistence-protocol.md).
 
 Only two owner commands consume that state. `ReplaceLostRunner` requires the
-expected current placement revision and either a different live exact runner or
-the one pending replacement enrollment it atomically activates. For a pinned
-loss, its transaction installs the checked successor placement and grant
-lineage, provisions a new revisioned workspace, appends the reference-only
-`RunnerPlacementChanged` semantic entry, extends the next context frontier, and
-returns the turn to the phase justified by its retained work. Safe retry proof
-may be consumed only inside this command. For `RunnerLostBeforePin`, replacement
-installs the new exact selector and returns the placement to `Unpinned` at the
-successor revision; it creates no semantic boundary, workspace, grant, or lease.
-Workspace provisioning and the first pin remain part of the eventual initial
-dispatch. `AbandonLostRunner` requires the same exact lost revision and no
-active turn, then installs terminal `RunnerAbandoned` placement state. If a turn
-is active it records `ActiveTurnRequiresExistingControl`; the owner first uses
-the existing `stop_turn`, approval-decision, or reconciliation flow until the
-slot is empty, so abandonment never mints cancellation authority. With no active
-turn, including an idle session with queued turns, no turn or frontier is
-fabricated; queued work remains queued and later runs with the daemon-only
-executable-tool snapshot because the terminal placement can issue no runner
-lease. No case turns ambiguous effect evidence into known failure.
+expected current placement revision and either a different live exact runner,
+the one pending replacement enrollment it atomically activates, or — for a
+registration-triggered loss alone — a checked re-enrollment of the same runner
+against its current connection
+([runner protocol and placement](runner-protocol.md#identity-enrollment-and-registration)).
+For a pinned loss, its transaction installs the checked successor placement and
+grant lineage, provisions a new revisioned workspace when the successor request
+requires one, appends the reference-only `RunnerPlacementChanged` semantic
+entry, extends the next context frontier, and returns the turn to the phase
+justified by its retained work. Safe retry proof may be consumed only inside
+this command.
+
+Replacement is never refused because a model call is in flight; it is staged
+behind that call. The command claims its identity and provisioning authorization
+immediately, while the terminal transaction that installs the successor
+placement, appends the placement entry, and extends the next context frontier
+commits only after any authorized in-flight daemon-local call for that session
+has reached its observation boundary. That call's assistant and tool entries
+therefore append first, from the frozen source frontier it was prepared against,
+and the placement boundary appends after them: the prefix-only frontier law
+holds, and the model never meets a placement event ordered ahead of output that
+could not have observed it. A call that terminalizes known-failed, refused,
+cancelled, or ambiguous reaches an observation boundary too, so staging cannot
+wait indefinitely on a call that will never complete. Why: the two rules — a
+call keeping its ordinary completion law and a replacement extending the next
+context frontier — are jointly satisfiable in exactly this order, and the
+persistence triggers that enforce prefix-only extension reject every other order
+at commit, so an implementation that appends the boundary early fails loudly in
+its own tests rather than writing a mis-ordered transcript. For
+`RunnerLostBeforePin`, replacement installs the new exact selector and returns
+the placement to `Unpinned` at the successor revision; it creates no semantic
+boundary, workspace, grant, or lease. Workspace provisioning and the first pin
+remain part of the eventual initial dispatch. `AbandonLostRunner` requires the
+same exact lost revision and no active turn, then installs terminal
+`RunnerAbandoned` placement state. If a turn is active it records
+`ActiveTurnRequiresExistingControl`; the owner first uses the existing
+`stop_turn`, approval-decision, or reconciliation flow until the slot is empty,
+so abandonment never mints cancellation authority. With no active turn,
+including an idle session with queued turns, no turn or frontier is fabricated;
+queued work remains queued and later runs with the daemon-only executable-tool
+snapshot because the terminal placement can issue no runner lease. No case turns
+ambiguous effect evidence into known failure.
 
 Equal command replay returns the recorded receipt. Another revision, a live or
-ordinary unpinned placement, the same runner, a stale connection, or an already
-replaced or abandoned session fails closed. These commands are administrative
-recovery, not input delivery: they neither widen `Interrupt` nor create a
-standalone cancellation path (INV-026, INV-029, INV-037, INV-044).
+ordinary unpinned placement, the same runner outside the registration-triggered
+recovery above, a stale connection, or an already replaced or abandoned session
+fails closed. These commands are administrative recovery, not input delivery:
+they neither widen `Interrupt` nor create a standalone cancellation path
+(INV-026, INV-029, INV-037, INV-044).
 
 ## Context frontier snapshots
 
@@ -749,6 +773,12 @@ clones over the shared pool; no shared locked service instance exists.
   (`fatal_mismatch` module) but no aggregate transition or commit path.
 - Dispatch fencing covers model calls, daemon tools, and local runner leases;
   remote runner transport and result envelopes remain deferred.
+- Loss replacement is the only version-one producer of a placement change.
+  Owner-directed relocation of a healthy session, and a working-directory move
+  on the same runner, are committed functionality with no command here yet; the
+  placement-revision, transcript-boundary, and runner-event mechanisms this page
+  drives must stay compatible with a relocation that no loss caused
+  ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)).
 - The eligible terminal-failure path (queued turn fixes its start and fails
   without an attempt for a structurally unexecutable configuration) is
   unimplemented; activation is the only eligibility outcome.

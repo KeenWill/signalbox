@@ -1,3 +1,7 @@
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-unwrap-in-tests = true
+disallowed-methods = [
+    { path = "sqlx::Row::get", reason = "durable row decoding must return typed corruption through Row::try_get" },
+    { path = "sqlx::Row::get_unchecked", reason = "durable row decoding must return typed corruption through Row::try_get" },
+]

@@ -171,7 +171,12 @@ messages:
   `Signalbox session event: runner placement changed to revision {revision} with profile {profile}; prior runner-local execution state is unavailable.`
   The braces are replaced by the canonical decimal revision and exact
   `workspace-restricted` or `ambient` token. Missing, stale, cross-session, or
-  non-successor placement authority fails rendering instead of inventing text;
+  non-successor placement authority fails rendering instead of inventing text.
+  The same text renders every relocation, including a working-directory move on
+  the same runner and a later owner-directed move of a healthy session
+  ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)):
+  what the model must be told is that runner-local state from before the
+  boundary is gone, which is equally true of each;
 - `AssistantText` renders as an assistant message retaining its producing-call
   provenance;
 - imported `Text` with an attested value renders with its imported user or
@@ -196,20 +201,38 @@ declaration to current execution authority. A pinned placement uses its frozen
 tool inventory and current matching registration. An ordinary unpinned request
 includes a runner-only definition only when a currently live registration
 satisfies its selector, sandbox, workspace, repository, and credential
-availability. An exact-identity selector binds that runner and registration
-revision for a possible first dispatch, so its loss produces
-`RunnerLostBeforePin`. A capability-class selector freezes the class and
-required availability, not a runner identity; the eventual first dispatch may
-select only a then-current satisfying registration. If none remains, the
-proposal closes known-failed as `ToolUnavailableBeforePin` without creating an
-attempt or placement, because no runner execution was authorized.
-`RunnerAbandoned` exposes daemon-executable tools only. `RunnerLost` and
-`RunnerLostBeforePin` cannot prepare a new model operation while the turn awaits
-owner recovery. An operation prepared before loss retains its frozen snapshot
-and physical-call disposition, but a runner-only proposal from it cannot
-authorize against the lost locus. A combined-locus definition remains executable
-through its daemon locus when runner availability disappears; an already frozen
-runner selection never silently falls back after the provider returns.
+availability.
+
+The snapshot is a function of the session's actual composition, not of the
+compiled registry. A declaration whose arguments, paths, or working directory
+are defined relative to a session repository is included only for a session that
+has a repository worktree, and a declaration requiring a credential profile is
+included only for a session that was granted one — and, when that requirement
+comes from a repository entry rather than from the session's own workspace, only
+when the current advertisement pairs some repository key with exactly the
+granted profile; a session composed without a workspace therefore advertises
+exactly the tools that can execute in it and no placement combination is
+rejected merely for being workspace-free
+([runner protocol and placement](runner-protocol.md#session-composition) owns
+the composition axes, and
+[tool-loop](tool-loop.md#registry-placement-and-effect-metadata) owns which
+declarations carry a workspace requirement). Why: advertising a tool that cannot
+be admitted at lease claim spends a model round to learn what preparation
+already knew, and honest advertisement is cheaper than a late refusal. An
+exact-identity selector binds that runner and registration revision for a
+possible first dispatch, so its loss produces `RunnerLostBeforePin`. A
+capability-class selector freezes the class and required availability, not a
+runner identity; the eventual first dispatch may select only a then-current
+satisfying registration. If none remains, the proposal closes known-failed as
+`ToolUnavailableBeforePin` without creating an attempt or placement, because no
+runner execution was authorized. `RunnerAbandoned` exposes daemon-executable
+tools only. `RunnerLost` and `RunnerLostBeforePin` cannot prepare a new model
+operation while the turn awaits owner recovery. An operation prepared before
+loss retains its frozen snapshot and physical-call disposition, but a
+runner-only proposal from it cannot authorize against the lost locus. A
+combined-locus definition remains executable through its daemon locus when
+runner availability disappears; an already frozen runner selection never
+silently falls back after the provider returns.
 
 Each snapshot entry binds the exact model definition, permission/effect policy,
 and selected executable locus used to validate and authorize a returned

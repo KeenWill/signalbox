@@ -65,15 +65,31 @@ INV-039).
 
 ## Session creation
 
-`CreateSession` carries the durable command identity, the provenance pair, and
-one complete unversioned initial defaults value, plus its explicit or
-template-derived creation mode. Structural equality excludes the command
-identifier. Explicit mode compares provenance and the complete defaults;
-template-derived mode compares provenance and the caller-supplied template name
-while excluding the copied defaults and content digest. The two modes are never
-equal (INV-012, INV-047). Three topics are owned by
+`CreateSession` carries the durable command identity, the provenance pair, one
+complete unversioned initial defaults value, and one optional complete session
+runner placement, plus its explicit or template-derived creation mode.
+Structural equality excludes the command identifier. Explicit mode compares
+provenance, the complete defaults, and the placement; template-derived mode
+compares provenance, the placement, and the caller-supplied template name while
+excluding the copied defaults and content digest. The two modes are never equal
+(INV-012, INV-047). Three topics are owned by
 [identity-and-commands](identity-and-commands.md): durable-command storage, the
 structural-equality doctrine, and identity generation, supply, and encoding.
+
+The placement is absent for a daemon-only session. When present it is the
+complete immutable request — runner selector, working-directory selection,
+credential-profile selection, workspace requirement, sandbox profile, and tool
+permission overrides — with every axis stated explicitly and none inferred from
+another; the axes and their independence are owned by
+[runner protocol and placement](runner-protocol.md#session-composition). Because
+placement is a caller-supplied semantic field, it participates in replay
+equality in both creation modes: replaying one command identity under a
+different placement, including under a placement where the first handling had
+none, is conflicting reuse rather than a corrected request. Template-derived
+creation carries the same placement field as explicit creation; a resolved
+template supplies defaults and never a placement, so the two choices compose
+instead of excluding each other and no selected placement can be silently
+discarded.
 
 Application orchestration (`crates/application/src/create_session.rs`):
 
@@ -93,10 +109,14 @@ creation uses the separate command path below; it does not widen
 
 The committing transaction atomically inserts the session row, the scheduler
 registration (`session_scheduler`), defaults version one, the current-defaults
-pointer, the typed command record, and the owner-global registry claim.
-Completeness at every commit boundary is enforced by deferred reverse foreign
-keys (`session_current_defaults_fk`, `session_scheduler_row_fk`) plus deferred
-constraint triggers `session_requires_creation_command` and
+pointer, the typed command record, the owner-global registry claim, and — when
+the request carried a placement — that session's initial `Unpinned`
+`SessionRunnerPlacement` record at revision one with its complete request. A
+visible session therefore never names a placement its creation command did not
+carry, and a carried placement is never dropped between the claim and the
+session. Completeness at every commit boundary is enforced by deferred reverse
+foreign keys (`session_current_defaults_fk`, `session_scheduler_row_fk`) plus
+deferred constraint triggers `session_requires_creation_command` and
 `durable_command_requires_typed_record`. The family-aware session trigger
 replaced `session_create_command_fk` when imported-frontier creation added its
 separate command family (migration `202607240002_imported_session_seed.sql`);
@@ -126,14 +146,15 @@ not a historical fact.
 
 `CreateSessionFromImportedFrontier` is a distinct durable command family
 carrying command identity, one addressable `ImportedTranscriptFrontier`, one
-`ImportedSessionRelationship` (`Resume` or `Fork`), and complete unversioned
-initial defaults. The frontier itself names its `ImportedConversationId` and
-inclusive entry boundary; the command accepts no second independently supplied
-conversation identity. Its structural replay equality excludes only command
-identity. Separating the family preserves its imported-ancestry contract and
-keeps its replay record distinct from the no-ancestry `CreateSession` family;
-the shared defaults-bearing storage versions are owned by
-[persistence-protocol](persistence-protocol.md).
+`ImportedSessionRelationship` (`Resume` or `Fork`), complete unversioned initial
+defaults, and the same optional complete session runner placement as ordinary
+creation, on the same replay-equality terms. The frontier itself names its
+`ImportedConversationId` and inclusive entry boundary; the command accepts no
+second independently supplied conversation identity. Its structural replay
+equality excludes only command identity. Separating the family preserves its
+imported-ancestry contract and keeps its replay record distinct from the
+no-ancestry `CreateSession` family; the shared defaults-bearing storage versions
+are owned by [persistence-protocol](persistence-protocol.md).
 
 The relationship records the client's creation-time intent: `Resume` declares a
 new Signalbox continuation from the selected imported point; `Fork` declares a
@@ -187,7 +208,8 @@ The committing transaction atomically inserts:
   conversation and boundary derived from the selected frontier, plus the
   relationship;
 - defaults version one, its current pointer, scheduler registration, typed
-  command record, registry claim, and the ordinary `session_created` outbox
+  command record, registry claim, the initial `Unpinned` placement record when
+  the request carried a placement, and the ordinary `session_created` outbox
   event;
 - one imported-provenance semantic entry for every normalized imported entry in
   the exact prefix, including non-text content; and
@@ -295,6 +317,13 @@ creation establishes the ordinary defaults version one from that complete copy
 and seals the name/digest alongside the session. The stored session has no
 template lookup operation: every later consumer reads its durable defaults and
 provenance only (INV-047).
+
+A template supplies no placement. Template-derived creation therefore carries
+the caller's optional placement exactly as explicit creation does, and its typed
+command record stores that placement in full. Why: silently discarding a typed
+flag a caller supplied is the false-confidence pattern — the session would run
+daemon-only while the caller believed it had a runner — so the two choices
+compose and neither excludes the other.
 
 Durable-command equality distinguishes the caller's two creation modes. An
 explicit command compares its complete caller-supplied defaults exactly. A
@@ -538,7 +567,13 @@ and closed:
   summary text retaining its dedicated physical call and the first and through
   source-qualified entries of the inclusive range it represents;
 - `RunnerPlacementChanged { placement_revision }` — a reference to the complete
-  checked replacement record at the owner-explicit runner/workspace boundary;
+  checked successor placement record at an owner-explicit relocation boundary.
+  One entry kind covers every session-relocation fact: a move to a different
+  runner and a working-directory move on the same runner both require it, and
+  the referenced record is the authority for which of them occurred. Splitting
+  the kind so that a working-directory-only move carries its own payload variant
+  changes no other contract on this page, since every consumer resolves the
+  record rather than reading the payload;
 - `TurnFailed { turn }` — an explicit marker that the turn terminalized as
   failed;
 - `AssistantText { producing_call, value }` — exact assistant text with
@@ -571,8 +606,8 @@ sealed inside the domain crate — checked constructors are `pub(crate)`.
 `model_execution.rs` produces assistant and turn-terminal history;
 imported-frontier session creation is the only producer of `Imported`; sealed
 tool transitions produce tool-use/result references only through the atomic
-boundaries owned by [tool-loop](tool-loop.md); and the checked owner replacement
-transaction is the only producer of `RunnerPlacementChanged`.
+boundaries owned by [tool-loop](tool-loop.md); and the checked owner placement
+transactions are the only producers of `RunnerPlacementChanged`.
 
 `OriginAcceptedInput` and `SteeringAcceptedInput` reference the accepted input's
 identity; neither copies content. Steering additionally names the exact active
@@ -677,18 +712,25 @@ predecessor terminal prefix, then appends the model-identity boundary when the
 frozen direct selection changed, and finally appends its ordinary origin
 (INV-039, INV-046).
 
-Runner replacement has a session-level frontier boundary. The atomic replacement
-transaction appends one `RunnerPlacementChanged` entry after the latest
-authoritative semantic frontier, or establishes a one-entry root when no
-frontier exists, and advances the session placement-frontier pointer with the
-placement revision. Active continuation and the next eligible origin both extend
-that exact boundary before any successor-runner execution. A same-revision,
+Session relocation has a session-level frontier boundary. Every transaction that
+installs a successor placement — loss replacement today, and the committed
+owner-directed move of a healthy session or of its working directory later
+([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one))
+— appends one `RunnerPlacementChanged` entry after the latest authoritative
+semantic frontier, or establishes a one-entry root when no frontier exists, and
+advances the session placement-frontier pointer with the placement revision.
+Active continuation and the next eligible origin both extend that exact boundary
+before any execution on the successor placement. A same-revision,
 missing-record, non-prefix, cross-session, or second placement boundary fails
-closed. The entry copies no runner advertisement, workspace path, credential
-fact, or tool output; the placement record remains its content authority. The
-provider projection resolves that record to the exact injected placement event
-owned by [model-call execution](model-call-execution.md#frontier-rendering)
-(INV-015, INV-044).
+closed. When the installing command runs while an authorized model call is still
+in flight, the boundary is appended only after that call's observation commits,
+so the call's own entries precede it and the prefix-only law holds
+([turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#runner-loss-session-recovery)).
+The entry copies no runner advertisement, workspace path, credential fact, or
+tool output; the placement record remains its content authority. The provider
+projection resolves that record to the exact injected placement event owned by
+[model-call execution](model-call-execution.md#frontier-rendering) (INV-015,
+INV-044).
 
 Pending steering has a separate safe-point boundary (INV-036). A `steer` submit
 accepted while its exact source turn is active returns the accepted-input

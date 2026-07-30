@@ -35,6 +35,7 @@ publish = false
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
+disallowed_methods = "deny"
 expect_used = "deny"
 panic = "deny"
 todo = "deny"

@@ -4748,6 +4748,71 @@ fn encode_attempt_end(
     }
 }
 
+pub(crate) struct SnapshotAppend<I> {
+    pub(crate) owning_session: SessionId,
+    pub(crate) frontier: signalbox_domain::ContextFrontierId,
+    pub(crate) prefix: Option<signalbox_domain::ContextFrontierId>,
+    pub(crate) member_count: u64,
+    pub(crate) prefix_member_count: u64,
+    pub(crate) appended_entries: I,
+}
+
+pub(crate) enum SnapshotAppendError {
+    FrontierInsert(sqlx::Error),
+    MemberInsert(sqlx::Error),
+    MemberPositionOverflow,
+}
+
+pub(crate) async fn insert_snapshot_append<I>(
+    connection: &mut PgConnection,
+    append: SnapshotAppend<I>,
+) -> Result<(), SnapshotAppendError>
+where
+    I: IntoIterator<Item = SemanticTranscriptEntryRef>,
+{
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id,
+             prefix_context_frontier_id, member_count)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(session_id_to_uuid(append.owning_session))
+    .bind(append.frontier.into_uuid())
+    .bind(
+        append
+            .prefix
+            .map(signalbox_domain::ContextFrontierId::into_uuid),
+    )
+    .bind(Decimal::from(append.member_count))
+    .execute(&mut *connection)
+    .await
+    .map_err(SnapshotAppendError::FrontierInsert)?;
+    for (index, entry) in append.appended_entries.into_iter().enumerate() {
+        let index =
+            u64::try_from(index).map_err(|_| SnapshotAppendError::MemberPositionOverflow)?;
+        let position = append
+            .prefix_member_count
+            .checked_add(index)
+            .and_then(|index| index.checked_add(1))
+            .ok_or(SnapshotAppendError::MemberPositionOverflow)?;
+        sqlx::query(
+            "INSERT INTO context_frontier_delta
+                (owning_session_id, context_frontier_id, member_position,
+                 source_session_id, semantic_entry_id)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(session_id_to_uuid(append.owning_session))
+        .bind(append.frontier.into_uuid())
+        .bind(Decimal::from(position))
+        .bind(session_id_to_uuid(entry.source_session()))
+        .bind(entry.entry().into_uuid())
+        .execute(&mut *connection)
+        .await
+        .map_err(SnapshotAppendError::MemberInsert)?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn insert_snapshot(
     connection: &mut PgConnection,
     snapshot: &signalbox_domain::ResolvedContextFrontierSnapshot,
@@ -4758,48 +4823,32 @@ pub(crate) async fn insert_snapshot(
     let prefix_member_count = snapshot
         .entry_count()
         .checked_sub(appended_entry_count)
+        .and_then(|count| u64::try_from(count).ok())
         .ok_or(ModelCallCorruption::Inconsistent(
             "frontier prefix member count",
         ))?;
-    sqlx::query(
-        "INSERT INTO context_frontier
-            (owning_session_id, context_frontier_id,
-             prefix_context_frontier_id, member_count)
-         VALUES ($1, $2, $3, $4)",
+    insert_snapshot_append(
+        connection,
+        SnapshotAppend {
+            owning_session: snapshot.frontier().owning_session(),
+            frontier: snapshot.frontier().snapshot(),
+            prefix: snapshot
+                .immediate_semantic_prefix()
+                .map(|prefix| prefix.snapshot()),
+            member_count,
+            prefix_member_count,
+            appended_entries: snapshot.appended_entries(),
+        },
     )
-    .bind(session_id_to_uuid(snapshot.frontier().owning_session()))
-    .bind(snapshot.frontier().snapshot().into_uuid())
-    .bind(
-        snapshot
-            .immediate_semantic_prefix()
-            .map(|prefix| prefix.snapshot().into_uuid()),
-    )
-    .bind(Decimal::from(member_count))
-    .execute(&mut *connection)
-    .await?;
-    for (index, entry) in snapshot.appended_entries().enumerate() {
-        let position = prefix_member_count
-            .checked_add(index)
-            .and_then(|index| index.checked_add(1))
-            .and_then(|position| u64::try_from(position).ok())
-            .ok_or(ModelCallCorruption::Inconsistent(
-                "frontier member position",
-            ))?;
-        sqlx::query(
-            "INSERT INTO context_frontier_delta
-                (owning_session_id, context_frontier_id, member_position,
-                 source_session_id, semantic_entry_id)
-             VALUES ($1, $2, $3, $4, $5)",
-        )
-        .bind(session_id_to_uuid(snapshot.frontier().owning_session()))
-        .bind(snapshot.frontier().snapshot().into_uuid())
-        .bind(Decimal::from(position))
-        .bind(session_id_to_uuid(entry.source_session()))
-        .bind(entry.entry().into_uuid())
-        .execute(&mut *connection)
-        .await?;
-    }
-    Ok(())
+    .await
+    .map_err(|error| match error {
+        SnapshotAppendError::FrontierInsert(error) | SnapshotAppendError::MemberInsert(error) => {
+            error.into()
+        }
+        SnapshotAppendError::MemberPositionOverflow => {
+            ModelCallCorruption::Inconsistent("frontier member position").into()
+        }
+    })
 }
 
 async fn terminalize_lifecycle(

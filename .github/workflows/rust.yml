@@ -109,11 +109,9 @@ jobs:
           - suite: terminal-client
             command: >-
               cargo test --no-fail-fast -p signalbox-client
-              --test end_to_end
-              terminal_client_completes_an_offline
+              --tests
               -- --ignored --test-threads=4
-              terminal_client_completes_an_offline_scripted_conversation
-              terminal_client_approval_from_a_second_client_completes_a_waiting_send
+              --skip terminal_client_completes_the_real_anthropic_path
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
