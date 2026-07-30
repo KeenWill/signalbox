@@ -1027,8 +1027,9 @@ enum OperatorFilterDisposition {
 /// Builds a first-party-only level override without exposing rejected input.
 ///
 /// Absence preserves the existing global INFO default. A closed log level can
-/// make Signalbox DEBUG sites reachable, but dependency DEBUG/TRACE sites stay
-/// disabled because arbitrary target directives are rejected.
+/// quiet every target or make Signalbox DEBUG sites reachable, but dependency
+/// DEBUG/TRACE sites stay disabled because arbitrary target directives are
+/// rejected.
 fn operator_filter(
     value: Option<&str>,
 ) -> (tracing_subscriber::EnvFilter, OperatorFilterDisposition) {
@@ -1059,14 +1060,21 @@ fn operator_filter(
 
 /// Applies one closed level only to crates covered by Signalbox redaction.
 ///
-/// The global INFO directive preserves the default operator experience. The
-/// three target overrides name the only crates that emit daemon telemetry, so
+/// The global directive preserves the INFO default, follows a quieter operator
+/// selection, and caps dependencies at INFO for DEBUG or TRACE. The three
+/// target overrides name the only crates that emit daemon telemetry, so
 /// dependency verbosity cannot be raised through this process surface.
 fn signalbox_level_filter(
     level: tracing::level_filters::LevelFilter,
 ) -> Option<tracing_subscriber::EnvFilter> {
+    let dependency_level = match level {
+        tracing::level_filters::LevelFilter::OFF
+        | tracing::level_filters::LevelFilter::ERROR
+        | tracing::level_filters::LevelFilter::WARN => level,
+        _ => tracing::level_filters::LevelFilter::INFO,
+    };
     let directives = [
-        String::from("info"),
+        dependency_level.to_string(),
         format!("signalboxd={level}"),
         format!("signalbox_application={level}"),
         format!("signalbox_model_provider_runtime={level}"),
@@ -1078,7 +1086,8 @@ fn signalbox_level_filter(
 /// Installs compact operator telemetry with a configurable closed level.
 ///
 /// The setting value itself is never logged. Rejection records only the public
-/// setting name, and third-party targets remain capped at the INFO default.
+/// setting name, and third-party targets never exceed the selected level or the
+/// INFO default.
 fn install_tracing_subscriber() {
     let configured = env::var(LOG_FILTER_ENVIRONMENT);
     let (filter, disposition) = match configured.as_deref() {
@@ -1347,10 +1356,11 @@ mod tests {
     }
 
     #[test]
-    fn tracing_filter_defaults_to_info_and_scopes_debug_to_signalbox() {
+    fn tracing_filter_defaults_scopes_debug_and_quiets_dependencies() {
         let (default_filter, default_disposition) = operator_filter(None);
         let (empty_filter, empty_disposition) = operator_filter(Some(""));
         let (debug_filter, debug_disposition) = operator_filter(Some("debug"));
+        let (warn_filter, warn_disposition) = operator_filter(Some("warn"));
         let (external_filter, external_disposition) = operator_filter(Some("hyper=trace"));
         let (invalid_filter, invalid_disposition) = operator_filter(Some("not a level"));
         assert_eq!(default_filter.to_string(), "info");
@@ -1372,6 +1382,14 @@ mod tests {
             assert!(tracing::enabled!(target: "hyper", tracing::Level::INFO));
         });
         assert_eq!(debug_disposition, OperatorFilterDisposition::Accepted);
+        let warn_subscriber = tracing_subscriber::registry().with(warn_filter);
+        tracing::subscriber::with_default(warn_subscriber, || {
+            assert!(!tracing::enabled!(target: "signalboxd", tracing::Level::INFO));
+            assert!(!tracing::enabled!(target: "hyper", tracing::Level::INFO));
+            assert!(tracing::enabled!(target: "signalboxd", tracing::Level::WARN));
+            assert!(tracing::enabled!(target: "hyper", tracing::Level::WARN));
+        });
+        assert_eq!(warn_disposition, OperatorFilterDisposition::Accepted);
         assert_eq!(external_filter.to_string(), "info");
         assert_eq!(external_disposition, OperatorFilterDisposition::Rejected);
         assert_eq!(invalid_filter.to_string(), "info");
