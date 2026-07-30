@@ -566,12 +566,16 @@ committed but unimplemented; no present application-store operation replaces
 that sealed outcome.
 
 External-publication work contains the exact canonical surviving inventory and
-uses the existing reservation-then-attachment pass boundary. Its result must
-cover that inventory exactly; any failed, blocked, or cancelled member returns a
-typed `PublicationIncomplete` outcome rather than `Complete`. The existing
-publication admission check uses only `is_real_confidence` and the immutable
-target head; a moved change request is another target, not permission to post
-stale results.
+uses the existing reservation-then-attachment pass boundary. A `Published`
+member carries the canonical finding-associated attached link, independently
+loaded publication-run evidence, and exact resolved publication-template digest.
+Before sealing or completing the attempt, the service authenticates their target
+and policy, the succeeded `Publish` pass and concluding `PublishReview` run, and
+the attachment result with its exact posted finding event. The result must cover
+the inventory exactly; any failed, blocked, or cancelled member returns a typed
+`PublicationIncomplete` outcome rather than `Complete`. The existing publication
+admission check uses only `is_real_confidence` and the immutable target head; a
+moved change request is another target, not permission to post stale results.
 
 Post-publication external-context import is committed but unimplemented by the
 present application service. A future continuation must use the existing import

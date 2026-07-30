@@ -5,10 +5,10 @@ use std::future::Future;
 use std::sync::Arc;
 
 use signalbox_domain::{
-    ReviewFinding, ReviewFindingId, ReviewFindingRef, ReviewFindingStatus, ReviewKey,
-    ReviewPassEvidence, ReviewPassKind, ReviewPassRef, ReviewPassResult, ReviewPassState,
-    ReviewPolicy, ReviewRunEvidence, ReviewRunState, ReviewTargetId, ReviewText,
-    ReviewWorkflowKind,
+    ReviewFinding, ReviewFindingEventResultKind, ReviewFindingExternalLinkRef, ReviewFindingId,
+    ReviewFindingRef, ReviewFindingStatus, ReviewKey, ReviewPassEvidence, ReviewPassKind,
+    ReviewPassRef, ReviewPassResult, ReviewPassState, ReviewPolicy, ReviewRunEvidence,
+    ReviewRunState, ReviewTargetId, ReviewText, ReviewWorkflowKind,
 };
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -970,22 +970,63 @@ struct CompleteRepairBarrier {
     surviving: Vec<ReviewFindingRef>,
 }
 
+/// Canonical evidence for one successfully published finding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewPublicationSuccess {
+    link: ReviewFindingExternalLinkRef,
+    run: ReviewRunEvidence,
+    template_digest: ReviewTemplateDigest,
+}
+
+impl ReviewPublicationSuccess {
+    /// Binds one canonical attached finding link to its producing run and template.
+    pub const fn new(
+        link: ReviewFindingExternalLinkRef,
+        run: ReviewRunEvidence,
+        template_digest: ReviewTemplateDigest,
+    ) -> Self {
+        Self {
+            link,
+            run,
+            template_digest,
+        }
+    }
+
+    /// Returns the exact published finding.
+    pub const fn finding(&self) -> ReviewFindingRef {
+        self.link.finding()
+    }
+
+    /// Borrows the canonical attached finding link and publication pass evidence.
+    pub const fn link(&self) -> &ReviewFindingExternalLinkRef {
+        &self.link
+    }
+
+    /// Returns the canonical publication-run evidence.
+    pub const fn run(&self) -> ReviewRunEvidence {
+        self.run
+    }
+
+    /// Returns the exact resolved publication template.
+    pub const fn template_digest(&self) -> ReviewTemplateDigest {
+        self.template_digest
+    }
+}
+
 /// One terminal external-publication pass outcome.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewPublicationMemberOutcome {
-    Published(ReviewFindingRef),
+    Published(Box<ReviewPublicationSuccess>),
     Failed(ReviewFindingRef),
     Blocked(ReviewFindingRef),
     Cancelled(ReviewFindingRef),
 }
 
 impl ReviewPublicationMemberOutcome {
-    const fn finding(self) -> ReviewFindingRef {
+    const fn finding(&self) -> ReviewFindingRef {
         match self {
-            Self::Published(finding)
-            | Self::Failed(finding)
-            | Self::Blocked(finding)
-            | Self::Cancelled(finding) => finding,
+            Self::Published(success) => success.finding(),
+            Self::Failed(finding) | Self::Blocked(finding) | Self::Cancelled(finding) => *finding,
         }
     }
 }
@@ -1011,7 +1052,20 @@ impl ReviewPublicationWork {
 /// Why a repair or publication result does not cover its exact input inventory.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReviewTerminalBarrierFailure {
+    /// Terminal outcomes do not name the exact input inventory in order.
     InexactFindingInventory,
+    /// Publication evidence belongs to another immutable target.
+    ForeignPublicationTarget,
+    /// Publication pass or run carries another frozen policy.
+    ForeignPublicationPolicy,
+    /// Publication used a different resolved template.
+    ForeignPublicationTemplate,
+    /// Publication pass is not the exact canonical succeeded publish pass.
+    IncompatiblePublicationPass,
+    /// Publication run does not canonically conclude with its attachment pass.
+    IncompatiblePublicationRun,
+    /// Attached link does not commit the exact posted finding event.
+    IncompatiblePublicationAttachment,
 }
 
 fn accepted_findings(plan: &ReviewJudgmentPlan) -> Vec<ReviewFindingRef> {
@@ -1062,16 +1116,76 @@ fn complete_repairs(
     )))
 }
 
+fn validate_publication_success(
+    repairs: &CompleteRepairBarrier,
+    success: &ReviewPublicationSuccess,
+) -> Result<(), ReviewTerminalBarrierFailure> {
+    let pass = success.link().attachment_pass();
+    let run = success.run();
+    if success.finding().target() != repairs.attempt.target
+        || pass.reference().target() != repairs.attempt.target
+        || run.reference().target() != repairs.attempt.target
+    {
+        return Err(ReviewTerminalBarrierFailure::ForeignPublicationTarget);
+    }
+    if pass.policy() != repairs.attempt.policy || run.policy() != repairs.attempt.policy {
+        return Err(ReviewTerminalBarrierFailure::ForeignPublicationPolicy);
+    }
+    if success.template_digest() != repairs.attempt.stage_templates.publication {
+        return Err(ReviewTerminalBarrierFailure::ForeignPublicationTemplate);
+    }
+    if pass.kind() != ReviewPassKind::Publish
+        || !matches!(pass.state(), ReviewPassState::Succeeded { .. })
+    {
+        return Err(ReviewTerminalBarrierFailure::IncompatiblePublicationPass);
+    }
+    if run.reference() != pass.reference().run()
+        || run.workflow() != ReviewWorkflowKind::PublishReview
+        || run.state()
+            != (ReviewRunState::Succeeded {
+                concluding_pass: pass.reference(),
+            })
+    {
+        return Err(ReviewTerminalBarrierFailure::IncompatiblePublicationRun);
+    }
+    let attachment_matches = matches!(
+        pass.state(),
+        ReviewPassState::Succeeded {
+            result: Some(ReviewPassResult::ExternalLinkAttachment(attachment)),
+            ..
+        } if attachment.link() == success.link().link()
+            && attachment.finding_event().is_some_and(|event| {
+                event.finding() == success.finding()
+                    && matches!(
+                        event.kind(),
+                        ReviewFindingEventResultKind::Posted { link }
+                            if *link == success.link().link()
+                    )
+            })
+    );
+    if !attachment_matches {
+        return Err(ReviewTerminalBarrierFailure::IncompatiblePublicationAttachment);
+    }
+    Ok(())
+}
+
 fn validate_publication(
     repairs: &CompleteRepairBarrier,
     outcomes: &[ReviewPublicationMemberOutcome],
 ) -> Result<(), ReviewTerminalBarrierFailure> {
-    let actual: Vec<_> = outcomes.iter().map(|outcome| outcome.finding()).collect();
-    if actual == repairs.surviving {
-        Ok(())
-    } else {
-        Err(ReviewTerminalBarrierFailure::InexactFindingInventory)
+    let actual: Vec<_> = outcomes
+        .iter()
+        .map(ReviewPublicationMemberOutcome::finding)
+        .collect();
+    if actual != repairs.surviving {
+        return Err(ReviewTerminalBarrierFailure::InexactFindingInventory);
     }
+    for outcome in outcomes {
+        if let ReviewPublicationMemberOutcome::Published(success) = outcome {
+            validate_publication_success(repairs, success)?;
+        }
+    }
+    Ok(())
 }
 
 /// Durable application-owned boundary for orchestration attempts and barriers.
@@ -1561,9 +1675,13 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use signalbox_domain::{
-        AcceptedInputId, ContextFrontierId, ReviewPass, ReviewPassAcceptedInputEvidence,
-        ReviewPassId, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewProducedFindings,
-        ReviewRun, ReviewRunId, ReviewRunRef, SessionId, TurnId,
+        AcceptedInputId, ContextFrontierId, ReviewEventOrdinal, ReviewExternalLink,
+        ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
+        ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
+        ReviewFindingEventResult, ReviewFindingEventResultKind, ReviewFindingExternalLinkRef,
+        ReviewPass, ReviewPassAcceptedInputEvidence, ReviewPassId, ReviewPassTurnEvidence,
+        ReviewPassTurnOutcome, ReviewProducedFindings, ReviewRun, ReviewRunId, ReviewRunRef,
+        ReviewTarget, ReviewTargetSubject, SessionId, TurnId,
     };
 
     use super::*;
@@ -2019,6 +2137,161 @@ mod tests {
     }
 
     #[test]
+    fn canonical_published_outcome_forms_the_terminal_barrier() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let success = publication_success(
+            &immutable_attempt,
+            finding,
+            500,
+            immutable_attempt.stage_templates().publication(),
+            true,
+        );
+        let repairs = CompleteRepairBarrier {
+            attempt: immutable_attempt,
+            surviving: vec![finding],
+        };
+        let outcomes = vec![ReviewPublicationMemberOutcome::Published(Box::new(success))];
+
+        let result = validate_publication(&repairs, &outcomes);
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn published_outcome_rejects_an_attachment_without_a_posted_event() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let success = publication_success(
+            &immutable_attempt,
+            finding,
+            500,
+            immutable_attempt.stage_templates().publication(),
+            false,
+        );
+        let repairs = CompleteRepairBarrier {
+            attempt: immutable_attempt,
+            surviving: vec![finding],
+        };
+        let outcomes = vec![ReviewPublicationMemberOutcome::Published(Box::new(success))];
+
+        let error = validate_publication(&repairs, &outcomes)
+            .expect_err("attachment without the posted event must fail closed");
+
+        assert_eq!(
+            error,
+            ReviewTerminalBarrierFailure::IncompatiblePublicationAttachment
+        );
+    }
+
+    #[test]
+    fn published_outcome_rejects_a_foreign_template() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let success = publication_success(
+            &immutable_attempt,
+            finding,
+            500,
+            ReviewTemplateDigest::new([99; 32]),
+            true,
+        );
+        let repairs = CompleteRepairBarrier {
+            attempt: immutable_attempt,
+            surviving: vec![finding],
+        };
+        let outcomes = vec![ReviewPublicationMemberOutcome::Published(Box::new(success))];
+
+        let error = validate_publication(&repairs, &outcomes)
+            .expect_err("foreign publication template must fail closed");
+
+        assert_eq!(
+            error,
+            ReviewTerminalBarrierFailure::ForeignPublicationTemplate
+        );
+    }
+
+    #[test]
+    fn published_outcome_rejects_a_cross_wired_run() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let success = publication_success(
+            &immutable_attempt,
+            finding,
+            500,
+            immutable_attempt.stage_templates().publication(),
+            true,
+        );
+        let (_, foreign_run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            900,
+            ReviewPassKind::Publish,
+            ReviewWorkflowKind::PublishReview,
+            None,
+        );
+        let cross_wired = ReviewPublicationSuccess::new(
+            success.link().clone(),
+            foreign_run,
+            success.template_digest(),
+        );
+        let repairs = CompleteRepairBarrier {
+            attempt: immutable_attempt,
+            surviving: vec![finding],
+        };
+        let outcomes = vec![ReviewPublicationMemberOutcome::Published(Box::new(
+            cross_wired,
+        ))];
+
+        let error = validate_publication(&repairs, &outcomes)
+            .expect_err("cross-wired publication run must fail closed");
+
+        assert_eq!(
+            error,
+            ReviewTerminalBarrierFailure::IncompatiblePublicationRun
+        );
+    }
+
+    #[test]
+    fn published_outcome_rejects_a_foreign_target() {
+        let immutable_attempt = attempt();
+        let foreign_target = ReviewTargetId::from_uuid(Uuid::from_u128(999));
+        let foreign_run_ref = ReviewRunRef::new(
+            foreign_target,
+            ReviewRunId::from_uuid(Uuid::from_u128(1_000)),
+        );
+        let foreign_pass_ref = ReviewPassRef::new(
+            foreign_run_ref,
+            ReviewPassId::from_uuid(Uuid::from_u128(1_001)),
+        );
+        let foreign_finding = ReviewFindingRef::new(
+            foreign_pass_ref,
+            ReviewFindingId::from_uuid(Uuid::from_u128(1_002)),
+        );
+        let mut foreign_attempt = immutable_attempt.clone();
+        foreign_attempt.target = foreign_target;
+        let success = publication_success(
+            &foreign_attempt,
+            foreign_finding,
+            1_100,
+            foreign_attempt.stage_templates().publication(),
+            true,
+        );
+        let repairs = CompleteRepairBarrier {
+            attempt: immutable_attempt,
+            surviving: vec![foreign_finding],
+        };
+        let outcomes = vec![ReviewPublicationMemberOutcome::Published(Box::new(success))];
+
+        let error = validate_publication(&repairs, &outcomes)
+            .expect_err("foreign publication target must fail closed");
+
+        assert_eq!(
+            error,
+            ReviewTerminalBarrierFailure::ForeignPublicationTarget
+        );
+    }
+
+    #[test]
     fn blocked_repair_stage_cannot_form_publication_barrier() {
         let immutable_attempt = attempt();
         let finding = finding_ref(100);
@@ -2202,6 +2475,71 @@ mod tests {
             ],
         )
         .expect("fixture attempt is valid")
+    }
+
+    fn publication_success(
+        immutable_attempt: &ReviewOrchestrationAttempt,
+        finding: ReviewFindingRef,
+        seed: u128,
+        template_digest: ReviewTemplateDigest,
+        include_posted_event: bool,
+    ) -> ReviewPublicationSuccess {
+        let provider = ReviewKey::try_new(String::from("github")).expect("provider key is valid");
+        let target = ReviewTarget::try_new(
+            immutable_attempt.target(),
+            provider.clone(),
+            ReviewKey::try_new(String::from("owner/repository")).expect("repository key is valid"),
+            ReviewTargetSubject::Commit,
+            ReviewKey::try_new(String::from("revision")).expect("revision key is valid"),
+            None,
+            None,
+        )
+        .expect("fixture target is valid");
+        let link_id = ReviewExternalLinkId::from_uuid(Uuid::from_u128(seed));
+        let external_object =
+            ReviewKey::try_new(String::from("external-object")).expect("object key is valid");
+        let reserved = ReviewExternalLink::try_reserve(
+            link_id,
+            ReviewExternalLinkAssociation::Finding(finding),
+            provider,
+            ReviewExternalObjectKind::ReviewComment,
+            &target,
+        )
+        .expect("fixture reservation is valid");
+        let finding_event = include_posted_event.then(|| {
+            ReviewFindingEventResult::new(
+                finding,
+                ReviewEventOrdinal::try_new(1).expect("event ordinal is positive"),
+                ReviewFindingEventResultKind::Posted { link: link_id },
+            )
+        });
+        let result =
+            ReviewPassResult::ExternalLinkAttachment(ReviewExternalLinkAttachmentResult::new(
+                link_id,
+                external_object.clone(),
+                finding_event,
+            ));
+        let (pass, run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            seed + 1,
+            ReviewPassKind::Publish,
+            ReviewWorkflowKind::PublishReview,
+            Some(result),
+        );
+        let attachment = ReviewExternalLinkAttachment::new(
+            link_id,
+            pass.reference(),
+            pass.clone(),
+            run,
+            external_object,
+        );
+        let attached = reserved
+            .attach(attachment)
+            .expect("fixture attachment is canonical");
+        let link = ReviewFindingExternalLinkRef::try_new(finding, &attached)
+            .expect("fixture finding link is canonical");
+        ReviewPublicationSuccess::new(link, run, template_digest)
     }
 
     fn succeeded_evidence(

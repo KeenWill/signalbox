@@ -5314,8 +5314,17 @@ pub struct ReviewRepairWork { /* private; produced by service */ }
 impl ReviewRepairWork {
     // accessors: attempt(), findings()
 }
+pub struct ReviewPublicationSuccess { /* private; canonical link + run + template */ }
+impl ReviewPublicationSuccess {
+    pub const fn new(
+        link: ReviewFindingExternalLinkRef,
+        run: ReviewRunEvidence,
+        template_digest: ReviewTemplateDigest,
+    ) -> Self;
+    // accessors: finding(), link(), run(), template_digest()
+}
 pub enum ReviewPublicationMemberOutcome {
-    Published(ReviewFindingRef),
+    Published(Box<ReviewPublicationSuccess>),
     Failed(ReviewFindingRef),
     Blocked(ReviewFindingRef),
     Cancelled(ReviewFindingRef),
@@ -5326,6 +5335,12 @@ impl ReviewPublicationWork {
 }
 pub enum ReviewTerminalBarrierFailure {
     InexactFindingInventory,
+    ForeignPublicationTarget,
+    ForeignPublicationPolicy,
+    ForeignPublicationTemplate,
+    IncompatiblePublicationPass,
+    IncompatiblePublicationRun,
+    IncompatiblePublicationAttachment,
 }
 
 pub trait ReviewOrchestrationAttemptStore {
@@ -7417,7 +7432,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop                             | 23 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 5 (incl. 1 trait)    |
-| application: review_orchestration                  | 32 (incl. 2 traits)  |
+| application: review_orchestration                  | 33 (incl. 2 traits)  |
 | application: review_workflow                       | 8 (incl. 2 traits)   |
 | application: session_metadata                      | 12 (incl. 4 traits)  |
 | application: scheduler                             | 12 (incl. 4 traits)  |
@@ -7426,4 +7441,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **187**              |
+| **signalbox-application total**                    | **188**              |

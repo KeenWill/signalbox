@@ -71,8 +71,8 @@ pub use review_orchestration::{
     ReviewOrchestrationAttemptError, ReviewOrchestrationAttemptId, ReviewOrchestrationAttemptStore,
     ReviewOrchestrationOutcome, ReviewOrchestrationPassRunner, ReviewOrchestrationService,
     ReviewOrchestrationServiceError, ReviewPassIncompleteStatus, ReviewPlannedDisposition,
-    ReviewPublicationMemberOutcome, ReviewPublicationWork, ReviewRepairMemberOutcome,
-    ReviewRepairWork, ReviewStageTemplateDigests, ReviewTemplateDigest,
+    ReviewPublicationMemberOutcome, ReviewPublicationSuccess, ReviewPublicationWork,
+    ReviewRepairMemberOutcome, ReviewRepairWork, ReviewStageTemplateDigests, ReviewTemplateDigest,
     ReviewTerminalBarrierFailure,
 };
 pub use review_workflow::{
