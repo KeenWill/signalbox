@@ -5190,6 +5190,7 @@ pub enum ReviewImportOutcome {
     Succeeded {
         pass: Box<ReviewPassEvidence>,
         run: ReviewRunEvidence,
+        external_link: Option<Box<ReviewExternalLink>>,
         template_digest: ReviewTemplateDigest,
         context_digest: [u8; 32],
     },
@@ -7241,6 +7242,7 @@ impl ReviewFinding {
 pub fn validate_complete_review_finding_reference_graph(
     findings: &[ReviewFinding],
 ) -> Result<(), Box<ReviewFindingReferenceGraphError>>;
+// impl Display + std::error::Error
 pub enum ReviewFindingReferenceGraphError {
     DuplicateFinding { reference: ReviewFindingRef },
     ForeignTargetRoot {

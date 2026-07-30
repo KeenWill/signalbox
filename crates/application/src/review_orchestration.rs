@@ -7,11 +7,11 @@ use std::future::Future;
 use std::sync::Arc;
 
 use signalbox_domain::{
-    ReviewFinding, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResultKind,
-    ReviewFindingExternalLinkRef, ReviewFindingId, ReviewFindingRef, ReviewFindingStatus,
-    ReviewKey, ReviewPassEvidence, ReviewPassKind, ReviewPassRef, ReviewPassResult,
-    ReviewPassState, ReviewPolicy, ReviewRunEvidence, ReviewRunState, ReviewTargetId, ReviewText,
-    ReviewWorkflowKind,
+    ReviewExternalLink, ReviewFinding, ReviewFindingEvent, ReviewFindingEventKind,
+    ReviewFindingEventResultKind, ReviewFindingExternalLinkRef, ReviewFindingId, ReviewFindingRef,
+    ReviewFindingStatus, ReviewKey, ReviewPassEvidence, ReviewPassKind, ReviewPassRef,
+    ReviewPassResult, ReviewPassState, ReviewPolicy, ReviewRunEvidence, ReviewRunState,
+    ReviewTargetId, ReviewText, ReviewWorkflowKind,
 };
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -254,6 +254,8 @@ pub enum ReviewImportOutcome {
         pass: Box<ReviewPassEvidence>,
         /// Canonical succeeded import-run evidence.
         run: ReviewRunEvidence,
+        /// Canonical external-link aggregate consumed by a result-bearing pass.
+        external_link: Option<Box<ReviewExternalLink>>,
         /// Exact resolved import template.
         template_digest: ReviewTemplateDigest,
         /// Digest of the frozen imported external context.
@@ -302,13 +304,14 @@ fn validate_import(
     attempt: &ReviewOrchestrationAttempt,
     outcome: &ReviewImportOutcome,
 ) -> Result<(), ReviewImportEvidenceFailure> {
-    let (pass, run, template_digest) = match outcome {
+    let (pass, run, template_digest, external_link) = match outcome {
         ReviewImportOutcome::Succeeded {
             pass,
             run,
+            external_link,
             template_digest,
             ..
-        } => (pass, run, template_digest),
+        } => (pass, run, template_digest, external_link.as_deref()),
         ReviewImportOutcome::Incomplete {
             pass: None,
             run: None,
@@ -336,10 +339,12 @@ fn validate_import(
             run: Some(run),
             template_digest,
             ..
-        } => (pass, run, template_digest),
+        } => (pass, run, template_digest, None),
     };
     let pass_ref = pass.reference();
-    if pass_ref.target() != attempt.target {
+    if pass_ref.target() != attempt.target
+        || external_link.is_some_and(|link| link.association().target() != attempt.target)
+    {
         return Err(ReviewImportEvidenceFailure::ForeignTarget);
     }
     if pass.policy() != attempt.policy || run.policy() != attempt.policy {
@@ -350,21 +355,11 @@ fn validate_import(
     }
     let compatible_state = match outcome {
         ReviewImportOutcome::Succeeded { .. } => {
-            matches!(
-                pass.state(),
-                ReviewPassState::Succeeded {
-                    result: None
-                        | Some(
-                            ReviewPassResult::ExternalLinkAttachment(_)
-                                | ReviewPassResult::ExternalLinkObservation(_)
-                                | ReviewPassResult::ExternalLinkNoChange(_)
-                        ),
-                    ..
-                }
-            ) && run.state()
-                == (ReviewRunState::Succeeded {
-                    concluding_pass: pass_ref,
-                })
+            import_result_matches_external_link(pass, *run, external_link)
+                && run.state()
+                    == (ReviewRunState::Succeeded {
+                        concluding_pass: pass_ref,
+                    })
         }
         ReviewImportOutcome::Incomplete {
             status: ReviewPassIncompleteStatus::Failed,
@@ -405,6 +400,68 @@ fn validate_import(
         return Err(ReviewImportEvidenceFailure::IncompatiblePass);
     }
     Ok(())
+}
+
+fn import_result_matches_external_link(
+    pass: &ReviewPassEvidence,
+    run: ReviewRunEvidence,
+    external_link: Option<&ReviewExternalLink>,
+) -> bool {
+    let result = match pass.state() {
+        ReviewPassState::Succeeded { result, .. } => result.as_ref(),
+        ReviewPassState::Queued
+        | ReviewPassState::Running { .. }
+        | ReviewPassState::Failed { .. }
+        | ReviewPassState::Blocked { .. }
+        | ReviewPassState::Cancelled { .. } => return false,
+    };
+    match result {
+        None => external_link.is_none(),
+        Some(ReviewPassResult::ExternalLinkAttachment(result)) => {
+            let Some(link) = external_link else {
+                return false;
+            };
+            link.id() == result.link()
+                && link.association().target() == pass.reference().target()
+                && link.attachment().is_some_and(|attachment| {
+                    attachment.pass() == pass.reference()
+                        && attachment.pass_evidence() == pass
+                        && attachment.run_evidence() == run
+                        && attachment.external_object() == result.external_object()
+                })
+        }
+        Some(ReviewPassResult::ExternalLinkObservation(result)) => {
+            let Some(link) = external_link else {
+                return false;
+            };
+            link.id() == result.link()
+                && link.association().target() == pass.reference().target()
+                && link.observations().iter().any(|observation| {
+                    observation.pass() == pass.reference()
+                        && observation.pass_evidence() == pass
+                        && observation.run_evidence() == run
+                        && observation.ordinal() == result.ordinal()
+                        && observation.state() == result.state()
+                })
+        }
+        Some(ReviewPassResult::ExternalLinkNoChange(result)) => {
+            let Some(link) = external_link else {
+                return false;
+            };
+            link.id() == result.link()
+                && link.association().target() == pass.reference().target()
+                && link.claims().iter().any(|claim| {
+                    claim.pass() == pass.reference()
+                        && claim.pass_evidence() == pass
+                        && claim.run_evidence() == run
+                })
+        }
+        Some(
+            ReviewPassResult::ProducedFindings(_)
+            | ReviewPassResult::FindingEvent(_)
+            | ReviewPassResult::ExternalLinkPublicationBlocked(_),
+        ) => false,
+    }
 }
 
 /// A successfully sealed typed inventory from one concern pass.
@@ -672,25 +729,40 @@ impl Display for ReviewFanoutBarrierFailure {
 
 impl Error for ReviewFanoutBarrierFailure {}
 
+fn validate_concern_claim_keys(
+    attempt: &ReviewOrchestrationAttempt,
+    claims: &[ReviewConcernClaim],
+) -> Result<(), ReviewFanoutBarrierFailure> {
+    let expected: HashSet<_> = attempt
+        .concerns
+        .iter()
+        .map(|concern| &concern.key)
+        .collect();
+    let mut current = HashSet::new();
+    for claim in claims {
+        if !expected.contains(&claim.concern) {
+            return Err(ReviewFanoutBarrierFailure::ExtraConcern {
+                concern: claim.concern.clone(),
+            });
+        }
+        if !current.insert(&claim.concern) {
+            return Err(ReviewFanoutBarrierFailure::RepeatedConcern {
+                concern: claim.concern.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn complete_fanout(
     attempt: &ReviewOrchestrationAttempt,
     claims: Vec<ReviewConcernClaim>,
 ) -> Result<CompleteReviewFanout, ReviewFanoutBarrierFailure> {
-    let expected: HashMap<_, _> = attempt
-        .concerns
-        .iter()
-        .map(|concern| (concern.key.clone(), concern))
+    validate_concern_claim_keys(attempt, &claims)?;
+    let mut current: HashMap<_, _> = claims
+        .into_iter()
+        .map(|claim| (claim.concern.clone(), claim))
         .collect();
-    let mut current = HashMap::new();
-    for claim in claims {
-        let concern = claim.concern.clone();
-        if !expected.contains_key(&concern) {
-            return Err(ReviewFanoutBarrierFailure::ExtraConcern { concern });
-        }
-        if current.insert(concern.clone(), claim).is_some() {
-            return Err(ReviewFanoutBarrierFailure::RepeatedConcern { concern });
-        }
-    }
 
     let mut members = Vec::with_capacity(attempt.concerns.len());
     let mut findings = Vec::new();
@@ -1220,7 +1292,10 @@ fn validate_judgment_effect(
     {
         return Err(ReviewJudgmentEffectEvidenceFailure::ForeignTarget);
     }
-    if pass.policy() != attempt.policy || run.policy() != attempt.policy {
+    if pass.policy() != attempt.policy
+        || run.policy() != attempt.policy
+        || referenced_event_policy(event.kind()).is_some_and(|policy| policy != attempt.policy)
+    {
         return Err(ReviewJudgmentEffectEvidenceFailure::ForeignPolicy);
     }
     if success.template_digest() != attempt.stage_templates.judgment {
@@ -1259,6 +1334,19 @@ fn validate_judgment_effect(
         return Err(ReviewJudgmentEffectEvidenceFailure::IncompatibleRun);
     }
     Ok(())
+}
+
+fn referenced_event_policy(event: &ReviewFindingEventKind) -> Option<ReviewPolicy> {
+    match event {
+        ReviewFindingEventKind::Duplicate { canonical } => Some(canonical.producer_policy()),
+        ReviewFindingEventKind::Superseded { successor } => Some(successor.producer_policy()),
+        ReviewFindingEventKind::Accepted
+        | ReviewFindingEventKind::Rejected { .. }
+        | ReviewFindingEventKind::Stale
+        | ReviewFindingEventKind::Posted { .. }
+        | ReviewFindingEventKind::Fixed
+        | ReviewFindingEventKind::BlockedWithReason { .. } => None,
+    }
 }
 
 fn event_matches_planned_disposition(
@@ -2279,17 +2367,11 @@ fn retryable_members(
     attempt: &ReviewOrchestrationAttempt,
     claims: &[ReviewConcernClaim],
 ) -> Result<Vec<ReviewConcernSpec>, ReviewFanoutBarrierFailure> {
+    validate_concern_claim_keys(attempt, claims)?;
     let mut retryable = Vec::new();
     for expected in &attempt.concerns {
-        let matching: Vec<_> = claims
-            .iter()
-            .filter(|claim| claim.concern == expected.key)
-            .collect();
-        if matching.is_empty() {
+        let Some(claim) = claims.iter().find(|claim| claim.concern == expected.key) else {
             retryable.push(expected.clone());
-            continue;
-        }
-        let [claim] = matching.as_slice() else {
             continue;
         };
         let ReviewConcernOutcome::Failed { pass } = &claim.outcome else {
@@ -2320,8 +2402,8 @@ mod tests {
         ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
         ReviewFindingEventResult, ReviewFindingEventResultKind, ReviewFindingExternalLinkRef,
         ReviewPass, ReviewPassAcceptedInputEvidence, ReviewPassId, ReviewPassTurnEvidence,
-        ReviewPassTurnOutcome, ReviewProducedFindings, ReviewRun, ReviewRunId, ReviewRunRef,
-        ReviewTarget, ReviewTargetSubject, SessionId, TurnId,
+        ReviewPassTurnOutcome, ReviewProducedFindings, ReviewReferencedFindingEvidence, ReviewRun,
+        ReviewRunId, ReviewRunRef, ReviewTarget, ReviewTargetSubject, SessionId, TurnId,
     };
 
     use super::*;
@@ -2378,6 +2460,7 @@ mod tests {
             Ok(ReviewImportOutcome::Succeeded {
                 pass: Box::new(pass),
                 run,
+                external_link: None,
                 template_digest: attempt.stage_templates.import,
                 context_digest: [90; 32],
             })
@@ -2827,6 +2910,25 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_judgment_effect_authenticates_referenced_policy() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let (success, canonical) = duplicate_judgment_success(&immutable_attempt, finding, 500);
+        let member = ReviewJudgmentPlanMember::new(
+            finding,
+            ReviewPlannedDisposition::Duplicate { canonical },
+        );
+
+        let result = validate_judgment_effect(&immutable_attempt, &member, &success);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            referenced_event_policy(success.event().kind()),
+            Some(immutable_attempt.policy()),
+        );
+    }
+
+    #[test]
     fn judgment_effect_rejects_a_cross_wired_run() {
         let immutable_attempt = attempt();
         let finding = finding_ref(100);
@@ -3211,15 +3313,14 @@ mod tests {
     }
 
     #[test]
-    fn successful_import_accepts_an_external_link_attachment_result() {
+    fn successful_import_accepts_an_authenticated_external_link_attachment() {
         let immutable_attempt = attempt();
-        let result =
-            ReviewPassResult::ExternalLinkAttachment(ReviewExternalLinkAttachmentResult::new(
-                ReviewExternalLinkId::from_uuid(Uuid::from_u128(1_000)),
-                ReviewKey::try_new(String::from("external-object"))
-                    .expect("external object key is valid"),
-                None,
-            ));
+        let link_id = ReviewExternalLinkId::from_uuid(Uuid::from_u128(1_000));
+        let external_object = ReviewKey::try_new(String::from("external-object"))
+            .expect("external object key is valid");
+        let result = ReviewPassResult::ExternalLinkAttachment(
+            ReviewExternalLinkAttachmentResult::new(link_id, external_object.clone(), None),
+        );
         let (pass, run) = succeeded_evidence(
             immutable_attempt.target(),
             immutable_attempt.policy(),
@@ -3228,9 +3329,28 @@ mod tests {
             ReviewWorkflowKind::ImportExternalContext,
             Some(result),
         );
+        let target = target_snapshot(immutable_attempt.target());
+        let reservation = ReviewExternalLink::try_reserve(
+            link_id,
+            ReviewExternalLinkAssociation::Target(immutable_attempt.target()),
+            target.provider().clone(),
+            ReviewExternalObjectKind::Review,
+            &target,
+        )
+        .expect("reservation belongs to the attempt target");
+        let external_link = reservation
+            .attach(ReviewExternalLinkAttachment::new(
+                link_id,
+                pass.reference(),
+                pass.clone(),
+                run,
+                external_object,
+            ))
+            .expect("attachment is canonical pass evidence");
         let imported = ReviewImportOutcome::Succeeded {
             pass: Box::new(pass),
             run,
+            external_link: Some(Box::new(external_link)),
             template_digest: immutable_attempt.stage_templates().import(),
             context_digest: [90; 32],
         };
@@ -3238,6 +3358,79 @@ mod tests {
         let result = validate_import(&immutable_attempt, &imported);
 
         assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn successful_import_rejects_result_without_external_link_evidence() {
+        let immutable_attempt = attempt();
+        let result =
+            ReviewPassResult::ExternalLinkAttachment(ReviewExternalLinkAttachmentResult::new(
+                ReviewExternalLinkId::from_uuid(Uuid::from_u128(1_015)),
+                ReviewKey::try_new(String::from("external-object"))
+                    .expect("external object key is valid"),
+                None,
+            ));
+        let (pass, run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            1_016,
+            ReviewPassKind::ImportExternalContext,
+            ReviewWorkflowKind::ImportExternalContext,
+            Some(result),
+        );
+        let imported = ReviewImportOutcome::Succeeded {
+            pass: Box::new(pass),
+            run,
+            external_link: None,
+            template_digest: immutable_attempt.stage_templates().import(),
+            context_digest: [90; 32],
+        };
+
+        let error = validate_import(&immutable_attempt, &imported)
+            .expect_err("result-bearing import requires canonical external-link evidence");
+
+        assert_eq!(error, ReviewImportEvidenceFailure::IncompatiblePass);
+    }
+
+    #[test]
+    fn successful_import_rejects_a_foreign_external_link_reservation() {
+        let immutable_attempt = attempt();
+        let foreign_target = ReviewTargetId::from_uuid(Uuid::from_u128(999));
+        let foreign_snapshot = target_snapshot(foreign_target);
+        let link_id = ReviewExternalLinkId::from_uuid(Uuid::from_u128(1_020));
+        let external_object = ReviewKey::try_new(String::from("external-object"))
+            .expect("external object key is valid");
+        let result = ReviewPassResult::ExternalLinkAttachment(
+            ReviewExternalLinkAttachmentResult::new(link_id, external_object, None),
+        );
+        let (pass, run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            1_030,
+            ReviewPassKind::ImportExternalContext,
+            ReviewWorkflowKind::ImportExternalContext,
+            Some(result),
+        );
+        let foreign_link = ReviewExternalLink::try_reserve(
+            link_id,
+            ReviewExternalLinkAssociation::Target(foreign_target),
+            foreign_snapshot.provider().clone(),
+            ReviewExternalObjectKind::Review,
+            &foreign_snapshot,
+        )
+        .expect("foreign reservation is internally canonical");
+        let imported = ReviewImportOutcome::Succeeded {
+            pass: Box::new(pass),
+            run,
+            external_link: Some(Box::new(foreign_link)),
+            template_digest: immutable_attempt.stage_templates().import(),
+            context_digest: [90; 32],
+        };
+
+        let error = validate_import(&immutable_attempt, &imported)
+            .expect_err("foreign reservation target must fail closed");
+
+        assert_eq!(error, ReviewImportEvidenceFailure::ForeignTarget);
     }
 
     #[test]
@@ -3364,6 +3557,41 @@ mod tests {
             error,
             ReviewFanoutBarrierFailure::ForeignProducerTarget {
                 concern: expected.key().clone(),
+            }
+        );
+    }
+
+    #[test]
+    fn retry_scheduling_rejects_extra_claim_before_missing_members() {
+        let immutable_attempt = attempt();
+        let extra = failed_claim("outside-config", 1_310);
+        let extra_concern = extra.concern.clone();
+
+        let error = retryable_members(&immutable_attempt, &[extra])
+            .expect_err("extra durable claim must block scheduling");
+
+        assert_eq!(
+            error,
+            ReviewFanoutBarrierFailure::ExtraConcern {
+                concern: extra_concern,
+            }
+        );
+    }
+
+    #[test]
+    fn retry_scheduling_rejects_repeated_claim_before_missing_members() {
+        let immutable_attempt = attempt();
+        let expected_concern = immutable_attempt.concerns()[0].key().clone();
+        let first = failed_claim(expected_concern.as_str(), 1_320);
+        let repeated = failed_claim(expected_concern.as_str(), 1_330);
+
+        let error = retryable_members(&immutable_attempt, &[first, repeated])
+            .expect_err("repeated durable claim must block scheduling");
+
+        assert_eq!(
+            error,
+            ReviewFanoutBarrierFailure::RepeatedConcern {
+                concern: expected_concern,
             }
         );
     }
@@ -3593,6 +3821,19 @@ mod tests {
         .expect("fixture attempt is valid")
     }
 
+    fn target_snapshot(target: ReviewTargetId) -> ReviewTarget {
+        ReviewTarget::try_new(
+            target,
+            ReviewKey::try_new(String::from("github")).expect("provider key is valid"),
+            ReviewKey::try_new(String::from("owner/repository")).expect("repository key is valid"),
+            ReviewTargetSubject::Commit,
+            ReviewKey::try_new(String::from("revision")).expect("revision key is valid"),
+            None,
+            None,
+        )
+        .expect("fixture target is valid")
+    }
+
     fn successful_empty_concern_claim(
         immutable_attempt: &ReviewOrchestrationAttempt,
         concern_index: usize,
@@ -3648,6 +3889,72 @@ mod tests {
             ReviewFindingEventKind::Accepted,
         );
         ReviewJudgmentEffectSuccess::new(event, template_digest)
+    }
+
+    fn duplicate_judgment_success(
+        immutable_attempt: &ReviewOrchestrationAttempt,
+        finding: ReviewFindingRef,
+        seed: u128,
+    ) -> (ReviewJudgmentEffectSuccess, ReviewFindingRef) {
+        let producer_run = ReviewRunRef::new(
+            immutable_attempt.target(),
+            ReviewRunId::from_uuid(Uuid::from_u128(seed)),
+        );
+        let producer_pass = ReviewPassRef::new(
+            producer_run,
+            ReviewPassId::from_uuid(Uuid::from_u128(seed + 1)),
+        );
+        let canonical = ReviewFindingRef::new(
+            producer_pass,
+            ReviewFindingId::from_uuid(Uuid::from_u128(seed + 6)),
+        );
+        let inventory = ReviewProducedFindings::try_new(vec![canonical])
+            .expect("canonical producer inventory is sealed");
+        let (producer, producer_run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            seed,
+            ReviewPassKind::ReadOnlyReview,
+            ReviewWorkflowKind::ReadOnlyReview,
+            Some(ReviewPassResult::ProducedFindings(inventory)),
+        );
+        let canonical_evidence = ReviewReferencedFindingEvidence::try_reconstitute(
+            canonical,
+            ReviewFindingStatus::Open,
+            &producer,
+            producer_run,
+        )
+        .expect("canonical finding has authenticated eligible producer evidence");
+        let ordinal = ReviewEventOrdinal::try_new(1).expect("event ordinal is positive");
+        let result = ReviewFindingEventResult::new(
+            finding,
+            ordinal,
+            ReviewFindingEventResultKind::Duplicate {
+                canonical: canonical_evidence,
+            },
+        );
+        let (pass, run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            seed + 10,
+            ReviewPassKind::Dedupe,
+            ReviewWorkflowKind::DedupeFindings,
+            Some(ReviewPassResult::FindingEvent(result)),
+        );
+        let event = ReviewFindingEvent::new(
+            finding,
+            ordinal,
+            pass.reference(),
+            pass,
+            run,
+            ReviewFindingEventKind::Duplicate {
+                canonical: canonical_evidence,
+            },
+        );
+        (
+            ReviewJudgmentEffectSuccess::new(event, immutable_attempt.stage_templates().judgment()),
+            canonical,
+        )
     }
 
     fn fixed_repair_success(

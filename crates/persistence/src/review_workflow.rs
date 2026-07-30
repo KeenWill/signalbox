@@ -598,7 +598,11 @@ impl ReviewWorkflowStore {
         }
         locked_findings.sort_unstable();
         locked_findings.dedup();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = if publication_link.is_some() {
+            self.pool.begin().await?
+        } else {
+            begin_repeatable_write(&self.pool).await?
+        };
         if let Some(link) = publication_link {
             // Publication reconciliation locks the reservation before any
             // finding, matching the attachment path's global lock order.
@@ -611,10 +615,18 @@ impl ReviewWorkflowStore {
             .bind(&locked_findings)
             .fetch_all(&mut *transaction)
             .await?;
-        let Some(current) = self
-            .load_finding_on_connection(&mut transaction, finding)
-            .await?
-        else {
+        let current = if publication_link.is_some() {
+            // The held reservation and finding locks make the subject projection
+            // stable while preserving attachment commits observed after waiting.
+            self.load_finding_projection_on_connection(&mut transaction, finding)
+                .await?
+        } else {
+            // Reference-sensitive target graphs span several statements and
+            // therefore require the repeatable snapshot opened above.
+            self.load_finding_on_connection(&mut transaction, finding)
+                .await?
+        };
+        let Some(current) = current else {
             transaction.rollback().await?;
             return Ok(None);
         };
@@ -1159,7 +1171,7 @@ impl ReviewWorkflowStore {
             && let ReviewExternalLinkAssociation::Finding(reference) = next.association()
         {
             let current_finding = self
-                .load_finding_on_connection(&mut transaction, reference.finding())
+                .load_finding_projection_on_connection(&mut transaction, reference.finding())
                 .await?
                 .ok_or_else(|| {
                     corruption(
@@ -1179,7 +1191,7 @@ impl ReviewWorkflowStore {
         }
         if let Some(event) = posted_event.as_ref() {
             let current_finding = self
-                .load_finding_on_connection(&mut transaction, event.finding().finding())
+                .load_finding_projection_on_connection(&mut transaction, event.finding().finding())
                 .await?
                 .ok_or_else(|| {
                     corruption(
@@ -1415,7 +1427,7 @@ impl ReviewWorkflowStore {
                 .fetch_all(&mut *transaction)
                 .await?;
             let current_finding = self
-                .load_finding_on_connection(&mut transaction, event.finding().finding())
+                .load_finding_projection_on_connection(&mut transaction, event.finding().finding())
                 .await?
                 .ok_or_else(|| {
                     corruption(
@@ -1881,6 +1893,16 @@ fn require_joined_reference(
         return Err(corruption(aggregate, String::from(detail)));
     }
     Ok(())
+}
+
+async fn begin_repeatable_write(
+    pool: &PgPool,
+) -> Result<Transaction<'_, Postgres>, ReviewWorkflowStoreError> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
 }
 
 async fn begin_repeatable_read(

@@ -4,9 +4,8 @@ This page specifies the implemented review-workflow bounded context. Its domain
 and store foundation was verified through PR #221
 (`agent/review-workflow-spec`); two-axis finding confidence is verified through
 PR #329 (`agent/review-finding-confidence`); targeted cross-run finding
-references and the application orchestration boundary are verified through
-[#336](https://github.com/KeenWill/signalbox/pull/336)
-(`agent/review-orchestrator`). Daemon and process-protocol wiring remain
+references and the application orchestration boundary are verified through PR
+#336 (`agent/review-orchestrator`). Daemon and process-protocol wiring remain
 unimplemented as identified below. This page owns review targets, workflow runs,
 session-backed passes, findings, external links, their relational store, and
 application orchestration. Session execution remains owned by
@@ -378,9 +377,12 @@ inputs; a mismatch blocks the attempt rather than being repaired by
 substitution. Failed, blocked, and post-admission cancelled imports likewise
 carry their canonical terminal pass and run plus the exact import template. A
 successful import pass may be result-free or carry one domain-compatible
-attachment, observation, or no-change result. Only cancellation before pass
-admission may omit both pass and run; every other passless or partially
-populated terminal outcome fails closed.
+attachment, observation, or no-change result. A result-bearing success also
+carries the canonical external-link aggregate; its association must own the
+attempt target and its exact attachment, observation, or durable no-change claim
+must authenticate the pass result. Only cancellation before pass admission may
+omit both pass and run; every other passless or partially populated terminal
+outcome fails closed.
 
 Concrete provider, model, and workspace adapters are committed but
 unimplemented; no present daemon surface supplies them. Future workspace
@@ -406,12 +408,12 @@ others succeed, the successful findings remain valid evidence but the fan-out
 set is incomplete and no judgment, repair, or publication work is eligible. The
 orchestrator may retry only the failed member against the same target, policy,
 concern-set version, and template digests. Before scheduling that retry it
-authenticates the current failed claim's target and template; mismatched durable
-evidence blocks the attempt and cannot be overwritten. A changed input starts a
-new attempt. The eventual barrier includes exactly one successful member for
-every expected concern and rejects missing, extra, repeated, or superseded
-member claims. It therefore cannot silently present a partial review as
-complete.
+rejects any extra or repeated current claim, then authenticates the current
+failed claim's target and template; mismatched durable evidence blocks the
+attempt and cannot be overwritten. A changed input starts a new attempt. The
+eventual barrier includes exactly one successful member for every expected
+concern and rejects missing, extra, repeated, or superseded member claims. It
+therefore cannot silently present a partial review as complete.
 
 ### Structured finding return
 

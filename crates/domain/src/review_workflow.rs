@@ -3678,6 +3678,44 @@ pub enum ReviewFindingReferenceGraphError {
     },
 }
 
+impl std::fmt::Display for ReviewFindingReferenceGraphError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateFinding { reference } => write!(
+                formatter,
+                "review finding reference graph repeats finding {reference:?}",
+            ),
+            Self::ForeignTargetRoot { expected, actual } => write!(
+                formatter,
+                "review finding reference graph contains target {actual:?}; expected {expected:?}",
+            ),
+            Self::MissingReferencedFinding {
+                finding,
+                referenced,
+            } => write!(
+                formatter,
+                "review finding {finding:?} references missing finding {referenced:?}",
+            ),
+            Self::ReferencedFindingPolicyMismatch {
+                finding,
+                referenced,
+            } => write!(
+                formatter,
+                "review finding {finding:?} freezes a policy that differs from referenced finding {referenced:?}",
+            ),
+            Self::Cycle {
+                finding,
+                referenced,
+            } => write!(
+                formatter,
+                "review finding {finding:?} closes a reference cycle through {referenced:?}",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ReviewFindingReferenceGraphError {}
+
 fn validate_finding_reference(
     finding: &ReviewFinding,
     event: &ReviewFindingEvent,
@@ -10881,5 +10919,22 @@ mod tests {
                 actual: foreign_target,
             },
         );
+    }
+
+    #[test]
+    fn review_finding_reference_graph_error_exposes_safe_standard_diagnostic() {
+        let finding =
+            finding_ref_for_producer(target_id(CANONICAL_TARGET_SEED), PRODUCING_PASS_SEED);
+        let referenced =
+            finding_ref_for_producer(target_id(CANONICAL_TARGET_SEED), REASSIGNED_PASS_SEED);
+        let error = ReviewFindingReferenceGraphError::MissingReferencedFinding {
+            finding,
+            referenced,
+        };
+
+        let source = std::error::Error::source(&error);
+        assert!(source.is_none());
+        expect!["review finding ReviewFindingRef { pass: ReviewPassRef { run: ReviewRunRef { target: ReviewTargetId(00000000-0000-0000-0000-000000000001), run: ReviewRunId(00000000-0000-0000-0000-000000002713) }, pass: ReviewPassId(00000000-0000-0000-0000-000000000003) }, finding: ReviewFindingId(00000000-0000-0000-0000-000000004e23) } references missing finding ReviewFindingRef { pass: ReviewPassRef { run: ReviewRunRef { target: ReviewTargetId(00000000-0000-0000-0000-000000000001), run: ReviewRunId(00000000-0000-0000-0000-000000002725) }, pass: ReviewPassId(00000000-0000-0000-0000-000000000015) }, finding: ReviewFindingId(00000000-0000-0000-0000-000000004e35) }"]
+        .assert_eq(&error.to_string());
     }
 }
