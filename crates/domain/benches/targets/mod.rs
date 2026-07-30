@@ -18,6 +18,12 @@ use uuid::Uuid;
 
 const SCHEDULING_SESSION_ID_SEED: u128 = 1;
 const SESSION_DEFAULT_MODEL_ID_SEED: u128 = 2;
+const SCHEDULING_TURN_ID_SEED: u128 = 10_000;
+const SCHEDULING_ACCEPTED_INPUT_ID_SEED: u128 = 20_000;
+const SCHEDULING_ORIGIN_ENTRY_ID_SEED: u128 = 30_000;
+const SCHEDULING_FAILURE_ENTRY_ID_SEED: u128 = 30_001;
+const SCHEDULING_STARTING_FRONTIER_ID_SEED: u128 = 40_000;
+const SCHEDULING_TERMINAL_FRONTIER_ID_SEED: u128 = 40_001;
 const ACTIVE_TURN_ATTEMPT_ID_SEED: u128 = 50_000;
 const FRONTIER_SESSION_ID_SEED: u128 = 60_000;
 const FRONTIER_ENTRY_ID_SEED: u128 = 61_000;
@@ -155,27 +161,27 @@ fn delivery(predecessor: Option<TurnId>) -> DeliveryRequest {
 }
 
 fn turn_for_ordinal(ordinal: u64) -> TurnId {
-    turn_id(10_000 + u128::from(ordinal))
+    turn_id(SCHEDULING_TURN_ID_SEED + u128::from(ordinal))
 }
 
 fn accepted_input_for_ordinal(ordinal: u64) -> signalbox_domain::AcceptedInputId {
-    accepted_input_id(20_000 + u128::from(ordinal))
+    accepted_input_id(SCHEDULING_ACCEPTED_INPUT_ID_SEED + u128::from(ordinal))
 }
 
 fn origin_entry_for_ordinal(ordinal: u64) -> SemanticTranscriptEntryId {
-    semantic_entry_id(30_000 + u128::from(ordinal) * 2)
+    semantic_entry_id(SCHEDULING_ORIGIN_ENTRY_ID_SEED + u128::from(ordinal) * 2)
 }
 
 fn failure_entry_for_ordinal(ordinal: u64) -> SemanticTranscriptEntryId {
-    semantic_entry_id(30_001 + u128::from(ordinal) * 2)
+    semantic_entry_id(SCHEDULING_FAILURE_ENTRY_ID_SEED + u128::from(ordinal) * 2)
 }
 
 fn starting_frontier_for_ordinal(ordinal: u64) -> ContextFrontierId {
-    frontier_id(40_000 + u128::from(ordinal) * 2)
+    frontier_id(SCHEDULING_STARTING_FRONTIER_ID_SEED + u128::from(ordinal) * 2)
 }
 
 fn terminal_frontier_for_ordinal(ordinal: u64) -> ContextFrontierId {
-    frontier_id(40_001 + u128::from(ordinal) * 2)
+    frontier_id(SCHEDULING_TERMINAL_FRONTIER_ID_SEED + u128::from(ordinal) * 2)
 }
 
 fn lifecycle(ordinal: u64) -> AcceptedInputLifecycle {

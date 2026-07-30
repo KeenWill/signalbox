@@ -75,12 +75,12 @@ mod benchmark_runner {
 }
 
 fn main() {
-    if cfg!(debug_assertions) {
-        if std::env::var_os("SIGNALBOX_DOMAIN_INSTRUCTION_BENCHMARK").is_some() {
-            eprintln!("domain instruction benchmarks require a release bench profile");
-            std::process::exit(2);
-        }
+    if std::env::var_os("SIGNALBOX_DOMAIN_INSTRUCTION_BENCHMARK").is_none() {
         return;
+    }
+    if cfg!(debug_assertions) {
+        eprintln!("domain instruction benchmarks require a release bench profile");
+        std::process::exit(2);
     }
     benchmark_runner::run();
 }

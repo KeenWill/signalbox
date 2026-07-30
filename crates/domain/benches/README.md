@@ -33,8 +33,13 @@ Wall-clock measurements use [Divan](https://github.com/nvzqz/divan) and are
 local only:
 
 ```console
-cargo bench -p signalbox-domain --bench wall_clock
+SIGNALBOX_DOMAIN_WALL_CLOCK_BENCHMARK=1 \
+  cargo bench -p signalbox-domain --bench wall_clock
 ```
+
+This run marker likewise distinguishes an explicit benchmark from Cargo
+executing the custom bench binary during `cargo test --all-targets`. An explicit
+run with debug assertions exits nonzero instead of publishing an empty report.
 
 Do not add the wall-clock suite to CI. Shared-runner load changes elapsed time
 enough to obscure the small regressions these benchmarks are intended to

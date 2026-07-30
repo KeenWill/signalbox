@@ -3,8 +3,12 @@ mod targets;
 use divan::{Bencher, black_box};
 
 fn main() {
-    if cfg!(debug_assertions) {
+    if std::env::var_os("SIGNALBOX_DOMAIN_WALL_CLOCK_BENCHMARK").is_none() {
         return;
+    }
+    if cfg!(debug_assertions) {
+        eprintln!("domain wall-clock benchmarks require a release bench profile");
+        std::process::exit(2);
     }
     divan::main();
 }
