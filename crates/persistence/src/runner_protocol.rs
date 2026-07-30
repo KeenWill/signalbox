@@ -21,16 +21,16 @@ use signalbox_domain::{
     RunnerClaimedAttemptReplacement, RunnerCredentialGrantLineage, RunnerDomainError,
     RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentReconstitutionInput,
     RunnerEnrollmentState, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation,
-    RunnerLeaseId, RunnerLeaseLoss, RunnerLeaseReconstitutionInput, RunnerLeaseState,
-    RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
-    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
-    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
-    SessionRunnerPlacementState, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptEnd, ToolAttemptId,
-    ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind, ToolName,
-    ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
-    ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceCapability,
-    WorkspaceRepositoryKey, WorkspaceRequirement,
+    RunnerLeaseId, RunnerLeaseLoss, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation,
+    RunnerLeaseState, RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass,
+    RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId, SessionRunnerPin,
+    SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptEnd, ToolAttemptId, ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind,
+    ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
+    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
+    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -1214,8 +1214,12 @@ impl RunnerProtocolStore {
         .fetch_one(transaction.as_mut())
         .await?;
         transaction.commit().await?;
+        let retry_preparation = match retry_prepared {
+            true => RunnerLeaseRetryPreparation::Prepared,
+            false => RunnerLeaseRetryPreparation::Available,
+        };
         loaded
-            .into_reconstituted_loss(no_execution, retry_prepared)
+            .into_reconstituted_loss(no_execution, retry_preparation)
             .map(Some)
             .map_err(RunnerProtocolStoreError::Domain)
     }
@@ -2532,8 +2536,7 @@ fn decode_lease(
             recorded_effect: decode_effect(row.decode_column("effect_class")?)?,
             recorded_credential_authorization: authorization.clone(),
             recorded_state: decode_lease_state(row.decode_column("state_kind")?)?,
-            retry_prepared: false,
-            recorded_retry_prepared: false,
+            retry_preparation: RunnerLeaseRetryPreparation::Available,
         },
         registration,
     )

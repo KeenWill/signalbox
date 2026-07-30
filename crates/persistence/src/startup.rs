@@ -17,6 +17,7 @@ use signalbox_domain::{
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
 use crate::{
+    commit_failure_is_ambiguous,
     mapping::{
         input_position_to_numeric, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
         turn_id_to_uuid,
@@ -920,15 +921,6 @@ fn identity_collision(error: &sqlx::Error) -> Option<StartupScanIdentityCollisio
             Some(StartupScanIdentityCollision::TerminalFrontier)
         }
         _ => None,
-    }
-}
-
-fn commit_failure_is_ambiguous(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(database) => {
-            matches!(database.code().as_deref(), Some("08007" | "40003"))
-        }
-        _ => true,
     }
 }
 

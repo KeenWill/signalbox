@@ -13,10 +13,15 @@ use sqlx::{PgPool, Row, types::Uuid};
 
 use crate::{
     commit_failure_is_ambiguous,
-    mapping::session_id_to_uuid,
+    mapping::{
+        DurableCommandKind, durable_command_kind_from_str, durable_command_kind_to_str,
+        session_id_to_uuid,
+    },
     model_execution::{SnapshotAppend, SnapshotAppendError, insert_snapshot_append},
     outbox,
 };
+
+const COMMAND_KIND: &str = durable_command_kind_to_str(DurableCommandKind::CompactSession);
 
 /// All caller and hub-minted facts for a fresh explicit command attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -751,10 +756,11 @@ async fn prepare_in_transaction(
     let claimed = sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'compact_session', 1, clock_timestamp())
+         VALUES ($1, $2, 1, clock_timestamp())
          ON CONFLICT (command_id) DO NOTHING",
     )
     .bind(request.command.into_uuid())
+    .bind(COMMAND_KIND)
     .execute(&mut **transaction)
     .await?
     .rows_affected();
@@ -966,9 +972,10 @@ async fn prepare_in_transaction(
             (command_id, command_kind, storage_version, session_id,
              requested_through_position, automatic_for_turn_id,
              model_call_id, result_kind)
-         VALUES ($1, 'compact_session', 1, $2, $3, $4, $5, 'pending')",
+         VALUES ($1, $2, 1, $3, $4, $5, $6, 'pending')",
     )
     .bind(request.command.into_uuid())
+    .bind(COMMAND_KIND)
     .bind(session_id_to_uuid(request.session))
     .bind(request.requested_through_position.map(Decimal::from))
     .bind(request.automatic_for_turn.map(TurnId::into_uuid))
@@ -1039,7 +1046,10 @@ async fn lookup_command_on_connection(
     let Some(kind) = existing_kind else {
         return Ok(ContextCompactionCommandLookup::Unseen);
     };
-    if kind != "compact_session" {
+    let Some(kind) = durable_command_kind_from_str(&kind) else {
+        return Err(ContextCompactionCorruption::UnsupportedCommandKind(kind).into());
+    };
+    if kind != DurableCommandKind::CompactSession {
         return Ok(ContextCompactionCommandLookup::ConflictingReuse);
     }
     let row = sqlx::query(
@@ -1325,6 +1335,8 @@ pub enum ContextCompactionCorruption {
     Inconsistent(&'static str),
     /// Stored command result discriminator is unknown.
     UnsupportedResult(String),
+    /// Stored owner-global command-kind discriminator is unknown.
+    UnsupportedCommandKind(String),
     /// Summary text did not satisfy the semantic entry scalar.
     InvalidSummary,
 }
