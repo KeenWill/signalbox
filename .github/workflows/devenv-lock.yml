@@ -38,6 +38,34 @@
 # needs to see, so the pull request is opened either way and says which
 # happened.
 #
+# Draft until validated. The pull request is always created as a draft.
+# .github/CODEOWNERS routes every path to the repository owner, so a ready pull
+# request requests owner review the instant it exists — before anything has
+# been checked. It is promoted to ready only when both of two things hold: the
+# environment built from the lock it proposes, and a configured token opened it
+# so the repository's own checks actually start. A proposal that has since
+# regressed is returned to draft rather than left looking reviewed.
+#
+# Under the fallback token it stays a draft however well the environment built.
+# GitHub suppresses that pull request's checks entirely, and marking it ready
+# would request owner review on a pull request carrying none — which is the
+# review request AGENTS.md rules out, since CI is not green on the named head;
+# it has not run at all. The body says to close and reopen it, and whoever does
+# that can mark it ready once they have looked.
+#
+# The automation branch. It is shared, so it is never rewritten blindly. Before
+# replacing it the job fetches its current tip and proceeds only if that tip is
+# a commit this workflow wrote — automation author, automation committer, and
+# the exact subject below — and then only through a --force-with-lease pinned
+# to the revision it inspected, so a push landing in the gap is rejected rather
+# than overwritten. Anything else refuses: the job pushes nothing, opens
+# nothing, and fails with an error naming the tip it found. The case that
+# matters is a maintainer's follow-up commit on an open proposal, which is
+# ordinary review behaviour and which AGENTS.md requires be preserved. Refusing
+# costs nothing that is not recoverable — the re-lock is reproducible on the
+# next run — whereas a silent overwrite destroys work. Resolving the open
+# proposal is a human's job, and the error says so.
+#
 # Token. Pull requests opened with the default GITHUB_TOKEN do not trigger
 # further workflow runs; GitHub suppresses them to stop workflows recursing. As
 # main's ruleset stands today that does not block a merge — it requires a pull
@@ -75,7 +103,8 @@ on:
 permissions: {}
 
 # Serialise the scheduled run against a manual one so two runs cannot race to
-# force-push the same automation branch.
+# replace the same automation branch. The lease on the push below is the
+# backstop for anything this does not cover.
 concurrency:
   group: devenv-lock
   cancel-in-progress: false
@@ -94,10 +123,24 @@ jobs:
       pull-requests: write
     env:
       BRANCH: automation/devenv-lock
+      # One source of truth for the subject line: the generated commit uses it,
+      # the pull request title repeats it, and the branch-safety check below
+      # recognises the automation's own commits by it.
+      PROPOSAL_SUBJECT: "devenv: refresh the locked development inputs"
+      AUTOMATION_NAME: "github-actions[bot]"
+      AUTOMATION_EMAIL: "41898282+github-actions[bot]@users.noreply.github.com"
     steps:
+      # Always main, never the ref the run was triggered from. A
+      # workflow_dispatch started from another branch would otherwise check that
+      # branch out, and the commit built below would carry everything on it
+      # while the pull request opened against main claimed only devenv.lock had
+      # changed — unrelated work proposed under a description that denies it.
+      # Manual dispatch here means "run the weekly sweep now", which is the only
+      # reading that makes sense for a job whose subject is main's devenv.yaml.
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: main
           persist-credentials: false
 
       # Installs Nix 2.35.1 and adds the runner user to `trusted-users`, which
@@ -189,7 +232,19 @@ jobs:
                   return reference
               return original.get("type", "unknown source")
 
+          # Not every lock source carries a revision — a path input is the
+          # ordinary case — and an input can move between a revision-bearing
+          # source and a revisionless one, leaving exactly one side None. These
+          # two render that without assuming a string is there.
+          def shown(rev):
+              return f"`{rev}`" if rev else "no revision"
+
+          def short(rev):
+              return rev[:12] if rev else "no revision"
+
           def compare_url(locked, old_rev, new_rev):
+              if not old_rev or not new_rev:
+                  return None
               if locked.get("type") != "github" or not locked.get("owner"):
                   return None
               owner, repo = locked["owner"], locked.get("repo", "")
@@ -203,22 +258,25 @@ jobs:
               if old is None and new is None:
                   continue
               if old is None:
-                  moved.append(f"- `{name}` added, locked at `{new.get('rev', 'unknown')}`")
+                  moved.append(f"- `{name}` added, locked at {shown(new.get('rev'))}")
                   summary.append(f"{name}: added")
                   continue
               if new is None:
-                  moved.append(f"- `{name}` removed, was `{old.get('rev', 'unknown')}`")
+                  moved.append(f"- `{name}` removed, was {shown(old.get('rev'))}")
                   summary.append(f"{name}: removed")
                   continue
               old_rev, new_rev = old.get("rev"), new.get("rev")
               if old_rev == new_rev:
                   continue
-              entry = f"- `{name}` ({requested(after[name])}): `{old_rev}` → `{new_rev}`"
+              entry = (
+                  f"- `{name}` ({requested(after[name])}): "
+                  f"{shown(old_rev)} → {shown(new_rev)}"
+              )
               url = compare_url(new, old_rev, new_rev)
               if url:
                   entry += f"\n  <{url}>"
               moved.append(entry)
-              summary.append(f"{name}: {old_rev[:12]} -> {new_rev[:12]}")
+              summary.append(f"{name}: {short(old_rev)} -> {short(new_rev)}")
 
           if not moved:
               # Reachable when only a narHash or lastModified changed and every
@@ -234,7 +292,8 @@ jobs:
               "exited cleanly."
               if built
               else "**`devenv shell -- true` did not build the environment from "
-              "this lock.** Read the run log before merging."
+              "this lock**, so this stays a draft. Read the run log before "
+              "merging."
           )
 
           paragraphs = [
@@ -256,23 +315,22 @@ jobs:
                   3,
                   "This pull request was opened with the default `GITHUB_TOKEN`, "
                   "so GitHub suppressed the workflow runs it would otherwise "
-                  "trigger and it shows no checks. Close and reopen it to start "
-                  "them, or configure the `DEVENV_UPDATE_TOKEN` secret described "
-                  "in the workflow header.",
+                  "trigger and it shows no checks. It therefore stays a draft "
+                  "whatever the check above says. Close and reopen it to start "
+                  "those runs and mark it ready once you have looked, or "
+                  "configure the `DEVENV_UPDATE_TOKEN` secret described in the "
+                  "workflow header.",
               )
 
           pathlib.Path(os.environ["BODY_FILE"]).write_text("\n\n".join(paragraphs) + "\n")
           pathlib.Path(os.environ["COMMIT_MESSAGE_FILE"]).write_text(
-              "devenv: refresh the locked development inputs\n\n"
+              os.environ["PROPOSAL_SUBJECT"] + "\n\n"
               + "\n".join(summary if summary else ["lock metadata only"])
               + "\n"
           )
           PYTHON
 
       # One step, so the token never crosses a step boundary as an output.
-      # The branch is always rebuilt from the checked-out main and force-pushed:
-      # if last week's proposal is still open, this replaces it with the current
-      # revisions rather than stacking a second pull request beside it.
       - name: Propose the updated lock
         if: ${{ steps.changed.outputs.moved == 'true' }}
         env:
@@ -281,20 +339,45 @@ jobs:
           GH_REPO: ${{ github.repository }}
           COMMIT_MESSAGE_FILE: ${{ runner.temp }}/commit-message
           BODY_FILE: ${{ runner.temp }}/pull-request-body
+          ENVIRONMENT_BUILT: ${{ steps.verify.outputs.built }}
         run: |
           set -euo pipefail
 
           export SIGNALBOX_LOCK_TOKEN="${CONFIGURED_TOKEN:-${DEFAULT_TOKEN}}"
           if [[ -z "${CONFIGURED_TOKEN}" ]]; then
-            echo "::warning::DEVENV_UPDATE_TOKEN is not configured; the pull request will open with no checks."
+            echo "::warning::DEVENV_UPDATE_TOKEN is not configured; the pull request will open with no checks and stay a draft."
           fi
 
-          git config --local user.name 'github-actions[bot]'
-          git config --local user.email \
-            '41898282+github-actions[bot]@users.noreply.github.com'
+          git config --local user.name "${AUTOMATION_NAME}"
+          git config --local user.email "${AUTOMATION_EMAIL}"
           # Reads the token from this step's environment when git asks for it.
           git config --local "credential.${GITHUB_SERVER_URL}.helper" \
             '!f() { echo username=x-access-token; echo "password=${SIGNALBOX_LOCK_TOKEN}"; }; f'
+
+          # Inspect the shared branch before deciding anything. An empty
+          # listing means it does not exist yet; ls-remote still fails loudly
+          # on an authentication or network fault, so silence here is real.
+          remote_heads="$(git ls-remote --heads origin "${BRANCH}")"
+          remote_tip=""
+          if [[ -n "${remote_heads}" ]]; then
+            git fetch --no-tags --depth=1 origin \
+              "+refs/heads/${BRANCH}:refs/automation/previous-tip"
+            remote_tip="$(git rev-parse refs/automation/previous-tip)"
+            tip_author="$(git log -1 --format=%ae refs/automation/previous-tip)"
+            tip_committer="$(git log -1 --format=%ce refs/automation/previous-tip)"
+            tip_subject="$(git log -1 --format=%s refs/automation/previous-tip)"
+            # The branch may be replaced only when its tip is this workflow's
+            # own previous proposal. Author, committer, and subject must all
+            # match: a follow-up commit changes the author, an amend or rebase
+            # of the automation's commit changes the committer, and anything
+            # else changes the subject.
+            if [[ "${tip_author}" != "${AUTOMATION_EMAIL}" ]] \
+              || [[ "${tip_committer}" != "${AUTOMATION_EMAIL}" ]] \
+              || [[ "${tip_subject}" != "${PROPOSAL_SUBJECT}" ]]; then
+              echo "::error::${BRANCH} carries a commit this workflow did not write (${remote_tip}, author ${tip_author}, committer ${tip_committer}, subject '${tip_subject}'). Refusing to rewrite a shared branch. Merge or close the open proposal, or delete the branch, then re-run; the re-lock is reproducible."
+              exit 1
+            fi
+          fi
 
           git checkout -B "${BRANCH}"
           # Only the lock. Entering the shell above left build state behind,
@@ -302,18 +385,51 @@ jobs:
           # here rather than in another file.
           git add -- devenv.lock
           git commit --file "${COMMIT_MESSAGE_FILE}"
-          git push --force origin "HEAD:refs/heads/${BRANCH}"
+
+          if [[ -n "${remote_tip}" ]]; then
+            # Replaces the automation's own previous proposal, and only while
+            # the branch is still exactly where the inspection above found it.
+            # A push landing in that gap loses the lease and is rejected.
+            git push --force-with-lease="refs/heads/${BRANCH}:${remote_tip}" \
+              origin "HEAD:refs/heads/${BRANCH}"
+          else
+            git push origin "HEAD:refs/heads/${BRANCH}"
+          fi
 
           export GH_TOKEN="${SIGNALBOX_LOCK_TOKEN}"
           existing="$(gh pr list --head "${BRANCH}" --state open \
             --json number --jq '.[0].number // empty')"
           if [[ -n "${existing}" ]]; then
             gh pr edit "${existing}" --body-file "${BODY_FILE}"
-            echo "Updated pull request #${existing}."
+            number="${existing}"
+            echo "Updated pull request #${number}."
           else
-            gh pr create \
+            # Always a draft on creation; promoted below only if it earned it.
+            url="$(gh pr create --draft \
               --base main \
               --head "${BRANCH}" \
-              --title 'devenv: refresh the locked development inputs' \
-              --body-file "${BODY_FILE}"
+              --title "${PROPOSAL_SUBJECT}" \
+              --body-file "${BODY_FILE}")"
+            number="${url##*/}"
+            echo "Opened draft pull request #${number}."
+          fi
+
+          # Ready means both: the environment built from this exact lock, and a
+          # configured token opened the pull request so its checks actually run.
+          # The header explains why the fallback token forfeits ready however
+          # well the environment built.
+          ready=false
+          if [[ "${ENVIRONMENT_BUILT}" == "true" && -n "${CONFIGURED_TOKEN}" ]]; then
+            ready=true
+          fi
+          is_draft="$(gh pr view "${number}" --json isDraft --jq '.isDraft')"
+          if [[ "${ready}" == "true" && "${is_draft}" == "true" ]]; then
+            gh pr ready "${number}"
+            echo "Marked #${number} ready for review."
+          elif [[ "${ready}" != "true" && "${is_draft}" == "false" ]]; then
+            gh pr ready "${number}" --undo
+            echo "Returned #${number} to draft."
+          fi
+          if [[ "${ready}" != "true" ]]; then
+            echo "#${number} stays a draft (environment built: ${ENVIRONMENT_BUILT:-not run}; configured token: $([[ -n "${CONFIGURED_TOKEN}" ]] && echo yes || echo no))."
           fi
