@@ -43,7 +43,8 @@ const CLAUDE_ENVIRONMENT_ALLOWLIST: &[&str] = &[
     "no_proxy",
 ];
 
-const CLAUDE_CREDENTIAL_HOME_VARIABLES: &[&str] = &["HOME", "CLAUDE_CONFIG_DIR"];
+const CLAUDE_CONFIG_HOME_VARIABLE: &str = "CLAUDE_CONFIG_DIR";
+const CLAUDE_CREDENTIAL_HOME_VARIABLES: &[&str] = &["HOME", CLAUDE_CONFIG_HOME_VARIABLE];
 const CLAUDE_PROCESS_LABELS: CliProcessLabels = CliProcessLabels {
     provider: "Claude",
     process: "Claude CLI",
@@ -477,4 +478,29 @@ async fn execute_process<C: Clone + Send + Sync>(
     };
     let _support_directory = prepared.support_directory;
     execute_cli_process(request, sink, cancellation).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CLAUDE_CONFIG_HOME_VARIABLE, CLAUDE_CREDENTIAL_HOME_VARIABLES, CLAUDE_ENVIRONMENT_ALLOWLIST,
+    };
+
+    const DIRECT_CREDENTIAL_VARIABLE: &str = "ANTHROPIC_API_KEY";
+
+    #[test]
+    fn cli_environment_routes_credential_store_without_direct_credential_values() {
+        assert!(
+            CLAUDE_ENVIRONMENT_ALLOWLIST.contains(&CLAUDE_CONFIG_HOME_VARIABLE),
+            "the provider credential-store selector reaches the child"
+        );
+        assert!(
+            CLAUDE_CREDENTIAL_HOME_VARIABLES.contains(&CLAUDE_CONFIG_HOME_VARIABLE),
+            "the selector receives credential-home path handling"
+        );
+        assert!(
+            !CLAUDE_ENVIRONMENT_ALLOWLIST.contains(&DIRECT_CREDENTIAL_VARIABLE),
+            "direct credential values never reach the child"
+        );
+    }
 }

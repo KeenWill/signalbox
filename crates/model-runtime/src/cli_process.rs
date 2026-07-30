@@ -12,7 +12,6 @@ use crate::{
     ProvenUnsentEvidence, RedactingSink, TerminalEvidence, TransportFacts, UnsentCause,
 };
 
-const MAX_CLI_STDERR_BODY_BYTES: usize = crate::MAX_BUFFERED_PROVIDER_RESPONSE_BYTES;
 const TRUNCATION_SUFFIX: &str = "… [truncated]";
 
 /// Whether this target can supervise the CLI's complete Unix process group.
@@ -80,7 +79,7 @@ pub struct CliProcessRequest<C, D> {
 }
 
 /// Provider-neutral classification of an event decoding failure.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CliDecodeFailureClass {
     /// Provider response could not be decoded.
     ProviderDecode,
@@ -89,6 +88,7 @@ pub enum CliDecodeFailureClass {
 }
 
 /// A content-bearing decoder failure sanitized by the shared runner.
+#[derive(Debug)]
 pub struct CliDecodeFailure {
     class: CliDecodeFailureClass,
     detail: String,
@@ -99,7 +99,30 @@ impl CliDecodeFailure {
     pub fn new(class: CliDecodeFailureClass, detail: String) -> Self {
         Self { class, detail }
     }
+
+    /// Returns the provider-neutral failure class.
+    pub fn class(&self) -> CliDecodeFailureClass {
+        self.class
+    }
+
+    /// Returns the provider-specific failure detail.
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    /// Separates the failure into its provider-neutral class and detail.
+    pub fn into_parts(self) -> (CliDecodeFailureClass, String) {
+        (self.class, self.detail)
+    }
 }
+
+impl std::fmt::Display for CliDecodeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for CliDecodeFailure {}
 
 /// Provider-specific interpretation at the edges of the shared process loop.
 pub trait CliSession<C>: Sized {
@@ -274,16 +297,17 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             labels.provider
         ));
     };
-    let mut stderr_task = tokio::spawn(async move { read_bounded_output(stderr).await });
+    let mut stderr_task =
+        tokio::spawn(async move { read_bounded_output(stderr, stderr_limit).await });
     let mut decoder = decoder;
     let mut redacting_sink = RedactingSink::new(sink);
     match terminal_text_capture {
         CliTerminalTextCapture::Disabled => {}
         CliTerminalTextCapture::TerminalOnly => {
-            redacting_sink.begin_terminal_text_capture(false);
+            redacting_sink.begin_terminal_only_text_capture();
         }
         CliTerminalTextCapture::StreamAndTerminal => {
-            redacting_sink.begin_terminal_text_capture(true);
+            redacting_sink.begin_streaming_terminal_text_capture();
         }
     }
     let input_step = {
@@ -362,7 +386,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         match next {
             ProcessStep::Line(Ok(Some(line))) => {
                 if let Err(error) = decoder.push(&line, &mut redacting_sink) {
-                    let class = error.class;
+                    let (class, error_detail) = error.into_parts();
                     // Serde details quote provider-controlled bytes, and both
                     // that library's prose and the adapter's own wrapper sit
                     // between a held credential marker and the continuation the
@@ -373,7 +397,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                     let detail = format!(
                         "undecodable {}: {}",
                         labels.decode_event,
-                        redacting_sink.redact_wrapped_provider_detail(&error.detail)
+                        redacting_sink.redact_wrapped_provider_detail(&error_detail)
                     );
                     force_kill(&mut child).await;
                     abort_stderr_task(&mut stderr_task).await;
@@ -723,7 +747,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                     format!(
                         "{} exited with status {status}: {}",
                         labels.process,
-                        stderr.text.trim()
+                        stderr.classification.trim()
                     ),
                 )
             } else if let Some(error) = input_error {
@@ -1093,37 +1117,51 @@ fn oversize_event(limit: usize, labels: CliProcessLabels) -> std::io::Error {
 
 struct BoundedOutput {
     text: String,
-    overflowed: bool,
+    classification: String,
+    evidence_truncated: bool,
 }
 
 impl BoundedOutput {
     fn diagnostic(text: String) -> Self {
         Self {
+            classification: text.clone(),
             text,
-            overflowed: false,
+            evidence_truncated: false,
         }
     }
 }
 
 async fn read_bounded_output<R: AsyncRead + Unpin>(
     mut reader: R,
+    evidence_limit: usize,
 ) -> std::io::Result<BoundedOutput> {
-    let mut retained = Vec::with_capacity(8192);
+    let sanitization_limit = stderr_sanitization_limit(evidence_limit);
+    let mut retained = Vec::with_capacity(sanitization_limit.min(8192));
     let mut buffer = [0_u8; 8192];
-    let mut overflowed = false;
+    let mut evidence_truncated = false;
     loop {
         let read = reader.read(&mut buffer).await?;
         if read == 0 {
             break;
         }
-        let admitted = (MAX_CLI_STDERR_BODY_BYTES - retained.len()).min(read);
+        let admitted = sanitization_limit.saturating_sub(retained.len()).min(read);
         retained.extend_from_slice(&buffer[..admitted]);
-        overflowed |= admitted < read;
+        evidence_truncated |= retained.len() > evidence_limit || admitted < read;
+    }
+    let classification_end = retained.len().min(evidence_limit);
+    let mut classification = String::from_utf8_lossy(&retained[..classification_end]).into_owned();
+    if evidence_truncated {
+        classification.push_str(TRUNCATION_SUFFIX);
     }
     Ok(BoundedOutput {
         text: String::from_utf8_lossy(&retained).into_owned(),
-        overflowed,
+        classification,
+        evidence_truncated,
     })
+}
+
+fn stderr_sanitization_limit(evidence_limit: usize) -> usize {
+    evidence_limit.saturating_mul(2)
 }
 
 fn sanitized_stderr<C: Clone>(
@@ -1131,19 +1169,15 @@ fn sanitized_stderr<C: Clone>(
     stderr: &BoundedOutput,
     evidence_limit: usize,
 ) -> String {
-    // The complete body admitted by the safety cap remains parseable through
-    // JSON-aware sanitization. Cutting at the evidence limit first could split
-    // an escape and hide the reversible credential it encodes. An over-cap
-    // body cannot be classified safely as complete and therefore fails closed.
-    let sanitized = if stderr.overflowed {
-        crate::REDACTED.to_string()
-    } else {
-        sink.redact_terminal_failure_text(&stderr.text)
-    };
-    truncate_sanitized_text(&sanitized, evidence_limit, stderr.overflowed)
+    // The reader retains an additional evidence-limit-sized window so
+    // JSON-aware sanitization can see escapes and closing syntax beyond the
+    // emitted prefix. Cutting at the evidence limit first could split an
+    // escape and hide the reversible credential it encodes.
+    let sanitized = sink.redact_terminal_failure_text(&stderr.text);
+    truncate_text(&sanitized, evidence_limit, stderr.evidence_truncated)
 }
 
-fn truncate_sanitized_text(text: &str, limit: usize, force_suffix: bool) -> String {
+fn truncate_text(text: &str, limit: usize, force_suffix: bool) -> String {
     if !force_suffix && text.len() <= limit {
         return text.to_string();
     }
@@ -1363,7 +1397,7 @@ mod tests {
     use super::{
         BoundedOutput, CliProcessLabels, EnvironmentRejection, EnvironmentRejectionReason,
         TRUNCATION_SUFFIX, absolute_credential_home, allowlisted_environment, read_bounded_line,
-        sanitized_stderr,
+        read_bounded_output, sanitized_stderr,
     };
     use crate::{REDACTED, RedactingSink};
 
@@ -1402,8 +1436,9 @@ mod tests {
             .expect("the fixture carries one JSON escape")
             + 2;
         let stderr = BoundedOutput {
+            classification: body.clone(),
             text: body,
-            overflowed: false,
+            evidence_truncated: false,
         };
         let mut observed: Vec<crate::Observation<u8>> = Vec::new();
         let sink = RedactingSink::new(&mut observed);
@@ -1417,17 +1452,59 @@ mod tests {
     }
 
     #[test]
-    fn stderr_beyond_the_complete_body_cap_fails_closed() {
+    fn an_incomplete_stderr_window_is_sanitized_and_marked_truncated() {
+        const SYNTHETIC_CREDENTIAL: &str = "SYNTHETIC-SECRET-STDERR-Z";
         let stderr = BoundedOutput {
-            text: "untrusted partial stderr".to_string(),
-            overflowed: true,
+            text: format!("api_key={SYNTHETIC_CREDENTIAL}"),
+            classification: String::new(),
+            evidence_truncated: true,
         };
         let mut observed: Vec<crate::Observation<u8>> = Vec::new();
         let sink = RedactingSink::new(&mut observed);
 
         let sanitized = sanitized_stderr(&sink, &stderr, usize::MAX);
 
-        assert_eq!(sanitized, format!("{REDACTED}{TRUNCATION_SUFFIX}"));
+        assert_eq!(sanitized, format!("api_key={REDACTED}{TRUNCATION_SUFFIX}"));
+        assert!(!sanitized.contains(SYNTHETIC_CREDENTIAL));
+    }
+
+    #[tokio::test]
+    async fn stderr_reader_retains_one_extra_evidence_window_for_sanitization() {
+        const EVIDENCE_LIMIT: usize = 8;
+        const INPUT: &[u8] = b"abcdefghijklmnopq";
+        const RETAINED_SANITIZATION_WINDOW: &[u8] = b"abcdefghijklmnop";
+
+        let output = read_bounded_output(INPUT, EVIDENCE_LIMIT)
+            .await
+            .expect("the in-memory reader succeeds");
+
+        assert_eq!(output.text.as_bytes(), RETAINED_SANITIZATION_WINDOW);
+    }
+
+    #[tokio::test]
+    async fn stderr_classification_preserves_the_original_bounded_prefix() {
+        const EVIDENCE_LIMIT: usize = 8;
+        const INPUT: &[u8] = b"abcdefghijklmnopq";
+        const EXPECTED_CLASSIFICATION: &str = "abcdefgh… [truncated]";
+
+        let output = read_bounded_output(INPUT, EVIDENCE_LIMIT)
+            .await
+            .expect("the in-memory reader succeeds");
+
+        assert_eq!(output.classification, EXPECTED_CLASSIFICATION);
+    }
+
+    #[tokio::test]
+    async fn stderr_reader_honors_limits_above_the_response_body_default() {
+        const EVIDENCE_LIMIT: usize = crate::MAX_BUFFERED_PROVIDER_RESPONSE_BYTES + 1;
+        let input = vec![b'x'; EVIDENCE_LIMIT];
+
+        let output = read_bounded_output(input.as_slice(), EVIDENCE_LIMIT)
+            .await
+            .expect("the in-memory reader succeeds");
+
+        assert_eq!(output.text.as_bytes(), input);
+        assert!(!output.evidence_truncated);
     }
 
     #[test]

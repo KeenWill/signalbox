@@ -1820,10 +1820,19 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         self.suppressing = true;
     }
 
-    /// Starts recording every emitted final-text byte, so terminal evidence
-    /// can carry exactly the stateful cross-fragment redaction the streamed
-    /// deltas received instead of a stateless re-redaction of the raw text.
-    pub fn begin_terminal_text_capture(&mut self, forward_stream_observations: bool) {
+    /// Starts recording emitted final-text bytes for terminal evidence without
+    /// forwarding them as streamed observations.
+    pub fn begin_terminal_only_text_capture(&mut self) {
+        self.begin_terminal_text_capture(false);
+    }
+
+    /// Starts recording emitted final-text bytes for terminal evidence while
+    /// forwarding the same bytes as streamed observations.
+    pub fn begin_streaming_terminal_text_capture(&mut self) {
+        self.begin_terminal_text_capture(true);
+    }
+
+    pub(crate) fn begin_terminal_text_capture(&mut self, forward_stream_observations: bool) {
         self.terminal_text_capture = Some(TerminalTextCapture::default());
         self.forward_stream_observations = forward_stream_observations;
     }

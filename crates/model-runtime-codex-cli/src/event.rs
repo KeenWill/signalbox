@@ -490,7 +490,7 @@ impl<C: Clone> EventDecoder<C> {
             EnvelopeOutcome::Completed => FinishReason::ToolUse,
         };
         if self.delivery == DeliveryMode::Streamed {
-            sink.begin_terminal_text_capture(true);
+            sink.begin_streaming_terminal_text_capture();
         }
         if let Err(detail) = self.emit_completion_observations(
             sink,
