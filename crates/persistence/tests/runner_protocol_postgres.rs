@@ -1,3 +1,5 @@
+//! Feature-gated PostgreSQL coverage for runner enrollment, leases, placement, and grants.
+
 #![allow(
     clippy::expect_used,
     clippy::panic,
