@@ -28,6 +28,10 @@ extension SignalboxSessionSynchronizing {
   public func recoverFromProjectionFailure(_ message: String) async {}
 }
 
+/// Actor reentrancy must not let transport, deadline, or projection callbacks
+/// overtake one another while an effect suspends. Inputs therefore enter one
+/// explicit FIFO, and each caller resumes only after its reducer effects have
+/// completed.
 public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizing {
   private struct QueuedInput {
     let input: SignalboxSessionSynchronizationInput

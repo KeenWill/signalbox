@@ -70,6 +70,10 @@ public enum SignalboxProcessRequestOpenError: LocalizedError, Equatable {
   }
 }
 
+/// Every request gets a fresh connection, while request identities remain
+/// monotonic for the client's lifetime. Once a send begins, cancellation or
+/// transport loss is reported as outcome-unknown because a mutation may already
+/// have committed on the daemon.
 public actor SignalboxProcessClient: SignalboxProcessRequesting {
   static let sendCancellationMessage =
     "The process request send was cancelled after it began."

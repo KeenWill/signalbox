@@ -288,6 +288,14 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertNotNil(ProcessProtocolFixture.turnStateDecodingDiagnostic(in: frame.message))
   }
 
+  func testFailedTerminalModelCallRejectsExplicitNullCause() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.failedTurnWithNullCauseFrame(turnID: turnID)
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.turnStateDecodingDiagnostic(in: frame.message))
+  }
+
   func testMalformedKnownMessageDegradesWithDiagnostic() throws {
     let encoded = Data(
       """
@@ -891,6 +899,32 @@ private enum ProcessProtocolFixture {
               "model_call_id":"\(modelCallID)",
               "disposition":"\(disposition)",
               "cause":"\(cause)"
+            }
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func failedTurnWithNullCauseFrame(turnID: String) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_turn",
+          "turn_id":"\(turnID)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"failed",
+            "terminal_frontier_id":"\(frontierID)",
+            "terminal_attempt_id":"\(attemptID)",
+            "terminal_model_call":{
+              "model_call_id":"\(modelCallID)",
+              "disposition":"known_failed",
+              "cause":null
             }
           }
         }
