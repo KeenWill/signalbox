@@ -1337,6 +1337,12 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     struct PostMutationResumeFailureExecution;
 
+    impl PostMutationResumeFailureExecution {
+        fn failed_turn() -> TurnId {
+            TurnId::from_uuid(Uuid::from_u128(10))
+        }
+    }
+
     impl ActivatedTurnExecution for PostMutationResumeFailureExecution {
         type Error = ExecutionFailure;
 
@@ -1355,7 +1361,7 @@ mod tests {
         }
 
         fn active_resume_failure_turn(_error: &Self::Error) -> Option<TurnId> {
-            Some(TurnId::from_uuid(Uuid::from_u128(10)))
+            Some(Self::failed_turn())
         }
     }
 
@@ -1541,7 +1547,7 @@ mod tests {
                 RecordingTransaction,
                 FatalExecutionSupervisor<PostMutationResumeFailureExecution>,
             > as EligibilityPass>::failure_turn(&error),
-            Some(TurnId::from_uuid(Uuid::from_u128(10))),
+            Some(PostMutationResumeFailureExecution::failed_turn()),
         );
     }
 

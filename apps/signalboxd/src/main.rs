@@ -340,6 +340,8 @@ enum ShutdownOutcome {
     GuardLost,
     RuntimeFailed,
     RuntimeFailedAfterGraceWindow,
+    RuntimeDefect,
+    RuntimeDefectAfterGraceWindow,
 }
 
 #[cfg(test)]
@@ -357,7 +359,7 @@ enum RuntimeStopCause {
     ExecutionFailed,
     GuardLost,
     ProcessRuntimeFailed,
-    SchedulerFailed,
+    RuntimeDefect,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -372,12 +374,53 @@ enum RuntimeTaskExit {
     Process(Result<(), ProcessRuntimeError>),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeTaskCompletion {
+    Clean,
+    Failed,
+    Defect,
+}
+
+impl RuntimeTaskCompletion {
+    const fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Defect, _) | (_, Self::Defect) => Self::Defect,
+            (Self::Failed, _) | (_, Self::Failed) => Self::Failed,
+            (Self::Clean, Self::Clean) => Self::Clean,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeTaskDefect {
+    SchedulerCompletedBeforeShutdown,
+    ProcessCompletedBeforeShutdown,
+    TaskCancelled,
+    TaskPanicked,
+    TaskJoinFailed,
+    TaskSetEmpty,
+}
+
+impl RuntimeTaskDefect {
+    const fn cause_code(self) -> &'static str {
+        match self {
+            Self::SchedulerCompletedBeforeShutdown => "scheduler_completed_before_shutdown",
+            Self::ProcessCompletedBeforeShutdown => "process_runtime_completed_before_shutdown",
+            Self::TaskCancelled => "runtime_task_cancelled",
+            Self::TaskPanicked => "runtime_task_panicked",
+            Self::TaskJoinFailed => "runtime_task_join_failed",
+            Self::TaskSetEmpty => "runtime_task_set_empty",
+        }
+    }
+}
+
 const fn should_close_pool(outcome: &Result<ShutdownOutcome, HubRuntimeError>) -> bool {
     matches!(
         outcome,
         Ok(ShutdownOutcome::Clean
             | ShutdownOutcome::ExecutionFailed
-            | ShutdownOutcome::RuntimeFailed)
+            | ShutdownOutcome::RuntimeFailed
+            | ShutdownOutcome::RuntimeDefect)
             | Err(_)
     )
 }
@@ -491,15 +534,41 @@ fn report_process_runtime_failure(error: &ProcessRuntimeError) {
     );
 }
 
-fn runtime_task_completed_cleanly(completed: Result<RuntimeTaskExit, JoinError>) -> bool {
+/// Records an unexpected top-level task state using closed evidence only.
+///
+/// The cause names the task-control condition without formatting `JoinError`,
+/// whose panic payload is not admitted to operator telemetry.
+fn report_runtime_task_defect(cause: RuntimeTaskDefect) {
+    tracing::error!(
+        phase = ?RuntimePhase::Runtime,
+        failure_class = ?OperatorFailureClass::CallerOrHubBug,
+        cause_code = cause.cause_code(),
+        "daemon runtime task violated its lifecycle contract"
+    );
+}
+
+fn joined_task_defect(error: &JoinError) -> RuntimeTaskDefect {
+    if error.is_cancelled() {
+        RuntimeTaskDefect::TaskCancelled
+    } else if error.is_panic() {
+        RuntimeTaskDefect::TaskPanicked
+    } else {
+        RuntimeTaskDefect::TaskJoinFailed
+    }
+}
+
+fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> RuntimeTaskCompletion {
     match completed {
         Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
-        | Ok(RuntimeTaskExit::Process(Ok(()))) => true,
+        | Ok(RuntimeTaskExit::Process(Ok(()))) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
-            false
+            RuntimeTaskCompletion::Failed
         }
-        Err(_) => false,
+        Err(error) => {
+            report_runtime_task_defect(joined_task_defect(&error));
+            RuntimeTaskCompletion::Defect
+        }
     }
 }
 
@@ -522,14 +591,18 @@ const fn completed_runtime_outcome(
         (RuntimeStopCause::ExecutionFailed, RuntimeDrainOutcome::GraceWindowExpired) => {
             ShutdownOutcome::ExecutionFailedAfterGraceWindow
         }
-        (
-            RuntimeStopCause::ProcessRuntimeFailed | RuntimeStopCause::SchedulerFailed,
-            RuntimeDrainOutcome::Complete,
-        ) => ShutdownOutcome::RuntimeFailed,
-        (
-            RuntimeStopCause::ProcessRuntimeFailed | RuntimeStopCause::SchedulerFailed,
-            RuntimeDrainOutcome::GraceWindowExpired,
-        ) => ShutdownOutcome::RuntimeFailedAfterGraceWindow,
+        (RuntimeStopCause::ProcessRuntimeFailed, RuntimeDrainOutcome::Complete) => {
+            ShutdownOutcome::RuntimeFailed
+        }
+        (RuntimeStopCause::ProcessRuntimeFailed, RuntimeDrainOutcome::GraceWindowExpired) => {
+            ShutdownOutcome::RuntimeFailedAfterGraceWindow
+        }
+        (RuntimeStopCause::RuntimeDefect, RuntimeDrainOutcome::Complete) => {
+            ShutdownOutcome::RuntimeDefect
+        }
+        (RuntimeStopCause::RuntimeDefect, RuntimeDrainOutcome::GraceWindowExpired) => {
+            ShutdownOutcome::RuntimeDefectAfterGraceWindow
+        }
     }
 }
 
@@ -813,10 +886,24 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
                         RuntimeStopCause::ProcessRuntimeFailed
                     }
                     Some(Ok(RuntimeTaskExit::Process(Ok(())))) => {
-                        RuntimeStopCause::ProcessRuntimeFailed
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::ProcessCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
                     }
-                    Some(Ok(RuntimeTaskExit::Scheduler(_))) | Some(Err(_)) | None => {
-                        RuntimeStopCause::SchedulerFailed
+                    Some(Ok(RuntimeTaskExit::Scheduler(_))) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::SchedulerCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
+                    Some(Err(error)) => {
+                        report_runtime_task_defect(joined_task_defect(&error));
+                        RuntimeStopCause::RuntimeDefect
+                    }
+                    None => {
+                        report_runtime_task_defect(RuntimeTaskDefect::TaskSetEmpty);
+                        RuntimeStopCause::RuntimeDefect
                     }
                 }
             }
@@ -831,19 +918,25 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             let _ = process_shutdown.send(true);
             let (drain, components_clean) = {
                 let drain_tasks = async {
-                    let mut clean = true;
+                    let mut completion = RuntimeTaskCompletion::Clean;
                     while let Some(completed) = runtime_tasks.join_next().await {
-                        clean &= runtime_task_completed_cleanly(completed);
+                        completion = completion.combine(runtime_task_completion(completed));
                     }
-                    clean
+                    completion
                 };
                 pin!(drain_tasks);
                 select! {
-                    () = &mut guard_loss => (RuntimeDrainOutcome::GuardLost, false),
+                    () = &mut guard_loss => (
+                        RuntimeDrainOutcome::GuardLost,
+                        RuntimeTaskCompletion::Failed,
+                    ),
                     result = timeout(GRACEFUL_SHUTDOWN_WINDOW, &mut drain_tasks) => {
                         match result {
-                            Ok(clean) => (RuntimeDrainOutcome::Complete, clean),
-                            Err(_) => (RuntimeDrainOutcome::GraceWindowExpired, false),
+                            Ok(completion) => (RuntimeDrainOutcome::Complete, completion),
+                            Err(_) => (
+                                RuntimeDrainOutcome::GraceWindowExpired,
+                                RuntimeTaskCompletion::Failed,
+                            ),
                         }
                     }
                 }
@@ -851,8 +944,16 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             if drain != RuntimeDrainOutcome::Complete {
                 runtime_tasks.abort_all();
                 while runtime_tasks.join_next().await.is_some() {}
-            } else if !components_clean {
-                cause = RuntimeStopCause::ProcessRuntimeFailed;
+            } else {
+                match components_clean {
+                    RuntimeTaskCompletion::Clean => {}
+                    RuntimeTaskCompletion::Failed => {
+                        cause = RuntimeStopCause::ProcessRuntimeFailed;
+                    }
+                    RuntimeTaskCompletion::Defect => {
+                        cause = RuntimeStopCause::RuntimeDefect;
+                    }
+                }
             }
             completed_runtime_outcome(cause, drain)
         }
@@ -1027,6 +1128,23 @@ async fn main() -> ExitCode {
                 failure_class = ?error.failure_class,
                 grace_window_seconds = GRACEFUL_SHUTDOWN_WINDOW.as_secs(),
                 "daemon runtime component failed and shutdown grace expired; abandoning in-flight work"
+            );
+            ExitCode::FAILURE
+        }
+        Ok(ShutdownOutcome::RuntimeDefect) => {
+            tracing::error!(
+                phase = ?RuntimePhase::Runtime,
+                failure_class = ?OperatorFailureClass::CallerOrHubBug,
+                "daemon runtime stopped after a task lifecycle defect"
+            );
+            ExitCode::FAILURE
+        }
+        Ok(ShutdownOutcome::RuntimeDefectAfterGraceWindow) => {
+            tracing::error!(
+                phase = ?RuntimePhase::Runtime,
+                failure_class = ?OperatorFailureClass::CallerOrHubBug,
+                grace_window_seconds = GRACEFUL_SHUTDOWN_WINDOW.as_secs(),
+                "daemon runtime task defect was followed by an expired shutdown grace window"
             );
             ExitCode::FAILURE
         }
@@ -1608,8 +1726,12 @@ mod tests {
         assert!(!should_close_pool(&Ok(
             ShutdownOutcome::RuntimeFailedAfterGraceWindow
         )));
+        assert!(!should_close_pool(&Ok(
+            ShutdownOutcome::RuntimeDefectAfterGraceWindow
+        )));
         assert!(should_close_pool(&Ok(ShutdownOutcome::ExecutionFailed)));
         assert!(should_close_pool(&Ok(ShutdownOutcome::RuntimeFailed)));
+        assert!(should_close_pool(&Ok(ShutdownOutcome::RuntimeDefect)));
         assert!(should_close_pool(&Ok(ShutdownOutcome::Clean)));
         assert!(should_close_pool(&Err(HubRuntimeError::infrastructure(
             RuntimePhase::Migration
@@ -1639,6 +1761,13 @@ mod tests {
         assert_eq!(
             completed_runtime_outcome(RuntimeStopCause::Requested, RuntimeDrainOutcome::GuardLost),
             ShutdownOutcome::GuardLost
+        );
+        assert_eq!(
+            completed_runtime_outcome(
+                RuntimeStopCause::RuntimeDefect,
+                RuntimeDrainOutcome::Complete
+            ),
+            ShutdownOutcome::RuntimeDefect
         );
     }
 }

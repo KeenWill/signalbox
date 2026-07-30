@@ -1832,7 +1832,6 @@ enum TurnTerminalOutcome {
     Failed,
     Cancelled,
     Refused,
-    ReconciliationRequired,
     TargetUnavailable,
     CapabilityKnownFailure,
 }
@@ -1845,7 +1844,6 @@ impl TurnTerminalOutcome {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::Refused => "refused",
-            Self::ReconciliationRequired => "reconciliation_required",
             Self::TargetUnavailable => "target_unavailable",
             Self::CapabilityKnownFailure => "capability_known_failure",
         }
@@ -1879,16 +1877,27 @@ fn report_model_call_terminalization(outcome: &ModelCallTerminalOutcome) {
         ModelCallTerminalOutcome::Refused(value) => {
             (value.session(), value.turn(), TurnTerminalOutcome::Refused)
         }
-        ModelCallTerminalOutcome::ReconciliationRequired(value) => (
-            value.session(),
-            value.turn(),
-            TurnTerminalOutcome::ReconciliationRequired,
-        ),
+        ModelCallTerminalOutcome::ReconciliationRequired(value) => {
+            report_turn_parked_for_reconciliation(value.session(), value.turn());
+            return;
+        }
         ModelCallTerminalOutcome::ToolRound(_) | ModelCallTerminalOutcome::AwaitingRecovery(_) => {
             return;
         }
     };
     report_turn_terminalization(session, turn, terminal_outcome);
+}
+
+/// Emits one content-free record for a turn parked on owner reconciliation.
+///
+/// Session and turn are daemon-minted identities, while the event name is a
+/// closed lifecycle state. Ambiguity details and model content remain absent.
+fn report_turn_parked_for_reconciliation(session: SessionId, turn: TurnId) {
+    tracing::warn!(
+        session_id = %session.into_uuid(),
+        turn_id = %turn.into_uuid(),
+        "turn parked awaiting owner reconciliation"
+    );
 }
 
 /// Emits one content-free terminal lifecycle record for an operator.
