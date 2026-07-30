@@ -1853,6 +1853,7 @@ fn required_string(
         .ok_or(CodeHostTransportFailure::InvalidResponse)
 }
 
+#[cfg_attr(test, derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
 struct ChangeRequestDiffRevision {
     base: String,
@@ -1965,9 +1966,16 @@ mod tests {
     const FILE_PATCH_MOVED_REVISION: &str = "3333333333333333333333333333333333333333";
     const FILE_PATCH_SERVER_TIMEOUT: Duration = Duration::from_secs(5);
 
-    struct FilePatchRevisionTransition {
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct FilePatchRevisionTransitionInput {
         before: ChangeRequestDiffRevision,
         after: ChangeRequestDiffRevision,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct FilePatchRevisionChangeServerObservation {
+        transition: FilePatchRevisionTransitionInput,
+        requests: [String; 4],
     }
 
     fn repository() -> CodeHostRepository {
@@ -2068,7 +2076,7 @@ mod tests {
     /// returned as evidence from any single revision.
     #[tokio::test]
     async fn file_patch_fails_closed_when_head_moves_during_pagination() {
-        let revision_transition = FilePatchRevisionTransition {
+        let expected_transition = FilePatchRevisionTransitionInput {
             before: ChangeRequestDiffRevision {
                 base: String::from(FILE_PATCH_BASE_REVISION),
                 head: String::from(FILE_PATCH_HEAD_REVISION),
@@ -2078,16 +2086,17 @@ mod tests {
                 head: String::from(FILE_PATCH_MOVED_REVISION),
             },
         };
-        let (failure, requests) = file_patch_revision_change_failure(revision_transition).await;
+        let (failure, observation) =
+            file_patch_revision_change_failure(expected_transition.clone()).await;
 
-        assert_file_patch_revision_change(failure, requests);
+        assert_file_patch_revision_change(failure, observation, expected_transition);
     }
 
     /// A stable head does not make pages revision-consistent when the base
     /// revision moves during the search.
     #[tokio::test]
     async fn file_patch_fails_closed_when_base_moves_without_head() {
-        let revision_transition = FilePatchRevisionTransition {
+        let expected_transition = FilePatchRevisionTransitionInput {
             before: ChangeRequestDiffRevision {
                 base: String::from(FILE_PATCH_BASE_REVISION),
                 head: String::from(FILE_PATCH_HEAD_REVISION),
@@ -2097,14 +2106,18 @@ mod tests {
                 head: String::from(FILE_PATCH_HEAD_REVISION),
             },
         };
-        let (failure, requests) = file_patch_revision_change_failure(revision_transition).await;
+        let (failure, observation) =
+            file_patch_revision_change_failure(expected_transition.clone()).await;
 
-        assert_file_patch_revision_change(failure, requests);
+        assert_file_patch_revision_change(failure, observation, expected_transition);
     }
 
     async fn file_patch_revision_change_failure(
-        revision_transition: FilePatchRevisionTransition,
-    ) -> (CodeHostTransportFailure, [String; 4]) {
+        revision_transition: FilePatchRevisionTransitionInput,
+    ) -> (
+        CodeHostTransportFailure,
+        FilePatchRevisionChangeServerObservation,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("loopback listener binds");
@@ -2134,7 +2147,11 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_file_patch_revision_change(failure: CodeHostTransportFailure, requests: [String; 4]) {
+    fn assert_file_patch_revision_change(
+        failure: CodeHostTransportFailure,
+        observation: FilePatchRevisionChangeServerObservation,
+        expected_transition: FilePatchRevisionTransitionInput,
+    ) {
         assert_eq!(
             failure,
             CodeHostTransportFailure::ChangeRequestRevisionChanged
@@ -2148,7 +2165,8 @@ mod tests {
                 commit_ambiguous: false
             })
         );
-        assert_eq!(requests, moved_head_file_patch_requests());
+        assert_eq!(observation.transition, expected_transition);
+        assert_eq!(observation.requests, moved_head_file_patch_requests());
     }
 
     fn moved_head_file_patch_arguments() -> crate::FilePatchArguments {
@@ -2172,9 +2190,10 @@ mod tests {
 
     async fn serve_changed_file_patch_revision(
         listener: tokio::net::TcpListener,
-        revision_transition: FilePatchRevisionTransition,
-    ) -> [String; 4] {
-        let initial_revision = change_request_revision_value(&revision_transition.before);
+        revision_transition: FilePatchRevisionTransitionInput,
+    ) -> FilePatchRevisionChangeServerObservation {
+        let FilePatchRevisionTransitionInput { before, after } = revision_transition;
+        let initial_revision = change_request_revision_value(&before);
         let target_page = serde_json::Value::Array(vec![changed_file_value(String::from(
             FILE_PATCH_TARGET_PATH,
         ))]);
@@ -2188,14 +2207,17 @@ mod tests {
         .await;
         let target_page_request =
             serve_json_response(&listener, &target_page.to_string(), None).await;
-        let final_revision = change_request_revision_value(&revision_transition.after);
+        let final_revision = change_request_revision_value(&after);
         let final_request = serve_json_response(&listener, &final_revision.to_string(), None).await;
-        [
-            initial_request,
-            first_page_request,
-            target_page_request,
-            final_request,
-        ]
+        FilePatchRevisionChangeServerObservation {
+            transition: FilePatchRevisionTransitionInput { before, after },
+            requests: [
+                initial_request,
+                first_page_request,
+                target_page_request,
+                final_request,
+            ],
+        }
     }
 
     fn change_request_revision_value(revision: &ChangeRequestDiffRevision) -> serde_json::Value {
