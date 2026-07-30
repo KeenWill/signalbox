@@ -75,7 +75,8 @@ use signalboxd::{
     ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, SessionStatusWrite,
     SessionStatusWriteOutcome, SessionStatusWriter, StackStateFields, StackStateResult,
     ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult, WebFetchBodyCompleteness,
-    WebFetchRequest, WebFetchResponse, WebFetchTransport, WebFetchTransportFailure,
+    WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse, WebFetchTransport,
+    WebFetchTransportFailure,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use tempfile::tempdir;
@@ -1087,6 +1088,7 @@ async fn code_host_tool_completes_offline(
         UnusedSessionStatusWriter,
         OfflineCodeHostCredentials,
         code_host.clone(),
+        WebFetchEgressPolicy::deny_all(),
     )?
     .into_parts();
     let (execution, runtime) = fixture.execution(
@@ -1632,6 +1634,7 @@ async fn tier_zero_echo_completes_offline_tool_loop() -> Result<(), Box<dyn Erro
         UnusedSessionStatusWriter,
         OfflineCodeHostCredentials,
         UnusedCodeHostTransport,
+        WebFetchEgressPolicy::deny_all(),
     )?
     .into_parts();
     let (execution, runtime) = fixture.execution(
@@ -1687,6 +1690,7 @@ async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn
         UnusedSessionStatusWriter,
         OfflineCodeHostCredentials,
         UnusedCodeHostTransport,
+        WebFetchEgressPolicy::try_from_allowed_origins([String::from("https://example.com")])?,
     )?
     .into_parts();
     let arguments = serde_json::json!({"url": expected_url}).to_string();
@@ -1754,6 +1758,7 @@ async fn tier_zero_session_status_updates_metadata_offline() -> Result<(), Box<d
         PostgresSessionStatusWriter::new(fixture.pool.clone()),
         OfflineCodeHostCredentials,
         UnusedCodeHostTransport,
+        WebFetchEgressPolicy::deny_all(),
     )?
     .into_parts();
     let (execution, runtime) = fixture.execution(
@@ -2944,12 +2949,14 @@ async fn s02_s10_inv006_failed_continuation_call_admits_and_runs_later_turn()
         turn_disposition: String,
         terminal_model_call_id: Option<Uuid>,
         call_disposition: String,
+        provider_failure_cause: Option<String>,
         model_call_count: i64,
     }
     let terminal_shape: FailedContinuationShape = sqlx::query_as(
         "SELECT lifecycle.terminal_disposition_kind AS turn_disposition,
                 lifecycle.terminal_model_call_id,
                 continuation.terminal_disposition_kind AS call_disposition,
+                continuation.terminal_provider_failure_cause AS provider_failure_cause,
                 (SELECT count(*) FROM model_call
                   WHERE session_id = $1 AND turn_id = $2) AS model_call_count
            FROM turn_lifecycle AS lifecycle
@@ -2969,6 +2976,10 @@ async fn s02_s10_inv006_failed_continuation_call_admits_and_runs_later_turn()
         "the failed turn names its continuation call"
     );
     assert_eq!(terminal_shape.call_disposition, "known_failed");
+    assert_eq!(
+        terminal_shape.provider_failure_cause,
+        Some(String::from("provider_internal"))
+    );
     assert_eq!(
         terminal_shape.model_call_count, 2,
         "the terminal call is the second-round continuation call"

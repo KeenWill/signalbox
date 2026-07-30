@@ -1,6 +1,6 @@
 //! Production GitHub REST/GraphQL adapter for the code-host tool suite.
 
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt, future::Future, time::Duration};
 
 use futures_util::StreamExt;
 use reqwest::{
@@ -42,6 +42,7 @@ const MAX_JSON_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_JOB_LOG_BYTES: usize = 64 * 1024;
 const MAX_REDIRECT_URL_BYTES: usize = 8 * 1024;
 const PAGE_SIZE: &str = "100";
+const MAX_CHANGED_FILE_PAGES: u16 = 30;
 const MAX_STACK_COMPARISONS_IN_FLIGHT: usize = 8;
 
 const REVIEW_THREADS_QUERY: &str = r#"
@@ -293,29 +294,43 @@ impl GitHubCodeHostTransport {
         arguments: super::FilePatchArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
-        let url = self.repository_url(
-            arguments.repository(),
-            &["pulls", &arguments.number().get().to_string(), "files"],
-            Some(&[("per_page", PAGE_SIZE), ("page", "1")]),
-        )?;
-        let response = self
-            .send_authenticated(Method::GET, url, None, credential)
-            .await?;
-        let (value, _completeness) = self.json_page(response, StatusCode::OK).await?;
-        let array = value
-            .as_array()
-            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-        let parsed = array
-            .iter()
-            .map(parse_changed_file)
-            .collect::<Result<Vec<_>, _>>()?;
-        let (file, patch) = parsed
-            .into_iter()
-            .find(|(file, _patch)| file.path() == arguments.path().as_str())
-            .ok_or(CodeHostTransportFailure::Rejected)?;
-        let result = FilePatchResult::try_new(file, patch)
-            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-        Ok(CodeHostResult::FilePatch(result))
+        with_read_operation_timeout(
+            DEFAULT_TIMEOUT,
+            self.file_patch_transaction(arguments, credential),
+        )
+        .await
+    }
+
+    async fn file_patch_transaction(
+        &self,
+        arguments: super::FilePatchArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        for page in 1..=MAX_CHANGED_FILE_PAGES {
+            let page_text = page.to_string();
+            let url = self.repository_url(
+                arguments.repository(),
+                &["pulls", &arguments.number().get().to_string(), "files"],
+                Some(&[("per_page", PAGE_SIZE), ("page", page_text.as_str())]),
+            )?;
+            let response = self
+                .send_authenticated(Method::GET, url, None, credential)
+                .await?;
+            let (value, completeness) = self.json_page(response, StatusCode::OK).await?;
+            match inspect_file_patch_page(&value, completeness, arguments.path().as_str())? {
+                FilePatchPageOutcome::Found(result) => {
+                    return Ok(CodeHostResult::FilePatch(result));
+                }
+                FilePatchPageOutcome::NotFound => {
+                    return Err(CodeHostTransportFailure::NotFound);
+                }
+                FilePatchPageOutcome::Continue if page < MAX_CHANGED_FILE_PAGES => {}
+                FilePatchPageOutcome::Continue => {
+                    return Err(CodeHostTransportFailure::InvalidResponse);
+                }
+            }
+        }
+        Err(CodeHostTransportFailure::InvalidResponse)
     }
 
     async fn checks_status(
@@ -1139,7 +1154,8 @@ impl GitHubCodeHostTransport {
             .map(|(value, _completeness)| value)
             .map_err(|failure| match failure {
                 CodeHostTransportFailure::InvalidCredential
-                | CodeHostTransportFailure::Rejected => failure,
+                | CodeHostTransportFailure::Rejected
+                | CodeHostTransportFailure::NotFound => failure,
                 CodeHostTransportFailure::InvalidResponse
                 | CodeHostTransportFailure::ResponseTooLarge
                 | CodeHostTransportFailure::DispatchUnknown => {
@@ -1315,6 +1331,39 @@ fn bounded_lossy_text(
     }
     text.truncate(boundary);
     (text, CodeHostResultCompleteness::Truncated)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FilePatchPageOutcome {
+    Found(FilePatchResult),
+    Continue,
+    NotFound,
+}
+
+fn inspect_file_patch_page(
+    value: &serde_json::Value,
+    completeness: CodeHostResultCompleteness,
+    path: &str,
+) -> Result<FilePatchPageOutcome, CodeHostTransportFailure> {
+    let array = value
+        .as_array()
+        .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+    let parsed = array
+        .iter()
+        .map(parse_changed_file)
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some((file, patch)) = parsed
+        .into_iter()
+        .find(|(file, _patch)| file.path() == path)
+    {
+        let result = FilePatchResult::try_new(file, patch)
+            .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+        return Ok(FilePatchPageOutcome::Found(result));
+    }
+    Ok(match completeness {
+        CodeHostResultCompleteness::Truncated => FilePatchPageOutcome::Continue,
+        CodeHostResultCompleteness::Complete => FilePatchPageOutcome::NotFound,
+    })
 }
 
 fn parse_changed_file(
@@ -1680,6 +1729,15 @@ fn parse_stack_comparison(
     required_u64(comparison, "behindBy")
 }
 
+async fn with_read_operation_timeout<T>(
+    timeout: Duration,
+    operation: impl Future<Output = Result<T, CodeHostTransportFailure>>,
+) -> Result<T, CodeHostTransportFailure> {
+    tokio::time::timeout(timeout, operation)
+        .await
+        .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
+}
+
 fn remaining_exchange_timeout(elapsed: Duration) -> Result<Duration, CodeHostTransportFailure> {
     DEFAULT_TIMEOUT
         .checked_sub(elapsed)
@@ -1899,6 +1957,55 @@ mod tests {
         );
     }
 
+    fn changed_file_value(path: String) -> serde_json::Value {
+        serde_json::json!({
+            "additions": 1,
+            "deletions": 0,
+            "filename": path,
+            "patch": "@@ -0,0 +1 @@\n+fixture",
+            "status": "added",
+        })
+    }
+
+    fn first_changed_file_page() -> serde_json::Value {
+        serde_json::Value::Array(
+            (0..100)
+                .map(|index| changed_file_value(format!("generated/file-{index}.rs")))
+                .collect(),
+        )
+    }
+
+    /// A requested patch beyond GitHub's first hundred changed files remains
+    /// reachable through the same bounded tool operation.
+    #[test]
+    fn file_patch_search_reaches_the_second_changed_file_page() {
+        let target_path = "src/target.rs";
+        let target_value = changed_file_value(String::from(target_path));
+        let expected_file =
+            ChangedFile::try_new(String::from(target_path), String::from("added"), 1, 0)
+                .expect("fixture changed file is bounded");
+        let expected =
+            FilePatchResult::try_new(expected_file, Some(String::from("@@ -0,0 +1 @@\n+fixture")))
+                .expect("fixture patch is bounded");
+
+        assert_eq!(
+            inspect_file_patch_page(
+                &first_changed_file_page(),
+                CodeHostResultCompleteness::Truncated,
+                target_path,
+            ),
+            Ok(FilePatchPageOutcome::Continue)
+        );
+        assert_eq!(
+            inspect_file_patch_page(
+                &serde_json::Value::Array(vec![target_value]),
+                CodeHostResultCompleteness::Complete,
+                target_path,
+            ),
+            Ok(FilePatchPageOutcome::Found(expected))
+        );
+    }
+
     /// GitHub's changed-file response is projected into the bounded result
     /// type without retaining unneeded response members.
     #[test]
@@ -1996,6 +2103,18 @@ mod tests {
             reject_graphql_errors(&value),
             Err(CodeHostTransportFailure::DispatchUnknown)
         );
+    }
+
+    /// Every page in one changed-file search shares one elapsed-time budget.
+    #[tokio::test]
+    async fn file_patch_transaction_has_one_timeout_budget() {
+        let result = with_read_operation_timeout(
+            Duration::ZERO,
+            std::future::pending::<Result<(), CodeHostTransportFailure>>(),
+        )
+        .await;
+
+        assert_eq!(result, Err(CodeHostTransportFailure::DispatchUnknown));
     }
 
     /// The authenticated redirect response consumes the same timeout budget

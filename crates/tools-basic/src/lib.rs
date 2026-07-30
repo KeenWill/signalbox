@@ -18,8 +18,8 @@ pub use session_status::{
 };
 pub use web_fetch::{
     PublicDestinationClientError, ReqwestWebFetchConstructionError, ReqwestWebFetchTransport,
-    WEB_FETCH_NAME, WebFetchBodyCompleteness, WebFetchExecutor, WebFetchExecutorError,
-    WebFetchRequest, WebFetchResponse, WebFetchTool, WebFetchToolConstructionError,
-    WebFetchTransport, WebFetchTransportFailure, has_more_response_bytes,
-    public_destination_client,
+    WEB_FETCH_NAME, WebFetchBodyCompleteness, WebFetchEgressPolicy, WebFetchEgressPolicyError,
+    WebFetchExecutor, WebFetchExecutorError, WebFetchRequest, WebFetchResponse, WebFetchTool,
+    WebFetchToolConstructionError, WebFetchTransport, WebFetchTransportFailure,
+    has_more_response_bytes, public_destination_client,
 };

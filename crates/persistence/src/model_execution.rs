@@ -32,9 +32,9 @@ use signalbox_domain::{
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelTargetCatalog, ModelTargetDefinition, PendingSteeringReclassificationIdentity,
     PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest,
-    PreparedToolResultProjection, ProviderModelIdentity, ProviderReportedTokenUsage,
-    ReclassifiedPendingSteeringTurn, ReconciliationRequiredModelCallTurn,
-    ReconciliationRequiredToolTurn, RefusedModelCallTurn,
+    PreparedToolResultProjection, ProviderModelCallFailureCause, ProviderModelIdentity,
+    ProviderReportedTokenUsage, ReclassifiedPendingSteeringTurn,
+    ReconciliationRequiredModelCallTurn, ReconciliationRequiredToolTurn, RefusedModelCallTurn,
     ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget, SemanticTranscriptEntry,
     SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef, SessionId,
     StopRequestedModelCallTurn, ToolApprovalDecision, ToolApprovalResolution, ToolDecisionSource,
@@ -551,6 +551,7 @@ impl PostgresModelCallRepository {
                         &mut transaction,
                         &failed,
                         ProviderReportedTokenUsage::unreported(),
+                        None,
                     )
                     .await?;
                     return Ok((
@@ -669,6 +670,7 @@ impl PostgresModelCallRepository {
                 &mut next_reclassified_turn,
             )?;
             let usage = observation.usage();
+            let provider_failure_cause = observation.provider_failure_cause();
             let outcome = execution
                 .apply_terminal_observation(observation, identities)
                 .map_err(|_| {
@@ -676,7 +678,13 @@ impl PostgresModelCallRepository {
                         "terminal observation does not match fresh issued state",
                     )
                 })?;
-            persist_terminal_outcome_with_usage(&mut transaction, &outcome, usage).await?;
+            persist_terminal_outcome_with_usage(
+                &mut transaction,
+                &outcome,
+                usage,
+                provider_failure_cause,
+            )
+            .await?;
             Ok(outcome)
         }
         .await;
@@ -716,6 +724,7 @@ impl PostgresModelCallRepository {
                 &mut transaction,
                 &failed,
                 ProviderReportedTokenUsage::unreported(),
+                None,
             )
             .await?;
             Ok(failed)
@@ -989,6 +998,7 @@ impl PostgresModelCallRepository {
                 "SELECT session_id, turn_id, turn_attempt_id,
                         resolved_provider_model_identity_id, context_frontier_id,
                         state_kind, terminal_disposition_kind,
+                        terminal_provider_failure_cause,
                         usage_input_tokens, usage_output_tokens,
                         usage_cache_creation_input_tokens,
                         usage_cache_read_input_tokens
@@ -1069,6 +1079,10 @@ impl PostgresModelCallRepository {
                 ("terminal", Some(stored_disposition))
                     if stored_disposition
                         == encode_disposition(observation.observation().disposition())
+                        && stored.provider_failure_cause.as_deref()
+                            == observation
+                                .provider_failure_cause()
+                                .map(encode_provider_failure_cause)
                         && stored.usage == encode_token_usage(observation.usage()) =>
                 {
                     if !terminal_observation_closure_matches(&mut transaction, session, observation)
@@ -1226,6 +1240,7 @@ where
                 connection,
                 &failed,
                 ProviderReportedTokenUsage::unreported(),
+                None,
             )
             .await?;
             return Ok(PrepareToolContinuationOutcome::TargetUnavailable(Box::new(
@@ -1289,6 +1304,7 @@ where
         connection,
         &failed,
         ProviderReportedTokenUsage::unreported(),
+        None,
     )
     .await?;
     Ok(failed)
@@ -3470,6 +3486,7 @@ pub(crate) async fn persist_terminal_outcome(
         connection,
         outcome,
         ProviderReportedTokenUsage::unreported(),
+        None,
     )
     .await
 }
@@ -3478,6 +3495,7 @@ async fn persist_terminal_outcome_with_usage(
     connection: &mut PgConnection,
     outcome: &ModelCallTerminalOutcome,
     usage: ProviderReportedTokenUsage,
+    provider_failure_cause: Option<ProviderModelCallFailureCause>,
 ) -> Result<(), ModelCallRepositoryError> {
     match outcome {
         ModelCallTerminalOutcome::Completed(completed) => {
@@ -3489,7 +3507,9 @@ async fn persist_terminal_outcome_with_usage(
         ModelCallTerminalOutcome::CancelledWithToolResponse(cancelled) => {
             persist_cancelled_tool_round(connection, cancelled, usage).await
         }
-        ModelCallTerminalOutcome::Failed(failed) => persist_failed(connection, failed, usage).await,
+        ModelCallTerminalOutcome::Failed(failed) => {
+            persist_failed(connection, failed, usage, provider_failure_cause).await
+        }
         ModelCallTerminalOutcome::Cancelled(cancelled) => {
             persist_cancelled(connection, cancelled, usage).await
         }
@@ -4202,9 +4222,18 @@ async fn persist_failed(
     connection: &mut PgConnection,
     failed: &FailedModelCallTurn,
     usage: ProviderReportedTokenUsage,
+    provider_failure_cause: Option<ProviderModelCallFailureCause>,
 ) -> Result<(), ModelCallRepositoryError> {
     if let Some(call) = failed.call() {
-        persist_ended_call(connection, failed.session(), failed.turn(), call, usage).await?;
+        persist_ended_call_with_provider_failure_cause(
+            connection,
+            failed.session(),
+            failed.turn(),
+            call,
+            usage,
+            provider_failure_cause,
+        )
+        .await?;
     }
     persist_ended_attempt(
         connection,
@@ -4532,6 +4561,7 @@ struct StoredModelCallObservation {
     frontier: Uuid,
     state: String,
     disposition: Option<String>,
+    provider_failure_cause: Option<String>,
     usage: EncodedTokenUsage,
 }
 
@@ -4546,6 +4576,7 @@ fn decode_stored_model_call_observation(
         frontier: row.try_get("context_frontier_id")?,
         state: row.try_get("state_kind")?,
         disposition: row.try_get("terminal_disposition_kind")?,
+        provider_failure_cause: row.try_get("terminal_provider_failure_cause")?,
         usage: EncodedTokenUsage {
             input_tokens: row.try_get("usage_input_tokens")?,
             output_tokens: row.try_get("usage_output_tokens")?,
@@ -4562,6 +4593,18 @@ async fn persist_ended_call(
     call: &signalbox_domain::EndedModelCall,
     usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
+    persist_ended_call_with_provider_failure_cause(connection, session, turn, call, usage, None)
+        .await
+}
+
+async fn persist_ended_call_with_provider_failure_cause(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    call: &signalbox_domain::EndedModelCall,
+    usage: ProviderReportedTokenUsage,
+    provider_failure_cause: Option<ProviderModelCallFailureCause>,
+) -> Result<(), ModelCallRepositoryError> {
     let usage = encode_token_usage(usage);
     let rows = sqlx::query(
         "UPDATE model_call
@@ -4570,11 +4613,12 @@ async fn persist_ended_call(
                 usage_input_tokens = $2,
                 usage_output_tokens = $3,
                 usage_cache_creation_input_tokens = $4,
-                usage_cache_read_input_tokens = $5
-          WHERE model_call_id = $6
-            AND turn_id = $7
-            AND session_id = $8
-            AND turn_attempt_id = $9
+                usage_cache_read_input_tokens = $5,
+                terminal_provider_failure_cause = $6
+          WHERE model_call_id = $7
+            AND turn_id = $8
+            AND session_id = $9
+            AND turn_attempt_id = $10
             AND state_kind <> 'terminal'
             AND terminal_disposition_kind IS NULL",
     )
@@ -4583,6 +4627,7 @@ async fn persist_ended_call(
     .bind(usage.output_tokens)
     .bind(usage.cache_creation_input_tokens)
     .bind(usage.cache_read_input_tokens)
+    .bind(provider_failure_cause.map(encode_provider_failure_cause))
     .bind(call.id().into_uuid())
     .bind(turn_id_to_uuid(turn))
     .bind(session_id_to_uuid(session))
@@ -4886,6 +4931,21 @@ fn encode_selection(
             Some(alias.into_uuid()),
             Some(definition.selected().into_uuid()),
         ),
+    }
+}
+
+fn encode_provider_failure_cause(cause: ProviderModelCallFailureCause) -> &'static str {
+    match cause {
+        ProviderModelCallFailureCause::CredentialRejected => "credential_rejected",
+        ProviderModelCallFailureCause::PermissionDenied => "permission_denied",
+        ProviderModelCallFailureCause::InvalidRequest => "invalid_request",
+        ProviderModelCallFailureCause::TargetNotFound => "target_not_found",
+        ProviderModelCallFailureCause::RequestTooLarge => "request_too_large",
+        ProviderModelCallFailureCause::RateLimited => "rate_limited",
+        ProviderModelCallFailureCause::QuotaExhausted => "quota_exhausted",
+        ProviderModelCallFailureCause::Overloaded => "overloaded",
+        ProviderModelCallFailureCause::ProviderInternal => "provider_internal",
+        ProviderModelCallFailureCause::Unrecognized => "unrecognized",
     }
 }
 

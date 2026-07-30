@@ -109,7 +109,7 @@ pub use model_execution::{
     ModelTargetCatalogError, ModelTargetDefinition, ModelTargetResolutionError,
     PendingSteeringReclassificationIdentity, PhysicalCancellationModelCallTurnIdentities,
     PreparedInitialModelCall, PreparedModelCallRequest, PreparedSteeringConsumption,
-    ProviderReportedTokenUsage, ReclassifiedPendingSteeringTurn,
+    ProviderModelCallFailureCause, ProviderReportedTokenUsage, ReclassifiedPendingSteeringTurn,
     ReconciliationRequiredModelCallTurn, ReconciliationRequiredToolTurn, RefusedModelCallTurn,
     RefusedModelCallTurnIdentities, ResolvedModelSelection, StopRequestedModelCallTurn,
     StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolResponsePartIdentity,

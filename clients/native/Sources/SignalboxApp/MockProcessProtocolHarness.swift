@@ -472,7 +472,12 @@ private actor MockProcessProtocolState {
         "cursor": cursor,
       ]
     ]
-    messages.append(contentsOf: fixture.records)
+    messages.append(contentsOf: fixture.records.prefix(1))
+    messages.append([
+      "type": "transcript_model_calls_end",
+      "model_call_count": "0",
+    ])
+    messages.append(contentsOf: fixture.records.dropFirst())
     messages.append([
       "type": "transcript_snapshot_end",
       "session_id": session.id,

@@ -86,10 +86,11 @@ use signalbox_persistence::{
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
         ProcessImportedContentKind, ProcessImportedSourceSpeaker,
-        ProcessModelCallRecoveryPrecondition, ProcessModelSelection, ProcessReadError,
-        ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionDefaultsRead,
-        ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptModelCallUsage,
-        ProcessTranscriptTurn, ProcessTurnState,
+        ProcessModelCallRecoveryPrecondition, ProcessModelSelection,
+        ProcessProviderModelCallFailureCause, ProcessReadError, ProcessReadRepository,
+        ProcessReconciliationOperation, ProcessSessionDefaultsRead, ProcessTranscriptEntry,
+        ProcessTranscriptItem, ProcessTranscriptModelCallUsage, ProcessTranscriptTurn,
+        ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
@@ -104,8 +105,8 @@ use signalbox_process_protocol::{
     ConversationImportFormat, ConversationOrigin as WireConversationOrigin,
     ConversationOriginFilter as WireConversationOriginFilter,
     ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
-    ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
-    FrameDecodeErrorKind, FrameEncodeError, ImportedContentKind,
+    ErrorCode, ErrorDetail, FailedModelCallCause, FailedModelCallDisposition,
+    FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError, ImportedContentKind,
     ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
@@ -7680,17 +7681,31 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
             terminal_attempt_id: terminal_attempt.map(|attempt| wire_uuid(attempt.into_uuid())),
             terminal_model_call: terminal_model_call.map(|call| {
-                FailedTerminalModelCall::new(
-                    wire_uuid(call.call().into_uuid()),
-                    match call.disposition() {
-                        ProcessFailedModelCallDisposition::KnownFailed => {
-                            FailedModelCallDisposition::KnownFailed
+                let model_call_id = wire_uuid(call.call().into_uuid());
+                match call.disposition() {
+                    ProcessFailedModelCallDisposition::KnownFailed => {
+                        match call.provider_failure_cause() {
+                            Some(cause) => FailedTerminalModelCall::known_failed_with_cause(
+                                model_call_id,
+                                wire_provider_failure_cause(cause),
+                            ),
+                            None => FailedTerminalModelCall::new(
+                                model_call_id,
+                                FailedModelCallDisposition::KnownFailed,
+                            ),
                         }
-                        ProcessFailedModelCallDisposition::Cancelled => {
-                            FailedModelCallDisposition::Cancelled
-                        }
-                    },
-                )
+                    }
+                    ProcessFailedModelCallDisposition::Cancelled => {
+                        debug_assert!(
+                            call.provider_failure_cause().is_none(),
+                            "process-read validation rejects causes on cancelled model calls"
+                        );
+                        FailedTerminalModelCall::new(
+                            model_call_id,
+                            FailedModelCallDisposition::Cancelled,
+                        )
+                    }
+                }
             }),
         },
         ProcessTurnState::Completed {
@@ -7984,6 +7999,37 @@ where
     tokio::select! {
         () = wait_for_shutdown(shutdown) => None,
         output = operation => Some(output),
+    }
+}
+
+fn wire_provider_failure_cause(
+    cause: ProcessProviderModelCallFailureCause,
+) -> FailedModelCallCause {
+    match cause {
+        ProcessProviderModelCallFailureCause::CredentialRejected => {
+            FailedModelCallCause::CredentialRejected
+        }
+        ProcessProviderModelCallFailureCause::PermissionDenied => {
+            FailedModelCallCause::PermissionDenied
+        }
+        ProcessProviderModelCallFailureCause::InvalidRequest => {
+            FailedModelCallCause::InvalidRequest
+        }
+        ProcessProviderModelCallFailureCause::TargetNotFound => {
+            FailedModelCallCause::TargetNotFound
+        }
+        ProcessProviderModelCallFailureCause::RequestTooLarge => {
+            FailedModelCallCause::RequestTooLarge
+        }
+        ProcessProviderModelCallFailureCause::RateLimited => FailedModelCallCause::RateLimited,
+        ProcessProviderModelCallFailureCause::QuotaExhausted => {
+            FailedModelCallCause::QuotaExhausted
+        }
+        ProcessProviderModelCallFailureCause::Overloaded => FailedModelCallCause::Overloaded,
+        ProcessProviderModelCallFailureCause::ProviderInternal => {
+            FailedModelCallCause::ProviderInternal
+        }
+        ProcessProviderModelCallFailureCause::Unrecognized => FailedModelCallCause::Unrecognized,
     }
 }
 
