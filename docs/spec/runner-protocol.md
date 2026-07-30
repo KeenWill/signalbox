@@ -490,9 +490,10 @@ A registration carries availability claims only:
 
 - the runner's advertised capability classes;
 - tool names;
-- credential-profile names, and repository entries pairing each key with its
-  optional configured profile name, where absence advertises anonymous HTTPS;
-  and
+- credential-profile names, and repository entries pairing each key with the
+  optional profile defined by
+  [runner credential lifecycle](configuration-and-credentials.md#runner-credential-lifecycle),
+  where absence advertises anonymous HTTPS; and
 - workspace and sandbox-profile capabilities.
 
 It carries no permission default, effect class, placement declaration, approval
@@ -841,7 +842,9 @@ a repository with no profile provisions anonymously only when its entry also
 names no profile, otherwise it fails `credential_unavailable`; and a repository
 with a named profile provisions with that grant only when the entry names the
 same profile, otherwise it fails `credential_unavailable`. No case selects,
-removes, or substitutes a credential implicitly.
+removes, or substitutes a credential implicitly
+([runner credential lifecycle](configuration-and-credentials.md#runner-credential-lifecycle)
+owns the configuration meaning of an absent repository profile).
 
 The advertised executable tool set is therefore a function of the session's
 actual capabilities rather than of the compiled registry. A declaration whose
@@ -1167,9 +1170,12 @@ clone requires a profile fails provisioning with the `credential_unavailable`
 category rather than proceeding under a profile the placement did not select.
 Conversely a named profile is grantable to a placement with no repository and no
 workspace, because the credential belongs to the session's work rather than to a
-clone ([session composition](#session-composition)). Why: a silently inferred
-credential is an authorization the owner never granted, and refusing to guess is
-the only behavior that keeps the grant record a truthful statement of intent.
+clone ([session composition](#session-composition));
+[runner credential lifecycle](configuration-and-credentials.md#runner-credential-lifecycle)
+owns the configuration meaning of the optional repository profile. Why: a
+silently inferred credential is an authorization the owner never granted, and
+refusing to guess is the only behavior that keeps the grant record a truthful
+statement of intent.
 
 The pinning transition snapshots the selected profile and validated advertised
 tool set into one `CredentialProfileGrant`, because only then are the exact
