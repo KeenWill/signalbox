@@ -857,6 +857,15 @@ impl ClassifyOperatorFailure for RuntimeInputTokenCountError {
             }
         }
     }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::UnconfiguredTarget => "model_input_count_unconfigured_target",
+            Self::InvalidToolSchema => "model_input_count_invalid_tool_schema",
+            Self::CorrelationMismatch => "model_input_count_correlation_mismatch",
+            Self::CountFailed => "model_input_count_provider_failure",
+        }
+    }
 }
 
 impl<R> ModelCallInputTokenCounter for RuntimeModelCallProvider<R>
@@ -1692,7 +1701,7 @@ mod tests {
     };
 
     use expect_test::expect;
-    use signalbox_application::ModelConversationMessage;
+    use signalbox_application::{ClassifyOperatorFailure, ModelConversationMessage};
     use signalbox_domain::{
         AssistantText, DirectModelSelection, ImportedText, ImportedTranscriptEntryId, ModelCallId,
         ModelCallTerminalObservation, NormalizedToolArguments, ProviderModelCallFailureCause,
@@ -1714,10 +1723,10 @@ mod tests {
 
     use super::{
         AcceptanceObservations, ModelCallTelemetry, ProviderTextDelta, ProviderTextDeltaContext,
-        ProviderTextDeltaSink, RuntimeModelCallProviderError, RuntimeModelCatalog,
-        RuntimeModelCatalogError, RuntimeModelDefinition, RuntimeModelDefinitionError,
-        classify_terminal, decode_checked_raw_json, provider_reported_token_usage,
-        render_runtime_messages,
+        ProviderTextDeltaSink, RuntimeInputTokenCountError, RuntimeModelCallProviderError,
+        RuntimeModelCatalog, RuntimeModelCatalogError, RuntimeModelDefinition,
+        RuntimeModelDefinitionError, classify_terminal, decode_checked_raw_json,
+        provider_reported_token_usage, render_runtime_messages,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -2895,6 +2904,26 @@ mod tests {
         let bounded = super::diagnostic_model_identity(&hostile);
         assert!(bounded.starts_with(&"x".repeat(super::DIAGNOSTIC_MODEL_IDENTITY_LIMIT)));
         assert!(bounded.ends_with("… [truncated]"));
+    }
+
+    #[test]
+    fn input_token_count_failures_keep_exact_operator_causes() {
+        assert_eq!(
+            RuntimeInputTokenCountError::UnconfiguredTarget.operator_failure_cause_code(),
+            "model_input_count_unconfigured_target"
+        );
+        assert_eq!(
+            RuntimeInputTokenCountError::InvalidToolSchema.operator_failure_cause_code(),
+            "model_input_count_invalid_tool_schema"
+        );
+        assert_eq!(
+            RuntimeInputTokenCountError::CorrelationMismatch.operator_failure_cause_code(),
+            "model_input_count_correlation_mismatch"
+        );
+        assert_eq!(
+            RuntimeInputTokenCountError::CountFailed.operator_failure_cause_code(),
+            "model_input_count_provider_failure"
+        );
     }
 
     #[test]

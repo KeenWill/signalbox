@@ -3696,6 +3696,30 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
             }
         }
     }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::Read(ProcessReadError::Database(_)) => "context_compaction_read_database",
+            Self::Read(ProcessReadError::Corruption(_)) => "context_compaction_read_corruption",
+            Self::Repository(ContextCompactionRepositoryError::Database(_)) => {
+                "context_compaction_repository_database"
+            }
+            Self::Repository(ContextCompactionRepositoryError::CommitAmbiguous(_)) => {
+                "context_compaction_repository_commit_ambiguous"
+            }
+            Self::Repository(ContextCompactionRepositoryError::IdentityCollision) => {
+                "context_compaction_repository_identity_collision"
+            }
+            Self::Repository(ContextCompactionRepositoryError::Corruption(_)) => {
+                "context_compaction_repository_corruption"
+            }
+            Self::Model => "context_compaction_model",
+            Self::Configuration => "context_compaction_configuration",
+            Self::State => "context_compaction_state",
+            Self::Integrity => "context_compaction_integrity",
+            Self::AlreadyAttempted => "context_compaction_already_attempted",
+        }
+    }
 }
 
 pub(crate) async fn compact_automatically(

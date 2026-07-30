@@ -68,6 +68,8 @@ pub enum ContextGuardedTurnPassError<CountError, ExecutionError> {
         turn: TurnId,
         /// Classified compaction failure.
         failure_class: OperatorFailureClass,
+        /// Closed cause retained before the compaction error is erased.
+        cause_code: &'static str,
     },
     /// Execution after exact guarded activation failed.
     Execution {
@@ -127,7 +129,7 @@ where
             Self::CountCancelled(_) => "model_input_count_cancelled",
             Self::ContextWindowUnavailable(_) => "context_window_unavailable",
             Self::ContextStillExceeded(_) => "context_window_exceeded",
-            Self::Compaction { .. } => "context_compaction",
+            Self::Compaction { cause_code, .. } => cause_code,
             Self::Execution { source, .. } => source.operator_failure_cause_code(),
             Self::ActivationSessionMismatch(_) => "activation_session_mismatch",
         }
@@ -328,6 +330,7 @@ where
                                 return Err(ContextGuardedTurnPassError::Compaction {
                                     turn,
                                     failure_class: error.operator_failure_class(),
+                                    cause_code: error.operator_failure_cause_code(),
                                 });
                             }
                         }
@@ -513,13 +516,18 @@ mod tests {
 
     /// The exact failure automatic compaction preparation reports when its own
     /// durable prepare cannot be proven committed.
+    fn ambiguous_compaction_source() -> AutomaticContextCompactionError {
+        AutomaticContextCompactionError::Repository(
+            ContextCompactionRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
+        )
+    }
+
     fn ambiguous_compaction() -> GuardedFailure {
+        let source = ambiguous_compaction_source();
         ContextGuardedTurnPassError::Compaction {
             turn: turn(),
-            failure_class: AutomaticContextCompactionError::Repository(
-                ContextCompactionRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
-            )
-            .operator_failure_class(),
+            failure_class: source.operator_failure_class(),
+            cause_code: source.operator_failure_cause_code(),
         }
     }
 
@@ -542,8 +550,13 @@ mod tests {
     fn s03_inv034_ambiguous_compaction_preparation_reports_post_activation_failure() {
         let (execution, signal) = supervised();
 
-        report_guarded_ambiguity(&execution, &ambiguous_compaction());
+        let error = ambiguous_compaction();
+        report_guarded_ambiguity(&execution, &error);
 
+        assert_eq!(
+            error.operator_failure_cause_code(),
+            ambiguous_compaction_source().operator_failure_cause_code()
+        );
         assert!(signal.is_triggered());
     }
 
