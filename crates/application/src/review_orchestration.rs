@@ -206,6 +206,23 @@ pub enum ReviewOrchestrationAttemptError {
     },
 }
 
+impl Display for ReviewOrchestrationAttemptError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyConcernInventory => {
+                formatter.write_str("review orchestration attempt requires at least one concern")
+            }
+            Self::RepeatedConcern { concern } => write!(
+                formatter,
+                "review orchestration attempt repeats concern `{}`",
+                concern.as_str(),
+            ),
+        }
+    }
+}
+
+impl Error for ReviewOrchestrationAttemptError {}
+
 /// Stable result of attempting to bind immutable durable orchestration data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReviewDurableSealOutcome {
@@ -267,6 +284,19 @@ pub enum ReviewImportEvidenceFailure {
     /// Pass and run are not a canonical succeeded import pair.
     IncompatiblePass,
 }
+
+impl Display for ReviewImportEvidenceFailure {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ForeignTarget => "review import target differs from the attempt",
+            Self::ForeignPolicy => "review import policy differs from the attempt",
+            Self::ForeignTemplate => "review import template differs from the attempt",
+            Self::IncompatiblePass => "review import pass and run evidence are incompatible",
+        })
+    }
+}
+
+impl Error for ReviewImportEvidenceFailure {}
 
 fn validate_import(
     attempt: &ReviewOrchestrationAttempt,
@@ -582,6 +612,66 @@ pub enum ReviewFanoutBarrierFailure {
     },
 }
 
+impl Display for ReviewFanoutBarrierFailure {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingConcern { concern } => write!(
+                formatter,
+                "review fan-out is missing concern `{}`",
+                concern.as_str(),
+            ),
+            Self::ExtraConcern { concern } => write!(
+                formatter,
+                "review fan-out contains unconfigured concern `{}`",
+                concern.as_str(),
+            ),
+            Self::RepeatedConcern { concern } => write!(
+                formatter,
+                "review fan-out repeats concern `{}`",
+                concern.as_str(),
+            ),
+            Self::TemplateMismatch { concern } => write!(
+                formatter,
+                "review fan-out concern `{}` has a different template",
+                concern.as_str(),
+            ),
+            Self::MemberIncomplete { concern } => write!(
+                formatter,
+                "review fan-out concern `{}` is incomplete",
+                concern.as_str(),
+            ),
+            Self::ForeignProducerTarget { concern } => write!(
+                formatter,
+                "review fan-out concern `{}` has a foreign producer target",
+                concern.as_str(),
+            ),
+            Self::ForeignProducerPolicy { concern } => write!(
+                formatter,
+                "review fan-out concern `{}` has a foreign producer policy",
+                concern.as_str(),
+            ),
+            Self::ForeignProducerTemplate { concern } => write!(
+                formatter,
+                "review fan-out concern `{}` has foreign producer-template evidence",
+                concern.as_str(),
+            ),
+            Self::InvalidSealedFinding { concern, finding } => write!(
+                formatter,
+                "review fan-out concern `{}` has invalid sealed finding {}",
+                concern.as_str(),
+                finding.finding().as_uuid(),
+            ),
+            Self::RepeatedFinding { finding } => write!(
+                formatter,
+                "review fan-out repeats finding {}",
+                finding.finding().as_uuid(),
+            ),
+        }
+    }
+}
+
+impl Error for ReviewFanoutBarrierFailure {}
+
 fn complete_fanout(
     attempt: &ReviewOrchestrationAttempt,
     claims: Vec<ReviewConcernClaim>,
@@ -820,6 +910,49 @@ pub enum ReviewJudgmentPlanFailure {
     ReferencedFindingTerminalBeforeAdmission { finding: ReviewFindingRef },
 }
 
+impl Display for ReviewJudgmentPlanFailure {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ForeignAnalysisTarget => {
+                formatter.write_str("review judgment analysis target differs from the attempt")
+            }
+            Self::ForeignAnalysisPolicy => {
+                formatter.write_str("review judgment analysis policy differs from the attempt")
+            }
+            Self::ForeignAnalysisTemplate => {
+                formatter.write_str("review judgment analysis template differs from the attempt")
+            }
+            Self::IncompatibleAnalysisPass => formatter
+                .write_str("review judgment analysis pass and run evidence are incompatible"),
+            Self::InexactFindingInventory => {
+                formatter.write_str("review judgment plan does not exactly cover the finding set")
+            }
+            Self::AcceptedBelowThreshold { finding } => write!(
+                formatter,
+                "review judgment accepts below-threshold finding {}",
+                finding.finding().as_uuid(),
+            ),
+            Self::InvalidReferencedFinding { finding } => write!(
+                formatter,
+                "review judgment has invalid reference for finding {}",
+                finding.finding().as_uuid(),
+            ),
+            Self::ReferenceCycle { finding } => write!(
+                formatter,
+                "review judgment closes a reference cycle at finding {}",
+                finding.finding().as_uuid(),
+            ),
+            Self::ReferencedFindingTerminalBeforeAdmission { finding } => write!(
+                formatter,
+                "review judgment terminalizes referenced finding {} before admission",
+                finding.finding().as_uuid(),
+            ),
+        }
+    }
+}
+
+impl Error for ReviewJudgmentPlanFailure {}
+
 fn validate_plan(
     fanout: &CompleteReviewFanout,
     plan: &ReviewJudgmentPlan,
@@ -1057,6 +1190,21 @@ pub enum ReviewJudgmentEffectEvidenceFailure {
     /// The run does not canonically conclude with the event pass.
     IncompatibleRun,
 }
+
+impl Display for ReviewJudgmentEffectEvidenceFailure {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ForeignTarget => "review judgment effect has a foreign target",
+            Self::ForeignPolicy => "review judgment effect has a foreign policy",
+            Self::ForeignTemplate => "review judgment effect has a foreign template",
+            Self::IncompatibleEvent => "review judgment effect event differs from its plan",
+            Self::IncompatiblePass => "review judgment effect pass is incompatible",
+            Self::IncompatibleRun => "review judgment effect run is incompatible",
+        })
+    }
+}
+
+impl Error for ReviewJudgmentEffectEvidenceFailure {}
 
 fn validate_judgment_effect(
     attempt: &ReviewOrchestrationAttempt,
@@ -1419,6 +1567,34 @@ pub enum ReviewTerminalBarrierFailure {
     IncompatiblePublicationAttachment,
 }
 
+impl Display for ReviewTerminalBarrierFailure {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InexactFindingInventory => {
+                "review terminal outcomes do not exactly cover their finding inventory"
+            }
+            Self::ForeignRepairTarget => "review repair evidence has a foreign target",
+            Self::ForeignRepairPolicy => "review repair evidence has a foreign policy",
+            Self::ForeignRepairTemplate => "review repair evidence has a foreign template",
+            Self::IncompatibleRepairPass => "review repair pass evidence is incompatible",
+            Self::IncompatibleRepairRun => "review repair run evidence is incompatible",
+            Self::IncompatibleRepairEvent => "review repair event evidence is incompatible",
+            Self::ForeignPublicationTarget => "review publication evidence has a foreign target",
+            Self::ForeignPublicationPolicy => "review publication evidence has a foreign policy",
+            Self::ForeignPublicationTemplate => {
+                "review publication evidence has a foreign template"
+            }
+            Self::IncompatiblePublicationPass => "review publication pass evidence is incompatible",
+            Self::IncompatiblePublicationRun => "review publication run evidence is incompatible",
+            Self::IncompatiblePublicationAttachment => {
+                "review publication attachment evidence is incompatible"
+            }
+        })
+    }
+}
+
+impl Error for ReviewTerminalBarrierFailure {}
+
 fn accepted_findings(plan: &ReviewJudgmentPlan) -> Vec<ReviewFindingRef> {
     plan.members
         .iter()
@@ -1729,17 +1905,30 @@ pub enum ReviewOrchestrationServiceError<StoreError, RunnerError> {
 
 impl<StoreError, RunnerError> Display for ReviewOrchestrationServiceError<StoreError, RunnerError> {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Store(_) => "review orchestration store failed",
-            Self::InvalidImportEvidence(_) => "review import evidence is invalid",
-            Self::Runner(_) => "review orchestration pass runner failed",
-            Self::ConcernTaskTerminated => "review concern task terminated",
-            Self::DurableConflict => "review orchestration durable seal conflicts",
-            Self::InvalidJudgmentPlan(_) => "review judgment plan is invalid",
-            Self::InvalidJudgmentEffectEvidence(_) => "review judgment effect evidence is invalid",
-            Self::InvalidAppliedEffects => "review applied-effect inventory is invalid",
-            Self::InvalidTerminalBarrier(_) => "review terminal barrier is invalid",
-        })
+        match self {
+            Self::Store(_) => formatter.write_str("review orchestration store failed"),
+            Self::InvalidImportEvidence(error) => {
+                write!(formatter, "review import evidence is invalid: {error}")
+            }
+            Self::Runner(_) => formatter.write_str("review orchestration pass runner failed"),
+            Self::ConcernTaskTerminated => formatter.write_str("review concern task terminated"),
+            Self::DurableConflict => {
+                formatter.write_str("review orchestration durable seal conflicts")
+            }
+            Self::InvalidJudgmentPlan(error) => {
+                write!(formatter, "review judgment plan is invalid: {error}")
+            }
+            Self::InvalidJudgmentEffectEvidence(error) => write!(
+                formatter,
+                "review judgment effect evidence is invalid: {error}",
+            ),
+            Self::InvalidAppliedEffects => {
+                formatter.write_str("review applied-effect inventory is invalid")
+            }
+            Self::InvalidTerminalBarrier(error) => {
+                write!(formatter, "review terminal barrier is invalid: {error}")
+            }
+        }
     }
 }
 
@@ -1751,14 +1940,14 @@ where
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
+            Self::InvalidImportEvidence(error) => Some(error),
             Self::Runner(error) => Some(error),
-            Self::InvalidImportEvidence(_)
-            | Self::ConcernTaskTerminated
-            | Self::DurableConflict
-            | Self::InvalidJudgmentPlan(_)
-            | Self::InvalidJudgmentEffectEvidence(_)
-            | Self::InvalidAppliedEffects
-            | Self::InvalidTerminalBarrier(_) => None,
+            Self::InvalidJudgmentPlan(error) => Some(error),
+            Self::InvalidJudgmentEffectEvidence(error) => Some(error),
+            Self::InvalidTerminalBarrier(error) => Some(error),
+            Self::ConcernTaskTerminated | Self::DurableConflict | Self::InvalidAppliedEffects => {
+                None
+            }
         }
     }
 }
@@ -3215,6 +3404,45 @@ mod tests {
             .expect_err("effect pass cannot authenticate complete-set analysis");
 
         assert_eq!(error, ReviewJudgmentPlanFailure::IncompatibleAnalysisPass);
+    }
+
+    #[test]
+    fn attempt_error_is_standard_and_retains_the_repeated_concern() {
+        let error = ReviewOrchestrationAttemptError::RepeatedConcern {
+            concern: ReviewKey::try_new(String::from("defects"))
+                .expect("fixture concern key is valid"),
+        };
+
+        let display = error.to_string();
+        let source = Error::source(&error);
+
+        assert_eq!(
+            display,
+            "review orchestration attempt repeats concern `defects`",
+        );
+        assert!(source.is_none());
+    }
+
+    #[test]
+    fn service_error_preserves_closed_evidence_failure() {
+        let error: ReviewOrchestrationServiceError<std::io::Error, std::io::Error> =
+            ReviewOrchestrationServiceError::InvalidImportEvidence(
+                ReviewImportEvidenceFailure::ForeignTemplate,
+            );
+
+        let display = error.to_string();
+        let source = Error::source(&error).map(ToString::to_string);
+
+        assert_eq!(
+            display,
+            "review import evidence is invalid: review import template differs from the attempt",
+        );
+        assert_eq!(
+            source,
+            Some(String::from(
+                "review import template differs from the attempt",
+            )),
+        );
     }
 
     #[test]

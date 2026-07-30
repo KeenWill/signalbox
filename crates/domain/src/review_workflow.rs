@@ -3575,8 +3575,8 @@ pub fn validate_complete_review_finding_reference_graph(
             ));
         }
         let referenced = finding.events.iter().find_map(|event| match &event.kind {
-            ReviewFindingEventKind::Duplicate { canonical } => Some(canonical.reference()),
-            ReviewFindingEventKind::Superseded { successor } => Some(successor.reference()),
+            ReviewFindingEventKind::Duplicate { canonical } => Some(*canonical),
+            ReviewFindingEventKind::Superseded { successor } => Some(*successor),
             ReviewFindingEventKind::Accepted
             | ReviewFindingEventKind::Rejected { .. }
             | ReviewFindingEventKind::Stale
@@ -3584,20 +3584,34 @@ pub fn validate_complete_review_finding_reference_graph(
             | ReviewFindingEventKind::Fixed
             | ReviewFindingEventKind::BlockedWithReason { .. } => None,
         });
-        if references.insert(reference, referenced).is_some() {
+        let producer_policy = finding.proposal.producing_pass.policy();
+        if references
+            .insert(reference, (producer_policy, referenced))
+            .is_some()
+        {
             return Err(Box::new(
                 ReviewFindingReferenceGraphError::DuplicateFinding { reference },
             ));
         }
     }
-    for (&finding, referenced) in &references {
-        if let Some(referenced) = referenced
-            && !references.contains_key(referenced)
-        {
+    for (&finding, (_, referenced)) in &references {
+        let Some(referenced) = referenced else {
+            continue;
+        };
+        let referenced_identity = referenced.reference();
+        let Some((referenced_root_policy, _)) = references.get(&referenced_identity) else {
             return Err(Box::new(
                 ReviewFindingReferenceGraphError::MissingReferencedFinding {
                     finding,
-                    referenced: *referenced,
+                    referenced: referenced_identity,
+                },
+            ));
+        };
+        if referenced.producer_policy() != *referenced_root_policy {
+            return Err(Box::new(
+                ReviewFindingReferenceGraphError::ReferencedFindingPolicyMismatch {
+                    finding,
+                    referenced: referenced_identity,
                 },
             ));
         }
@@ -3609,16 +3623,17 @@ pub fn validate_complete_review_finding_reference_graph(
         let mut current = root;
         while !completed.contains(&current) {
             path.insert(current);
-            let Some(Some(referenced)) = references.get(&current) else {
+            let Some((_, Some(referenced))) = references.get(&current) else {
                 break;
             };
-            if path.contains(referenced) {
+            let referenced = referenced.reference();
+            if path.contains(&referenced) {
                 return Err(Box::new(ReviewFindingReferenceGraphError::Cycle {
                     finding: current,
-                    referenced: *referenced,
+                    referenced,
                 }));
             }
-            current = *referenced;
+            current = referenced;
         }
         completed.extend(path);
     }
@@ -3645,6 +3660,13 @@ pub enum ReviewFindingReferenceGraphError {
         /// Finding that owns the corrupt edge.
         finding: ReviewFindingRef,
         /// Referenced finding absent from the graph.
+        referenced: ReviewFindingRef,
+    },
+    /// A reference edge freezes a policy different from its supplied root.
+    ReferencedFindingPolicyMismatch {
+        /// Finding that owns the corrupt edge.
+        finding: ReviewFindingRef,
+        /// Referenced root whose producer policy contradicts the edge.
         referenced: ReviewFindingRef,
     },
     /// One edge closes a direct or transitive reference cycle.
@@ -10279,6 +10301,45 @@ mod tests {
         assert_eq!(
             error.failure(),
             ReviewFindingTransitionFailure::ReferencedFindingPolicyMismatch,
+        );
+    }
+
+    /// INV-040: complete-graph reconstitution rejects an edge whose frozen
+    /// policy contradicts the independently supplied referenced root.
+    #[test]
+    fn inv040_reconstituted_reference_graph_rejects_root_policy_mismatch() {
+        let target = target_id(CANONICAL_TARGET_SEED);
+        let subject_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
+        let canonical_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
+        let subject = open_finding_with_producer(subject_reference, ReviewPolicy::version_one());
+        let canonical = open_finding_with_producer(canonical_reference, unsupported_policy());
+        let forged_edge = ReviewReferencedFindingEvidence {
+            reference: canonical_reference,
+            status: ReviewFindingStatus::Open,
+            producer_policy: ReviewPolicy::version_one(),
+        };
+        let subject = ReviewFinding::try_reconstitute(
+            subject.proposal().clone(),
+            vec![finding_event(
+                subject_reference,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(ARBITRARY_DEDUPE_PASS_SEED, ReviewPassKind::Dedupe),
+                ReviewFindingEventKind::Duplicate {
+                    canonical: forged_edge,
+                },
+            )],
+        )
+        .expect("forged edge is locally consistent with the subject policy");
+
+        let error = validate_complete_review_finding_reference_graph(&[subject, canonical])
+            .expect_err("edge policy must authenticate against the supplied root producer");
+
+        assert_eq!(
+            *error,
+            ReviewFindingReferenceGraphError::ReferencedFindingPolicyMismatch {
+                finding: subject_reference,
+                referenced: canonical_reference,
+            },
         );
     }
 

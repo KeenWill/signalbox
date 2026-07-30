@@ -7251,6 +7251,10 @@ pub enum ReviewFindingReferenceGraphError {
         finding: ReviewFindingRef,
         referenced: ReviewFindingRef,
     },
+    ReferencedFindingPolicyMismatch {
+        finding: ReviewFindingRef,
+        referenced: ReviewFindingRef,
+    },
     Cycle {
         finding: ReviewFindingRef,
         referenced: ReviewFindingRef,
@@ -7455,10 +7459,10 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: review_workflow                            | 84                   |
+| domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 53                   |
-| **signalbox-domain total**                         | **540 (+1 free fn)** |
+| **signalbox-domain total**                         | **539 (+2 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

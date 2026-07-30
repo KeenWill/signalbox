@@ -557,10 +557,11 @@ status cannot be newly named as the referenced root.
 
 Self-reference, repeated reference, and direct or transitive cycles fail closed.
 Complete-graph domain reconstitution checks every referenced root and edge,
-while relational composite references and event guards authenticate each
-independent identity. Missing or mismatched target/run/pass/finding evidence, an
-unsealed or nonmember producer inventory, a policy mismatch, or a graph cycle is
-corruption rather than a best-effort match.
+including the edge's frozen producer policy against the supplied root's actual
+producer policy, while relational composite references and event guards
+authenticate each independent identity. Missing or mismatched
+target/run/pass/finding evidence, an unsealed or nonmember producer inventory, a
+policy mismatch, or a graph cycle is corruption rather than a best-effort match.
 
 This targeted relaxation preserves one pass per run and the original evidence
 chain. Allowing multiple passes per run would overturn the run lifecycle,
