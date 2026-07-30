@@ -2,7 +2,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use crate::evidence::TerminalReport;
 use crate::observation::ObservationSink;
@@ -78,6 +78,31 @@ impl CancellationSignal {
     pub fn already_cancelled() -> Self {
         Self(Box::pin(std::future::ready(())))
     }
+
+    /// Checks whether cancellation is already observable without blocking.
+    pub fn is_cancelled(&mut self) -> bool {
+        let mut context = Context::from_waker(Waker::noop());
+        Pin::new(self).poll(&mut context).is_ready()
+    }
+
+    /// Runs `work` until it completes or cancellation becomes observable.
+    ///
+    /// Work is polled first, so already-available provider evidence wins a
+    /// same-poll race instead of being discarded as ambiguous cancellation.
+    pub async fn run_until_cancelled<F: Future>(&mut self, work: F) -> Option<F::Output> {
+        let mut work = std::pin::pin!(work);
+        std::future::poll_fn(|context| {
+            if let Poll::Ready(output) = work.as_mut().poll(context) {
+                return Poll::Ready(Some(output));
+            }
+            if Pin::new(&mut *self).poll(context).is_ready() {
+                Poll::Ready(None)
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
 }
 
 impl Future for CancellationSignal {
@@ -91,5 +116,38 @@ impl Future for CancellationSignal {
 impl std::fmt::Debug for CancellationSignal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("CancellationSignal")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    use super::CancellationSignal;
+
+    #[test]
+    fn cancellation_status_is_checked_without_blocking() {
+        assert!(CancellationSignal::already_cancelled().is_cancelled());
+        assert!(!CancellationSignal::never().is_cancelled());
+    }
+
+    #[test]
+    fn ready_work_wins_a_same_poll_cancellation_race() {
+        let mut cancellation = CancellationSignal::already_cancelled();
+        let mut future = std::pin::pin!(cancellation.run_until_cancelled(std::future::ready(7)));
+        let mut context = Context::from_waker(Waker::noop());
+
+        assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(Some(7)));
+    }
+
+    #[test]
+    fn cancellation_wins_while_work_remains_pending() {
+        let mut cancellation = CancellationSignal::already_cancelled();
+        let mut future =
+            std::pin::pin!(cancellation.run_until_cancelled(std::future::pending::<()>()));
+        let mut context = Context::from_waker(Waker::noop());
+
+        assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(None));
     }
 }

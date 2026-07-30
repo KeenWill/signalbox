@@ -10,10 +10,13 @@ adapter implementation was verified through PR #320
 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
 escalation closeout is PR #317 (`agent/escalation-closeout`). The Codex CLI
 compatibility-smoke automation was verified through PR #333
-(`agent/ci-tells-truth`). The `signalboxd` names this page states for the
-composition root, its telemetry, and the production `FileCredentialAccess` were
-verified through PR #258 (`agent/signalboxd-rename`); the Anthropic adapter's
-server-side `fallback`-block recognition was verified through PR #280
+(`agent/ci-tells-truth`); its feature classification, ambient-skill catalog
+probe, and pinned version were verified against the `0.146.0` executable through
+PR #321 (`renovate/openai-codex-0.x`). The `signalboxd` names this page states
+for the composition root, its telemetry, and the production
+`FileCredentialAccess` were verified through PR #258
+(`agent/signalboxd-rename`); the Anthropic adapter's server-side
+`fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The HTTP fallback-body redaction
 ordering was verified through PR #330 (`agent/audit-verified-fixes`). The five
 persistence-repository families in the operator-failure inventory were verified
@@ -424,7 +427,7 @@ fabricated.
 ## Codex CLI provider adapter
 
 `signalbox-model-runtime-codex-cli` wraps the locally installed Codex CLI event
-protocol captured by the offline fixture corpus at version `0.145.0`; its
+protocol captured by the offline fixture corpus at version `0.146.0`; its
 exported version constant is the contract a later composition must pin before
 wiring the adapter. The model dispatch itself performs no separate version
 probe. Preparation validates and renders the complete operation, writes the
@@ -437,18 +440,19 @@ Unix, passes the full rendered frontier on stdin, requires absolute configured
 executable and working-root paths, selects the exact resolved model, ignores
 user configuration and rule files, and explicitly disables every feature in the
 pinned CLI inventory that can add a model-visible tool, external interaction,
-instruction source, or delegated execution surface outside the declared tools.
-It independently disables configured agents, ambient skill-instruction
-injection, MCP servers, and web search, sets the project-instruction byte budget
-to zero, and uses the read-only CLI sandbox; prompt text is never a capability
-boundary. Strict configuration turns an unavailable control into a closed
-failure instead of silently relaxing this invocation boundary. Before spawn it
-clears the parent environment, then copies only its explicit home/Codex-home,
-executable and temporary path, XDG, locale/terminal, certificate, and proxy
-allowlist; unrelated service variables do not reach the CLI. A proxy variable
-whose URL authority embeds userinfo (`scheme://user:secret@host`) is refused
-before `SendCommenced` as `ProvenUnsent(ConnectFailed)` naming only the variable
-— the CLI could reflect its proxy configuration in output the adapter can only
+instruction source, or delegated execution surface outside the declared tools,
+or that can replace the pinned executable the version contract names. It
+independently disables configured agents, ambient skill-instruction injection,
+MCP servers, and web search, sets the project-instruction byte budget to zero,
+and uses the read-only CLI sandbox; prompt text is never a capability boundary.
+Strict configuration turns an unavailable control into a closed failure instead
+of silently relaxing this invocation boundary. Before spawn it clears the parent
+environment, then copies only its explicit home/Codex-home, executable and
+temporary path, XDG, locale/terminal, certificate, and proxy allowlist;
+unrelated service variables do not reach the CLI. A proxy variable whose URL
+authority embeds userinfo (`scheme://user:secret@host`) is refused before
+`SendCommenced` as `ProvenUnsent(ConnectFailed)` naming only the variable — the
+CLI could reflect its proxy configuration in output the adapter can only
 shape-redact, so an inherited proxy credential never reaches the child; a proxy
 value that is not UTF-8 cannot be verified credential-free and is refused the
 same way. A `HOME` or `CODEX_HOME` the parent cannot resolve to an absolute
@@ -590,10 +594,9 @@ than exactly three numeric components. The live smoke verifies that the
 installed executable reports the derived version.
 
 This mechanical binding deliberately removes the old human-attestation tripwire.
-One live exchange proves that the installed CLI still works through the adapter;
-it does not prove that the recorded offline fixture corpus still represents
-every current CLI event shape. A fixture-regeneration or fixture-validation step
-against the installed CLI is required to close that residual gap.
+One live exchange proves that the installed CLI still works through the adapter,
+but does not prove that the recorded offline fixture corpus still represents
+every current CLI event shape.
 
 The compatibility smoke is the second gate: one exchange against the cheapest
 model the smoke credential can address, run through this adapter with the real
@@ -624,18 +627,21 @@ job then checks the complete pull request file list: no pin change is an
 immediate success; for a pin change it compares
 `github.event.pull_request.head.repo.full_name` with `github.repository`, fails
 a mismatch with a manual-dispatch instruction, and admits the live job only for
-a same-repository head. A final always-running job folds the eligibility and
+a same-repository head. The credentialed job condition independently repeats
+that comparison. A final always-running job folds the eligibility and
 conditional live results into the required check, so a skipped or failed
-required smoke cannot appear green. Manual dispatch remains available, and a
-path-filtered push to `main` reruns the smoke after merge.
+required smoke cannot appear green; for a pull request that requires the smoke,
+the aggregate also repeats the same-repository comparison. Manual dispatch
+remains available, and a path-filtered push to `main` reruns the smoke after
+merge.
 
 The `codex-smoke` environment is configured for all branches because GitHub
 evaluates an environment used by `pull_request` against `GITHUB_REF`, which is
 the synthetic merge ref rather than the head branch. That setting admits fork
 and same-repository merge refs alike and supplies no security boundary. Forks
-are excluded, in order, by GitHub's independent secret withholding and the
-explicit repository-name comparison above. The model dispatch still performs no
-version probe: this check lives in the smoke, never in the hot path.
+are excluded, in order, by GitHub secret withholding and the three explicit
+repository-name comparisons above. The model dispatch still performs no version
+probe: this check lives in the smoke, never in the hot path.
 
 The smoke authenticates the CLI through its own non-interactive API-key login,
 piped from an environment-scoped secret into the CLI's credential store, which
@@ -884,3 +890,6 @@ failures after staleness handling.
   contract only; no manifest allowlist check enforces it.
 - [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
   owns controlled provider-proxy and private-root support.
+- [Codex CLI fixture validation](../open-questions.md#codex-cli-fixture-validation)
+  owns how a pin bump will prove that the recorded offline event-shape fixtures
+  still represent the installed CLI.
