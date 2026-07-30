@@ -6,27 +6,31 @@
 # CLI provider adapter section of docs/spec/runtime-substrate.md.
 #
 # Security shape. There is deliberately no `pull_request` trigger: a fork pull
-# request must never be able to reach the credential, and no path in this file
-# runs fork-authored code. The two triggers are `workflow_dispatch`, which
-# GitHub restricts to accounts with write access, and `push` to `main` limited
-# to the pin manifest and lockfile. The credential lives only in the
-# `codex-smoke` environment below, so it is unavailable to any other workflow
-# and to any run this environment's protection rules have not admitted; it is
+# request must never be able to reach the credential, and no run checks out a
+# fork ref. `workflow_dispatch` is restricted to accounts with write access.
+# The `push` trigger accepts `main` and the in-repository versioned Renovate
+# branch pattern for this dependency: a fork cannot create a push event on
+# either base-repository ref, even if it gives its own branch the same name.
+# The path filter admits the pin files, the constant the mechanical sync script
+# moves, and the live-smoke compatibility fixture. The credential remains bound
+# to the `codex-smoke` environment, so it is unavailable to any other workflow
+# and to any run the environment's protection rules have not admitted; it is
 # read once, from `secrets.*`, into the single step that pipes it to the CLI's
 # own login command, and it is never echoed, written to the log, or passed to
 # the Rust process.
 #
-# Verifying a bump before it lands: dispatch this workflow against the Renovate
-# branch (`gh workflow run codex-smoke.yml --ref <renovate-branch>`). Renovate
-# branches live in this repository, not in a fork, so a dispatch reaches them
-# while the fork exclusion above still holds.
+# A Renovate pin bump runs this workflow automatically. If the ordinary Rust
+# workflow reports the deliberate pin drift tripwire, run the sync command in
+# that assertion and push the result; the constant path retriggers this smoke.
 name: Codex CLI smoke
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, "renovate/openai-codex-*.x"]
     paths:
+      - "crates/model-runtime-codex-cli/src/runtime.rs"
+      - "crates/model-runtime-codex-cli/tests/live_smoke.rs"
       - "tooling/codex-cli/package.json"
       - "tooling/codex-cli/package-lock.json"
 
@@ -75,7 +79,7 @@ jobs:
       # CODEX_HOME. The run step below is then fresh and does not recompile.
       - name: Build the smoke test binary
         run: >-
-          cargo test -p signalbox-model-runtime-codex-cli
+          cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli
           --test live_smoke --no-run
       # The CLI reads the key from stdin and writes its own credential store
       # under CODEX_HOME. The value is never an argument (process listings),
@@ -116,7 +120,7 @@ jobs:
           # CODEX_SMOKE_MODEL on the codex-smoke environment to override.
           SIGNALBOX_CODEX_SMOKE_MODEL: ${{ vars.CODEX_SMOKE_MODEL }}
         run: >-
-          cargo test -p signalbox-model-runtime-codex-cli
+          cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli
           --test live_smoke --
           --ignored --exact the_pinned_codex_cli_completes_one_exchange
       - name: Remove the credential store

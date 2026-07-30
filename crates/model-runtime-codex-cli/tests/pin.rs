@@ -35,8 +35,10 @@ fn the_pin_manifest_names_the_supported_codex_cli_version() {
     assert_eq!(
         pinned, SUPPORTED_CODEX_CLI_VERSION,
         "{PIN_MANIFEST} pins {PIN_PACKAGE} at {pinned}, but this adapter's \
-         fixtures and smoke cover {SUPPORTED_CODEX_CLI_VERSION}; move the \
-         constant and re-verify the corpus, or revert the pin"
+         fixtures and smoke cover {SUPPORTED_CODEX_CLI_VERSION}; run \
+         `python3 tooling/codex-cli/sync-supported-version.py`, re-verify the \
+         fixture corpus, and push so the gated smoke proves the exact pin, or \
+         revert the pin"
     );
 }
 

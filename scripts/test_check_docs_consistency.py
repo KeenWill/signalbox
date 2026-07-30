@@ -438,6 +438,53 @@ class DocsConsistencyTests(unittest.TestCase):
         self.assertIn("| INV-001", rendered)
         self.assertNotIn("| INV-002", rendered)
 
+    def test_ci_ignored_test_skips_exclude_only_named_enforcement(self) -> None:
+        selected_invariant = "INV-001"
+        skipped_invariant = "INV-002"
+        also_skipped_invariant = "INV-003"
+        selected_test = selected_invariant.lower().replace("-", "_")
+        skipped_test = skipped_invariant.lower().replace("-", "_")
+        also_skipped_test = also_skipped_invariant.lower().replace("-", "_")
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        selected = self.root / "tests/selected.rs"
+        selected.parent.mkdir()
+        selected.write_text(
+            "#[test]\n"
+            "#[ignore]\n"
+            f"fn {selected_test}_selected_by_ci() {{}}\n"
+            "#[test]\n"
+            "#[ignore]\n"
+            f"fn {skipped_test}_skipped_by_ci() {{}}\n"
+            "#[test]\n"
+            "#[ignore]\n"
+            f"fn {also_skipped_test}_also_skipped_by_ci() {{}}\n",
+            encoding="utf-8",
+        )
+        workflow = self.root / ".github/workflows/rust.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text(
+            "jobs:\n"
+            "  integration:\n"
+            "    strategy:\n"
+            "      matrix:\n"
+            "        include:\n"
+            "          - suite: fixture\n"
+            "            command: >-\n"
+            "              cargo test --no-fail-fast -p fixture --test selected\n"
+            f"              -- --ignored --skip {skipped_test} --skip={also_skipped_test}\n",
+            encoding="utf-8",
+        )
+
+        rendered = render_invariant_index(self.root)
+
+        self.assertIn(f"| {selected_invariant}", rendered)
+        self.assertNotIn(f"| {skipped_invariant}", rendered)
+        self.assertNotIn(f"| {also_skipped_invariant}", rendered)
+
     def test_windows_only_test_does_not_register_invariant_enforcement(self) -> None:
         disabled = self.root / "src/windows.rs"
         disabled.write_text(

@@ -457,7 +457,7 @@ class RustSource:
     invocations: dict[str, list[int]]
     aliases: list[ScopedTestAlias]
     module_prefixes: tuple[tuple[str, ...], ...]
-    ignored_test_filters: tuple[str, ...] | None
+    ignored_test_selections: tuple[IgnoredTestSelection, ...]
 
 
 @dataclass(frozen=True)
@@ -2267,7 +2267,7 @@ def rust_test_invariant_tags(
     text: str,
     module_prefixes: tuple[tuple[str, ...], ...] = ((),),
     aliases: list[ScopedTestAlias] | None = None,
-    ignored_test_filters: tuple[str, ...] | None = (),
+    ignored_test_selections: tuple[IgnoredTestSelection, ...] = (),
 ) -> list[tuple[str, int]]:
     """Return declaration-local INV tags and lines from Rust tests.
 
@@ -2294,22 +2294,31 @@ def rust_test_invariant_tags(
         if rust_item_is_disabled_in_ci(attributes):
             continue
         ignored = rust_item_may_be_ignored(attributes)
-        if ignored and ignored_test_filters == ():
+        if ignored and not ignored_test_selections:
             continue
         enclosing = rust_enclosing_modules(module_spans, declaration.start())
         if any(module.ci_disabled for module in enclosing):
             continue
-        if ignored and ignored_test_filters is not None:
+        if ignored:
             local_name = tuple(
                 [*(module.name for module in enclosing), declaration.group("name")]
             )
-            registered_names = (
+            registered_names = tuple(
                 "::".join((*prefix, *local_name)) for prefix in module_prefixes
             )
             if not any(
-                test_filter in registered_name
+                (
+                    not selection.filters
+                    or any(
+                        test_filter in registered_name
+                        for test_filter in selection.filters
+                    )
+                )
+                for selection in ignored_test_selections
                 for registered_name in registered_names
-                for test_filter in ignored_test_filters
+                if not any(
+                    skipped in registered_name for skipped in selection.skips
+                )
             ):
                 continue
         doc_comments = "\n".join(rust_doc_comments(raw_prefix))
@@ -2481,13 +2490,21 @@ def rust_module_graph(
 
 
 @dataclass(frozen=True)
+class IgnoredTestSelection:
+    """One libtest name selection, including explicit exclusions."""
+
+    filters: tuple[str, ...]
+    skips: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class IgnoredTestRun:
     """One Cargo invocation that executes ignored tests in authoritative CI."""
 
     package: str
     all_tests: bool
     target: str | None
-    filters: tuple[str, ...]
+    selection: IgnoredTestSelection
 
 
 def folded_workflow_commands(root: Path) -> list[str]:
@@ -2539,6 +2556,7 @@ def cargo_argument_filters(arguments: list[str]) -> tuple[str, ...]:
         "--message-format",
         "--package",
         "--profile",
+        "--skip",
         "--target",
         "--target-dir",
         "--test",
@@ -2559,6 +2577,17 @@ def cargo_argument_filters(arguments: list[str]) -> tuple[str, ...]:
         filters.append(argument)
         index += 1
     return tuple(filters)
+
+
+def cargo_argument_skips(arguments: list[str]) -> tuple[str, ...]:
+    """Return values named by libtest's repeatable `--skip` option."""
+    skips: list[str] = []
+    for index, argument in enumerate(arguments):
+        if argument == "--skip" and index + 1 < len(arguments):
+            skips.append(arguments[index + 1])
+        elif argument.startswith("--skip="):
+            skips.append(argument.removeprefix("--skip="))
+    return tuple(skips)
 
 
 def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
@@ -2586,12 +2615,17 @@ def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
             continue
         cargo_filters = cargo_argument_filters(cargo_arguments)
         harness_filters = cargo_argument_filters(harness_arguments)
+        cargo_skips = cargo_argument_skips(cargo_arguments)
+        harness_skips = cargo_argument_skips(harness_arguments)
         runs.append(
             IgnoredTestRun(
                 package=package,
                 all_tests="--tests" in cargo_arguments,
                 target=target,
-                filters=tuple(sorted(set((*cargo_filters, *harness_filters)))),
+                selection=IgnoredTestSelection(
+                    filters=tuple(sorted(set((*cargo_filters, *harness_filters)))),
+                    skips=tuple(sorted(set((*cargo_skips, *harness_skips)))),
+                ),
             )
         )
     return runs
@@ -2651,10 +2685,12 @@ def cargo_test_roots(package: Path) -> list[Path]:
     return roots
 
 
-def ignored_test_filters_by_target(root: Path) -> dict[Path, tuple[str, ...] | None]:
-    """Map Cargo target roots to the ignored tests authoritative CI executes."""
+def ignored_test_selections_by_target(
+    root: Path,
+) -> dict[Path, tuple[IgnoredTestSelection, ...]]:
+    """Map Cargo target roots to the ignored-test runs authoritative CI executes."""
     packages = cargo_package_directories(root)
-    selected: dict[Path, tuple[str, ...] | None] = {}
+    selected: dict[Path, set[IgnoredTestSelection]] = {}
     for run in workflow_ignored_test_runs(root):
         package = packages.get(run.package)
         if package is None:
@@ -2666,15 +2702,17 @@ def ignored_test_filters_by_target(root: Path) -> dict[Path, tuple[str, ...] | N
             targets = [] if target is None else [target]
         else:
             targets = []
-        filters = None if not run.filters else run.filters
         for target in targets:
-            if target not in selected or filters is None:
-                selected[target] = filters
-                continue
-            current = selected[target]
-            if current is not None:
-                selected[target] = tuple(sorted(set((*current, *filters))))
-    return selected
+            selected.setdefault(target, set()).add(run.selection)
+    return {
+        target: tuple(
+            sorted(
+                selections,
+                key=lambda selection: (selection.filters, selection.skips),
+            )
+        )
+        for target, selections in selected.items()
+    }
 
 
 CARGO_TARGET_TABLES = ("bin", "test", "bench", "example")
@@ -2755,12 +2793,12 @@ def rust_sources(root: Path) -> list[RustSource]:
                 invocations=invocations,
                 aliases=[],
                 module_prefixes=((),),
-                ignored_test_filters=(),
+                ignored_test_selections=(),
             )
         )
     target_roots = frozenset(cargo_target_roots(root))
     prefixes, roots = rust_module_graph(prepared, target_roots)
-    ignored_by_target = ignored_test_filters_by_target(root)
+    ignored_by_target = ignored_test_selections_by_target(root)
     reachable = set(prefixes)
     prepared = [source for source in prepared if source.path in reachable]
     exported = {
@@ -2775,23 +2813,17 @@ def rust_sources(root: Path) -> list[RustSource]:
         source.aliases = rust_test_attribute_aliases(
             source.code, frozenset(visible)
         )
-        ignored_selections = [
-            ignored_by_target[target]
+        ignored_selections = {
+            selection
             for target in roots.get(source.path, {source.path})
-            if target in ignored_by_target
-        ]
-        if any(selection is None for selection in ignored_selections):
-            source.ignored_test_filters = None
-        else:
-            source.ignored_test_filters = tuple(
-                sorted(
-                    {
-                        test_filter
-                        for selection in ignored_selections
-                        for test_filter in selection or ()
-                    }
-                )
+            for selection in ignored_by_target.get(target, ())
+        }
+        source.ignored_test_selections = tuple(
+            sorted(
+                ignored_selections,
+                key=lambda selection: (selection.filters, selection.skips),
             )
+        )
     return prepared
 
 
@@ -2805,7 +2837,7 @@ def rust_invariant_test_files(
             source.text,
             source.module_prefixes,
             source.aliases,
-            source.ignored_test_filters,
+            source.ignored_test_selections,
         )
         for invariant, line in tags:
             found[(invariant, source.label)] = line
