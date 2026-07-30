@@ -379,17 +379,26 @@ concern specifications. It rejects an empty inventory or a repeated concern key.
 Recording the attempt before any pass starts makes an equal retry resume those
 values and makes a distinct reuse conflict.
 
-Daemon startup loading, concern configuration, prompt-library resolution, and
-template-digest derivation are committed but unimplemented. No present daemon
-surface resolves or supplies those assets. A future daemon configuration must
-name one shared review-header prompt asset, store that header once and each
-concern body once, and construct each exact system prompt as the header bytes,
-two LF bytes, and that concern body bytes, with no trimming or interpolation
-before copying the resolved bundle into the session. The copied session must
-retain the complete assembled prompt as execution evidence; N configuration
-records must not duplicate the header. The derived digest must commit the shared
-header and concern-body digests, concern key, source template version, model
-selection, and approval blanket.
+The daemon's optional closed version-one review library resolves at startup. It
+stores one shared header, one body for each of the four non-concern stages, and
+one body for each concern in the exact ordered initial set: correctness,
+interface and type design, test quality, security, and documentation-versus-code
+drift. It generates nine reserved ordinary session templates. Every generated
+system prompt is the exact header bytes, two LF bytes, and its stage or concern
+body bytes, without trimming or interpolation, and the complete assembled bundle
+follows ordinary copy-on-create session provenance.
+
+A review start selection names its concern-set version, all four labeled stage
+template names, and the ordered concern-key/template-name pairs. The daemon
+constructs the application attempt only when that complete selection exactly
+matches the resolved library; an absent library, changed version, changed stage
+name, extra or missing concern, reordered concern, or changed concern template
+fails closed rather than being replaced by daemon defaults. Each generated
+session template retains the ordinary content digest over source version, model
+selection, approval blanket, and complete assembled prompt. The orchestration
+attempt separately retains a domain-separated digest committing the stage or
+concern key, source version, model selection, approval blanket, and separate
+SHA-256 digests of the exact shared-header and body bytes.
 
 The application exposes ports for immutable-target context import,
 session-backed passes, repair, and reserved publication. Adapter success returns
@@ -737,8 +746,8 @@ the process protocol.
 
 ## Open edges
 
-- Daemon configuration loading, the concern prompt library, concrete adapters,
-  process-protocol additions, and merge-based stack propagation remain under
+- Concrete adapters, process-protocol additions, and merge-based stack
+  propagation remain under
   [review-workflow orchestration](../open-questions.md#destination-features-target-model).
 - [Artifacts](../open-questions.md#general-purpose-artifacts) remain a separate
   future aggregate; review workflow rows contain references and evidence, not

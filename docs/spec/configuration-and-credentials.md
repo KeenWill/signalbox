@@ -251,12 +251,45 @@ acknowledged work is configuration-independent (INV-034).
 The file named by `SIGNALBOX_TEMPLATE_CONFIG_FILE` is a separate versioned TOML
 document (`config/session-templates.example.toml` is the checked-in example). It
 is read once at startup, after the model catalog, and never reread within a
-process. Its root requires exactly `version = 1` and an optional array of
-`[[templates]]` tables; a version-only document is a valid empty catalog.
-Unknown root and table fields, a mistyped templates value, duplicate names, and
-every invalid field fail as precise sanitized
-`SessionTemplateConfigurationError` variants without including file paths,
-prompt content, or document text.
+process. Its root requires exactly `version = 1`, an optional array of
+`[[templates]]` tables, and one optional `[review_library]` table; a version-only
+document is a valid empty catalog. Unknown root and nested fields, a mistyped
+templates or review-library value, duplicate names, and every invalid field fail
+as precise sanitized `SessionTemplateConfigurationError` variants without
+including file paths, prompt content, or document text.
+
+The version-one `[review_library]` table is closed and carries exactly:
+
+- `source_version` — the positive bundle version applied to every generated
+  template;
+- `concern_set_version` — the exact nonempty `ReviewKey` copied into each
+  orchestration attempt;
+- exactly one of `model` or `alias`, under the same canonical configured-UUID
+  rules as an ordinary template;
+- one required `dangerous_tool_auto_approval` Boolean shared by the library;
+- one required nonempty `shared_header` string;
+- the four required nonempty `import_body`, `judgment_body`, `repair_body`, and
+  `publication_body` strings; and
+- one `[review_library.concerns]` table containing exactly the five required
+  nonempty keys `correctness`, `interface-and-type-design`, `test-quality`,
+  `security`, and `documentation-code-drift`.
+
+An absent concern table, an empty or partial five-key inventory, an extra concern
+key, a missing or empty body, both or neither model choices, a noncanonical or
+unknown model identity, a missing approval Boolean, or any unknown field rejects
+the complete catalog. The initial concern inventory is closed: a different set
+requires a later accepted catalog contract rather than an extra version-one key.
+
+Loading a library generates exactly nine ordinary resolved session templates:
+`review-import`, `review-judgment`, `review-repair`, `review-publication`,
+`review-concern-correctness`, `review-concern-interface-and-type-design`,
+`review-concern-test-quality`, `review-concern-security`, and
+`review-concern-documentation-code-drift`. Those names are reserved even when no
+library is configured, so an ordinary `[[templates]]` entry cannot shadow one.
+Each generated prompt is the exact `shared_header` bytes, two LF bytes, and the
+corresponding stage or concern body bytes, in that order. Loading performs no
+trimming, newline normalization, variable expansion, or interpolation. The
+assembled value must satisfy the ordinary `SessionSystemPrompt` bound.
 
 Each template table carries exactly:
 
@@ -300,6 +333,19 @@ it. The stable vector for version 7, alias
 exposes only sorted name/version summaries to clients; clients never receive
 prompt text or parse this file.
 
+Review orchestration retains a second digest for each generated template. It is
+domain-separated SHA-256 over the same unsigned-64-bit length framing. Its
+frames, in order, are ASCII
+`signalbox/review-template/orchestration-digest/v1`; the exact stage or concern
+key; the source version as eight unsigned big-endian bytes; ASCII `direct` or
+`alias`; the selected UUID's 16 network-order bytes; ASCII `disabled` or
+`approve_all`; SHA-256 of the exact shared-header bytes; and SHA-256 of the exact
+body bytes. The key frame makes equal prompt bytes used for different stages or
+concerns distinct orchestration inputs. This orchestration digest does not
+replace the ordinary content digest: template provenance uses the complete
+assembled prompt digest above, while the immutable orchestration attempt uses
+the header/body/key-aware digest.
+
 Creation by template name first consults the owner-global durable-command
 registry by command identity. An existing create-session claim is reconstituted
 and compared using the caller-supplied creation mode and template name before
@@ -307,9 +353,12 @@ the current catalog is consulted; an equal replay returns its stored session,
 including when that name is absent or changed in the current catalog. Only an
 unclaimed command identity resolves against this process-lifetime catalog and
 copies the complete bundle into the session's immutable defaults version one.
-The session separately records the template name and content digest; it retains
-no live catalog reference. An edit therefore requires a daemon restart and
-affects only creation commands first handled under the new catalog. Equal replay
+The session separately records the template name and ordinary content digest; it
+retains no live catalog reference. Generated review templates follow this same
+copy-on-create path: the complete assembled prompt, model selection, approval
+blanket, reserved name, and content digest become immutable session evidence. An
+edit therefore requires a daemon restart and affects only creation commands
+first handled under the new catalog. Equal replay
 of an already handled command and template name returns the original copied
 session rather than comparing against the current bundle (INV-047).
 
