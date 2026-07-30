@@ -14,10 +14,17 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 
 import check_docs_consistency
-from check_docs_consistency import PR_TOKEN, Violation, github_slug, run_checks
+from check_docs_consistency import (
+    PR_TOKEN,
+    TrackedFilesError,
+    Violation,
+    github_slug,
+    run_checks as run_docs_checks,
+    tracked_files,
+)
 from generate_invariants import (
-    orphan_invariant_references,
-    render as render_invariant_index,
+    orphan_invariant_references as find_orphan_invariant_references,
+    render as render_generated_invariant_index,
 )
 
 
@@ -75,6 +82,24 @@ def git_output(root: Path, *arguments: str) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
+def run_checks(root: Path) -> list[Violation]:
+    """Track each test's intended fixture edits before running the validator."""
+    run_git(root, "add", "-A")
+    return run_docs_checks(root)
+
+
+def render_invariant_index(root: Path) -> str:
+    """Track intended fixture edits before rendering its invariant index."""
+    run_git(root, "add", "-A")
+    return render_generated_invariant_index(root)
+
+
+def orphan_invariant_references(root: Path) -> dict[str, tuple[str, ...]]:
+    """Track intended fixture edits before finding orphan references."""
+    run_git(root, "add", "-A")
+    return find_orphan_invariant_references(root)
 
 
 def initialize_git_history(root: Path) -> str:
@@ -178,6 +203,47 @@ class DocsConsistencyTests(unittest.TestCase):
 
     def test_valid_fixture_passes(self) -> None:
         self.assertEqual(run_checks(self.root), [])
+
+    def test_untracked_sibling_markdown_and_rust_sources_are_ignored(self) -> None:
+        sibling = self.root / ".claude/worktrees/agent-phantom"
+        (sibling / "docs/spec").mkdir(parents=True)
+        (sibling / "src").mkdir()
+        (sibling / "docs/spec/phantom.md").write_text(
+            "# Phantom\n\n[Missing](nowhere.md) and INV-999.\n",
+            encoding="utf-8",
+        )
+        (sibling / "src/phantom.rs").write_text(
+            "#[test]\nfn s99_inv_999_phantom() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_docs_checks(self.root), [])
+        self.assertNotIn("INV-999", render_generated_invariant_index(self.root))
+        self.assertEqual(find_orphan_invariant_references(self.root), {})
+
+    def test_tracked_file_discovery_works_from_a_repository_subdirectory(self) -> None:
+        sources = tracked_files(self.root / "docs")
+
+        self.assertIn(self.root / "docs/invariants.md", sources)
+        self.assertNotIn(self.root / "AGENTS.md", sources)
+
+    def test_tracked_file_discovery_fails_outside_a_repository(self) -> None:
+        outside = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: outside.rmdir())
+
+        with self.assertRaisesRegex(TrackedFilesError, "not a Git repository"):
+            tracked_files(outside)
+
+    def test_tracked_file_discovery_fails_when_git_is_unavailable(self) -> None:
+        missing_git = FileNotFoundError("git executable not found")
+
+        with patch.object(
+            check_docs_consistency.subprocess,
+            "run",
+            side_effect=missing_git,
+        ):
+            with self.assertRaisesRegex(TrackedFilesError, "unavailable"):
+                tracked_files(self.root)
 
     def test_generator_renders_an_empty_index_without_tagged_tests(self) -> None:
         rendered = render_invariant_index(self.root)
@@ -1169,18 +1235,14 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
-    def test_missing_git_reports_a_verification_violation(self) -> None:
+    def test_missing_git_fails_before_validation(self) -> None:
         empty_path = self.root / ".empty-path"
         empty_path.mkdir()
+        run_git(self.root, "add", "-A")
 
         with patch.dict(os.environ, {"PATH": str(empty_path)}):
-            failures = run_checks(self.root)
-
-        self.assertEqual(
-            failure_categories(failures),
-            ["spec-verification-history"],
-        )
-        self.assertIn("`git` is not available", failures[0].message)
+            with self.assertRaisesRegex(TrackedFilesError, "unavailable"):
+                run_docs_checks(self.root)
 
     def test_disabled_inline_module_declares_no_test(self) -> None:
         (self.root / "src/context.rs").write_text(

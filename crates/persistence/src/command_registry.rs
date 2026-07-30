@@ -1,28 +1,103 @@
 //! Closed inspection of the owner-global durable-command registry.
 
+use std::sync::LazyLock;
+
 use signalbox_domain::DurableCommandId;
 use sqlx::{PgConnection, Row};
 
-use crate::mapping::durable_command_id_to_uuid;
+pub(crate) use crate::mapping::DurableCommandKind as CommandKind;
+use crate::mapping::{
+    durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
+};
 
-pub(crate) const CREATE_SESSION_KIND: &str = "create_session";
+pub(crate) const CREATE_SESSION_KIND: &str =
+    durable_command_kind_to_str(CommandKind::CreateSession);
 pub(crate) const CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND: &str =
-    "create_session_from_imported_frontier";
-pub(crate) const REPLACE_SESSION_DEFAULTS_KIND: &str = "replace_session_defaults";
-pub(crate) const REPLACE_SESSION_METADATA_KIND: &str = "replace_session_metadata";
-pub(crate) const SUBMIT_INPUT_KIND: &str = "submit_input";
-pub(crate) const DECIDE_TOOL_REQUEST_KIND: &str = "decide_tool_request";
-pub(crate) const REVIEW_WORKFLOW_KIND: &str = "review_workflow";
+    durable_command_kind_to_str(CommandKind::CreateSessionFromImportedFrontier);
+pub(crate) const REPLACE_SESSION_DEFAULTS_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ReplaceSessionDefaults);
+pub(crate) const REPLACE_SESSION_METADATA_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ReplaceSessionMetadata);
+pub(crate) const SUBMIT_INPUT_KIND: &str = durable_command_kind_to_str(CommandKind::SubmitInput);
+pub(crate) const DECIDE_TOOL_REQUEST_KIND: &str =
+    durable_command_kind_to_str(CommandKind::DecideToolRequest);
+pub(crate) const REVIEW_WORKFLOW_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ReviewWorkflow);
+pub(crate) const COMPACT_SESSION_KIND: &str =
+    durable_command_kind_to_str(CommandKind::CompactSession);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CommandKind {
-    CreateSession,
-    CreateSessionFromImportedFrontier,
-    ReplaceSessionDefaults,
-    ReplaceSessionMetadata,
-    SubmitInput,
-    DecideToolRequest,
-    ReviewWorkflow,
+#[derive(Clone, Copy)]
+struct CommandKindDefinition {
+    kind: CommandKind,
+    spelling: &'static str,
+    typed_table: &'static str,
+    minimum_version: i16,
+    maximum_version: i16,
+}
+
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 8] = [
+    CommandKindDefinition {
+        kind: CommandKind::CreateSession,
+        spelling: CREATE_SESSION_KIND,
+        typed_table: "create_session_command",
+        minimum_version: 1,
+        maximum_version: 4,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::CreateSessionFromImportedFrontier,
+        spelling: CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND,
+        typed_table: "create_session_from_imported_frontier_command",
+        minimum_version: 1,
+        maximum_version: 3,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::ReplaceSessionDefaults,
+        spelling: REPLACE_SESSION_DEFAULTS_KIND,
+        typed_table: "replace_session_defaults_command",
+        minimum_version: 1,
+        maximum_version: 3,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::ReplaceSessionMetadata,
+        spelling: REPLACE_SESSION_METADATA_KIND,
+        typed_table: "replace_session_metadata_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::SubmitInput,
+        spelling: SUBMIT_INPUT_KIND,
+        typed_table: "submit_input_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::DecideToolRequest,
+        spelling: DECIDE_TOOL_REQUEST_KIND,
+        typed_table: "decide_tool_request_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::ReviewWorkflow,
+        spelling: REVIEW_WORKFLOW_KIND,
+        typed_table: "review_workflow_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::CompactSession,
+        spelling: COMPACT_SESSION_KIND,
+        typed_table: "compact_session_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+];
+
+impl CommandKindDefinition {
+    const fn supports_version(self, version: i16) -> bool {
+        version >= self.minimum_version && version <= self.maximum_version
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,40 +118,12 @@ pub(crate) async fn inspect(
     connection: &mut PgConnection,
     command_id: DurableCommandId,
 ) -> Result<Option<CommandKind>, RegistryInspectionError> {
-    let row = sqlx::query(
-        "SELECT
-            command.command_kind,
-            command.storage_version,
-            create_command.command_id IS NOT NULL AS has_create_session,
-            imported_create_command.command_id IS NOT NULL
-                AS has_create_session_from_imported_frontier,
-            defaults_command.command_id IS NOT NULL AS has_replace_session_defaults,
-            metadata_command.command_id IS NOT NULL AS has_replace_session_metadata,
-            input_command.command_id IS NOT NULL AS has_submit_input,
-            tool_command.command_id IS NOT NULL AS has_decide_tool_request,
-            review_command.command_id IS NOT NULL AS has_review_workflow
-         FROM durable_command AS command
-         LEFT JOIN create_session_command AS create_command
-           ON create_command.command_id = command.command_id
-         LEFT JOIN create_session_from_imported_frontier_command
-                AS imported_create_command
-           ON imported_create_command.command_id = command.command_id
-         LEFT JOIN replace_session_defaults_command AS defaults_command
-           ON defaults_command.command_id = command.command_id
-         LEFT JOIN replace_session_metadata_command AS metadata_command
-           ON metadata_command.command_id = command.command_id
-         LEFT JOIN submit_input_command AS input_command
-           ON input_command.command_id = command.command_id
-         LEFT JOIN decide_tool_request_command AS tool_command
-           ON tool_command.command_id = command.command_id
-         LEFT JOIN review_workflow_command AS review_command
-           ON review_command.command_id = command.command_id
-         WHERE command.command_id = $1",
-    )
-    .bind(durable_command_id_to_uuid(command_id))
-    .fetch_optional(&mut *connection)
-    .await
-    .map_err(RegistryInspectionError::Database)?;
+    let query = inspection_query();
+    let row = sqlx::query(query)
+        .bind(durable_command_id_to_uuid(command_id))
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(RegistryInspectionError::Database)?;
 
     row.map(|row| {
         let version: i16 = row
@@ -85,76 +132,54 @@ pub(crate) async fn inspect(
         let spelling: String = row
             .try_get("command_kind")
             .map_err(RegistryInspectionError::Database)?;
-        let kind = match spelling.as_str() {
-            CREATE_SESSION_KIND => CommandKind::CreateSession,
-            CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND => {
-                CommandKind::CreateSessionFromImportedFrontier
-            }
-            REPLACE_SESSION_DEFAULTS_KIND => CommandKind::ReplaceSessionDefaults,
-            REPLACE_SESSION_METADATA_KIND => CommandKind::ReplaceSessionMetadata,
-            SUBMIT_INPUT_KIND => CommandKind::SubmitInput,
-            DECIDE_TOOL_REQUEST_KIND => CommandKind::DecideToolRequest,
-            REVIEW_WORKFLOW_KIND => CommandKind::ReviewWorkflow,
-            _ => {
-                return Err(RegistryInspectionError::Corruption(
-                    RegistryCorruption::UnsupportedKind(spelling),
-                ));
-            }
+        let Some(kind) = durable_command_kind_from_str(&spelling) else {
+            return Err(RegistryInspectionError::Corruption(
+                RegistryCorruption::UnsupportedKind(spelling),
+            ));
         };
-        let version_supported = match kind {
-            CommandKind::CreateSession => matches!(version, 1..=4),
-            CommandKind::CreateSessionFromImportedFrontier
-            | CommandKind::ReplaceSessionDefaults => matches!(version, 1..=3),
-            CommandKind::ReplaceSessionMetadata
-            | CommandKind::SubmitInput
-            | CommandKind::DecideToolRequest
-            | CommandKind::ReviewWorkflow => version == 1,
-        };
-        if !version_supported {
+        let definition = COMMAND_KIND_DEFINITIONS
+            .iter()
+            .copied()
+            .find(|candidate| candidate.kind == kind)
+            .ok_or_else(|| {
+                RegistryInspectionError::Corruption(RegistryCorruption::UnsupportedKind(spelling))
+            })?;
+        if !definition.supports_version(version) {
             return Err(RegistryInspectionError::Corruption(
                 RegistryCorruption::UnsupportedVersion(version),
             ));
         }
-        let has_create: bool = row
-            .try_get("has_create_session")
-            .map_err(RegistryInspectionError::Database)?;
-        let has_imported_create: bool = row
-            .try_get("has_create_session_from_imported_frontier")
-            .map_err(RegistryInspectionError::Database)?;
-        let has_defaults: bool = row
-            .try_get("has_replace_session_defaults")
-            .map_err(RegistryInspectionError::Database)?;
-        let has_metadata: bool = row
-            .try_get("has_replace_session_metadata")
-            .map_err(RegistryInspectionError::Database)?;
-        let has_input: bool = row
-            .try_get("has_submit_input")
-            .map_err(RegistryInspectionError::Database)?;
-        let has_tool: bool = row
-            .try_get("has_decide_tool_request")
-            .map_err(RegistryInspectionError::Database)?;
-        let has_review: bool = row
-            .try_get("has_review_workflow")
-            .map_err(RegistryInspectionError::Database)?;
 
-        let present: Vec<CommandKind> = [
-            (CommandKind::CreateSession, has_create),
-            (
-                CommandKind::CreateSessionFromImportedFrontier,
-                has_imported_create,
-            ),
-            (CommandKind::ReplaceSessionDefaults, has_defaults),
-            (CommandKind::ReplaceSessionMetadata, has_metadata),
-            (CommandKind::SubmitInput, has_input),
-            (CommandKind::DecideToolRequest, has_tool),
-            (CommandKind::ReviewWorkflow, has_review),
-        ]
-        .into_iter()
-        .filter_map(|(candidate, is_present)| is_present.then_some(candidate))
-        .collect();
-        sole_typed_record(kind, &present).map_err(RegistryInspectionError::Corruption)
+        let mut present = Vec::new();
+        for candidate in COMMAND_KIND_DEFINITIONS {
+            let is_present: bool = row
+                .try_get(candidate.spelling)
+                .map_err(RegistryInspectionError::Database)?;
+            if is_present {
+                present.push(candidate.kind);
+            }
+        }
+        sole_typed_record(definition.kind, &present).map_err(RegistryInspectionError::Corruption)
     })
     .transpose()
+}
+
+fn inspection_query() -> &'static str {
+    static QUERY: LazyLock<String> = LazyLock::new(|| {
+        // Every interpolated identifier comes from the closed compile-time
+        // table; command data remains a bind parameter and never enters the
+        // SQL text.
+        let mut query = String::from("SELECT command.command_kind, command.storage_version");
+        for definition in COMMAND_KIND_DEFINITIONS {
+            query.push_str(", EXISTS (SELECT 1 FROM ");
+            query.push_str(definition.typed_table);
+            query.push_str(" AS typed WHERE typed.command_id = command.command_id) AS ");
+            query.push_str(definition.spelling);
+        }
+        query.push_str(" FROM durable_command AS command WHERE command.command_id = $1");
+        query
+    });
+    QUERY.as_str()
 }
 
 /// The registry's consistency rule: exactly one typed record exists, and it
@@ -172,7 +197,52 @@ fn sole_typed_record(
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandKind, RegistryCorruption, sole_typed_record};
+    use std::collections::BTreeSet;
+
+    use super::{COMMAND_KIND_DEFINITIONS, CommandKind, RegistryCorruption, sole_typed_record};
+
+    fn database_admitted_command_kinds() -> BTreeSet<String> {
+        const CONSTRAINT: &str = "ADD CONSTRAINT durable_command_kind_closed";
+        const KIND_LIST: &str = "command_kind IN (";
+        let definition = crate::MIGRATOR
+            .iter()
+            .filter_map(|migration| {
+                migration
+                    .sql
+                    .as_str()
+                    .find(CONSTRAINT)
+                    .map(|offset| &migration.sql.as_str()[offset..])
+            })
+            .next_back()
+            .expect("one migration defines the durable command kind constraint");
+        let list = definition
+            .split_once(KIND_LIST)
+            .expect("the current command-kind constraint has an IN list")
+            .1
+            .split_once(')')
+            .expect("the current command-kind IN list is closed")
+            .0;
+        list.split('\'')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn registry_admitted_command_kinds() -> BTreeSet<String> {
+        COMMAND_KIND_DEFINITIONS
+            .iter()
+            .map(|definition| definition.spelling.to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn database_and_registry_admit_the_same_command_kinds() {
+        assert_eq!(
+            database_admitted_command_kinds(),
+            registry_admitted_command_kinds()
+        );
+    }
 
     #[test]
     fn a_sole_typed_record_of_the_registered_kind_is_consistent() {
