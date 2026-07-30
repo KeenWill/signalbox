@@ -1,8 +1,8 @@
 # Process protocol
 
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`)
-and the closed provider-failure/native transcript projections in
-PR #330 (`agent/audit-verified-fixes`). This page is the normative boundary between a
+and the closed provider-failure/native transcript projections in PR #330
+(`agent/audit-verified-fixes`). This page is the normative boundary between a
 local client process and `signalboxd`; domain values, PostgreSQL records, and
 wire messages remain distinct representations.
 

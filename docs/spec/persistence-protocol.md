@@ -15,8 +15,8 @@ were verified through PR #288 (`agent/audit-fix-docs-coherence`); the session
 system-prompt columns were verified through PR #286
 (`agent/session-system-prompt`); the terminal model-call token evidence columns
 and transcript reader were verified through this PR (`agent/token-usage`); the
-additive provider-failure cause column was verified through
-PR #330 (`agent/audit-verified-fixes`); the session-template provenance columns and
+additive provider-failure cause column was verified through PR #330
+(`agent/audit-verified-fixes`); the session-template provenance columns and
 storage version four were verified through PR #311
 (`agent/session-templates-spec`); and the context-compaction transaction and
 lock inventory were verified against `agent/context-compaction-protocol`. This

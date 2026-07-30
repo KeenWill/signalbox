@@ -13,8 +13,8 @@ decision surface through PR #291 (`agent/turn-control-verbs`), and
 runner-protocol batch reconstitution through PR #260
 (`agent/runner-protocol-domain`). Template-derived blanket creation was verified
 through PR #311 (`agent/session-templates-spec`), and the exact-origin
-`web_fetch` egress policy and complete bounded file-patch lookup through
-PR #330 (`agent/audit-verified-fixes`). The runner executable stack rooted at this
+`web_fetch` egress policy and complete bounded file-patch lookup through PR #330
+(`agent/audit-verified-fixes`). The runner executable stack rooted at this
 foundation proposal extends the same laws to the runner locus. This page owns
 logical tool requests, approval policy and decisions, physical tool attempts,
 result admission, intra-turn continuation, crash classification, the compiled
