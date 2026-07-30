@@ -1963,6 +1963,7 @@ mod tests {
     const FILE_PATCH_BASE_REVISION: &str = "1111111111111111111111111111111111111111";
     const FILE_PATCH_HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
     const FILE_PATCH_MOVED_REVISION: &str = "3333333333333333333333333333333333333333";
+    const FILE_PATCH_SERVER_TIMEOUT: Duration = Duration::from_secs(5);
 
     fn repository() -> CodeHostRepository {
         CodeHostRepository::try_new(String::from("owner/repository"))
@@ -2117,11 +2118,15 @@ mod tests {
             .file_patch_transaction(arguments, &credential)
             .await
             .expect_err("a moved diff revision cannot yield consistent patch evidence");
-        let requests = server.await.expect("loopback server task completes");
+        let requests = tokio::time::timeout(FILE_PATCH_SERVER_TIMEOUT, server)
+            .await
+            .expect("loopback server observes every expected request")
+            .expect("loopback server task completes");
 
         (failure, requests)
     }
 
+    #[track_caller]
     fn assert_file_patch_revision_change(failure: CodeHostTransportFailure, requests: [String; 4]) {
         assert_eq!(
             failure,

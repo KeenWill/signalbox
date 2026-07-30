@@ -1610,6 +1610,20 @@ mod tests {
         );
     }
 
+    /// Infrastructure failures are classified before known-failure detail is
+    /// read, so neither can accidentally inherit a code-host rejection claim.
+    #[test]
+    fn infrastructure_failures_present_no_known_failure_detail() {
+        assert_eq!(
+            transport_failure_detail(CodeHostTransportFailure::ChangeRequestRevisionChanged),
+            None
+        );
+        assert_eq!(
+            transport_failure_detail(CodeHostTransportFailure::DispatchUnknown),
+            None
+        );
+    }
+
     /// A returned node identity the argument side would refuse never enters
     /// durable evidence, so every identity a result offers can be passed back.
     #[test]
