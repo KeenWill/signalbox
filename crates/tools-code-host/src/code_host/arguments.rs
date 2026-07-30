@@ -193,6 +193,46 @@ impl JsonSchema for CodeHostPositiveId {
     }
 }
 
+/// One positive one-based repository line number.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(try_from = "u64")]
+pub(super) struct CodeHostLineNumber(u32);
+
+impl CodeHostLineNumber {
+    pub(super) const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u64> for CodeHostLineNumber {
+    type Error = InvalidCodeHostArguments;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        let value = u32::try_from(value).map_err(|_| InvalidCodeHostArguments)?;
+        (value > 0)
+            .then_some(Self(value))
+            .ok_or(InvalidCodeHostArguments)
+    }
+}
+
+impl JsonSchema for CodeHostLineNumber {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CodeHostLineNumber")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "integer",
+            "minimum": 1,
+            "maximum": u32::MAX,
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
 /// Whether a value is one exact lowercase 40-hex revision. Returned revisions
 /// are admitted by this same predicate so a result can always be passed back
 /// as a revision argument.

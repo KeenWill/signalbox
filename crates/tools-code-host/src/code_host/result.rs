@@ -6,11 +6,10 @@ use reqwest::Url;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
-use super::arguments::{valid_opaque_id, valid_revision};
+use super::arguments::{MAX_FILE_PATH_BYTES, valid_opaque_id, valid_revision};
 
-const MAX_RESULT_TEXT_BYTES: usize = 64 * 1024;
+pub(super) const MAX_RESULT_TEXT_BYTES: usize = 64 * 1024;
 const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
-const MAX_RESULT_PATH_BYTES: usize = 4 * 1024;
 pub(super) const MAX_RESULT_ITEMS: usize = 100;
 pub(super) const MAX_ENCODED_RESULT_BYTES: usize = 512 * 1024;
 
@@ -24,7 +23,7 @@ pub enum CodeHostResultCompleteness {
 }
 
 impl CodeHostResultCompleteness {
-    const fn is_truncated(self) -> bool {
+    pub(super) const fn is_truncated(self) -> bool {
         matches!(self, Self::Truncated)
     }
 }
@@ -105,7 +104,7 @@ impl JsonSchema for CodeHostUrl {
 pub(super) fn valid_path(value: &str) -> bool {
     !value.is_empty()
         && !value.starts_with('/')
-        && value.len() <= MAX_RESULT_PATH_BYTES
+        && value.len() <= MAX_FILE_PATH_BYTES
         && !value.contains('\0')
 }
 
@@ -589,7 +588,7 @@ impl RerunFailedJobsResult {
     }
 }
 
-/// Closed typed result vocabulary for all fourteen code-host tools.
+/// Closed typed result vocabulary for all sixteen code-host tools.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CodeHostResult {
     /// Change-request summary.
@@ -598,6 +597,10 @@ pub enum CodeHostResult {
     ChangedFiles(ChangedFilesResult),
     /// One per-file patch.
     FilePatch(FilePatchResult),
+    /// Bounded exact-revision repository directory listing.
+    ListDirectory(super::RepositoryListDirectoryResult),
+    /// Bounded exact-revision repository file read.
+    ReadFile(super::RepositoryReadFileResult),
     /// Bounded check-run page.
     ChecksStatus(ChecksStatusResult),
     /// Created top-level comment.
@@ -629,6 +632,8 @@ impl CodeHostResult {
             Self::Summary(result) => result.into_value(),
             Self::ChangedFiles(result) => result.into_value(),
             Self::FilePatch(result) => result.into_value(),
+            Self::ListDirectory(result) => result.into_value(),
+            Self::ReadFile(result) => result.into_value(),
             Self::ChecksStatus(result) => result.into_value(),
             Self::Comment(result) => result.into_value(),
             Self::ReviewThreads(result) => result.into_value(),

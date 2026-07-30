@@ -15,6 +15,9 @@ mod change_request_thread_inventory;
 mod change_request_thread_reply;
 mod change_request_thread_resolve;
 mod github;
+mod repository_list_directory;
+mod repository_read_file;
+mod repository_result;
 mod result;
 mod review_gate_check;
 mod review_slog;
@@ -50,6 +53,12 @@ pub use change_request_thread_inventory::ThreadInventoryArguments;
 pub use change_request_thread_reply::ThreadReplyArguments;
 pub use change_request_thread_resolve::ThreadResolveArguments;
 pub use github::{GitHubCodeHostConstructionError, GitHubCodeHostTransport};
+pub use repository_list_directory::RepositoryListDirectoryArguments;
+pub use repository_read_file::{RepositoryLineRange, RepositoryReadFileArguments};
+pub use repository_result::{
+    RepositoryDirectoryEntry, RepositoryFileContentFields, RepositoryListDirectoryResult,
+    RepositoryObjectKind, RepositoryReadFileResult,
+};
 pub use result::{
     ChangeRequestCommentResult, ChangeRequestSummaryFields, ChangeRequestSummaryResult,
     ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult, CiJobLogResult,
@@ -76,6 +85,10 @@ pub const CHANGE_REQUEST_SUMMARY_NAME: &str = change_request_summary::NAME;
 pub const CHANGE_REQUEST_CHANGED_FILES_NAME: &str = change_request_changed_files::NAME;
 /// Registry name for per-file patch lookup.
 pub const CHANGE_REQUEST_FILE_PATCH_NAME: &str = change_request_file_patch::NAME;
+/// Registry name for exact-revision repository file reads.
+pub const REPOSITORY_READ_FILE_NAME: &str = repository_read_file::NAME;
+/// Registry name for exact-revision repository directory listings.
+pub const REPOSITORY_LIST_DIRECTORY_NAME: &str = repository_list_directory::NAME;
 /// Registry name for check-status lookup.
 pub const CHANGE_REQUEST_CHECKS_STATUS_NAME: &str = change_request_checks_status::NAME;
 /// Registry name for top-level comment creation.
@@ -100,7 +113,7 @@ pub const CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME: &str = change_request_rerun_fai
 pub const REVIEW_GATE_CHECK_NAME: &str = review_gate_check::NAME;
 
 /// Registry names in deterministic catalog order.
-pub const CODE_HOST_TOOL_NAMES: [&str; 14] = [
+pub const CODE_HOST_TOOL_NAMES: [&str; 16] = [
     CHANGE_REQUEST_CHANGED_FILES_NAME,
     CHANGE_REQUEST_CHECKS_STATUS_NAME,
     CHANGE_REQUEST_CI_JOB_LOG_NAME,
@@ -114,6 +127,8 @@ pub const CODE_HOST_TOOL_NAMES: [&str; 14] = [
     CHANGE_REQUEST_THREAD_INVENTORY_NAME,
     CHANGE_REQUEST_THREAD_REPLY_NAME,
     CHANGE_REQUEST_THREAD_RESOLVE_NAME,
+    REPOSITORY_LIST_DIRECTORY_NAME,
+    REPOSITORY_READ_FILE_NAME,
     REVIEW_GATE_CHECK_NAME,
 ];
 
@@ -133,6 +148,10 @@ enum CodeHostToolKind {
     ChangedFiles,
     /// Registry effect posture: read-only, `Auto`, and `ExternalEffect`.
     FilePatch,
+    /// Registry effect posture: read-only, `Auto`, and `ExternalEffect`.
+    ListDirectory,
+    /// Registry effect posture: read-only, `Auto`, and `ExternalEffect`.
+    ReadFile,
     /// Registry effect posture: read-only, `Auto`, and `ExternalEffect`.
     ChecksStatus,
     /// Registry effect posture: mutation, `Confirm`, and `ExternalEffect`.
@@ -158,10 +177,12 @@ enum CodeHostToolKind {
 }
 
 impl CodeHostToolKind {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 16] = [
         Self::Summary,
         Self::ChangedFiles,
         Self::FilePatch,
+        Self::ListDirectory,
+        Self::ReadFile,
         Self::ChecksStatus,
         Self::Comment,
         Self::ConvergenceState,
@@ -180,6 +201,8 @@ impl CodeHostToolKind {
             Self::Summary => change_request_summary::NAME,
             Self::ChangedFiles => change_request_changed_files::NAME,
             Self::FilePatch => change_request_file_patch::NAME,
+            Self::ListDirectory => repository_list_directory::NAME,
+            Self::ReadFile => repository_read_file::NAME,
             Self::ChecksStatus => change_request_checks_status::NAME,
             Self::Comment => change_request_comment::NAME,
             Self::ConvergenceState => change_request_convergence_state::NAME,
@@ -205,6 +228,16 @@ impl CodeHostToolKind {
                 change_request_changed_files::Contract,
             >(permission, ToolEffectClass::ExternalEffect),
             Self::FilePatch => compile_contract_definition::<change_request_file_patch::Contract>(
+                permission,
+                ToolEffectClass::ExternalEffect,
+            ),
+            Self::ListDirectory => {
+                compile_contract_definition::<repository_list_directory::Contract>(
+                    permission,
+                    ToolEffectClass::ExternalEffect,
+                )
+            }
+            Self::ReadFile => compile_contract_definition::<repository_read_file::Contract>(
                 permission,
                 ToolEffectClass::ExternalEffect,
             ),
@@ -261,6 +294,8 @@ impl CodeHostToolKind {
             Self::Summary
             | Self::ChangedFiles
             | Self::FilePatch
+            | Self::ListDirectory
+            | Self::ReadFile
             | Self::ChecksStatus
             | Self::ConvergenceState
             | Self::ReviewThreads
@@ -284,6 +319,8 @@ impl CodeHostToolKind {
             (Self::Summary, CodeHostResult::Summary(_))
                 | (Self::ChangedFiles, CodeHostResult::ChangedFiles(_))
                 | (Self::FilePatch, CodeHostResult::FilePatch(_))
+                | (Self::ListDirectory, CodeHostResult::ListDirectory(_))
+                | (Self::ReadFile, CodeHostResult::ReadFile(_))
                 | (Self::ChecksStatus, CodeHostResult::ChecksStatus(_))
                 | (Self::Comment, CodeHostResult::Comment(_))
                 | (Self::ConvergenceState, CodeHostResult::ConvergenceState(_))
@@ -314,6 +351,10 @@ pub enum CodeHostOperation {
     ChangedFiles(ChangedFilesArguments),
     /// Read one file patch.
     FilePatch(FilePatchArguments),
+    /// List one directory at an exact revision.
+    ListDirectory(RepositoryListDirectoryArguments),
+    /// Read one file at an exact revision.
+    ReadFile(RepositoryReadFileArguments),
     /// Read checks for one frozen revision.
     ChecksStatus(ChecksStatusArguments),
     /// Post one top-level comment.
@@ -345,6 +386,8 @@ impl CodeHostOperation {
             Self::Summary(_) => change_request_summary::NAME,
             Self::ChangedFiles(_) => change_request_changed_files::NAME,
             Self::FilePatch(_) => change_request_file_patch::NAME,
+            Self::ListDirectory(_) => repository_list_directory::NAME,
+            Self::ReadFile(_) => repository_read_file::NAME,
             Self::ChecksStatus(_) => change_request_checks_status::NAME,
             Self::Comment(_) => change_request_comment::NAME,
             Self::ConvergenceState(_) => change_request_convergence_state::NAME,
@@ -368,6 +411,8 @@ fn decode_operation(
         CodeHostToolKind::Summary => change_request_summary::decode(arguments),
         CodeHostToolKind::ChangedFiles => change_request_changed_files::decode(arguments),
         CodeHostToolKind::FilePatch => change_request_file_patch::decode(arguments),
+        CodeHostToolKind::ListDirectory => repository_list_directory::decode(arguments),
+        CodeHostToolKind::ReadFile => repository_read_file::decode(arguments),
         CodeHostToolKind::ChecksStatus => change_request_checks_status::decode(arguments),
         CodeHostToolKind::Comment => change_request_comment::decode(arguments),
         CodeHostToolKind::ConvergenceState => change_request_convergence_state::decode(arguments),
@@ -428,7 +473,7 @@ impl ToolArgumentValidator for CodeHostArgumentValidator {
     }
 }
 
-/// All fourteen compiled code-host declarations and their matching executor.
+/// All sixteen compiled code-host declarations and their matching executor.
 ///
 /// Effect postures are explicit per declaration: summary, files, patch,
 /// checks, threads, job-log, convergence, stack, thread-inventory, and
@@ -521,7 +566,7 @@ impl fmt::Display for CodeHostToolsConstructionError {
 
 impl Error for CodeHostToolsConstructionError {}
 
-/// Credential-resolving executor for all fourteen code-host declarations.
+/// Credential-resolving executor for all sixteen code-host declarations.
 #[derive(Clone, Debug)]
 pub struct CodeHostExecutor<Credentials, Transport> {
     credentials: Credentials,
@@ -781,7 +826,17 @@ mod tests {
         assert_eq!(catalog.validate_arguments(&name, &arguments(value)), Ok(()));
     }
 
-    /// The fourteen declarations encode the read/mutation approval split and make
+    #[track_caller]
+    fn assert_invalid(catalog: &CompiledToolCatalog, name: &str, value: &str) {
+        let name = ToolName::try_new(name.to_owned()).expect("fixture name is admitted");
+        assert!(
+            catalog
+                .validate_arguments(&name, &arguments(value))
+                .is_err()
+        );
+    }
+
+    /// The sixteen declarations encode the read/mutation approval split and make
     /// every remote observation explicit as an external effect.
     #[test]
     fn code_host_definitions_carry_exact_policy() {
@@ -800,6 +855,16 @@ mod tests {
         assert_definition(
             &catalog,
             change_request_file_patch::NAME,
+            ToolPermissionDefault::Auto,
+        );
+        assert_definition(
+            &catalog,
+            repository_list_directory::NAME,
+            ToolPermissionDefault::Auto,
+        );
+        assert_definition(
+            &catalog,
+            repository_read_file::NAME,
             ToolPermissionDefault::Auto,
         );
         assert_definition(
@@ -957,6 +1022,122 @@ mod tests {
                   ],
                   "type": "object"
                 }"#]],
+        );
+    }
+
+    /// Complete model-facing schema for `repository_list_directory`.
+    #[test]
+    fn repository_list_directory_schema_is_the_exact_wire_artifact() {
+        assert_schema(
+            repository_list_directory::NAME,
+            expect_test::expect![[r#"
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "description": "Exact repository-relative directory path; `.` lists the repository root.",
+                      "maxLength": 4096,
+                      "minLength": 1,
+                      "pattern": "^[^/\\u0000][^\\u0000]*$",
+                      "type": "string"
+                    },
+                    "repository": {
+                      "description": "Exact owner/repository spelling.",
+                      "maxLength": 256,
+                      "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+                      "type": "string"
+                    },
+                    "revision": {
+                      "description": "Required exact lowercase 40-hex commit revision.",
+                      "maxLength": 40,
+                      "minLength": 40,
+                      "pattern": "^[0-9a-f]{40}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "repository",
+                    "path",
+                    "revision"
+                  ],
+                  "type": "object"
+                }"#]],
+        );
+    }
+
+    /// Complete model-facing schema for `repository_read_file`.
+    #[test]
+    fn repository_read_file_schema_is_the_exact_wire_artifact() {
+        assert_schema(
+            repository_read_file::NAME,
+            expect_test::expect![[r##"
+                {
+                  "$defs": {
+                    "RepositoryLineRange": {
+                      "additionalProperties": false,
+                      "description": "One inclusive, positive line range.",
+                      "properties": {
+                        "end": {
+                          "description": "Last one-based line to return, inclusive.",
+                          "maximum": 4294967295,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "start": {
+                          "description": "First one-based line to return.",
+                          "maximum": 4294967295,
+                          "minimum": 1,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "start",
+                        "end"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "properties": {
+                    "line_range": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/RepositoryLineRange"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Optional inclusive one-based line range."
+                    },
+                    "path": {
+                      "description": "Exact repository-relative path; `.` addresses the repository root.",
+                      "maxLength": 4096,
+                      "minLength": 1,
+                      "pattern": "^[^/\\u0000][^\\u0000]*$",
+                      "type": "string"
+                    },
+                    "repository": {
+                      "description": "Exact owner/repository spelling.",
+                      "maxLength": 256,
+                      "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+                      "type": "string"
+                    },
+                    "revision": {
+                      "description": "Required exact lowercase 40-hex commit revision.",
+                      "maxLength": 40,
+                      "minLength": 40,
+                      "pattern": "^[0-9a-f]{40}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "repository",
+                    "path",
+                    "revision"
+                  ],
+                  "type": "object"
+                }"##]],
         );
     }
 
@@ -1404,6 +1585,46 @@ mod tests {
             &catalog(),
             change_request_file_patch::NAME,
             r#"{"number":17,"path":"src/line\nbreak.rs","repository":"owner/repository"}"#,
+        );
+    }
+
+    /// Directory-list arguments require an exact path and revision.
+    #[test]
+    fn repository_list_directory_typed_decode_accepts_exact_shape() {
+        assert_valid(
+            &catalog(),
+            repository_list_directory::NAME,
+            r#"{"path":"src","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// File-read arguments retain one inclusive line range at an exact revision.
+    #[test]
+    fn repository_read_file_typed_decode_accepts_line_range() {
+        assert_valid(
+            &catalog(),
+            repository_read_file::NAME,
+            r#"{"line_range":{"end":40,"start":20},"path":"src/lib.rs","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
+        );
+    }
+
+    /// A repository file read cannot silently default to a moving branch head.
+    #[test]
+    fn repository_read_file_typed_decode_requires_revision() {
+        assert_invalid(
+            &catalog(),
+            repository_read_file::NAME,
+            r#"{"path":"src/lib.rs","repository":"owner/repository"}"#,
+        );
+    }
+
+    /// A reversed range cannot become a misleading empty successful read.
+    #[test]
+    fn repository_read_file_typed_decode_rejects_reversed_range() {
+        assert_invalid(
+            &catalog(),
+            repository_read_file::NAME,
+            r#"{"line_range":{"end":20,"start":40},"path":"src/lib.rs","repository":"owner/repository","revision":"0123456789abcdef0123456789abcdef01234567"}"#,
         );
     }
 
