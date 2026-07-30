@@ -22,6 +22,7 @@ const FRONTIER_ENTRIES_PER_LAYER: u128 = 8;
 const PREFIX_LAYER_COUNT: usize = 48;
 const TOTAL_ORDER_CHAIN_COUNT: u64 = 64;
 const TOTAL_ORDER_CHAIN_LENGTH: u64 = 4;
+const TOOL_ARGUMENT_MEMBER_COUNT: u32 = 128;
 
 #[derive(Clone, Copy, Debug)]
 pub enum FixtureError {
@@ -433,7 +434,8 @@ pub fn prefix_proof_fixture() -> PrefixProofFixture {
 /// Proves the fixed 384-entry frontier is a semantic prefix of the 512-entry
 /// frontier.
 pub fn prove_shared_prefix(input: &PrefixProofFixture) -> bool {
-    input.0.is_semantic_prefix_of(&input.1)
+    let is_prefix = input.0.is_semantic_prefix_of(&input.1);
+    fixture_or_exit(is_prefix.then_some(is_prefix).ok_or(FixtureError::Frontier))
 }
 
 /// Supplies a fixed total-order workload with realistic interrupt chaining.
@@ -543,8 +545,8 @@ pub fn project_compaction_frontier(input: &ProjectionFixture) -> ProjectionResul
 pub fn tool_arguments_fixture() -> String {
     let mut value = String::with_capacity(16 * 1024);
     value.push('{');
-    for index in (0..128_u32).rev() {
-        if index != 127 {
+    for index in (0..TOOL_ARGUMENT_MEMBER_COUNT).rev() {
+        if index + 1 != TOOL_ARGUMENT_MEMBER_COUNT {
             value.push(',');
         }
         value.push_str(&format!(
