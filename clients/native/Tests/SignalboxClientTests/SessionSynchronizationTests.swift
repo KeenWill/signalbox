@@ -1697,6 +1697,156 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testAwaitingToolApprovalRequiresTerminalUsageOwner() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.activeAwaitingToolApprovalTurn()
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testAwaitingToolRecoveryRequiresTerminalUsageOwner() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.activeAwaitingToolRecoveryTurn()
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testToolReconciliationRequiresTerminalUsageOwner() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.toolReconciliationRequiredTurn()
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testPreparedCurrentModelCallCannotOwnTerminalUsage() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.activeRunningPreparedTurn()
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallUsage()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testInFlightCurrentModelCallCannotOwnTerminalUsage() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.activeRunningInFlightTurn()
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallUsage()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testCancellationRequestedCurrentModelCallCannotOwnTerminalUsage() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.activeRunningCancellationRequestedTurn()
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallUsage()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
   func testQueuedTurnCannotOwnModelCallUsage() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
@@ -1933,6 +2083,8 @@ private enum SynchronizationFixture {
   static let entry = "66666666-6666-4666-8666-666666666666"
   static let frontier = "77777777-7777-4777-8777-777777777777"
   static let attempt = "88888888-8888-4888-8888-888888888888"
+  static let toolRequest = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+  static let toolAttempt = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
   static let oversizedDiagnosticKind = String(
     repeating: "x",
     count: SignalboxSessionSynchronizationMachine.maximumRetainedDiagnosticMessageUTF8Bytes + 1
@@ -2413,6 +2565,91 @@ private enum SynchronizationFixture {
           "terminal_frontier_id":"\(frontier)",
           "terminal_attempt_id":"\(attempt)",
           "terminal_model_call_id":"\(modelCall)"
+        }
+      }
+      """
+    )
+  }
+
+  static func activeAwaitingToolApprovalTurn() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"active_awaiting_tool_approval",
+          "tool_request_id":"\(toolRequest)"
+        }
+      }
+      """
+    )
+  }
+
+  static func activeAwaitingToolRecoveryTurn() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"active_awaiting_tool_recovery",
+          "ended_attempt_id":"\(attempt)",
+          "recovery_tool_attempt_id":"\(toolAttempt)"
+        }
+      }
+      """
+    )
+  }
+
+  static func toolReconciliationRequiredTurn() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"tool_reconciliation_required",
+          "terminal_frontier_id":"\(frontier)",
+          "terminal_attempt_id":"\(attempt)",
+          "terminal_tool_attempt_id":"\(toolAttempt)"
+        }
+      }
+      """
+    )
+  }
+
+  static func activeRunningPreparedTurn() throws -> SignalboxProcessServerMessage {
+    try activeRunningTurn(currentModelCallState: "prepared")
+  }
+
+  static func activeRunningInFlightTurn() throws -> SignalboxProcessServerMessage {
+    try activeRunningTurn(currentModelCallState: "in_flight")
+  }
+
+  static func activeRunningCancellationRequestedTurn() throws -> SignalboxProcessServerMessage {
+    try activeRunningTurn(currentModelCallState: "cancellation_requested")
+  }
+
+  private static func activeRunningTurn(
+    currentModelCallState: String
+  ) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"active_running",
+          "current_attempt_id":"\(attempt)",
+          "current_model_call":{
+            "model_call_id":"\(modelCall)",
+            "state":{"type":"\(currentModelCallState)"}
+          }
         }
       }
       """

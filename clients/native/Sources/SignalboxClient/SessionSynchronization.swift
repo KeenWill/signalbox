@@ -1361,12 +1361,19 @@ private struct SignalboxSnapshotEntryIdentity: Hashable {
   let entryID: SignalboxCanonicalUUID
 }
 
-/// Row counts alone cannot prove usage ownership. Turn states establish which
-/// turns may own historical calls and which exposed terminal call identities
-/// must appear before the model-call section can close.
+/// Row counts alone cannot prove usage ownership. Turn states may require a
+/// terminal owner, merely permit historical calls, or expose a current call
+/// identity that the terminal-only usage section must reject.
 private enum SignalboxSnapshotModelCallOwnership {
   case impossible
-  case permitted(requiredTerminalModelCallID: SignalboxCanonicalUUID?)
+  case permitted
+  case required(SignalboxSnapshotRequiredModelCallOwnership)
+  case forbidden(SignalboxCanonicalUUID)
+}
+
+private enum SignalboxSnapshotRequiredModelCallOwnership {
+  case identity(SignalboxCanonicalUUID)
+  case owner
 }
 
 private struct SignalboxSnapshotAccumulator: Sendable {
@@ -1376,6 +1383,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
   private var turnAcceptancePositions: [SignalboxCanonicalUUID: UInt64] = [:]
   private var modelCallOwningTurnIDs: Set<SignalboxCanonicalUUID> = []
   private var unmatchedTerminalModelCallOwners:
+    [SignalboxCanonicalUUID: SignalboxCanonicalUUID] = [:]
+  private var unmatchedTerminalModelCallOwnerIDs: Set<SignalboxCanonicalUUID> = []
+  private var forbiddenModelCallOwners:
     [SignalboxCanonicalUUID: SignalboxCanonicalUUID] = [:]
   private var modelCallIDs: Set<SignalboxCanonicalUUID> = []
   private var entryIDs: Set<SignalboxSnapshotEntryIdentity> = []
@@ -1413,7 +1423,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     switch message {
     case .transcriptTurn(let turn):
       let ownership = turn.state.snapshotModelCallOwnership
-      let requiredTerminalModelCallID = ownership.requiredTerminalModelCallID
+      let exposedModelCallID = ownership.exposedModelCallID
       guard
         !turn.state.isInvalidStoredProjection,
         !modelCallsStarted,
@@ -1421,8 +1431,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         !entriesStarted,
         turn.acceptancePosition.rawValue != 0,
         priorAcceptancePosition.map({ $0 < turn.acceptancePosition.rawValue }) ?? true,
-        (requiredTerminalModelCallID.map {
+        (exposedModelCallID.map {
           unmatchedTerminalModelCallOwners[$0] == nil
+            && forbiddenModelCallOwners[$0] == nil
         } ?? true),
         turnAcceptancePositions.updateValue(
           turn.acceptancePosition.rawValue, forKey: turn.turnID
@@ -1433,11 +1444,17 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       switch ownership {
       case .impossible:
         break
-      case .permitted(let requiredTerminalModelCallID):
+      case .permitted:
         modelCallOwningTurnIDs.insert(turn.turnID)
-        if let requiredTerminalModelCallID {
-          unmatchedTerminalModelCallOwners[requiredTerminalModelCallID] = turn.turnID
-        }
+      case .required(.identity(let requiredTerminalModelCallID)):
+        modelCallOwningTurnIDs.insert(turn.turnID)
+        unmatchedTerminalModelCallOwners[requiredTerminalModelCallID] = turn.turnID
+      case .required(.owner):
+        modelCallOwningTurnIDs.insert(turn.turnID)
+        unmatchedTerminalModelCallOwnerIDs.insert(turn.turnID)
+      case .forbidden(let forbiddenModelCallID):
+        modelCallOwningTurnIDs.insert(turn.turnID)
+        forbiddenModelCallOwners[forbiddenModelCallID] = turn.turnID
       }
       priorAcceptancePosition = turn.acceptancePosition.rawValue
       turnCount = turnCount.addingReportingOverflow(1).partialValue
@@ -1459,6 +1476,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         !entriesStarted,
         evidence.modelCallIndex.rawValue == modelCallCount,
         modelCallOwningTurnIDs.contains(evidence.turnID),
+        forbiddenModelCallOwners[evidence.modelCallID] == nil,
         (unmatchedTerminalModelCallOwners[evidence.modelCallID].map {
           $0 == evidence.turnID
         } ?? true),
@@ -1469,6 +1487,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       }
       modelCallsStarted = true
       unmatchedTerminalModelCallOwners.removeValue(forKey: evidence.modelCallID)
+      unmatchedTerminalModelCallOwnerIDs.remove(evidence.turnID)
       priorModelCallTurnAcceptancePosition = turnAcceptancePosition
       priorModelCallID = evidence.modelCallID.rawValue
       modelCallCount = modelCallCount.addingReportingOverflow(1).partialValue
@@ -1481,7 +1500,8 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         !modelCallsEnded,
         !entriesStarted,
         count.rawValue == modelCallCount,
-        unmatchedTerminalModelCallOwners.isEmpty
+        unmatchedTerminalModelCallOwners.isEmpty,
+        unmatchedTerminalModelCallOwnerIDs.isEmpty
       else {
         return .invalid("Snapshot model-call evidence identities or count were invalid.")
       }
@@ -1627,18 +1647,29 @@ extension SignalboxTranscriptTurnState {
     case .queued, .unknown:
       return .impossible
     case .activeAwaitingModelCallRecovery(_, let recoveryModelCallID):
-      return .permitted(requiredTerminalModelCallID: recoveryModelCallID)
+      return .required(.identity(recoveryModelCallID))
     case .failed(_, _, let terminalModelCall):
-      return .permitted(requiredTerminalModelCallID: terminalModelCall?.modelCallID)
+      guard let terminalModelCall else {
+        return .permitted
+      }
+      return .required(.identity(terminalModelCall.modelCallID))
     case .completed(_, _, let terminalModelCallID),
       .refused(_, _, let terminalModelCallID),
       .reconciliationRequired(_, _, let terminalModelCallID):
-      return .permitted(requiredTerminalModelCallID: terminalModelCallID)
+      return .required(.identity(terminalModelCallID))
     case .cancelled(_, _, let terminalModelCallID):
-      return .permitted(requiredTerminalModelCallID: terminalModelCallID)
-    case .activeRunning, .activeAwaitingToolApproval, .activeAwaitingToolRecovery,
+      guard let terminalModelCallID else {
+        return .permitted
+      }
+      return .required(.identity(terminalModelCallID))
+    case .activeRunning(_, let currentModelCall):
+      guard let currentModelCall else {
+        return .permitted
+      }
+      return .forbidden(currentModelCall.modelCallID)
+    case .activeAwaitingToolApproval, .activeAwaitingToolRecovery,
       .toolReconciliationRequired:
-      return .permitted(requiredTerminalModelCallID: nil)
+      return .required(.owner)
     }
   }
 
@@ -1675,12 +1706,14 @@ extension SignalboxTranscriptTurnState {
 }
 
 extension SignalboxSnapshotModelCallOwnership {
-  fileprivate var requiredTerminalModelCallID: SignalboxCanonicalUUID? {
+  fileprivate var exposedModelCallID: SignalboxCanonicalUUID? {
     switch self {
-    case .impossible:
-      return nil
-    case .permitted(let requiredTerminalModelCallID):
+    case .required(.identity(let requiredTerminalModelCallID)):
       return requiredTerminalModelCallID
+    case .forbidden(let forbiddenModelCallID):
+      return forbiddenModelCallID
+    case .impossible, .permitted, .required(.owner):
+      return nil
     }
   }
 }
