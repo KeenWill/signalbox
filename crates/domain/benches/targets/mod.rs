@@ -17,6 +17,12 @@ use uuid::Uuid;
 
 const SCHEDULING_SESSION_ID_SEED: u128 = 1;
 const SESSION_DEFAULT_MODEL_ID_SEED: u128 = 2;
+const ACTIVE_TURN_ATTEMPT_ID_SEED: u128 = 50_000;
+const FRONTIER_SESSION_ID_SEED: u128 = 60_000;
+const FRONTIER_ENTRY_ID_SEED: u128 = 61_000;
+const FRONTIER_SNAPSHOT_ID_SEED: u128 = 62_000;
+const TOTAL_ORDER_SESSION_ID_SEED: u128 = 70_000;
+const TOTAL_ORDER_TURN_ID_SEED: u128 = 80_000;
 const TERMINAL_TURN_COUNT: u64 = 48;
 const QUEUED_TURN_COUNT: u64 = 15;
 const FRONTIER_LAYER_COUNT: u128 = 64;
@@ -292,7 +298,7 @@ fn try_scheduling_fixture() -> Result<SchedulingFixture, FixtureError> {
             starting_frontier: active_frontier,
             phase: ActiveTurnSchedulingReconstitutionInput::prepared(
                 active_turn,
-                attempt_id(50_000),
+                attempt_id(ACTIVE_TURN_ATTEMPT_ID_SEED),
             ),
         },
     ));
@@ -369,17 +375,19 @@ pub fn reconstitute_scheduling(input: SchedulingFixture) -> SchedulingResult {
 /// entry identities are fixed synthetic UUIDs, and each layer shares the
 /// complete prefix built by the prior layer.
 pub fn frontier_build_input() -> FrontierBuildInput {
-    let session = session_id(60_000);
+    let session = session_id(FRONTIER_SESSION_ID_SEED);
     let mut layers = (0..FRONTIER_LAYER_COUNT).map(|layer| {
         let entries = (0..FRONTIER_ENTRIES_PER_LAYER)
             .map(|offset| {
                 SemanticTranscriptEntryRef::from_source(
                     session,
-                    semantic_entry_id(61_000 + layer * FRONTIER_ENTRIES_PER_LAYER + offset),
+                    semantic_entry_id(
+                        FRONTIER_ENTRY_ID_SEED + layer * FRONTIER_ENTRIES_PER_LAYER + offset,
+                    ),
                 )
             })
             .collect::<Vec<_>>();
-        (frontier_id(62_000 + layer), entries)
+        (frontier_id(FRONTIER_SNAPSHOT_ID_SEED + layer), entries)
     });
     let (first_snapshot, first_entries) =
         fixture_or_exit(layers.next().ok_or(FixtureError::Frontier));
@@ -410,7 +418,7 @@ pub fn build_deep_frontier(
 ///
 /// The prefix is layer 48 with 384 entries; the later frontier is layer 64
 /// with 512 entries. Both retain the same structural-sharing lineage, so the
-/// measured proof exercises the O(1) shared-prefix fast path.
+/// measured proof exercises the shared-prefix lookup without scanning entries.
 pub fn prefix_proof_fixture() -> PrefixProofFixture {
     let input = frontier_build_input();
     let mut frontier = ResolvedContextFrontierReconstitutionInput::new(
@@ -455,7 +463,7 @@ pub fn prove_shared_prefix(input: &PrefixProofFixture) -> bool {
 /// 1 through 256 and identities deliberately descend as positions increase,
 /// preventing identity order from coinciding with durable acceptance order.
 pub fn total_order_fixture() -> Vec<AcceptedInputQueueWork> {
-    let session = session_id(70_000);
+    let session = session_id(TOTAL_ORDER_SESSION_ID_SEED);
     let capacity = fixture_or_exit(
         usize::try_from(TOTAL_ORDER_CHAIN_COUNT * TOTAL_ORDER_CHAIN_LENGTH)
             .map_err(|_| FixtureError::Position),
@@ -463,7 +471,7 @@ pub fn total_order_fixture() -> Vec<AcceptedInputQueueWork> {
     let mut work = Vec::with_capacity(capacity);
     for chain in 0..TOTAL_ORDER_CHAIN_COUNT {
         let root_ordinal = chain * TOTAL_ORDER_CHAIN_LENGTH + 1;
-        let root = turn_id(80_000 + u128::from(u64::MAX - root_ordinal));
+        let root = turn_id(TOTAL_ORDER_TURN_ID_SEED + u128::from(u64::MAX - root_ordinal));
         let root_position = fixture_or_exit(position(root_ordinal));
         work.push(AcceptedInputQueueWork::new(
             session,
@@ -473,7 +481,7 @@ pub fn total_order_fixture() -> Vec<AcceptedInputQueueWork> {
         let mut predecessor = root;
         for offset in 1..TOTAL_ORDER_CHAIN_LENGTH {
             let ordinal = root_ordinal + offset;
-            let turn = turn_id(80_000 + u128::from(u64::MAX - ordinal));
+            let turn = turn_id(TOTAL_ORDER_TURN_ID_SEED + u128::from(u64::MAX - ordinal));
             let accepted_position = fixture_or_exit(position(ordinal));
             work.push(AcceptedInputQueueWork::new(
                 session,

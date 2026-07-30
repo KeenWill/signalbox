@@ -76,6 +76,10 @@ mod benchmark_runner {
 
 fn main() {
     if cfg!(debug_assertions) {
+        if std::env::var_os("SIGNALBOX_DOMAIN_INSTRUCTION_BENCHMARK").is_some() {
+            eprintln!("domain instruction benchmarks require a release bench profile");
+            std::process::exit(2);
+        }
         return;
     }
     benchmark_runner::run();

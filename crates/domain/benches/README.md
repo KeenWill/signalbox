@@ -14,8 +14,13 @@ On Linux, install Valgrind and the matching runner, then run:
 
 ```console
 cargo install --locked --version '=0.19.4' gungraun-runner
-cargo bench -p signalbox-domain --bench instruction_counts
+SIGNALBOX_DOMAIN_INSTRUCTION_BENCHMARK=1 \
+  cargo bench -p signalbox-domain --bench instruction_counts
 ```
+
+The run marker distinguishes an explicit instruction benchmark from Cargo
+executing the custom bench binary during `cargo test --all-targets`. An explicit
+run with debug assertions exits nonzero instead of publishing an empty report.
 
 The detailed profiles are written below `target/gungraun`. The Rust workflow
 runs this command and copies its complete terminal report into the GitHub job
@@ -45,14 +50,18 @@ code-performance change.
   semantic entries, 97 shared snapshots, and a 16-entry active acceptance tail.
   This baseline comes before the scheduled refactor of that function. A
   sustained instruction increase means the complete scheduling read path does
-  more CPU work; 4% is material enough to inspect before accepting a refactor.
+  more CPU work. A 4% increase is an investigation lead, not an acceptance
+  threshold: first confirm the compiler, dependencies, harness, and fixture are
+  equivalent, then use the profile and code diff to decide whether the added
+  work is justified.
 - `build_deep_frontier` builds 64 structurally shared layers containing 512
   entries. A change tracks the cost of persistent frontier construction and
   append validation.
 - `prove_shared_prefix` proves that a 384-entry frontier is a prefix of a
-  512-entry descendant through the O(1) sharing fast path. Its absolute count is
-  intentionally small, so inspect the disassembly or profile before treating a
-  percentage alone as important.
+  512-entry descendant through the structural-sharing fast path. The lineage
+  index lookup is logarithmic in the number of snapshots but avoids scanning
+  semantic entries. Its absolute count is intentionally small, so inspect the
+  disassembly or profile before treating a percentage alone as important.
 - `derive_interrupt_total_order` orders 256 turns arranged as 64 ordinary roots
   with three interrupt successors each. A change tracks sorting, map/set work,
   chain traversal, and chronology validation.
