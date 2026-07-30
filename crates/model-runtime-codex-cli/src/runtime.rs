@@ -132,9 +132,14 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
 
 /// Codex CLI protocol snapshot covered by this adapter's offline fixtures.
 ///
-/// Composition must select this executable version before wiring the adapter;
-/// the runtime does not add a version-probe process to a model dispatch.
-pub const SUPPORTED_CODEX_CLI_VERSION: &str = "0.146.0";
+/// The build derives this marker from the exact pin in
+/// `tooling/codex-cli/package.json`, so a Renovate change is mechanically
+/// complete and the binding smoke tests that same version. That live exchange
+/// does not prove the offline fixture corpus still represents the CLI's current
+/// event shapes; fixture regeneration or validation against the installed CLI
+/// remains the missing check. The runtime does not add a version-probe process
+/// to a model dispatch.
+pub const SUPPORTED_CODEX_CLI_VERSION: &str = env!("SIGNALBOX_CODEX_CLI_VERSION");
 
 /// Stateless subscription-backed Codex CLI adapter.
 pub struct CodexCliRuntime {

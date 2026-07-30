@@ -5,52 +5,112 @@
 # rather than assumed. The discipline it implements is specified in the Codex
 # CLI provider adapter section of docs/spec/runtime-substrate.md.
 #
-# Security shape. There is deliberately no `pull_request` trigger: a fork pull
-# request must never be able to reach the credential, and no run checks out a
-# fork ref. `workflow_dispatch` is restricted to accounts with write access.
-# The `push` trigger accepts `main` and the in-repository versioned Renovate
-# branch pattern for this dependency: a fork cannot create a push event on
-# either base-repository ref, even if it gives its own branch the same name.
-# The path filter admits the pin files, the constant the mechanical sync script
-# moves, and the live-smoke compatibility fixture. The credential remains bound
-# to the `codex-smoke` environment, so it is unavailable to any other workflow
-# and to any run the environment's protection rules have not admitted; it is
-# read once, from `secrets.*`, into the single step that pipes it to the CLI's
-# own login command, and it is never echoed, written to the log, or passed to
-# the Rust process.
+# Accepted trust boundary. The live exchange must execute the proposed
+# repository adapter code against the pinned CLI; that is the purpose of this
+# compatibility smoke. After authentication, that repository-controlled test
+# process can read the CLI credential store under CODEX_HOME. The workflow
+# therefore trusts anyone with write access to this repository, the same trust
+# already required to push executable code to main. It does not trust fork
+# authors. First, GitHub withholds secrets from ordinary fork pull_request runs
+# regardless of environment policy. Second, the secretless gate compares
+# github.event.pull_request.head.repo.full_name with github.repository and
+# rejects a changed fork before the credentialed job can start. Third, the
+# credentialed job condition repeats that comparison. The required aggregate
+# also refuses a smoke-required fork, so weakening one site is insufficient.
 #
-# A Renovate pin bump runs this workflow automatically. If the ordinary Rust
-# workflow reports the deliberate pin drift tripwire, run the sync command in
-# that assertion and push the result; the constant path retriggers this smoke.
+# The smoke remains bound to the codex-smoke environment, which is configured
+# for all branches so main, manual, and synthetic pull-request merge refs can
+# enter. That availability setting admits fork and same-repository refs alike
+# and supplies no security boundary; the defenses above exclude forks.
+#
+# The credential is referenced only in the authentication step, piped to the
+# CLI login command on stdin, and never echoed or passed in argv or a child
+# environment. npm lifecycle scripts are disabled, and repository code is
+# compiled and the credential-free real-CLI probes run before the credential
+# store exists. The later live test's access to that store is intentional under
+# the accepted same-repository-writer boundary above.
 name: Codex CLI smoke
 
 on:
   workflow_dispatch:
+  pull_request:
   push:
-    branches: [main, "renovate/openai-codex-*.x"]
+    branches: [main]
     paths:
-      - "crates/model-runtime-codex-cli/src/runtime.rs"
-      - "crates/model-runtime-codex-cli/tests/live_smoke.rs"
-      - "tooling/codex-cli/package.json"
-      - "tooling/codex-cli/package-lock.json"
+      - "tooling/codex-cli/**"
 
-permissions:
-  contents: read
-
-# One live exchange at a time. Never cancel in progress: a half-killed run
-# would leave no compatibility evidence for the bump that triggered it.
-concurrency:
-  group: codex-smoke
-  cancel-in-progress: false
+permissions: {}
 
 jobs:
-  codex-smoke:
+  gate:
+    name: Codex smoke eligibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      smoke_required: ${{ steps.gate.outputs.smoke_required }}
+    steps:
+      - name: Check out the pull request head for path inspection
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Decide whether compatibility smoke is required
+        id: gate
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
+            echo "smoke_required=true" >> "${GITHUB_OUTPUT}"
+            echo "Compatibility smoke is required for ${GITHUB_EVENT_NAME}."
+            exit 0
+          fi
+
+          changed_paths="${RUNNER_TEMP}/codex-smoke-changed-files"
+          git diff --no-renames --name-only -z \
+            "${BASE_SHA}...${HEAD_SHA}" > "${changed_paths}"
+          tooling_changed=false
+          while IFS= read -r -d '' path; do
+            if [[ "${path}" == tooling/codex-cli/* ]]; then
+              tooling_changed=true
+              break
+            fi
+          done < "${changed_paths}"
+          if [[ "${tooling_changed}" != "true" ]]; then
+            echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
+            echo "Not applicable: tooling/codex-cli/** did not change."
+            exit 0
+          fi
+
+          if [[ "${HEAD_REPOSITORY}" != "${BASE_REPOSITORY}" ]]; then
+            echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
+            echo "::error::A fork changed the Codex CLI pin. Put the reviewed change on a trusted in-repository Renovate branch, then run: gh workflow run codex-smoke.yml --ref <trusted-renovate-branch>"
+            exit 1
+          fi
+
+          echo "smoke_required=true" >> "${GITHUB_OUTPUT}"
+          echo "Compatibility smoke is required for this same-repository pin change."
+
+  smoke:
+    name: Codex live compatibility
+    needs: gate
+    if: ${{ needs.gate.outputs.smoke_required == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    permissions:
+      contents: read
     # Repository → Settings → Environments → codex-smoke holds
-    # CODEX_SMOKE_API_KEY and should carry the deployment-branch and
-    # required-reviewer rules the owner wants around real spend. Binding the
-    # secret to the environment rather than the repository is what keeps it out
-    # of every other workflow.
+    # CODEX_SMOKE_API_KEY. Its all-branches availability setting is documented
+    # above and deliberately supplies no additional author-trust decision.
     environment: codex-smoke
+    concurrency:
+      group: codex-smoke
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -58,6 +118,8 @@ jobs:
       # the runner home directory, so the cleanup step below can remove it and
       # nothing survives into a later step.
       CODEX_HOME: ${{ github.workspace }}/.codex-smoke-home
+      SIGNALBOX_CODEX_SMOKE_EXECUTABLE: >-
+        ${{ github.workspace }}/tooling/codex-cli/node_modules/.bin/codex
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,21 +128,38 @@ jobs:
       # The runner image ships Node, and the pinned package is a thin launcher
       # around a prebuilt native binary, so no Node toolchain setup is needed.
       # `npm ci` installs the lockfile's integrity-checked artifact exactly.
+      # The package ships its platform binary as an optional dependency and
+      # needs no lifecycle script, so installation disables scripts entirely.
       - name: Install the pinned Codex CLI
-        run: npm ci --prefix tooling/codex-cli
+        run: npm ci --ignore-scripts --prefix tooling/codex-cli
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-on-failure: true
           key: codex-smoke
       # Compile the smoke test binary BEFORE the credential store exists, so no
-      # repository code — build scripts, procedural macros, the test itself —
-      # ever executes as this job's user while the API key is readable under
-      # CODEX_HOME. The run step below is then fresh and does not recompile.
+      # repository build script or procedural macro executes while the API key
+      # is readable under CODEX_HOME. The later test run is fresh and does not
+      # recompile.
       - name: Build the smoke test binary
         run: >-
           cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli
           --test live_smoke --no-run
+      - name: Run credential-free pre-spend probes
+        run: |
+          set -euo pipefail
+          test_name=the_pinned_codex_cli_pre_spend_contract_holds
+          result="${RUNNER_TEMP}/codex-smoke-pre-spend-result"
+          cargo test --color never --no-fail-fast \
+            -p signalbox-model-runtime-codex-cli --test live_smoke -- \
+            --ignored --exact "${test_name}" 2>&1 | tee "${result}"
+          passed_count=$(sed -n \
+            's/^test result: ok\. \([0-9][0-9]*\) passed;.*/\1/p' \
+            "${result}")
+          if [[ "${passed_count}" != "1" ]]; then
+            echo "::error::Expected exactly one pre-spend test to execute; libtest reported '${passed_count:-no passed count}'."
+            exit 1
+          fi
       # The CLI reads the key from stdin and writes its own credential store
       # under CODEX_HOME. The value is never an argument (process listings),
       # never echoed, and never exported to the smoke step: the adapter's
@@ -104,25 +183,65 @@ jobs:
             | env -u CODEX_SMOKE_API_KEY timeout --signal=TERM --kill-after=5s 30s \
                 sh -c 'trap "while :; do sleep 1; done" TERM; "$@"' sh \
                 tooling/codex-cli/node_modules/.bin/codex login --with-api-key
-      # The test asserts the executable's reported version against the
-      # adapter's supported-version constant before spending anything, so a
-      # drifted binary fails closed instead of producing compatibility evidence
-      # for a version it never ran.
+      # The test repeats the pre-spend assertions immediately before the model
+      # operation, then spends exactly one exchange through the adapter.
       - name: Run one live exchange through the adapter
         env:
-          SIGNALBOX_CODEX_SMOKE_EXECUTABLE: >-
-            ${{ github.workspace }}/tooling/codex-cli/node_modules/.bin/codex
           # Optional, and a plain variable rather than a secret because a model
-          # name is not sensitive. The test's built-in default is the cheapest
-          # model the CLI advertises, but which models a credential may address
-          # is account-scoped — a ChatGPT-account login and an API key do not
-          # offer the same set — and only the account holder knows. Set
-          # CODEX_SMOKE_MODEL on the codex-smoke environment to override.
+          # name is not sensitive. Which models an API key can address is
+          # account-scoped, so the environment may override the code default.
           SIGNALBOX_CODEX_SMOKE_MODEL: ${{ vars.CODEX_SMOKE_MODEL }}
-        run: >-
-          cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli
-          --test live_smoke --
-          --ignored --exact the_pinned_codex_cli_completes_one_exchange
+        run: |
+          set -euo pipefail
+          test_name=the_pinned_codex_cli_completes_one_exchange
+          result="${RUNNER_TEMP}/codex-smoke-live-result"
+          cargo test --color never --no-fail-fast \
+            -p signalbox-model-runtime-codex-cli --test live_smoke -- \
+            --ignored --exact "${test_name}" 2>&1 | tee "${result}"
+          passed_count=$(sed -n \
+            's/^test result: ok\. \([0-9][0-9]*\) passed;.*/\1/p' \
+            "${result}")
+          if [[ "${passed_count}" != "1" ]]; then
+            echo "::error::Expected exactly one live smoke test to execute; libtest reported '${passed_count:-no passed count}'."
+            exit 1
+          fi
       - name: Remove the credential store
         if: ${{ always() }}
         run: rm -rf "${CODEX_HOME}"
+
+  required:
+    name: Codex smoke compatibility
+    needs: [gate, smoke]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      GATE_RESULT: ${{ needs.gate.result }}
+      SMOKE_REQUIRED: ${{ needs.gate.outputs.smoke_required }}
+      SMOKE_RESULT: ${{ needs.smoke.result }}
+      HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+      BASE_REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Report the binding result
+        run: |
+          set -euo pipefail
+          if [[ "${GATE_RESULT}" != "success" ]]; then
+            echo "The Codex smoke eligibility gate failed."
+            exit 1
+          fi
+          if [[ "${EVENT_NAME}" == "pull_request" \
+            && "${SMOKE_REQUIRED}" == "true" \
+            && "${HEAD_REPOSITORY}" != "${BASE_REPOSITORY}" ]]; then
+            echo "A fork pull request cannot use the credentialed Codex smoke."
+            exit 1
+          fi
+          if [[ "${SMOKE_REQUIRED}" == "true" && "${SMOKE_RESULT}" != "success" ]]; then
+            echo "The required Codex live compatibility smoke did not pass."
+            exit 1
+          fi
+          if [[ "${SMOKE_REQUIRED}" == "true" ]]; then
+            echo "The required Codex live compatibility smoke passed."
+          else
+            echo "Not applicable: the Codex CLI pin did not change."
+          fi

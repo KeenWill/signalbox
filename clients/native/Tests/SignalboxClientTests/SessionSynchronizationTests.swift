@@ -24,6 +24,12 @@ final class SessionSynchronizationTests: XCTestCase {
         message: try SynchronizationFixture.queuedTurn()
       )
     )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
     let textEffects = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
@@ -679,6 +685,12 @@ final class SessionSynchronizationTests: XCTestCase {
         message: try SynchronizationFixture.unknownTopLevelMessage()
       )
     )
+    _ = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
     let replayEffects = transport.send(
       .frame(
         generation: 1,
@@ -724,6 +736,13 @@ final class SessionSynchronizationTests: XCTestCase {
         generation: 1,
         refreshID: 1,
         message: try SynchronizationFixture.snapshotStart(cursor: 20)
+      )
+    )
+    _ = transport.send(
+      .sideFrame(
+        generation: 1,
+        refreshID: 1,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
       )
     )
     let sideEndEffects = transport.send(
@@ -913,6 +932,13 @@ final class SessionSynchronizationTests: XCTestCase {
         message: try SynchronizationFixture.snapshotStart(cursor: liveCursor)
       )
     )
+    _ = transport.send(
+      .sideFrame(
+        generation: SynchronizationFixture.initialGeneration,
+        refreshID: SynchronizationFixture.firstRefreshID,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
     let sideEndEffects = transport.send(
       .sideFrame(
         generation: SynchronizationFixture.initialGeneration,
@@ -1093,6 +1119,13 @@ final class SessionSynchronizationTests: XCTestCase {
         message: try SynchronizationFixture.snapshotStart(cursor: 19)
       )
     )
+    _ = transport.send(
+      .sideFrame(
+        generation: 1,
+        refreshID: 1,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
     let staleEffects = transport.send(
       .sideFrame(
         generation: 1,
@@ -1265,6 +1298,12 @@ final class SessionSynchronizationTests: XCTestCase {
     _ = transport.send(
       .frame(
         generation: 2,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: 2,
         message: try SynchronizationFixture.snapshotEnd(
           cursor: 30,
           turnCount: 0,
@@ -1306,6 +1345,12 @@ final class SessionSynchronizationTests: XCTestCase {
       .frame(
         generation: 2,
         message: try SynchronizationFixture.snapshotStart(cursor: recoveredCursor)
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: 2,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
       )
     )
     _ = transport.send(
@@ -1443,6 +1488,12 @@ final class SessionSynchronizationTests: XCTestCase {
   func testMismatchedSnapshotCountsFailClosedIntoRecovery() throws {
     var transport = try SynchronizationFixture.transportInHistory(cursor: 10)
 
+    _ = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
     let effects = transport.send(
       .frame(
         generation: 1,
@@ -1552,6 +1603,105 @@ final class SessionSynchronizationTests: XCTestCase {
       .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
     )
     XCTAssertEqual(transport.machine.diagnostics.first?.kind, .protocolViolation)
+  }
+
+  func testModelCallUsageRejectsUUIDOrderRegressionWithinATurn() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.queuedTurn()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallUsage(
+          modelCallID: SynchronizationFixture.modelCall
+        )
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallUsage(
+          index: 1, modelCallID: SynchronizationFixture.earlierModelCall
+        )
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
+    )
+    XCTAssertEqual(transport.machine.diagnostics.first?.kind, .protocolViolation)
+  }
+
+  func testZeroModelCallSnapshotRequiresExplicitBoundary() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.snapshotEnd(
+          cursor: SynchronizationFixture.initialCursor,
+          turnCount: 0,
+          entryCount: 0
+        )
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
+    )
+    XCTAssertEqual(transport.machine.diagnostics.first?.kind, .protocolViolation)
+  }
+
+  func testModelCallEvidenceFramesCompleteWithoutAFalseDiagnostic() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.queuedTurn()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallUsage()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 1)
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.snapshotEnd(
+          cursor: SynchronizationFixture.initialCursor,
+          turnCount: 1,
+          entryCount: 0
+        )
+      )
+    )
+    let snapshot = try SynchronizationFixture.publishedSnapshot(in: effects)
+
+    XCTAssertEqual(snapshot.records.count, 2)
+    XCTAssertTrue(transport.machine.diagnostics.isEmpty)
   }
 
   func testNonRetriableProtocolErrorReportsTerminalFailure() throws {
@@ -1695,6 +1845,7 @@ private enum SynchronizationFixture {
   static let session = "11111111-1111-4111-8111-111111111111"
   static let turn = "22222222-2222-4222-8222-222222222222"
   static let acceptedInput = "33333333-3333-4333-8333-333333333333"
+  static let earlierModelCall = "44444444-4444-4444-8444-444444444444"
   static let modelCall = "55555555-5555-4555-8555-555555555555"
   static let entry = "66666666-6666-4666-8666-666666666666"
   static let frontier = "77777777-7777-4777-8777-777777777777"
@@ -1817,6 +1968,12 @@ private enum SynchronizationFixture {
     _ = result.send(
       .frame(
         generation: 1,
+        message: try modelCallsEnd(count: 0)
+      )
+    )
+    _ = result.send(
+      .frame(
+        generation: 1,
         message: try snapshotEnd(
           cursor: cursor,
           turnCount: 0,
@@ -1846,6 +2003,12 @@ private enum SynchronizationFixture {
       .frame(
         generation: 1,
         message: try snapshotStart(cursor: cursor)
+      )
+    )
+    _ = result.send(
+      .frame(
+        generation: 1,
+        message: try modelCallsEnd(count: 0)
       )
     )
     _ = result.send(
@@ -2198,6 +2361,39 @@ private enum SynchronizationFixture {
         "fragment_index":"0",
         "final_fragment":true,
         "content_fragment":"\(content)"
+      }
+      """
+    )
+  }
+
+  static func modelCallUsage(
+    index: UInt64 = 0,
+    modelCallID: String = modelCall
+  ) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_model_call_usage",
+        "model_call_index":"\(index)",
+        "turn_id":"\(turn)",
+        "model_call_id":"\(modelCallID)",
+        "usage":{
+          "input_tokens":"10",
+          "output_tokens":"0",
+          "cache_creation_input_tokens":null,
+          "cache_read_input_tokens":"4"
+        }
+      }
+      """
+    )
+  }
+
+  static func modelCallsEnd(count: UInt64) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_model_calls_end",
+        "model_call_count":"\(count)"
       }
       """
     )

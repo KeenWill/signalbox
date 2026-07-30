@@ -41,12 +41,14 @@
       // Deliberately carries no minimum-release-age gate and no automerge, on
       // both counts unlike the cargo policy above. The wrapped CLI releases
       // far too often for calendar age to mean anything, and what makes a bump
-      // safe is evidence, not waiting: the offline pin-agreement test fails the
-      // ordinary Rust check until the adapter's supported-version constant and
-      // fixture corpus move with the manifest, and the gated compatibility
-      // smoke (.github/workflows/codex-smoke.yml, dispatched against the
-      // Renovate branch) is what proves the bump against the real CLI. Both are
-      // human-read gates, so the pull request must never merge itself.
+      // safe is evidence, not waiting: the adapter build mechanically derives
+      // its supported-version constant from the exact manifest pin, and the
+      // automatic pull-request compatibility smoke
+      // (.github/workflows/codex-smoke.yml) installs and proves that pin against
+      // the real CLI. Neither gate validates the recorded offline event-shape
+      // fixtures; docs/open-questions.md tracks that residual coverage gap.
+      // The evidence remains human-reviewed, so the pull request must never
+      // merge itself.
       "matchManagers": ["npm"],
       "rangeStrategy": "pin",
       "automerge": false,

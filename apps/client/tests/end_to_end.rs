@@ -2115,6 +2115,8 @@ context_window_tokens = 200000
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_drives_review_target_to_finding() -> Result<(), Box<dyn Error>> {
     const SCRIPTED_REVIEW_ASSISTANT_TEXT: &str = "review analysis complete";
+    const IS_REAL_CONFIDENCE: &str = "9000";
+    const SEVERITY_LABEL_CONFIDENCE: &str = "8500";
 
     let (container, pool) = postgres().await?;
     let socket_directory = SocketDirectory::create()?;
@@ -2377,8 +2379,10 @@ context_window_tokens = 200000
         String::from("body\u{1b}[31m"),
         String::from("--severity"),
         String::from("high"),
-        String::from("--confidence"),
-        String::from("9000"),
+        String::from("--is-real-confidence"),
+        String::from(IS_REAL_CONFIDENCE),
+        String::from("--severity-label-confidence"),
+        String::from(SEVERITY_LABEL_CONFIDENCE),
         String::from("--category"),
         String::from("correctness"),
         String::from("--command-id"),
@@ -2427,8 +2431,10 @@ context_window_tokens = 200000
             String::from("body\u{1b}[31m"),
             String::from("--severity"),
             String::from("high"),
-            String::from("--confidence"),
-            String::from("9000"),
+            String::from("--is-real-confidence"),
+            String::from(IS_REAL_CONFIDENCE),
+            String::from("--severity-label-confidence"),
+            String::from(SEVERITY_LABEL_CONFIDENCE),
             String::from("--category"),
             String::from("correctness"),
             String::from("--command-id"),
@@ -2462,6 +2468,10 @@ context_window_tokens = 200000
     assert!(read_finding.status.success());
     let finding_output = String::from_utf8(read_finding.stdout)?;
     assert!(finding_output.contains("status=open"));
+    assert!(finding_output.contains(&format!("is_real_confidence={IS_REAL_CONFIDENCE}")));
+    assert!(finding_output.contains(&format!(
+        "severity_label_confidence={SEVERITY_LABEL_CONFIDENCE}"
+    )));
     assert!(finding_output.contains("body=body\\u{1b}[31m"));
     assert!(!finding_output.contains('\u{1b}'));
     let listed = run_client(

@@ -1918,7 +1918,20 @@ async fn await_and_report_turn(
             write_assistant_texts(&mut snapshot, output, turn_id)?;
             Ok(())
         }
-        TurnTerminal::Failed => Err(ClientError::TurnFailed),
+        TurnTerminal::Failed => {
+            let mut snapshot = transcript(client, session_id).await?;
+            match snapshot.turn_state(turn_id)? {
+                Some(TurnState::Failed {
+                    terminal_model_call,
+                    ..
+                }) => Err(ClientError::TurnFailed(
+                    terminal_model_call.and_then(|call| call.cause()),
+                )),
+                _ => Err(ClientError::Protocol(
+                    "terminal reread did not retain failed turn state",
+                )),
+            }
+        }
         TurnTerminal::Refused => Err(ClientError::TurnRefused),
         TurnTerminal::Cancelled => Err(ClientError::TurnCancelled),
         TurnTerminal::ReconciliationRequired => Err(ClientError::TurnReconciliationRequired),

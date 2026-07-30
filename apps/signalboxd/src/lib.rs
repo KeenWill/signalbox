@@ -54,9 +54,9 @@ pub use signalbox_tools_basic::{
     ReqwestWebFetchConstructionError, ReqwestWebFetchTransport, SessionStatusExecutor,
     SessionStatusExecutorError, SessionStatusTool, SessionStatusToolConstructionError,
     SessionStatusWrite, SessionStatusWriteOutcome, SessionStatusWriter, SystemCurrentTimeClock,
-    WebFetchBodyCompleteness, WebFetchExecutor, WebFetchExecutorError, WebFetchRequest,
-    WebFetchResponse, WebFetchTool, WebFetchToolConstructionError, WebFetchTransport,
-    WebFetchTransportFailure,
+    WebFetchBodyCompleteness, WebFetchEgressPolicy, WebFetchEgressPolicyError, WebFetchExecutor,
+    WebFetchExecutorError, WebFetchRequest, WebFetchResponse, WebFetchTool,
+    WebFetchToolConstructionError, WebFetchTransport, WebFetchTransportFailure,
 };
 pub use signalbox_tools_code_host::{
     CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
