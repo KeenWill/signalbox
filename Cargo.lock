@@ -2612,6 +2612,7 @@ dependencies = [
  "signalbox-domain",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

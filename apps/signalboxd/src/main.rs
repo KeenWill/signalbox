@@ -8,6 +8,7 @@
 //! boundary.
 
 use std::{
+    cell::Cell,
     env,
     ffi::OsString,
     fmt,
@@ -609,6 +610,34 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
     }
 }
 
+/// Drains runtime tasks without losing failures observed before cancellation.
+///
+/// The completion accumulator lives outside the timeout-cancelled future, so a
+/// task defect or failure already reduced to a closed class survives when a
+/// different task exhausts the grace window. No task error payload is retained.
+async fn drain_runtime_tasks<GuardLoss>(
+    runtime_tasks: &mut JoinSet<RuntimeTaskExit>,
+    guard_loss: GuardLoss,
+    grace_window: Duration,
+) -> (RuntimeDrainOutcome, RuntimeTaskCompletion)
+where
+    GuardLoss: Future<Output = ()>,
+{
+    let completion = Cell::new(RuntimeTaskCompletion::Clean);
+    let drain = select! {
+        () = guard_loss => RuntimeDrainOutcome::GuardLost,
+        result = timeout(grace_window, async {
+            while let Some(completed) = runtime_tasks.join_next().await {
+                completion.set(completion.get().combine(runtime_task_completion(completed)));
+            }
+        }) => match result {
+            Ok(()) => RuntimeDrainOutcome::Complete,
+            Err(_) => RuntimeDrainOutcome::GraceWindowExpired,
+        }
+    };
+    (drain, completion.get())
+}
+
 const fn completed_runtime_outcome(
     cause: RuntimeStopCause,
     drain: RuntimeDrainOutcome,
@@ -953,36 +982,16 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
         } else {
             let _ = scheduler_shutdown.send(());
             let _ = process_shutdown.send(true);
-            let (drain, components_clean) = {
-                let drain_tasks = async {
-                    let mut completion = RuntimeTaskCompletion::Clean;
-                    while let Some(completed) = runtime_tasks.join_next().await {
-                        completion = completion.combine(runtime_task_completion(completed));
-                    }
-                    completion
-                };
-                pin!(drain_tasks);
-                select! {
-                    () = &mut guard_loss => (
-                        RuntimeDrainOutcome::GuardLost,
-                        RuntimeTaskCompletion::Failed,
-                    ),
-                    result = timeout(GRACEFUL_SHUTDOWN_WINDOW, &mut drain_tasks) => {
-                        match result {
-                            Ok(completion) => (RuntimeDrainOutcome::Complete, completion),
-                            Err(_) => (
-                                RuntimeDrainOutcome::GraceWindowExpired,
-                                RuntimeTaskCompletion::Failed,
-                            ),
-                        }
-                    }
-                }
-            };
+            let (drain, components_clean) = drain_runtime_tasks(
+                &mut runtime_tasks,
+                guard_loss.as_mut(),
+                GRACEFUL_SHUTDOWN_WINDOW,
+            )
+            .await;
+            cause = combine_runtime_stop_cause(cause, components_clean);
             if drain != RuntimeDrainOutcome::Complete {
                 runtime_tasks.abort_all();
                 while runtime_tasks.join_next().await.is_some() {}
-            } else {
-                cause = combine_runtime_stop_cause(cause, components_clean);
             }
             completed_runtime_outcome(cause, drain)
         }
@@ -1211,7 +1220,7 @@ mod tests {
         SchedulerLoop,
     };
     use signalbox_domain::{SessionId, TurnId};
-    use tokio::sync::oneshot;
+    use tokio::{sync::oneshot, task::JoinSet};
     use tracing_subscriber::prelude::*;
     use uuid::Uuid;
 
@@ -1221,10 +1230,10 @@ mod tests {
         MODEL_CONFIGURATION_FILE_ENVIRONMENT, OperatorFilterDisposition,
         PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RequiredSettingFailure,
         RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
-        SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome, SingleHubGuardError,
-        TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
+        RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
+        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
         combine_runtime_stop_cause, completed_runtime_outcome, database_close_failure_outcome,
-        erase_startup_cause, migrate_scan_then_schedule, operator_filter,
+        drain_runtime_tasks, erase_startup_cause, migrate_scan_then_schedule, operator_filter,
         process_runtime_failure_class, report_database_close_failure, run_scheduler_until_shutdown,
         should_close_pool,
     };
@@ -1841,6 +1850,46 @@ mod tests {
                 RuntimeTaskCompletion::Defect
             ),
             RuntimeStopCause::RuntimeDefect
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runtime_task_defect_before_drain_timeout_prevents_clean_exit() {
+        let mut runtime_tasks: JoinSet<RuntimeTaskExit> = JoinSet::new();
+        runtime_tasks.spawn(async {
+            panic!("synthetic runtime task panic");
+        });
+        runtime_tasks.spawn(pending::<RuntimeTaskExit>());
+
+        let (drain, completion) =
+            drain_runtime_tasks(&mut runtime_tasks, pending(), Duration::from_secs(5)).await;
+        let cause = combine_runtime_stop_cause(RuntimeStopCause::Requested, completion);
+
+        assert_eq!(drain, RuntimeDrainOutcome::GraceWindowExpired);
+        assert_eq!(cause, RuntimeStopCause::RuntimeDefect);
+        assert_eq!(
+            completed_runtime_outcome(cause, drain),
+            ShutdownOutcome::RuntimeDefectAfterGraceWindow
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runtime_task_failure_before_drain_timeout_prevents_clean_exit() {
+        let mut runtime_tasks: JoinSet<RuntimeTaskExit> = JoinSet::new();
+        runtime_tasks.spawn(ready(RuntimeTaskExit::Process(Err(
+            ProcessRuntimeError::EncodeInvariant,
+        ))));
+        runtime_tasks.spawn(pending::<RuntimeTaskExit>());
+
+        let (drain, completion) =
+            drain_runtime_tasks(&mut runtime_tasks, pending(), Duration::from_secs(5)).await;
+        let cause = combine_runtime_stop_cause(RuntimeStopCause::Requested, completion);
+
+        assert_eq!(drain, RuntimeDrainOutcome::GraceWindowExpired);
+        assert_eq!(cause, RuntimeStopCause::ProcessRuntimeFailed);
+        assert_eq!(
+            completed_runtime_outcome(cause, drain),
+            ShutdownOutcome::RuntimeFailedAfterGraceWindow
         );
     }
 

@@ -606,6 +606,9 @@ where
 /// Session and optional turn are daemon-minted identities; failure class,
 /// cause, and stage are closed typed tokens. The pass error itself is never
 /// formatted, so adapter prose and caller content cannot enter any event here.
+/// The message makes no retry claim because this generic boundary covers both
+/// scheduler-retryable failures and failures that stop the daemon for startup
+/// recovery.
 fn observe_pass_completion<Pass>(
     completed: Result<(Id, Result<(), Pass::Error>), JoinError>,
     task_sessions: &mut HashMap<Id, SessionId>,
@@ -641,8 +644,7 @@ where
                     stage,
                     session_id = %session.as_uuid(),
                     turn_id = %turn.as_uuid(),
-                    "authoritative eligibility pass failed; \
-                     a later nudge or sweep will retry"
+                    "authoritative eligibility pass failed"
                 ),
                 None => tracing::error!(
                     ?failure_class,
@@ -650,8 +652,7 @@ where
                     stage,
                     session_id = %session.as_uuid(),
                     turn_id = tracing::field::Empty,
-                    "authoritative eligibility pass failed; \
-                     a later nudge or sweep will retry"
+                    "authoritative eligibility pass failed"
                 ),
             };
         }
@@ -661,8 +662,7 @@ where
                 cause_code = "eligibility_pass_task_terminated",
                 stage = "task",
                 session_id = %session.as_uuid(),
-                "authoritative eligibility pass task terminated unexpectedly; \
-                 a later nudge or sweep will retry"
+                "authoritative eligibility pass task terminated unexpectedly"
             );
         }
     }
@@ -704,6 +704,7 @@ mod tests {
     use std::{
         collections::VecDeque,
         future::{Future, pending, ready},
+        io::{self, Write},
         num::NonZeroUsize,
         sync::{
             Arc, Mutex,
@@ -732,6 +733,43 @@ mod tests {
         OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
         StartEligibleTurnService, StartEligibleTurnTransaction,
     };
+
+    #[derive(Clone, Default)]
+    struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedTelemetry {
+        fn text(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .expect("captured telemetry lock is available")
+                    .clone(),
+            )
+            .expect("captured telemetry is UTF-8")
+        }
+    }
+
+    impl Write for CapturedTelemetry {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured telemetry lock is available")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedTelemetry {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
 
     fn session(value: u128) -> SessionId {
         SessionId::from_uuid(Uuid::from_u128(value))
@@ -1174,6 +1212,39 @@ mod tests {
         assert_eq!(observed.len(), 2);
         assert!(observed.contains(&first));
         assert!(observed.contains(&second));
+    }
+
+    #[tokio::test]
+    async fn failed_pass_event_does_not_promise_scheduler_retry() {
+        let output = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(output.clone())
+            .finish();
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let failing_session = session(7);
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let pass = FakePass::failing_once(failing_session, 1, shutdown_sender);
+        let mut scheduler = SchedulerLoop::new(
+            FakeWorkSource {
+                hints: VecDeque::from([Ok(failing_session)]),
+            },
+            pass,
+        );
+
+        let exit = scheduler
+            .run_until(async {
+                shutdown_receiver
+                    .await
+                    .expect("fake pass requests shutdown after its failure");
+            })
+            .await;
+        let encoded = output.text();
+
+        assert_eq!(exit, SchedulerLoopExit::Shutdown);
+        assert!(encoded.contains("authoritative eligibility pass failed"));
+        assert!(!encoded.contains("a later nudge or sweep will retry"));
     }
 
     #[derive(Debug)]

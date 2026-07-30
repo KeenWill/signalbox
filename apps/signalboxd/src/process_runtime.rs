@@ -6488,6 +6488,61 @@ where
     }
 }
 
+/// Closed submit-input disposition for one model-execution repository error.
+///
+/// The mapping retains the exact typed variant before its source is erased.
+/// No database detail, transition label, or corruption payload enters the
+/// diagnostic, so credentials and caller or model content remain excluded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SubmitInputModelExecutionDiagnostic {
+    DatabaseUnavailable,
+    CommitAmbiguous,
+    Internal(InternalDiagnostic),
+}
+
+impl SubmitInputModelExecutionDiagnostic {
+    fn into_protocol_error(self, session_id: CanonicalUuid) -> ProtocolError {
+        match self {
+            Self::DatabaseUnavailable => ProtocolError::mutation_unavailable(false),
+            Self::CommitAmbiguous => ProtocolError::mutation_unavailable(true),
+            Self::Internal(diagnostic) => {
+                internal_protocol_error(Some(session_id.into_uuid()), diagnostic)
+            }
+        }
+    }
+}
+
+fn submit_input_model_execution_diagnostic(
+    error: &signalbox_persistence::model_execution::ModelCallRepositoryError,
+) -> SubmitInputModelExecutionDiagnostic {
+    use signalbox_persistence::model_execution::ModelCallRepositoryError;
+
+    match error {
+        ModelCallRepositoryError::Database {
+            commit_ambiguous, ..
+        } => match commit_ambiguous {
+            true => SubmitInputModelExecutionDiagnostic::CommitAmbiguous,
+            false => SubmitInputModelExecutionDiagnostic::DatabaseUnavailable,
+        },
+        ModelCallRepositoryError::Corruption(_) => SubmitInputModelExecutionDiagnostic::Internal(
+            InternalDiagnostic::SubmitInputModelExecutionCorruption,
+        ),
+        ModelCallRepositoryError::IdentityCollision(_) => {
+            SubmitInputModelExecutionDiagnostic::Internal(
+                InternalDiagnostic::SubmitInputModelExecutionIdentityCollision,
+            )
+        }
+        ModelCallRepositoryError::NoLiveExecution => SubmitInputModelExecutionDiagnostic::Internal(
+            InternalDiagnostic::SubmitInputModelExecutionNoLiveExecution,
+        ),
+        ModelCallRepositoryError::InvalidTransition(_) => {
+            SubmitInputModelExecutionDiagnostic::Internal(
+                InternalDiagnostic::SubmitInputModelExecutionInvalidTransition,
+            )
+        }
+    }
+}
+
 async fn write_submit_input_repository_error<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -6501,16 +6556,9 @@ where
     let protocol_error = match error {
         SubmitInputRepositoryError::Database(_) => ProtocolError::mutation_unavailable(false),
         SubmitInputRepositoryError::CommitAmbiguous(_) => ProtocolError::mutation_unavailable(true),
-        SubmitInputRepositoryError::ModelExecution(error) => match error.as_ref() {
-            signalbox_persistence::model_execution::ModelCallRepositoryError::Database {
-                commit_ambiguous,
-                ..
-            } => ProtocolError::mutation_unavailable(*commit_ambiguous),
-            source => internal_protocol_error(
-                Some(session_id.into_uuid()),
-                InternalDiagnostic::ModelExecutionIntegrityFailure(source.operator_failure_class()),
-            ),
-        },
+        SubmitInputRepositoryError::ModelExecution(error) => {
+            submit_input_model_execution_diagnostic(error.as_ref()).into_protocol_error(session_id)
+        }
         SubmitInputRepositoryError::DifferentCommandKind { .. } => internal_protocol_error(
             Some(session_id.into_uuid()),
             InternalDiagnostic::SubmitInputCommandKindMismatch,
@@ -8054,7 +8102,10 @@ enum InternalDiagnostic {
     SubmitInputCommandKindMismatch,
     SubmitInputIdentityCollision,
     SubmitInputCorruption,
-    ModelExecutionIntegrityFailure(OperatorFailureClass),
+    SubmitInputModelExecutionCorruption,
+    SubmitInputModelExecutionIdentityCollision,
+    SubmitInputModelExecutionNoLiveExecution,
+    SubmitInputModelExecutionInvalidTransition,
     ToolLoopIdentityCollision,
     ToolLoopCorruption,
     ToolLoopInvalidTransition,
@@ -8087,11 +8138,14 @@ impl InternalDiagnostic {
             | Self::SessionDefaultsCommandKindMismatch
             | Self::SystemPromptMemberMissing
             | Self::SubmitInputCommandKindMismatch
+            | Self::SubmitInputModelExecutionNoLiveExecution
+            | Self::SubmitInputModelExecutionInvalidTransition
             | Self::ToolLoopInvalidTransition => OperatorFailureClass::CallerOrHubBug,
             Self::ImportedSessionIdentityCollision
             | Self::ImportedConversationIdentityCollision
             | Self::ContextCompactionIdentityCollision
             | Self::SubmitInputIdentityCollision
+            | Self::SubmitInputModelExecutionIdentityCollision
             | Self::ToolLoopIdentityCollision => OperatorFailureClass::IdentityCollision,
             Self::ReviewWorkflowProjectionCorruption
             | Self::ImportedSessionCorruption
@@ -8107,9 +8161,9 @@ impl InternalDiagnostic {
             | Self::SessionMetadataCorruption
             | Self::SessionDefaultsCorruption
             | Self::SubmitInputCorruption
+            | Self::SubmitInputModelExecutionCorruption
             | Self::ToolLoopCorruption
             | Self::ProcessReadCorruption => OperatorFailureClass::FailClosedCorruption,
-            Self::ModelExecutionIntegrityFailure(failure_class) => failure_class,
         }
     }
 
@@ -8158,7 +8212,16 @@ impl InternalDiagnostic {
             Self::SubmitInputCommandKindMismatch => "submit_input_command_kind_mismatch",
             Self::SubmitInputIdentityCollision => "submit_input_identity_collision",
             Self::SubmitInputCorruption => "submit_input_corruption",
-            Self::ModelExecutionIntegrityFailure(_) => "model_execution_integrity_failure",
+            Self::SubmitInputModelExecutionCorruption => "submit_input_model_execution_corruption",
+            Self::SubmitInputModelExecutionIdentityCollision => {
+                "submit_input_model_execution_identity_collision"
+            }
+            Self::SubmitInputModelExecutionNoLiveExecution => {
+                "submit_input_model_execution_no_live_execution"
+            }
+            Self::SubmitInputModelExecutionInvalidTransition => {
+                "submit_input_model_execution_invalid_transition"
+            }
             Self::ToolLoopIdentityCollision => "tool_loop_identity_collision",
             Self::ToolLoopCorruption => "tool_loop_corruption",
             Self::ToolLoopInvalidTransition => "tool_loop_invalid_transition",
@@ -9039,17 +9102,19 @@ mod tests {
         MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
         OperationalImportError, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
         ProtocolError, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId,
-        ReviewCommandAdmission, SnapshotSpoolError, acquire_import_permit,
-        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
-        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
-        acquire_snapshot_reader_permit, admitted_user_content, canonical_review_request_digest,
-        consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
+        ReviewCommandAdmission, SnapshotSpoolError, SubmitInputModelExecutionDiagnostic,
+        acquire_import_permit, acquire_inbound_frame_permit,
+        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
+        acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
+        admitted_user_content, canonical_review_request_digest, consume_snapshot_queued_update,
+        context_compaction_failure_disposition, execute_import,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, operational_import_error, read_frame_line,
         replacement_model_is_admitted, retry_context_compaction_range_database_reads,
-        run_until_shutdown, snapshot_reader_capacity, wire_model_call_state, wire_tool_decision,
-        wire_turn_state, wire_uuid, write_content, write_context_compaction_repository_error,
-        write_snapshot_spool_error, write_transcript_entry,
+        run_until_shutdown, snapshot_reader_capacity, submit_input_model_execution_diagnostic,
+        wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
+        write_context_compaction_repository_error, write_snapshot_spool_error,
+        write_transcript_entry,
     };
     use crate::FatalExecutionSupervisor;
     use signalbox_model_provider_runtime::ContextCompactionModelError;
@@ -9059,6 +9124,9 @@ mod tests {
         },
         conversation_import::{
             ImportedConversationCorruption, ImportedConversationIdentityCollision,
+        },
+        model_execution::{
+            ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
         },
         outbox::{
             DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEventKind,
@@ -9110,17 +9178,31 @@ mod tests {
         }
     }
 
-    fn capture_internal_diagnostic(session_id: Uuid, diagnostic: InternalDiagnostic) -> String {
+    fn capture_telemetry(record: impl FnOnce()) -> String {
         let output = CapturedTelemetry::default();
         let subscriber = tracing_subscriber::fmt()
             .without_time()
             .with_ansi(false)
             .with_writer(output.clone())
             .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            let _ = internal_protocol_error(Some(session_id), diagnostic);
-        });
+        tracing::subscriber::with_default(subscriber, record);
         output.text()
+    }
+
+    fn capture_internal_diagnostic(session_id: Uuid, diagnostic: InternalDiagnostic) -> String {
+        capture_telemetry(|| {
+            let _ = internal_protocol_error(Some(session_id), diagnostic);
+        })
+    }
+
+    fn capture_submit_input_model_execution_diagnostic(
+        session_id: Uuid,
+        error: &ModelCallRepositoryError,
+    ) -> String {
+        let diagnostic = submit_input_model_execution_diagnostic(error);
+        capture_telemetry(|| {
+            let _ = diagnostic.into_protocol_error(CanonicalUuid::from_uuid(session_id));
+        })
     }
 
     #[test]
@@ -9157,6 +9239,88 @@ mod tests {
             InternalDiagnostic::ToolLoopInvalidTransition.cause_code(),
             "tool_loop_invalid_transition"
         );
+        assert_eq!(
+            InternalDiagnostic::SubmitInputModelExecutionIdentityCollision.cause_code(),
+            "submit_input_model_execution_identity_collision"
+        );
+        assert_eq!(
+            InternalDiagnostic::SubmitInputModelExecutionCorruption.cause_code(),
+            "submit_input_model_execution_corruption"
+        );
+        assert_eq!(
+            InternalDiagnostic::SubmitInputModelExecutionNoLiveExecution.cause_code(),
+            "submit_input_model_execution_no_live_execution"
+        );
+        assert_eq!(
+            InternalDiagnostic::SubmitInputModelExecutionInvalidTransition.cause_code(),
+            "submit_input_model_execution_invalid_transition"
+        );
+    }
+
+    #[test]
+    fn submit_input_model_execution_identity_collision_keeps_its_diagnostic() {
+        let error =
+            ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::ModelCall);
+
+        assert_eq!(
+            submit_input_model_execution_diagnostic(&error),
+            SubmitInputModelExecutionDiagnostic::Internal(
+                InternalDiagnostic::SubmitInputModelExecutionIdentityCollision
+            )
+        );
+    }
+
+    #[test]
+    fn submit_input_model_execution_corruption_keeps_its_diagnostic() {
+        let error = ModelCallRepositoryError::Corruption(ModelCallCorruption::Missing(
+            "synthetic model-call row",
+        ));
+
+        assert_eq!(
+            submit_input_model_execution_diagnostic(&error),
+            SubmitInputModelExecutionDiagnostic::Internal(
+                InternalDiagnostic::SubmitInputModelExecutionCorruption
+            )
+        );
+    }
+
+    #[test]
+    fn submit_input_model_execution_no_live_execution_keeps_its_diagnostic() {
+        let error = ModelCallRepositoryError::NoLiveExecution;
+
+        assert_eq!(
+            submit_input_model_execution_diagnostic(&error),
+            SubmitInputModelExecutionDiagnostic::Internal(
+                InternalDiagnostic::SubmitInputModelExecutionNoLiveExecution
+            )
+        );
+    }
+
+    #[test]
+    fn submit_input_model_execution_invalid_transition_keeps_its_diagnostic() {
+        let error = ModelCallRepositoryError::InvalidTransition("synthetic transition");
+
+        assert_eq!(
+            submit_input_model_execution_diagnostic(&error),
+            SubmitInputModelExecutionDiagnostic::Internal(
+                InternalDiagnostic::SubmitInputModelExecutionInvalidTransition
+            )
+        );
+    }
+
+    #[test]
+    fn submit_input_model_execution_diagnostic_omits_dynamic_source_detail() {
+        let dynamic_detail = "synthetic-credential-prompt-and-provider-prose";
+        let session_id = Uuid::from_u128(1);
+        let error = ModelCallRepositoryError::InvalidTransition(dynamic_detail);
+        let encoded = capture_submit_input_model_execution_diagnostic(session_id, &error);
+
+        assert!(encoded.contains(&format!("session_id={session_id}")));
+        assert!(encoded.contains("failure_class=CallerOrHubBug"));
+        assert!(
+            encoded.contains(r#"cause_code="submit_input_model_execution_invalid_transition""#)
+        );
+        assert!(!encoded.contains(dynamic_detail));
     }
 
     #[test]
