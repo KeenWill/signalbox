@@ -45,10 +45,26 @@ source.
 
 **Living specification.** A pull request that changes behavior described by a
 `docs/spec/` page updates the owning section in the same pull request, exactly
-as the spine rule above. Pages state implemented behavior only; deferred or
-undecided work is recorded in `docs/open-questions.md` — its one home — and a
-page's Open edges list carries pointers to it, never substantive speculative
-prose. Within a stack, the bottom specification diff satisfies this rule for the
+as the spine rule above. Every paragraph on a page belongs to exactly one of
+three categories, and a page that cannot say which a paragraph is has a defect:
+
+- **Implemented behavior**, which is what a page states by default.
+- **Committed unimplemented functionality** — a capability the owner has decided
+  will exist, recorded because it constrains what present change may do. Such a
+  paragraph names itself unimplemented, states that no present surface provides
+  it, and carries only that compatibility constraint. It is neither a
+  description of the system nor an open question, and it is admitted only where
+  a present contract must stay compatible with it.
+- **Deferred or undecided work**, recorded in `docs/open-questions.md` — its one
+  home — with a page's Open edges list carrying pointers to it, never
+  substantive speculative prose.
+
+The distinction that matters is force, not tense: committed functionality binds
+a future change, an open question binds nobody, and conflating them either
+invites an implementer to build against an undecided design or lets a decision
+be quietly relitigated.
+
+Within a stack, the bottom specification diff satisfies this rule for the
 behavior its child pull requests implement; a child adds its own spec edit only
 for behavior the bottom diff does not describe.
 
