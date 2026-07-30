@@ -5194,7 +5194,9 @@ pub enum ReviewImportOutcome {
         context_digest: [u8; 32],
     },
     Incomplete {
-        pass: Option<ReviewPassRef>,
+        pass: Option<Box<ReviewPassEvidence>>,
+        run: Option<ReviewRunEvidence>,
+        template_digest: ReviewTemplateDigest,
         status: ReviewPassIncompleteStatus,
     },
 }
@@ -5281,6 +5283,7 @@ pub enum ReviewJudgmentPlanFailure {
     ForeignAnalysisTarget,
     ForeignAnalysisPolicy,
     ForeignAnalysisTemplate,
+    IncompatibleAnalysisPass,
     InexactFindingInventory,
     AcceptedBelowThreshold { finding: ReviewFindingRef },
     InvalidReferencedFinding { finding: ReviewFindingRef },

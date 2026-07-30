@@ -374,7 +374,10 @@ The application exposes ports for immutable-target context import,
 session-backed passes, repair, and reserved publication. Adapter success returns
 typed evidence naming the exact target, policy, run, pass, session, and template
 inputs; a mismatch blocks the attempt rather than being repaired by
-substitution.
+substitution. Failed, blocked, and post-admission cancelled imports likewise
+carry their canonical terminal pass and run plus the exact import template. Only
+cancellation before pass admission may omit both pass and run; every other
+passless or partially populated terminal outcome fails closed.
 
 Concrete provider, model, and workspace adapters are committed but
 unimplemented; no present daemon surface supplies them. Future workspace
@@ -399,10 +402,13 @@ explicit empty inventory. If one member fails, blocks, or is cancelled while
 others succeed, the successful findings remain valid evidence but the fan-out
 set is incomplete and no judgment, repair, or publication work is eligible. The
 orchestrator may retry only the failed member against the same target, policy,
-concern-set version, and template digests; a changed input starts a new attempt.
-The eventual barrier includes exactly one successful member for every expected
-concern and rejects missing, extra, repeated, or superseded member claims. It
-therefore cannot silently present a partial review as complete.
+concern-set version, and template digests. Before scheduling that retry it
+authenticates the current failed claim's target and template; mismatched durable
+evidence blocks the attempt and cannot be overwritten. A changed input starts a
+new attempt. The eventual barrier includes exactly one successful member for
+every expected concern and rejects missing, extra, repeated, or superseded
+member claims. It therefore cannot silently present a partial review as
+complete.
 
 ### Structured finding return
 
@@ -511,22 +517,25 @@ none of its proposals may survive as untyped text or a partial inventory.
 ### Judgment and cross-run deduplication
 
 One judgment analysis pass consumes the sealed finding inventories from all
-fan-out members, not a concern subset. Its structured result contains exactly
-one disposition for every input finding identity and no unknown or repeated
-identity. A disposition is `accepted`, `rejected { reason }`,
-`duplicate { canonical_finding }`, `superseded { successor_finding }`, or
-`stale`. Referenced findings carry their complete original finding references.
-The result is invalid unless every accepted finding meets
-`minimum_judge_confidence` on `is_real_confidence`; severity-label confidence is
-available to the judge but never filters a finding. The orchestrator seals this
-complete plan before admitting its per-finding judgment and deduplication events
-through the existing single-effect pass primitives in canonical finding order.
-An `Applied` result carries the canonical finding event, its independently
-loaded pass and run evidence, and the exact judgment-template digest. The
-service validates the exact planned disposition and committed pass result before
-recording the durable effect receipt. Until every planned event is durably
-admitted, repair and publication remain ineligible; a crash resumes the plan
-rather than asking a model for a different partial judgment.
+fan-out members, not a concern subset. The canonical analysis pass must be a
+result-free succeeded `Judge` pass; a result-bearing per-finding effect pass
+cannot authenticate or be reused as the complete-set analysis. Its structured
+result contains exactly one disposition for every input finding identity and no
+unknown or repeated identity. A disposition is `accepted`,
+`rejected { reason }`, `duplicate { canonical_finding }`,
+`superseded { successor_finding }`, or `stale`. Referenced findings carry their
+complete original finding references. The result is invalid unless every
+accepted finding meets `minimum_judge_confidence` on `is_real_confidence`;
+severity-label confidence is available to the judge but never filters a finding.
+The orchestrator seals this complete plan before admitting its per-finding
+judgment and deduplication events through the existing single-effect pass
+primitives in canonical finding order. An `Applied` result carries the canonical
+finding event, its independently loaded pass and run evidence, and the exact
+judgment-template digest. The service validates the exact planned disposition
+and committed pass result before recording the durable effect receipt. Until
+every planned event is durably admitted, repair and publication remain
+ineligible; a crash resumes the plan rather than asking a model for a different
+partial judgment.
 
 Duplicate and superseded events may reference a finding produced by another run
 only within one immutable target and one equal complete frozen policy. Each

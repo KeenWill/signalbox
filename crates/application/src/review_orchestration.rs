@@ -1,6 +1,8 @@
 //! Resumable concern-fan-out review orchestration.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 use std::sync::Arc;
 
@@ -242,8 +244,12 @@ pub enum ReviewImportOutcome {
     },
     /// Import did not produce usable context.
     Incomplete {
-        /// Terminal pass, when it was admitted before cancellation.
-        pass: Option<ReviewPassRef>,
+        /// Canonical terminal pass, when execution admitted one.
+        pass: Option<Box<ReviewPassEvidence>>,
+        /// Canonical terminal run, when execution admitted a pass.
+        run: Option<ReviewRunEvidence>,
+        /// Exact resolved import template.
+        template_digest: ReviewTemplateDigest,
         /// Exact terminal status.
         status: ReviewPassIncompleteStatus,
     },
@@ -274,15 +280,33 @@ fn validate_import(
             ..
         } => (pass, run, template_digest),
         ReviewImportOutcome::Incomplete {
-            pass: Some(pass), ..
+            pass: None,
+            run: None,
+            template_digest,
+            status: ReviewPassIncompleteStatus::Cancelled,
+        } if *template_digest == attempt.stage_templates.import => return Ok(()),
+        ReviewImportOutcome::Incomplete {
+            pass: None,
+            template_digest,
+            ..
+        }
+        | ReviewImportOutcome::Incomplete {
+            run: None,
+            template_digest,
+            ..
         } => {
-            return if pass.target() == attempt.target {
-                Ok(())
+            return if *template_digest == attempt.stage_templates.import {
+                Err(ReviewImportEvidenceFailure::IncompatiblePass)
             } else {
-                Err(ReviewImportEvidenceFailure::ForeignTarget)
+                Err(ReviewImportEvidenceFailure::ForeignTemplate)
             };
         }
-        ReviewImportOutcome::Incomplete { pass: None, .. } => return Ok(()),
+        ReviewImportOutcome::Incomplete {
+            pass: Some(pass),
+            run: Some(run),
+            template_digest,
+            ..
+        } => (pass, run, template_digest),
     };
     let pass_ref = pass.reference();
     if pass_ref.target() != attempt.target {
@@ -294,14 +318,51 @@ fn validate_import(
     if *template_digest != attempt.stage_templates.import {
         return Err(ReviewImportEvidenceFailure::ForeignTemplate);
     }
+    let compatible_state = match outcome {
+        ReviewImportOutcome::Succeeded { .. } => {
+            matches!(
+                pass.state(),
+                ReviewPassState::Succeeded { result: None, .. }
+            ) && run.state()
+                == (ReviewRunState::Succeeded {
+                    concluding_pass: pass_ref,
+                })
+        }
+        ReviewImportOutcome::Incomplete {
+            status: ReviewPassIncompleteStatus::Failed,
+            ..
+        } => {
+            matches!(pass.state(), ReviewPassState::Failed { .. })
+                && run.state()
+                    == (ReviewRunState::Failed {
+                        failed_pass: pass_ref,
+                    })
+        }
+        ReviewImportOutcome::Incomplete {
+            status: ReviewPassIncompleteStatus::Blocked,
+            ..
+        } => {
+            matches!(pass.state(), ReviewPassState::Blocked { .. })
+                && run.state()
+                    == (ReviewRunState::Blocked {
+                        blocking_pass: pass_ref,
+                    })
+        }
+        ReviewImportOutcome::Incomplete {
+            status: ReviewPassIncompleteStatus::Cancelled,
+            ..
+        } => {
+            matches!(pass.state(), ReviewPassState::Cancelled { .. })
+                && run.state()
+                    == (ReviewRunState::Cancelled {
+                        last_pass: Some(pass_ref),
+                    })
+        }
+    };
     if pass.kind() != ReviewPassKind::ImportExternalContext
-        || !matches!(pass.state(), ReviewPassState::Succeeded { .. })
         || run.reference() != pass_ref.run()
         || run.workflow() != ReviewWorkflowKind::ImportExternalContext
-        || run.state()
-            != (ReviewRunState::Succeeded {
-                concluding_pass: pass_ref,
-            })
+        || !compatible_state
     {
         return Err(ReviewImportEvidenceFailure::IncompatiblePass);
     }
@@ -737,6 +798,8 @@ pub enum ReviewJudgmentPlanFailure {
     ForeignAnalysisPolicy,
     /// The resolved judgment template differs from the attempt.
     ForeignAnalysisTemplate,
+    /// The analysis pass is not a result-free succeeded judgment pass and run.
+    IncompatibleAnalysisPass,
     /// A plan member is missing, extra, repeated, or not identity ordered.
     InexactFindingInventory,
     /// An accepted finding is below the frozen judgment threshold.
@@ -762,10 +825,13 @@ fn validate_plan(
     }
     if plan.analysis_pass.policy() != fanout.attempt.policy
         || plan.analysis_run.policy() != fanout.attempt.policy
-        || plan.analysis_pass.kind() != ReviewPassKind::Judge
+    {
+        return Err(ReviewJudgmentPlanFailure::ForeignAnalysisPolicy);
+    }
+    if plan.analysis_pass.kind() != ReviewPassKind::Judge
         || !matches!(
             plan.analysis_pass.state(),
-            ReviewPassState::Succeeded { .. }
+            ReviewPassState::Succeeded { result: None, .. }
         )
         || plan.analysis_run.reference() != analysis_pass.run()
         || plan.analysis_run.workflow() != ReviewWorkflowKind::JudgeFindings
@@ -774,7 +840,7 @@ fn validate_plan(
                 concluding_pass: analysis_pass,
             })
     {
-        return Err(ReviewJudgmentPlanFailure::ForeignAnalysisPolicy);
+        return Err(ReviewJudgmentPlanFailure::IncompatibleAnalysisPass);
     }
     let expected: Vec<_> = fanout
         .findings
@@ -1653,6 +1719,42 @@ pub enum ReviewOrchestrationServiceError<StoreError, RunnerError> {
     InvalidTerminalBarrier(ReviewTerminalBarrierFailure),
 }
 
+impl<StoreError, RunnerError> Display for ReviewOrchestrationServiceError<StoreError, RunnerError> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Store(_) => "review orchestration store failed",
+            Self::InvalidImportEvidence(_) => "review import evidence is invalid",
+            Self::Runner(_) => "review orchestration pass runner failed",
+            Self::ConcernTaskTerminated => "review concern task terminated",
+            Self::DurableConflict => "review orchestration durable seal conflicts",
+            Self::InvalidJudgmentPlan(_) => "review judgment plan is invalid",
+            Self::InvalidJudgmentEffectEvidence(_) => "review judgment effect evidence is invalid",
+            Self::InvalidAppliedEffects => "review applied-effect inventory is invalid",
+            Self::InvalidTerminalBarrier(_) => "review terminal barrier is invalid",
+        })
+    }
+}
+
+impl<StoreError, RunnerError> Error for ReviewOrchestrationServiceError<StoreError, RunnerError>
+where
+    StoreError: Error + 'static,
+    RunnerError: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Runner(error) => Some(error),
+            Self::InvalidImportEvidence(_)
+            | Self::ConcernTaskTerminated
+            | Self::DurableConflict
+            | Self::InvalidJudgmentPlan(_)
+            | Self::InvalidJudgmentEffectEvidence(_)
+            | Self::InvalidAppliedEffects
+            | Self::InvalidTerminalBarrier(_) => None,
+        }
+    }
+}
+
 /// Resumable application service for the complete review pipeline.
 #[derive(Debug)]
 pub struct ReviewOrchestrationService<Store, Runner> {
@@ -1726,7 +1828,10 @@ where
             .load_concern_claims(attempt.id)
             .await
             .map_err(ReviewOrchestrationServiceError::Store)?;
-        let members_to_run = retryable_members(&attempt, &existing);
+        let members_to_run = match retryable_members(&attempt, &existing) {
+            Ok(members) => members,
+            Err(failure) => return Ok(ReviewOrchestrationOutcome::FanoutIncomplete(failure)),
+        };
         let mut tasks = JoinSet::new();
         for concern in members_to_run {
             let runner = Arc::clone(&self.runner);
@@ -1976,23 +2081,36 @@ fn ensure_sealed<StoreError, RunnerError>(
 fn retryable_members(
     attempt: &ReviewOrchestrationAttempt,
     claims: &[ReviewConcernClaim],
-) -> Vec<ReviewConcernSpec> {
-    attempt
-        .concerns
-        .iter()
-        .filter(|expected| {
-            let matching: Vec<_> = claims
-                .iter()
-                .filter(|claim| claim.concern == expected.key)
-                .collect();
-            matching.is_empty()
-                || (matching.len() == 1
-                    && matching.first().is_some_and(|claim| {
-                        matches!(claim.outcome, ReviewConcernOutcome::Failed { .. })
-                    }))
-        })
-        .cloned()
-        .collect()
+) -> Result<Vec<ReviewConcernSpec>, ReviewFanoutBarrierFailure> {
+    let mut retryable = Vec::new();
+    for expected in &attempt.concerns {
+        let matching: Vec<_> = claims
+            .iter()
+            .filter(|claim| claim.concern == expected.key)
+            .collect();
+        if matching.is_empty() {
+            retryable.push(expected.clone());
+            continue;
+        }
+        let [claim] = matching.as_slice() else {
+            continue;
+        };
+        let ReviewConcernOutcome::Failed { pass } = &claim.outcome else {
+            continue;
+        };
+        if claim.template_digest != expected.template_digest {
+            return Err(ReviewFanoutBarrierFailure::TemplateMismatch {
+                concern: expected.key.clone(),
+            });
+        }
+        if pass.target() != attempt.target {
+            return Err(ReviewFanoutBarrierFailure::ForeignProducerTarget {
+                concern: expected.key.clone(),
+            });
+        }
+        retryable.push(expected.clone());
+    }
+    Ok(retryable)
 }
 
 #[cfg(test)]
@@ -2896,17 +3014,21 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_import_rejects_a_foreign_optional_pass() {
+    fn incomplete_import_rejects_a_foreign_terminal_pass() {
         let immutable_attempt = attempt();
-        let foreign_pass = ReviewPassRef::new(
-            ReviewRunRef::new(
-                ReviewTargetId::from_uuid(Uuid::from_u128(999)),
-                ReviewRunId::from_uuid(Uuid::from_u128(1_000)),
-            ),
-            ReviewPassId::from_uuid(Uuid::from_u128(1_001)),
+        let foreign_target = ReviewTargetId::from_uuid(Uuid::from_u128(999));
+        let (pass, run) = succeeded_evidence(
+            foreign_target,
+            immutable_attempt.policy(),
+            1_000,
+            ReviewPassKind::ImportExternalContext,
+            ReviewWorkflowKind::ImportExternalContext,
+            None,
         );
         let incomplete = ReviewImportOutcome::Incomplete {
-            pass: Some(foreign_pass),
+            pass: Some(Box::new(pass)),
+            run: Some(run),
+            template_digest: immutable_attempt.stage_templates().import(),
             status: ReviewPassIncompleteStatus::Failed,
         };
 
@@ -2914,6 +3036,159 @@ mod tests {
             .expect_err("foreign incomplete pass ancestry must fail closed");
 
         assert_eq!(error, ReviewImportEvidenceFailure::ForeignTarget);
+    }
+
+    #[test]
+    fn failed_import_cannot_omit_terminal_pass_and_run() {
+        let immutable_attempt = attempt();
+        let incomplete = ReviewImportOutcome::Incomplete {
+            pass: None,
+            run: None,
+            template_digest: immutable_attempt.stage_templates().import(),
+            status: ReviewPassIncompleteStatus::Failed,
+        };
+
+        let error = validate_import(&immutable_attempt, &incomplete)
+            .expect_err("failed import requires canonical terminal evidence");
+
+        assert_eq!(error, ReviewImportEvidenceFailure::IncompatiblePass);
+    }
+
+    #[test]
+    fn pre_pass_import_cancellation_is_canonical() {
+        let immutable_attempt = attempt();
+        let incomplete = ReviewImportOutcome::Incomplete {
+            pass: None,
+            run: None,
+            template_digest: immutable_attempt.stage_templates().import(),
+            status: ReviewPassIncompleteStatus::Cancelled,
+        };
+
+        let result = validate_import(&immutable_attempt, &incomplete);
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn authenticated_failed_import_evidence_is_canonical() {
+        let immutable_attempt = attempt();
+        let (pass, run) = failed_import_evidence(&immutable_attempt, 1_100);
+        let incomplete = ReviewImportOutcome::Incomplete {
+            pass: Some(Box::new(pass)),
+            run: Some(run),
+            template_digest: immutable_attempt.stage_templates().import(),
+            status: ReviewPassIncompleteStatus::Failed,
+        };
+
+        let result = validate_import(&immutable_attempt, &incomplete);
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn failed_concern_retry_rejects_a_foreign_template() {
+        let immutable_attempt = attempt();
+        let expected = immutable_attempt.concerns()[0].clone();
+        let pass = ReviewPassRef::new(
+            ReviewRunRef::new(
+                immutable_attempt.target(),
+                ReviewRunId::from_uuid(Uuid::from_u128(1_200)),
+            ),
+            ReviewPassId::from_uuid(Uuid::from_u128(1_201)),
+        );
+        let claim = ReviewConcernClaim::new(
+            expected.key().clone(),
+            ReviewTemplateDigest::new([99; 32]),
+            ReviewConcernOutcome::Failed { pass },
+        );
+
+        let error = retryable_members(&immutable_attempt, &[claim])
+            .expect_err("mismatched failed claim cannot be overwritten");
+
+        assert_eq!(
+            error,
+            ReviewFanoutBarrierFailure::TemplateMismatch {
+                concern: expected.key().clone(),
+            }
+        );
+    }
+
+    #[test]
+    fn failed_concern_retry_rejects_a_foreign_target() {
+        let immutable_attempt = attempt();
+        let expected = immutable_attempt.concerns()[0].clone();
+        let pass = ReviewPassRef::new(
+            ReviewRunRef::new(
+                ReviewTargetId::from_uuid(Uuid::from_u128(1_300)),
+                ReviewRunId::from_uuid(Uuid::from_u128(1_301)),
+            ),
+            ReviewPassId::from_uuid(Uuid::from_u128(1_302)),
+        );
+        let claim = ReviewConcernClaim::new(
+            expected.key().clone(),
+            expected.template_digest(),
+            ReviewConcernOutcome::Failed { pass },
+        );
+
+        let error = retryable_members(&immutable_attempt, &[claim])
+            .expect_err("foreign failed claim cannot be overwritten");
+
+        assert_eq!(
+            error,
+            ReviewFanoutBarrierFailure::ForeignProducerTarget {
+                concern: expected.key().clone(),
+            }
+        );
+    }
+
+    #[test]
+    fn result_bearing_judgment_pass_cannot_seal_analysis() {
+        let immutable_attempt = attempt();
+        let claims = vec![
+            successful_empty_concern_claim(
+                &immutable_attempt,
+                0,
+                20,
+                immutable_attempt.concerns()[0].template_digest(),
+            ),
+            successful_empty_concern_claim(
+                &immutable_attempt,
+                1,
+                30,
+                immutable_attempt.concerns()[1].template_digest(),
+            ),
+        ];
+        let fanout = complete_fanout(&immutable_attempt, claims)
+            .expect("complete empty fanout is canonical");
+        let effect = accepted_judgment_success(
+            &immutable_attempt,
+            finding_ref(100),
+            1_400,
+            immutable_attempt.stage_templates().judgment(),
+        );
+        let plan = ReviewJudgmentPlan::new(
+            effect.event().pass_evidence().clone(),
+            effect.event().run_evidence(),
+            immutable_attempt.stage_templates().judgment(),
+            Vec::new(),
+        );
+
+        let error = validate_plan(&fanout, &plan)
+            .expect_err("effect pass cannot authenticate complete-set analysis");
+
+        assert_eq!(error, ReviewJudgmentPlanFailure::IncompatibleAnalysisPass);
+    }
+
+    #[test]
+    fn service_error_forwards_wrapped_standard_source() {
+        let error: ReviewOrchestrationServiceError<std::io::Error, std::io::Error> =
+            ReviewOrchestrationServiceError::Store(std::io::Error::other("synthetic store"));
+
+        let display = error.to_string();
+        let source = Error::source(&error).map(ToString::to_string);
+
+        assert_eq!(display, "review orchestration store failed");
+        assert_eq!(source, Some(String::from("synthetic store")));
     }
 
     #[tokio::test]
@@ -3223,6 +3498,74 @@ mod tests {
         let link = ReviewFindingExternalLinkRef::try_new(finding, &attached)
             .expect("fixture finding link is canonical");
         ReviewPublicationSuccess::new(link, run, template_digest)
+    }
+
+    fn failed_import_evidence(
+        immutable_attempt: &ReviewOrchestrationAttempt,
+        seed: u128,
+    ) -> (ReviewPassEvidence, ReviewRunEvidence) {
+        let run_ref = ReviewRunRef::new(
+            immutable_attempt.target(),
+            ReviewRunId::from_uuid(Uuid::from_u128(seed)),
+        );
+        let pass_ref =
+            ReviewPassRef::new(run_ref, ReviewPassId::from_uuid(Uuid::from_u128(seed + 1)));
+        let session = SessionId::from_uuid(Uuid::from_u128(seed + 2));
+        let accepted = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 3));
+        let turn = TurnId::from_uuid(Uuid::from_u128(seed + 4));
+        let frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 5));
+        let mut run = ReviewRun::new(
+            run_ref,
+            ReviewWorkflowKind::ImportExternalContext,
+            immutable_attempt.policy(),
+        );
+        let pass = ReviewPass::try_new(
+            pass_ref,
+            ReviewPassKind::ImportExternalContext,
+            &mut run,
+            session,
+            ReviewPassAcceptedInputEvidence::new(accepted, session, Some(turn)),
+        )
+        .expect("fixture import pass is valid");
+        let active_turn = ReviewPassTurnEvidence::new(
+            turn,
+            session,
+            accepted,
+            ReviewPassTurnOutcome::Active,
+            None,
+        );
+        let pass = pass
+            .transition(ReviewPassState::Running { turn }, Some(active_turn))
+            .expect("fixture import pass starts");
+        let running = ReviewPassEvidence::from_pass(&pass, immutable_attempt.policy());
+        let run = run
+            .transition(
+                ReviewRunState::Running {
+                    active_pass: pass_ref,
+                },
+                Some(running),
+            )
+            .expect("fixture import run starts");
+        let failed_turn = ReviewPassTurnEvidence::new(
+            turn,
+            session,
+            accepted,
+            ReviewPassTurnOutcome::Failed,
+            Some(frontier),
+        );
+        let pass = pass
+            .transition(ReviewPassState::Failed { turn }, Some(failed_turn))
+            .expect("fixture import pass fails");
+        let pass_evidence = ReviewPassEvidence::from_pass(&pass, immutable_attempt.policy());
+        let run = run
+            .transition(
+                ReviewRunState::Failed {
+                    failed_pass: pass_ref,
+                },
+                Some(pass_evidence.clone()),
+            )
+            .expect("fixture import run fails");
+        (pass_evidence, run.evidence())
     }
 
     fn succeeded_evidence(
