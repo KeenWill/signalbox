@@ -5,7 +5,8 @@ use std::future::Future;
 use signalbox_domain::{
     DurableCommandId, ReviewExternalLink, ReviewExternalLinkAttachment, ReviewExternalLinkId,
     ReviewFinding, ReviewFindingEvent, ReviewFindingId, ReviewFindingStatus, ReviewKey, ReviewPass,
-    ReviewPassEvidence, ReviewPassId, ReviewRun, ReviewRunId, ReviewTarget, ReviewTargetId,
+    ReviewPassEvidence, ReviewPassId, ReviewPassState, ReviewRun, ReviewRunId, ReviewTarget,
+    ReviewTargetId,
 };
 
 /// One owner-global durable review-workflow command.
@@ -55,6 +56,8 @@ pub enum ReviewWorkflowOperation {
     StartRun { run: ReviewRun, pass: ReviewPass },
     /// Atomically project one queued run and pass into their active turn.
     ActivatePass { run: ReviewRun, pass: ReviewPass },
+    /// Atomically project one queued-or-active run and pass into a result-free terminal state.
+    CompletePass { run: ReviewRun, pass: ReviewPass },
     /// Atomically bind a read-only result and its complete finding inventory.
     RecordFindings {
         pass: ReviewPassEvidence,
@@ -83,6 +86,8 @@ pub enum ReviewWorkflowOperationKind {
     StartRun,
     /// Activate one pass.
     ActivatePass,
+    /// Complete one pass.
+    CompletePass,
     /// Record one complete finding inventory.
     RecordFindings,
     /// Record one finding event.
@@ -100,10 +105,44 @@ impl ReviewWorkflowOperation {
             Self::CreateTarget(_) => ReviewWorkflowOperationKind::CreateTarget,
             Self::StartRun { .. } => ReviewWorkflowOperationKind::StartRun,
             Self::ActivatePass { .. } => ReviewWorkflowOperationKind::ActivatePass,
+            Self::CompletePass { .. } => ReviewWorkflowOperationKind::CompletePass,
             Self::RecordFindings { .. } => ReviewWorkflowOperationKind::RecordFindings,
             Self::RecordFindingEvent { .. } => ReviewWorkflowOperationKind::RecordFindingEvent,
             Self::ReserveExternalLink(_) => ReviewWorkflowOperationKind::ReserveExternalLink,
             Self::AttachExternalLink { .. } => ReviewWorkflowOperationKind::AttachExternalLink,
+        }
+    }
+}
+
+/// Closed result-free terminal status recorded for one completed pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReviewPassCompletionStatus {
+    /// The pass completed successfully.
+    Succeeded,
+    /// The pass failed definitively.
+    Failed,
+    /// The pass requires reconciliation.
+    Blocked,
+    /// The pass was cancelled.
+    Cancelled,
+}
+
+impl ReviewPassCompletionStatus {
+    /// Derives a result-free terminal status from a pass projection.
+    pub const fn from_state(state: &ReviewPassState) -> Option<Self> {
+        match state {
+            ReviewPassState::Succeeded { result: None, .. } => Some(Self::Succeeded),
+            ReviewPassState::Failed { .. } => Some(Self::Failed),
+            ReviewPassState::Blocked { result: None, .. } => Some(Self::Blocked),
+            ReviewPassState::Cancelled { .. } => Some(Self::Cancelled),
+            ReviewPassState::Queued
+            | ReviewPassState::Running { .. }
+            | ReviewPassState::Succeeded {
+                result: Some(_), ..
+            }
+            | ReviewPassState::Blocked {
+                result: Some(_), ..
+            } => None,
         }
     }
 }
@@ -122,6 +161,12 @@ pub enum ReviewWorkflowCommandResult {
     PassActivated {
         run: ReviewRunId,
         pass: ReviewPassId,
+    },
+    /// One run and pass reached the requested result-free terminal state.
+    PassCompleted {
+        run: ReviewRunId,
+        pass: ReviewPassId,
+        status: ReviewPassCompletionStatus,
     },
     /// A complete finding inventory was committed.
     FindingsRecorded {

@@ -77,9 +77,9 @@ pub use review_orchestration::{
     ReviewTemplateDigest, ReviewTerminalBarrierFailure,
 };
 pub use review_workflow::{
-    ReviewWorkflowCommand, ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult,
-    ReviewWorkflowCommandService, ReviewWorkflowOperation, ReviewWorkflowOperationKind,
-    ReviewWorkflowReader, ReviewWorkflowTransaction,
+    ReviewPassCompletionStatus, ReviewWorkflowCommand, ReviewWorkflowCommandOutcome,
+    ReviewWorkflowCommandResult, ReviewWorkflowCommandService, ReviewWorkflowOperation,
+    ReviewWorkflowOperationKind, ReviewWorkflowReader, ReviewWorkflowTransaction,
 };
 pub use scheduler::{
     EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass, EligibilitySweep,
