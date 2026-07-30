@@ -13,12 +13,12 @@ decision surface through PR #291 (`agent/turn-control-verbs`), and
 runner-protocol batch reconstitution through PR #260
 (`agent/runner-protocol-domain`). Template-derived blanket creation was verified
 through PR #311 (`agent/session-templates-spec`), and the exact-origin
-`web_fetch` egress policy through `agent/audit-verified-fixes`. The runner
-executable stack rooted at this foundation proposal extends the same laws to the
-runner locus. This page owns logical tool requests, approval policy and
-decisions, physical tool attempts, result admission, intra-turn continuation,
-crash classification, the compiled registry, and the daemon-local catalog. Turn
-and attempt lifecycle law lives in
+`web_fetch` egress policy and complete bounded file-patch lookup through
+`agent/audit-verified-fixes`. The runner executable stack rooted at this
+foundation proposal extends the same laws to the runner locus. This page owns
+logical tool requests, approval policy and decisions, physical tool attempts,
+result admission, intra-turn continuation, crash classification, the compiled
+registry, and the daemon-local catalog. Turn and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
 model-call staging and provider translation in
@@ -731,9 +731,12 @@ The declarations and compact result objects are:
   the first page of at most 100 files, each with path, code-host status,
   additions, and deletions, plus `truncated`.
 - `change_request_file_patch` accepts `repository`, `number`, and one
-  repository-relative `path`; it searches that same first 100-file page and
-  returns its file summary plus the optional code-host patch. A path outside the
-  bounded page is a known failure rather than an unbounded pagination request.
+  repository-relative `path`; it searches consecutive 100-file pages through
+  GitHub's 3,000-file endpoint ceiling and returns the matching file summary
+  plus the optional code-host patch. A complete search miss reports the fixed
+  semantic detail `requested changed file was not found in the change request`;
+  it is not presented as a host rejection. A next-page signal beyond page 30
+  violates the bounded response contract and fails closed.
 - `change_request_checks_status` accepts `repository` and one exact lowercase
   40-hex `revision`; it returns that revision and the first page of at most 100
   check runs, each with id, name, status, optional conclusion, and URL, plus
