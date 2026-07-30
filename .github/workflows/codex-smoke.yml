@@ -8,15 +8,16 @@
 # Security shape. There is deliberately no `pull_request` trigger: a fork pull
 # request must never be able to reach the credential, and no run checks out a
 # fork ref. `workflow_dispatch` is restricted to accounts with write access.
-# The `push` trigger accepts `main` and the exact in-repository
-# Renovate branch for this dependency: a fork cannot create a push event on
+# The `push` trigger accepts `main` and the in-repository versioned Renovate
+# branch pattern for this dependency: a fork cannot create a push event on
 # either base-repository ref, even if it gives its own branch the same name.
-# The path filter admits the pin files and the one constant the mechanical sync
-# script moves. The credential remains bound to the `codex-smoke` environment,
-# so it is unavailable to any other workflow and to any run the environment's
-# protection rules have not admitted; it is read once, from `secrets.*`, into
-# the single step that pipes it to the CLI's own login command, and it is never
-# echoed, written to the log, or passed to the Rust process.
+# The path filter admits the pin files, the constant the mechanical sync script
+# moves, and the live-smoke compatibility fixture. The credential remains bound
+# to the `codex-smoke` environment, so it is unavailable to any other workflow
+# and to any run the environment's protection rules have not admitted; it is
+# read once, from `secrets.*`, into the single step that pipes it to the CLI's
+# own login command, and it is never echoed, written to the log, or passed to
+# the Rust process.
 #
 # A Renovate pin bump runs this workflow automatically. If the ordinary Rust
 # workflow reports the deliberate pin drift tripwire, run the sync command in
@@ -26,9 +27,10 @@ name: Codex CLI smoke
 on:
   workflow_dispatch:
   push:
-    branches: [main, "renovate/openai-codex-0.x"]
+    branches: [main, "renovate/openai-codex-*.x"]
     paths:
       - "crates/model-runtime-codex-cli/src/runtime.rs"
+      - "crates/model-runtime-codex-cli/tests/live_smoke.rs"
       - "tooling/codex-cli/package.json"
       - "tooling/codex-cli/package-lock.json"
 

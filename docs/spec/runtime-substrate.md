@@ -8,11 +8,12 @@ through PR #183 (`agent/provider-call-security-parser`). The Claude Code CLI
 adapter implementation was verified through PR #320
 (`agent/claude-cli-adapter`). The Codex CLI adapter stack comprises PR #264
 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
-escalation closeout is PR #317 (`agent/escalation-closeout`). The `signalboxd`
-names this page states for the composition root, its telemetry, and the
-production `FileCredentialAccess` were verified through PR #258
-(`agent/signalboxd-rename`); the Anthropic adapter's server-side
-`fallback`-block recognition was verified through PR #280
+escalation closeout is PR #317 (`agent/escalation-closeout`). The Codex CLI
+compatibility-smoke automation was verified through PR #328
+(`agent/ci-tells-truth`). The `signalboxd` names this page states for the
+composition root, its telemetry, and the production `FileCredentialAccess` were
+verified through PR #258 (`agent/signalboxd-rename`); the Anthropic adapter's
+server-side `fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The five persistence-repository
 families in the operator-failure inventory were verified through PR #288
 (`agent/audit-fix-docs-coherence`). The streamed-delivery bridge and ephemeral
@@ -601,11 +602,15 @@ nobody reviewed, is worse than no evidence. The smoke then asserts only the
 protocol surfaces a version bump moves — the thread identifier reaching the
 exchange facts, the terminal usage counters, and the response envelope decoding
 as a completed or refused terminal outcome — and nothing about answer quality.
-It never runs on a pull-request event, so no fork can reach its credentials; it
-is dispatched manually, including against a pin-bump branch to verify that bump
-before it lands, and runs automatically on `main` only when the pin manifest or
-its committed lockfile changes. The model dispatch itself still performs no
-version probe: this check lives in the smoke, never in the hot path.
+It never runs on a pull-request event, so no fork can reach its credentials;
+manual dispatch remains available, and it runs automatically on `main` or an
+in-repository versioned Renovate branch matching `renovate/openai-codex-*.x`
+when the pin manifest, committed lockfile, supported-version marker, or
+live-smoke compatibility fixture changes. A fork cannot emit a push event for
+either base-repository ref. Moving the marker with the pin test's named sync
+script retriggers the smoke, as does a subsequent compatibility-fixture
+correction. The model dispatch itself still performs no version probe: this
+check lives in the smoke, never in the hot path.
 
 The smoke authenticates the CLI through its own non-interactive API-key login,
 piped from an environment-scoped secret into the CLI's credential store, which
