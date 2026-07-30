@@ -5462,6 +5462,22 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
     runtime.stop().await
 }
 
+#[track_caller]
+fn assert_context_still_exceeded<CountError, ExecutionError>(
+    outcome: Result<(), ContextGuardedTurnPassError<CountError, ExecutionError>>,
+    expected_turn: CanonicalUuid,
+) where
+    CountError: std::fmt::Debug,
+    ExecutionError: std::fmt::Debug,
+{
+    match outcome {
+        Err(ContextGuardedTurnPassError::ContextStillExceeded(actual_turn)) => {
+            assert_eq!(*actual_turn.as_uuid(), expected_turn.into_uuid());
+        }
+        other => panic!("expected ContextStillExceeded, got {other:?}"),
+    }
+}
+
 /// S01 / S03 / INV-014 / INV-015: one queued candidate retains its durable
 /// automatic-attempt marker across eligibility retries, so an oversized suffix
 /// cannot issue a paid successor compaction on every sweep.
@@ -5553,15 +5569,9 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
     );
     let session = SessionId::from_uuid(session_id.into_uuid());
     let first_attempt = pass.run(session).await;
-    assert!(matches!(
-        first_attempt,
-        Err(ContextGuardedTurnPassError::ContextStillExceeded)
-    ));
+    assert_context_still_exceeded(first_attempt, queued_turn);
     let second_attempt = pass.run(session).await;
-    assert!(matches!(
-        second_attempt,
-        Err(ContextGuardedTurnPassError::ContextStillExceeded)
-    ));
+    assert_context_still_exceeded(second_attempt, queued_turn);
     assert!(!fatal_execution.is_triggered());
     assert_eq!(ordinary_probe.counted_operations().len(), 3);
     assert_eq!(ordinary_probe.prepared_operations().len(), 0);
@@ -5687,9 +5697,10 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
 
     assert!(matches!(
         outcome,
-        Err(ContextGuardedTurnPassError::Count(
-            CommitAmbiguousCountFailure
-        ))
+        Err(ContextGuardedTurnPassError::Count {
+            source: CommitAmbiguousCountFailure,
+            ..
+        })
     ));
     assert!(fatal_execution.is_triggered());
 
