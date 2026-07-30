@@ -38,6 +38,7 @@ use crate::wire::ErrorEnvelope;
 const MAX_BUFFERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STREAMED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_NATIVE_MESSAGE_BYTES: usize = 2_048;
+const NATIVE_MESSAGE_TRUNCATION_SUFFIX: &str = " … [truncated]";
 
 /// The OpenAI Chat Completions adapter.
 ///
@@ -1391,14 +1392,14 @@ fn redact_bounded_text(text: String, credential: &CredentialValue) -> String {
 }
 
 fn redact_native_message(text: String, credential: &CredentialValue) -> String {
-    const TRUNCATION_SUFFIX: &str = " … [truncated]";
-    if let Some(body) = text.strip_suffix(TRUNCATION_SUFFIX) {
+    let redacted = if let Some(body) = text.strip_suffix(NATIVE_MESSAGE_TRUNCATION_SUFFIX) {
         let mut redacted = redact_native_body(body.to_string(), credential);
-        redacted.push_str(TRUNCATION_SUFFIX);
+        redacted.push_str(NATIVE_MESSAGE_TRUNCATION_SUFFIX);
         redacted
     } else {
-        lossy_truncated(redact_native_body(text, credential).as_bytes())
-    }
+        redact_native_body(text, credential)
+    };
+    lossy_truncated(redacted.as_bytes())
 }
 
 fn redact_native_body(text: String, credential: &CredentialValue) -> String {
@@ -1863,6 +1864,37 @@ mod tests {
         assert!(message.ends_with(" … [truncated]"));
         assert!(!message.contains(credential_text));
         assert!(!message.contains(r"fixture_abcdefghijklmnopqrstuvwxyz\u005a"));
+    }
+
+    #[test]
+    fn provider_controlled_truncation_suffix_cannot_bypass_native_message_bound() {
+        const PROVIDER_BODY_BYTES: usize = super::MAX_NATIVE_MESSAGE_BYTES + 200;
+        const FALLBACK_STATUS: u16 = 502;
+        let credential_text = "fixture_provider_key";
+        let credential = CredentialValue::new(credential_text.as_bytes().to_vec());
+        let body = format!(
+            "{}{credential_text}{}",
+            "x".repeat(PROVIDER_BODY_BYTES),
+            super::NATIVE_MESSAGE_TRUNCATION_SUFFIX
+        );
+
+        let evidence =
+            fallback_provider_error(ExchangeFacts::default(), FALLBACK_STATUS, body.as_bytes());
+        let persisted_evidence = redact_evidence(evidence, &credential);
+        let TerminalEvidence::ProviderError(error) = persisted_evidence else {
+            panic!("fallback provider evidence remains a provider error");
+        };
+        let message = error
+            .native
+            .message
+            .expect("fallback provider evidence retains a sanitized message");
+
+        assert!(
+            message.len()
+                <= super::MAX_NATIVE_MESSAGE_BYTES + super::NATIVE_MESSAGE_TRUNCATION_SUFFIX.len()
+        );
+        assert!(message.ends_with(super::NATIVE_MESSAGE_TRUNCATION_SUFFIX));
+        assert!(!message.contains(credential_text));
     }
 
     #[test]

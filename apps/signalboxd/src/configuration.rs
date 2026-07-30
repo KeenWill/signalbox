@@ -77,7 +77,8 @@ impl HubModelConfiguration {
                 let table = item
                     .as_table()
                     .ok_or(HubModelConfigurationError::InvalidWebFetchPolicy)?;
-                reject_unknown_fields(table, &["allowed_origins"])?;
+                reject_unknown_fields(table, &["allowed_origins"])
+                    .map_err(|_| HubModelConfigurationError::InvalidWebFetchPolicy)?;
                 let origins = table
                     .get("allowed_origins")
                     .and_then(|item| item.as_array())
@@ -518,6 +519,36 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         assert_eq!(
             HubModelConfiguration::parse(&dangling).err(),
             Some(HubModelConfigurationError::DanglingAlias)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_each_malformed_web_fetch_policy_shape() {
+        let unknown_field = CONFIGURATION.replace(
+            r#"allowed_origins = ["https://example.com"]"#,
+            r#"allowed_origins = ["https://example.com"]
+extra = true"#,
+        );
+        let non_string_origin = CONFIGURATION.replace(
+            r#"allowed_origins = ["https://example.com"]"#,
+            "allowed_origins = [17]",
+        );
+        let non_origin_url = CONFIGURATION.replace(
+            r#"allowed_origins = ["https://example.com"]"#,
+            r#"allowed_origins = ["https://example.com/path"]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&unknown_field).err(),
+            Some(HubModelConfigurationError::InvalidWebFetchPolicy)
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&non_string_origin).err(),
+            Some(HubModelConfigurationError::InvalidWebFetchPolicy)
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&non_origin_url).err(),
+            Some(HubModelConfigurationError::InvalidWebFetchPolicy)
         );
     }
 

@@ -762,6 +762,7 @@ mod tests {
 
     use super::*;
 
+    const FIXTURE_ORIGIN: &str = "https://example.com";
     const REDIRECT_STATUS: u16 = 302;
 
     fn arguments(value: &str) -> NormalizedToolArguments {
@@ -770,7 +771,7 @@ mod tests {
     }
 
     fn fixture_egress_policy() -> WebFetchEgressPolicy {
-        WebFetchEgressPolicy::try_from_allowed_origins([String::from("https://example.com")])
+        WebFetchEgressPolicy::try_from_allowed_origins([String::from(FIXTURE_ORIGIN)])
             .expect("fixture origin is admitted")
     }
 
@@ -801,12 +802,14 @@ mod tests {
             .into_parts();
         let definition = &catalog.definitions()[0];
 
+        let admitted = serde_json::json!({
+            "url": format!("{FIXTURE_ORIGIN}/ordinary"),
+        })
+        .to_string();
+
         assert_eq!(definition.permission_default(), ToolPermissionDefault::Auto);
         assert_eq!(
-            catalog.validate_arguments(
-                definition.name(),
-                &arguments(r#"{"url":"https://example.com/ordinary"}"#),
-            ),
+            catalog.validate_arguments(definition.name(), &arguments(&admitted)),
             Ok(())
         );
         assert!(matches!(
@@ -860,11 +863,13 @@ mod tests {
             .into_parts();
         let definition = &catalog.definitions()[0];
 
+        let supplied = serde_json::json!({
+            "url": format!("{FIXTURE_ORIGIN}/path?q=one"),
+        })
+        .to_string();
+
         assert_eq!(
-            catalog.validate_arguments(
-                definition.name(),
-                &arguments(r#"{"url":"https://example.com/path?q=one"}"#),
-            ),
+            catalog.validate_arguments(definition.name(), &arguments(&supplied)),
             Ok(())
         );
     }
@@ -890,10 +895,7 @@ mod tests {
     /// percent encoding cannot expand a short supplied value past the cap.
     #[test]
     fn web_fetch_typed_decode_rejects_percent_encoded_url_over_cap() {
-        let supplied_url = format!(
-            "https://example.com/{}",
-            "\u{00e9}".repeat(MAX_URL_BYTES / 4)
-        );
+        let supplied_url = format!("{FIXTURE_ORIGIN}/{}", "\u{00e9}".repeat(MAX_URL_BYTES / 4));
         let supplied = serde_json::json!({"url": supplied_url}).to_string();
 
         assert!(supplied_url.len() <= MAX_URL_BYTES);
@@ -1040,11 +1042,11 @@ mod tests {
     /// Bounded binary input becomes deterministic lossy text plus metadata.
     #[test]
     fn web_fetch_result_is_bounded_text_with_metadata() {
-        let expected_url = "https://example.com/data";
+        let expected_url = format!("{FIXTURE_ORIGIN}/data");
         let expected_status = 200;
         let expected_content_type = "text/plain";
         let expected_body = vec![b'o', b'k', 0xff];
-        let supplied = serde_json::json!({"url": expected_url}).to_string();
+        let supplied = serde_json::json!({"url": expected_url.as_str()}).to_string();
         let request = decode_arguments(&arguments(&supplied)).expect("fixture URL is valid");
         let response = WebFetchResponse::new(
             expected_status,
@@ -1061,7 +1063,7 @@ mod tests {
             "content_type": expected_content_type,
             "status": expected_status,
             "truncated": false,
-            "url": expected_url,
+            "url": expected_url.as_str(),
         })
         .to_string();
 

@@ -1365,10 +1365,12 @@ private struct SignalboxSnapshotAccumulator: Sendable {
   let boundary: SignalboxTranscriptSnapshotBoundary
   let capacity: SignalboxSynchronizationSnapshotCapacity
   private var records: [SignalboxSynchronizationSnapshot.Record] = []
-  private var turnIDs: Set<SignalboxCanonicalUUID> = []
+  private var turnAcceptancePositions: [SignalboxCanonicalUUID: UInt64] = [:]
   private var modelCallIDs: Set<SignalboxCanonicalUUID> = []
   private var entryIDs: Set<SignalboxSnapshotEntryIdentity> = []
   private var priorAcceptancePosition: UInt64?
+  private var priorModelCallTurnAcceptancePosition: UInt64?
+  private var priorModelCallID: String?
   private var turnCount: UInt64 = 0
   private var modelCallCount: UInt64 = 0
   private var entryCount: UInt64 = 0
@@ -1404,7 +1406,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         !entriesStarted,
         turn.acceptancePosition.rawValue != 0,
         priorAcceptancePosition.map({ $0 < turn.acceptancePosition.rawValue }) ?? true,
-        turnIDs.insert(turn.turnID).inserted
+        turnAcceptancePositions.updateValue(
+          turn.acceptancePosition.rawValue, forKey: turn.turnID
+        ) == nil
       else {
         return .invalid("Snapshot turns were not unique acceptance-order projections.")
       }
@@ -1415,15 +1419,25 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       }
       return .accepted
     case .transcriptModelCallUsage(let evidence):
+      guard let turnAcceptancePosition = turnAcceptancePositions[evidence.turnID] else {
+        return .invalid("Snapshot model-call usage order or identities were invalid.")
+      }
+      let followsPriorModelCall = priorModelCallTurnAcceptancePosition.map { priorPosition in
+        turnAcceptancePosition > priorPosition
+          || (turnAcceptancePosition == priorPosition
+            && priorModelCallID.map { $0 < evidence.modelCallID.rawValue } == true)
+      } ?? true
       guard
         !modelCallsEnded,
         !entriesStarted,
         evidence.modelCallIndex.rawValue == modelCallCount,
-        turnIDs.contains(evidence.turnID),
+        followsPriorModelCall,
         modelCallIDs.insert(evidence.modelCallID).inserted
       else {
         return .invalid("Snapshot model-call usage order or identities were invalid.")
       }
+      priorModelCallTurnAcceptancePosition = turnAcceptancePosition
+      priorModelCallID = evidence.modelCallID.rawValue
       modelCallCount = modelCallCount.addingReportingOverflow(1).partialValue
       guard append(.modelCallUsage(evidence)) else {
         return .invalid("Snapshot exceeded the configured native-client capacity.")
@@ -1442,6 +1456,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     case .transcriptEntry(let entry):
       entriesStarted = true
       guard
+        modelCallsEnded,
         !entry.entry.hasUnknownStoredVariant,
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
@@ -1461,6 +1476,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     case .transcriptTextEntry(let entry):
       entriesStarted = true
       guard
+        modelCallsEnded,
         !entry.entry.hasUnknownStoredVariant,
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
@@ -1485,7 +1501,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         end.cursor == boundary.cursor,
         end.turnCount.rawValue == turnCount,
         end.entryCount.rawValue == entryCount,
-        modelCallCount == 0 || modelCallsEnded
+        modelCallsEnded
       else {
         return .invalid("Snapshot terminal identity, cursor, or counts were invalid.")
       }

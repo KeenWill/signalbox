@@ -672,19 +672,20 @@ tools:
   effect class is `EffectFree`: execution observes no external state.
 - `web_fetch` requires exactly one absolute HTTP(S) `url` no longer than 8 KiB.
   User information, fragments, and direct non-public IP destinations are
-  invalid. The URL's canonical scheme, host, and effective port must exactly
-  match one of at most 64 origins in the deployment-owned `[web_fetch]`
-  `allowed_origins` list; an absent or empty list disables all outbound fetches.
-  Paths and queries do not broaden that set. Before dispatch, a domain must
-  resolve to between one and 32 addresses and every address must be public; the
-  admitted addresses are pinned into the request client so connection setup
-  cannot substitute a later DNS answer. Its permission default is `Auto`; its
-  effect class is `ExternalEffect` because the remote server can observe a GET.
-  One dispatch performs at most one credential-free request: ambient proxies,
-  redirects, protocol retries, and idle reuse are disabled, TLS uses rustls with
-  a TLS 1.2 floor, and a 15-second timeout bounds resolution and the exchange.
-  The executor retains at most 64 KiB of response bytes and at most 1,024 bytes
-  of a valid content-type header. Success is compact JSON containing the exact
+  invalid. Before dispatch, its canonical origin must satisfy the
+  deployment-owned
+  [web-fetch catalog policy](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog),
+  which owns the origin bound, canonicalization, and absent-or-empty behavior;
+  this admission gates automatic execution. A domain must resolve to between one
+  and 32 addresses and every address must be public; the admitted addresses are
+  pinned into the request client so connection setup cannot substitute a later
+  DNS answer. Its permission default is `Auto`; its effect class is
+  `ExternalEffect` because the remote server can observe a GET. One dispatch
+  performs at most one credential-free request: ambient proxies, redirects,
+  protocol retries, and idle reuse are disabled, TLS uses rustls with a TLS 1.2
+  floor, and a 15-second timeout bounds resolution and the exchange. The
+  executor retains at most 64 KiB of response bytes and at most 1,024 bytes of a
+  valid content-type header. Success is compact JSON containing the exact
   requested `url`, numeric `status`, optional `content_type`, a lossy UTF-8
   `body`, and `truncated`. Resolution, client-setup, and definite
   connection-establishment failure before request dispatch returns a fixed

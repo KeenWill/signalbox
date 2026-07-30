@@ -19,12 +19,13 @@ additive provider-failure cause column was verified through PR #330
 (`agent/audit-verified-fixes`); the session-template provenance columns and
 storage version four were verified through PR #311
 (`agent/session-templates-spec`); and the context-compaction transaction and
-lock inventory were verified against `agent/context-compaction-protocol`. This
-page covers the Postgres representation in `crates/persistence` (source and
-migrations), migration discipline, durable command storage and replay equality,
-the fail-closed reconstitution boundary, the lock protocol, pending-steering
-durable state, the corruption taxonomy, commit-ambiguity handling, and the
-transactional outbox. Session aggregate semantics live in
+lock inventory were verified against PR #314
+(`agent/context-compaction-protocol`). This page covers the Postgres
+representation in `crates/persistence` (source and migrations), migration
+discipline, durable command storage and replay equality, the fail-closed
+reconstitution boundary, the lock protocol, pending-steering durable state, the
+corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
+Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in

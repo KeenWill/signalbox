@@ -1,6 +1,6 @@
 //! Production GitHub REST/GraphQL adapter for the code-host tool suite.
 
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt, future::Future, time::Duration};
 
 use futures_util::StreamExt;
 use reqwest::{
@@ -290,6 +290,18 @@ impl GitHubCodeHostTransport {
     }
 
     async fn file_patch(
+        &self,
+        arguments: super::FilePatchArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        with_read_operation_timeout(
+            DEFAULT_TIMEOUT,
+            self.file_patch_transaction(arguments, credential),
+        )
+        .await
+    }
+
+    async fn file_patch_transaction(
         &self,
         arguments: super::FilePatchArguments,
         credential: &CredentialValue,
@@ -1717,6 +1729,15 @@ fn parse_stack_comparison(
     required_u64(comparison, "behindBy")
 }
 
+async fn with_read_operation_timeout<T>(
+    timeout: Duration,
+    operation: impl Future<Output = Result<T, CodeHostTransportFailure>>,
+) -> Result<T, CodeHostTransportFailure> {
+    tokio::time::timeout(timeout, operation)
+        .await
+        .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
+}
+
 fn remaining_exchange_timeout(elapsed: Duration) -> Result<Duration, CodeHostTransportFailure> {
     DEFAULT_TIMEOUT
         .checked_sub(elapsed)
@@ -2082,6 +2103,18 @@ mod tests {
             reject_graphql_errors(&value),
             Err(CodeHostTransportFailure::DispatchUnknown)
         );
+    }
+
+    /// Every page in one changed-file search shares one elapsed-time budget.
+    #[tokio::test]
+    async fn file_patch_transaction_has_one_timeout_budget() {
+        let result = with_read_operation_timeout(
+            Duration::ZERO,
+            std::future::pending::<Result<(), CodeHostTransportFailure>>(),
+        )
+        .await;
+
+        assert_eq!(result, Err(CodeHostTransportFailure::DispatchUnknown));
     }
 
     /// The authenticated redirect response consumes the same timeout budget

@@ -190,6 +190,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     await requester.primary.send(
       try ProcessDriverFixture.snapshotStart(cursor: ProcessDriverFixture.snapshotCursor)
     )
+    await requester.primary.send(try ProcessDriverFixture.modelCallsEnd())
     await requester.primary.send(
       try ProcessDriverFixture.snapshotEnd(cursor: ProcessDriverFixture.snapshotCursor)
     )
@@ -205,6 +206,8 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     await requester.side.send(
       try ProcessDriverFixture.snapshotStart(cursor: ProcessDriverFixture.triggerCursor)
     )
+    await requester.side.waitForNextCallCount(ProcessDriverFixture.sideStartReadCount)
+    await requester.side.send(try ProcessDriverFixture.modelCallsEnd())
     await requester.side.waitForNextCallCount(ProcessDriverFixture.sideEndReadCount)
     await recorder.pauseNextPhase()
     await requester.side.send(
@@ -3097,9 +3100,10 @@ private enum ProcessDriverFixture {
   static let singleMetadataCount: UInt64 = 1
   static let twoMetadataCount: UInt64 = 2
   static let oneMetadataCount: UInt64 = 1
-  static let initialFollowReadCount = 3
-  static let bufferedFollowReadCount = 5
-  static let sideEndReadCount = 2
+  static let initialFollowReadCount = 4
+  static let bufferedFollowReadCount = 6
+  static let sideStartReadCount = 2
+  static let sideEndReadCount = 3
   static let snapshotCursor: UInt64 = 0
   static let triggerCursor: UInt64 = 1
   static let bufferedCursor: UInt64 = 2
@@ -3191,6 +3195,17 @@ private enum ProcessDriverFixture {
         "type":"transcript_snapshot_start",
         "session_id":"\(session)",
         "cursor":"\(cursor)"
+      }
+      """
+    )
+  }
+
+  static func modelCallsEnd() throws -> SignalboxProcessServerFrame {
+    try frame(
+      """
+      {
+        "type":"transcript_model_calls_end",
+        "model_call_count":"0"
       }
       """
     )
@@ -3458,6 +3473,12 @@ private enum ProcessDriverFixture {
 }
 
 private enum ProcessProjectionFixture {
+  static let emptyModelCallsBoundary = """
+    {
+      "type":"transcript_model_calls_end",
+      "model_call_count":"0"
+    }
+    """
   static let userText = "fixture materialized owner input"
   static let proposedAssistantText = "I will inspect the fixture before using the tool."
   static let proposedToolName = "inspect_fixture"
@@ -3606,6 +3627,12 @@ private enum ProcessProjectionFixture {
     _ = machine.receive(
       .frame(
         generation: 1,
+        message: try message(emptyModelCallsBoundary)
+      )
+    )
+    _ = machine.receive(
+      .frame(
+        generation: 1,
         message: try message(
           """
           {
@@ -3678,6 +3705,7 @@ private enum ProcessProjectionFixture {
           "cursor":"1"
         }
         """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_text_entry",
@@ -3739,6 +3767,7 @@ private enum ProcessProjectionFixture {
           "cursor":"1"
         }
         """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_text_entry",
@@ -3789,6 +3818,7 @@ private enum ProcessProjectionFixture {
           "cursor":"1"
         }
         """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_entry",
@@ -3842,6 +3872,7 @@ private enum ProcessProjectionFixture {
           "cursor":"1"
         }
         """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_text_entry",
@@ -3921,6 +3952,7 @@ private enum ProcessProjectionFixture {
           "cursor":"1"
         }
         """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_entry",
@@ -3958,6 +3990,7 @@ private enum ProcessProjectionFixture {
           "cursor":"1"
         }
         """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_text_entry",
@@ -4051,6 +4084,7 @@ private enum ProcessProjectionFixture {
           }
         }
         """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_snapshot_end",

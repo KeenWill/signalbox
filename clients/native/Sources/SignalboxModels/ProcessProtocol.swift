@@ -1354,6 +1354,14 @@ public struct SignalboxFailedTerminalModelCall: Decodable, Equatable, Sendable {
     modelCallID = try decoder.decode("model_call_id")
     disposition = try decoder.decode("disposition")
     cause = try decoder.decodeIfPresent("cause")
+    guard disposition != .cancelled || cause == nil else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "A cancelled model call cannot carry a provider-failure cause."
+        )
+      )
+    }
   }
 }
 

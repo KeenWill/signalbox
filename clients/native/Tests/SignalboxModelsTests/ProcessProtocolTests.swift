@@ -278,6 +278,16 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testCancelledTerminalModelCallRejectsProviderFailureCause() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.failedTurnFrame(
+        turnID: turnID, cause: "quota_exhausted", disposition: "cancelled"
+      )
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
+  }
+
   func testMalformedKnownMessageDegradesWithDiagnostic() throws {
     let encoded = Data(
       """
@@ -861,7 +871,9 @@ private enum ProcessProtocolFixture {
     )
   }
 
-  static func failedTurnFrame(turnID: String, cause: String) -> Data {
+  static func failedTurnFrame(
+    turnID: String, cause: String, disposition: String = "known_failed"
+  ) -> Data {
     Data(
       """
       {
@@ -877,7 +889,7 @@ private enum ProcessProtocolFixture {
             "terminal_attempt_id":"\(attemptID)",
             "terminal_model_call":{
               "model_call_id":"\(modelCallID)",
-              "disposition":"known_failed",
+              "disposition":"\(disposition)",
               "cause":"\(cause)"
             }
           }
