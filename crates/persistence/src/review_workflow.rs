@@ -14,12 +14,12 @@ use signalbox_domain::{
     ReviewExternalLinkId, ReviewExternalLinkNoChangeResult, ReviewExternalLinkObservation,
     ReviewExternalLinkObservationResult, ReviewExternalLinkPublicationBlockedResult,
     ReviewExternalLinkTransitionFailure, ReviewExternalObjectKind, ReviewExternalObjectState,
-    ReviewFinding, ReviewFindingContent, ReviewFindingDiffSide, ReviewFindingEvent,
-    ReviewFindingEventKind, ReviewFindingEventResult, ReviewFindingEventResultKind,
-    ReviewFindingExternalLinkRef, ReviewFindingId, ReviewFindingLocation,
-    ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
-    ReviewFindingSeverity, ReviewFindingStatus, ReviewKey, ReviewLineRange, ReviewPass,
-    ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
+    ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide,
+    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
+    ReviewFindingEventResultKind, ReviewFindingExternalLinkRef, ReviewFindingId,
+    ReviewFindingLocation, ReviewFindingPendingExternalLinkRef, ReviewFindingProposal,
+    ReviewFindingRef, ReviewFindingSeverity, ReviewFindingStatus, ReviewKey, ReviewLineRange,
+    ReviewPass, ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
     ReviewPassReconstitutionInput, ReviewPassRef, ReviewPassResult, ReviewPassState,
     ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewPolicyVersion,
     ReviewProducedFindings, ReviewReferencedFindingEvidence, ReviewRun, ReviewRunEvidence,
@@ -675,7 +675,8 @@ impl ReviewWorkflowStore {
                     finding.producing_pass_id, finding.file_path,
                     finding.line_start, finding.line_end, finding.diff_side,
                     finding.title, finding.body, finding.severity,
-                    finding.confidence, finding.category,
+                    finding.is_real_confidence,
+                    finding.severity_label_confidence, finding.category,
                     finding.recommended_fix,
                     target.provider_key, target.repository_key,
                     target.subject_kind, target.change_request_number,
@@ -2182,9 +2183,11 @@ async fn insert_finding_row(
         "INSERT INTO review_finding
             (finding_id, run_id, target_id, producing_pass_id, file_path,
              line_start, line_end, diff_side, title, body, severity,
-             confidence, category, recommended_fix)
+             is_real_confidence, severity_label_confidence, category,
+             recommended_fix)
          VALUES (
-             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+             $15
          )",
     )
     .bind(reference.finding().into_uuid())
@@ -2198,7 +2201,10 @@ async fn insert_finding_row(
     .bind(content.title().as_str())
     .bind(content.body().as_str())
     .bind(encode_severity(content.severity()))
-    .bind(i32::from(content.confidence().basis_points()))
+    .bind(i32::from(content.is_real_confidence().basis_points()))
+    .bind(i32::from(
+        content.severity_label_confidence().basis_points(),
+    ))
     .bind(content.category().as_str())
     .bind(content.recommended_fix().map(ReviewText::as_str))
     .execute(&mut **transaction)
@@ -3121,7 +3127,10 @@ fn decode_finding_proposal(
         review_text(row.try_get("title")?, "review_finding")?,
         review_text(row.try_get("body")?, "review_finding")?,
         decode_severity(&row.try_get::<String, _>("severity")?)?,
-        confidence(row.try_get("confidence")?, "review_finding")?,
+        ReviewFindingConfidenceAxes::new(
+            decode_review_confidence(row.try_get("is_real_confidence")?, "review_finding")?,
+            decode_review_confidence(row.try_get("severity_label_confidence")?, "review_finding")?,
+        ),
         review_key(row.try_get("category")?, "review_finding")?,
         row.try_get::<Option<String>, _>("recommended_fix")?
             .map(|value| review_text(value, "review_finding"))
@@ -4408,7 +4417,7 @@ fn review_text(
     })
 }
 
-fn confidence(
+fn decode_review_confidence(
     value: i32,
     aggregate: &'static str,
 ) -> Result<ReviewConfidence, ReviewWorkflowStoreError> {
@@ -4426,8 +4435,8 @@ fn decode_review_policy(
     aggregate: &'static str,
 ) -> Result<ReviewPolicy, ReviewWorkflowStoreError> {
     let version = positive_u32(row.try_get(version_column)?, aggregate)?;
-    let judge = confidence(row.try_get(judge_column)?, aggregate)?;
-    let publication = confidence(row.try_get(publication_column)?, aggregate)?;
+    let judge = decode_review_confidence(row.try_get(judge_column)?, aggregate)?;
+    let publication = decode_review_confidence(row.try_get(publication_column)?, aggregate)?;
     ReviewPolicy::try_new(
         ReviewPolicyVersion::try_new(version)
             .map_err(|_| corruption(aggregate, String::from("zero policy version")))?,

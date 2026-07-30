@@ -203,6 +203,36 @@ impl ReviewConfidenceError {
     }
 }
 
+/// The independent confidence axes carried by one review finding.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ReviewFindingConfidenceAxes {
+    is_real_confidence: ReviewConfidence,
+    severity_label_confidence: ReviewConfidence,
+}
+
+impl ReviewFindingConfidenceAxes {
+    /// Creates explicitly labeled is-real and severity-label confidence axes.
+    pub const fn new(
+        is_real_confidence: ReviewConfidence,
+        severity_label_confidence: ReviewConfidence,
+    ) -> Self {
+        Self {
+            is_real_confidence,
+            severity_label_confidence,
+        }
+    }
+
+    /// Returns confidence that the issue is real.
+    pub const fn is_real_confidence(self) -> ReviewConfidence {
+        self.is_real_confidence
+    }
+
+    /// Returns confidence that the severity label is correct.
+    pub const fn severity_label_confidence(self) -> ReviewConfidence {
+        self.severity_label_confidence
+    }
+}
+
 /// An ordinal review-policy version.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ReviewPolicyVersion(NonZeroU32);
@@ -2802,7 +2832,7 @@ pub struct ReviewFindingContent {
     title: ReviewText,
     body: ReviewText,
     severity: ReviewFindingSeverity,
-    confidence: ReviewConfidence,
+    confidence_axes: ReviewFindingConfidenceAxes,
     category: ReviewKey,
     recommended_fix: Option<ReviewText>,
 }
@@ -2814,7 +2844,7 @@ impl ReviewFindingContent {
         title: ReviewText,
         body: ReviewText,
         severity: ReviewFindingSeverity,
-        confidence: ReviewConfidence,
+        confidence_axes: ReviewFindingConfidenceAxes,
         category: ReviewKey,
         recommended_fix: Option<ReviewText>,
     ) -> Self {
@@ -2823,7 +2853,7 @@ impl ReviewFindingContent {
             title,
             body,
             severity,
-            confidence,
+            confidence_axes,
             category,
             recommended_fix,
         }
@@ -2849,9 +2879,14 @@ impl ReviewFindingContent {
         self.severity
     }
 
-    /// Returns producer confidence.
-    pub const fn confidence(&self) -> ReviewConfidence {
-        self.confidence
+    /// Returns producer confidence that the issue is real.
+    pub const fn is_real_confidence(&self) -> ReviewConfidence {
+        self.confidence_axes.is_real_confidence()
+    }
+
+    /// Returns producer confidence that the severity label is correct.
+    pub const fn severity_label_confidence(&self) -> ReviewConfidence {
+        self.confidence_axes.severity_label_confidence()
     }
 
     /// Borrows the category.
@@ -3407,7 +3442,8 @@ impl ReviewFinding {
             ));
         }
         if matches!(&event.kind, ReviewFindingEventKind::Accepted)
-            && self.proposal.content.confidence() < event.run.policy().minimum_judge_confidence()
+            && self.proposal.content.is_real_confidence()
+                < event.run.policy().minimum_judge_confidence()
         {
             return Err(self.event_error(
                 event,
@@ -3415,7 +3451,7 @@ impl ReviewFinding {
             ));
         }
         if matches!(&event.kind, ReviewFindingEventKind::Posted { .. })
-            && self.proposal.content.confidence()
+            && self.proposal.content.is_real_confidence()
                 < event.run.policy().minimum_publication_confidence()
         {
             return Err(self.event_error(
@@ -4989,9 +5025,14 @@ mod tests {
         .expect("standalone commit target may omit a comparison revision")
     }
 
-    fn finding_content_with_confidence(
+    struct FindingConfidenceAxes {
+        is_real: u16,
+        severity_label: u16,
+    }
+
+    fn finding_content_with_confidence_axes(
         diff_side: Option<ReviewFindingDiffSide>,
-        confidence: u16,
+        confidence: FindingConfidenceAxes,
     ) -> ReviewFindingContent {
         ReviewFindingContent::new(
             ReviewFindingLocation::new(
@@ -5002,17 +5043,28 @@ mod tests {
             text("Finding title"),
             text("Finding body"),
             ReviewFindingSeverity::High,
-            ReviewConfidence::try_from_basis_points(confidence).expect("bounded confidence"),
+            ReviewFindingConfidenceAxes::new(
+                ReviewConfidence::try_from_basis_points(confidence.is_real)
+                    .expect("bounded is-real confidence"),
+                ReviewConfidence::try_from_basis_points(confidence.severity_label)
+                    .expect("bounded severity-label confidence"),
+            ),
             key("correctness"),
             Some(text("Apply the exact fix")),
         )
     }
 
     fn finding_content(diff_side: Option<ReviewFindingDiffSide>) -> ReviewFindingContent {
-        finding_content_with_confidence(diff_side, 8_500)
+        finding_content_with_confidence_axes(
+            diff_side,
+            FindingConfidenceAxes {
+                is_real: 8_500,
+                severity_label: 8_500,
+            },
+        )
     }
 
-    fn proposal_with_confidence(confidence: u16) -> ReviewFindingProposal {
+    fn proposal_with_confidence_axes(confidence: FindingConfidenceAxes) -> ReviewFindingProposal {
         let target = target_with_base();
         ReviewFindingProposal::try_new(
             finding_ref(10),
@@ -5022,13 +5074,16 @@ mod tests {
             ),
             run_evidence(),
             &target,
-            finding_content_with_confidence(Some(ReviewFindingDiffSide::Right), confidence),
+            finding_content_with_confidence_axes(Some(ReviewFindingDiffSide::Right), confidence),
         )
         .expect("producing pass belongs to the finding run")
     }
 
     fn proposal() -> ReviewFindingProposal {
-        proposal_with_confidence(8_500)
+        proposal_with_confidence_axes(FindingConfidenceAxes {
+            is_real: 8_500,
+            severity_label: 8_500,
+        })
     }
 
     fn succeeded_review_pass() -> ReviewPass {
@@ -9609,14 +9664,17 @@ mod tests {
     /// INV-040: judgment cannot accept a finding below the frozen threshold.
     #[test]
     fn inv040_finding_rejects_acceptance_below_policy_threshold() {
-        let error = ReviewFinding::new(proposal_with_confidence(6_999))
-            .apply(finding_event(
-                finding_ref(10),
-                ReviewEventOrdinal::one(),
-                succeeded_pass(20, ReviewPassKind::Judge),
-                ReviewFindingEventKind::Accepted,
-            ))
-            .expect_err("confidence below 70 percent cannot be accepted");
+        let error = ReviewFinding::new(proposal_with_confidence_axes(FindingConfidenceAxes {
+            is_real: 6_999,
+            severity_label: 10_000,
+        }))
+        .apply(finding_event(
+            finding_ref(10),
+            ReviewEventOrdinal::one(),
+            succeeded_pass(20, ReviewPassKind::Judge),
+            ReviewFindingEventKind::Accepted,
+        ))
+        .expect_err("is-real confidence below 70 percent cannot be accepted");
 
         assert_eq!(
             error.failure(),
@@ -9627,14 +9685,17 @@ mod tests {
     /// INV-040: publication cannot post a finding below the frozen threshold.
     #[test]
     fn inv040_finding_rejects_posting_below_policy_threshold() {
-        let finding = ReviewFinding::new(proposal_with_confidence(7_999))
-            .apply(finding_event(
-                finding_ref(10),
-                ReviewEventOrdinal::one(),
-                succeeded_pass(19, ReviewPassKind::Judge),
-                ReviewFindingEventKind::Accepted,
-            ))
-            .expect("confidence meets the judgment threshold");
+        let finding = ReviewFinding::new(proposal_with_confidence_axes(FindingConfidenceAxes {
+            is_real: 7_999,
+            severity_label: 10_000,
+        }))
+        .apply(finding_event(
+            finding_ref(10),
+            ReviewEventOrdinal::one(),
+            succeeded_pass(19, ReviewPassKind::Judge),
+            ReviewFindingEventKind::Accepted,
+        ))
+        .expect("is-real confidence meets the judgment threshold");
         let error = finding
             .apply(posted_finding_event(
                 finding_ref(10),
@@ -9642,12 +9703,39 @@ mod tests {
                 succeeded_pass(20, ReviewPassKind::Publish),
                 link_id(30),
             ))
-            .expect_err("confidence below 80 percent cannot be posted");
+            .expect_err("is-real confidence below 80 percent cannot be posted");
 
         assert_eq!(
             error.failure(),
             ReviewFindingTransitionFailure::BelowPublicationThreshold
         );
+    }
+
+    /// INV-040: severity-label uncertainty never suppresses a real finding.
+    #[test]
+    fn inv040_finding_thresholds_ignore_severity_label_confidence() {
+        let accepted = ReviewFinding::new(proposal_with_confidence_axes(FindingConfidenceAxes {
+            is_real: 9_500,
+            severity_label: 0,
+        }))
+        .apply(finding_event(
+            finding_ref(10),
+            ReviewEventOrdinal::one(),
+            succeeded_pass(19, ReviewPassKind::Judge),
+            ReviewFindingEventKind::Accepted,
+        ))
+        .expect("high is-real confidence permits judgment");
+
+        let posted = accepted
+            .apply(posted_finding_event(
+                finding_ref(10),
+                ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+                succeeded_pass(20, ReviewPassKind::Publish),
+                link_id(30),
+            ))
+            .expect("severity-label uncertainty does not suppress publication");
+
+        assert_eq!(posted.status(), ReviewFindingStatus::Posted);
     }
 
     /// INV-041: a reservation provider must be the canonical target provider.

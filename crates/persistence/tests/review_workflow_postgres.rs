@@ -28,13 +28,13 @@ use signalbox_domain::{
     ReviewExternalLinkNoChangeResult, ReviewExternalLinkObservation,
     ReviewExternalLinkObservationResult, ReviewExternalLinkPublicationBlockedResult,
     ReviewExternalLinkTransitionFailure, ReviewExternalObjectKind, ReviewExternalObjectState,
-    ReviewFinding, ReviewFindingContent, ReviewFindingDiffSide, ReviewFindingEvent,
-    ReviewFindingEventKind, ReviewFindingEventResult, ReviewFindingEventResultKind,
-    ReviewFindingId, ReviewFindingLocation, ReviewFindingPendingExternalLinkRef,
-    ReviewFindingProposal, ReviewFindingRef, ReviewFindingSeverity, ReviewFindingStatus,
-    ReviewFindingTransitionFailure, ReviewKey, ReviewLineRange, ReviewPass,
-    ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
-    ReviewPassRef, ReviewPassResult, ReviewPassState, ReviewPassTransitionFailure,
+    ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide,
+    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
+    ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation,
+    ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
+    ReviewFindingSeverity, ReviewFindingStatus, ReviewFindingTransitionFailure, ReviewKey,
+    ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId,
+    ReviewPassKind, ReviewPassRef, ReviewPassResult, ReviewPassState, ReviewPassTransitionFailure,
     ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewProducedFindings,
     ReviewReferencedFindingEvidence, ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunRef,
     ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
@@ -635,26 +635,37 @@ fn finding(
     producing_pass: ReviewPassEvidence,
     target: &ReviewTarget,
 ) -> ReviewFinding {
-    finding_with_confidence_and_side(
+    finding_with_confidence_axes_and_side(
         reference,
         producing_pass,
         target,
-        9_000,
+        FindingConfidenceAxes {
+            is_real: 9_000,
+            severity_label: 8_500,
+        },
         Some(ReviewFindingDiffSide::Right),
     )
 }
 
-fn finding_with_confidence(
+struct FindingConfidenceAxes {
+    is_real: u16,
+    severity_label: u16,
+}
+
+fn finding_with_is_real_confidence(
     reference: ReviewFindingRef,
     producing_pass: ReviewPassEvidence,
     target: &ReviewTarget,
-    confidence: u16,
+    is_real_confidence: u16,
 ) -> ReviewFinding {
-    finding_with_confidence_and_side(
+    finding_with_confidence_axes_and_side(
         reference,
         producing_pass,
         target,
-        confidence,
+        FindingConfidenceAxes {
+            is_real: is_real_confidence,
+            severity_label: 8_500,
+        },
         Some(ReviewFindingDiffSide::Right),
     )
 }
@@ -665,14 +676,23 @@ fn finding_with_side(
     target: &ReviewTarget,
     diff_side: Option<ReviewFindingDiffSide>,
 ) -> ReviewFinding {
-    finding_with_confidence_and_side(reference, producing_pass, target, 9_000, diff_side)
+    finding_with_confidence_axes_and_side(
+        reference,
+        producing_pass,
+        target,
+        FindingConfidenceAxes {
+            is_real: 9_000,
+            severity_label: 8_500,
+        },
+        diff_side,
+    )
 }
 
-fn finding_with_confidence_and_side(
+fn finding_with_confidence_axes_and_side(
     reference: ReviewFindingRef,
     producing_pass: ReviewPassEvidence,
     target: &ReviewTarget,
-    confidence: u16,
+    confidence: FindingConfidenceAxes,
     diff_side: Option<ReviewFindingDiffSide>,
 ) -> ReviewFinding {
     let policy = producing_pass.policy();
@@ -726,8 +746,12 @@ fn finding_with_confidence_and_side(
                 text("Guard the exact evidence edge"),
                 text("The transition must retain the producing turn."),
                 ReviewFindingSeverity::High,
-                ReviewConfidence::try_from_basis_points(confidence)
-                    .expect("fixture confidence is bounded"),
+                ReviewFindingConfidenceAxes::new(
+                    ReviewConfidence::try_from_basis_points(confidence.is_real)
+                        .expect("fixture is-real confidence is bounded"),
+                    ReviewConfidence::try_from_basis_points(confidence.severity_label)
+                        .expect("fixture severity-label confidence is bounded"),
+                ),
                 key("correctness"),
                 Some(text("Bind the transition to the complete pass reference.")),
             ),
@@ -2555,13 +2579,14 @@ async fn inv040_sealed_finding_inventory_cannot_expand() -> Result<(), Box<dyn E
 
     let expansion = sqlx::query(
         "INSERT INTO review_finding
-            (finding_id, run_id, target_id, producing_pass_id, file_path,
+             (finding_id, run_id, target_id, producing_pass_id, file_path,
              line_start, line_end, diff_side, title, body, severity,
-             confidence, category, recommended_fix)
+             is_real_confidence, severity_label_confidence, category,
+             recommended_fix)
          VALUES (
              $1, $2, $3, $4, 'src/lib.rs',
              1, 1, 'right', 'Late finding', 'Body', 'high',
-             9000, 'correctness', NULL
+             9000, 8500, 'correctness', NULL
          )",
     )
     .bind(uuid(0x329))
@@ -2976,7 +3001,7 @@ async fn inv040_schema_enforces_judge_confidence_threshold() -> Result<(), Box<d
     let review_evidence = pass_with_produced_findings(vec![finding_ref], evidence[0].clone());
     fixture
         .store
-        .insert_finding(&finding_with_confidence(
+        .insert_finding(&finding_with_is_real_confidence(
             finding_ref,
             review_evidence,
             &fixture.target_snapshot,
@@ -3042,7 +3067,7 @@ async fn inv040_inv041_schema_enforces_publication_confidence_threshold()
     let review_evidence = pass_with_produced_findings(vec![finding_ref], evidence[0].clone());
     fixture
         .store
-        .insert_finding(&finding_with_confidence(
+        .insert_finding(&finding_with_is_real_confidence(
             finding_ref,
             review_evidence,
             &fixture.target_snapshot,
@@ -3187,6 +3212,81 @@ async fn inv040_inv041_schema_enforces_publication_confidence_threshold()
     .expect_err("below-threshold publication cannot bypass the domain through SQL");
     assert_sqlstate(&posted, "23514");
     transaction.rollback().await?;
+    Ok(())
+}
+
+/// INV-040 / INV-041: severity-label uncertainty cannot suppress a finding
+/// whose is-real confidence clears both frozen policy thresholds.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_inv041_schema_thresholds_ignore_severity_label_confidence()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let judge_pass = insert_fixture_pass(&fixture, 0x34e, ReviewPassKind::Judge).await;
+    let publish_pass = insert_fixture_pass(&fixture, 0x34f, ReviewPassKind::Publish).await;
+    let evidence = succeed_fixture_passes(
+        &pool,
+        &fixture.store,
+        &[fixture.pass, judge_pass, publish_pass],
+    )
+    .await;
+    let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x350)));
+    let review_evidence = pass_with_produced_findings(vec![finding_ref], evidence[0].clone());
+    let finding = finding_with_confidence_axes_and_side(
+        finding_ref,
+        review_evidence,
+        &fixture.target_snapshot,
+        FindingConfidenceAxes {
+            is_real: 9_500,
+            severity_label: 0,
+        },
+        Some(ReviewFindingDiffSide::Right),
+    );
+    fixture.store.insert_finding(&finding).await?;
+    fixture
+        .store
+        .append_finding_event(
+            finding_ref.finding(),
+            finding_event(
+                finding_ref,
+                ReviewEventOrdinal::one(),
+                evidence[1].clone(),
+                ReviewFindingEventKind::Accepted,
+            ),
+        )
+        .await?;
+
+    let link = ReviewExternalLinkId::from_uuid(uuid(0x351));
+    let reservation = ReviewExternalLink::try_reserve(
+        link,
+        ReviewExternalLinkAssociation::Finding(finding_ref),
+        key("example-code-host"),
+        ReviewExternalObjectKind::ReviewComment,
+        &fixture.target_snapshot,
+    )
+    .expect("reservation matches the target");
+    fixture.store.reserve_external_link(reservation).await?;
+    fixture
+        .store
+        .attach_external_link(
+            link,
+            posted_attachment(
+                link,
+                evidence[2].clone(),
+                key("comment-351"),
+                finding_ref,
+                ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+            ),
+        )
+        .await?;
+
+    let posted = fixture
+        .store
+        .load_finding(finding_ref.finding())
+        .await?
+        .expect("posted finding loads");
+    assert_eq!(posted.status(), ReviewFindingStatus::Posted);
     Ok(())
 }
 
@@ -3547,13 +3647,14 @@ async fn inv040_finding_diff_side_requires_target_base() -> Result<(), Box<dyn E
 
     let diff_relative = sqlx::query(
         "INSERT INTO review_finding
-            (finding_id, run_id, target_id, producing_pass_id, file_path,
+             (finding_id, run_id, target_id, producing_pass_id, file_path,
              line_start, line_end, diff_side, title, body, severity,
-             confidence, category, recommended_fix)
+             is_real_confidence, severity_label_confidence, category,
+             recommended_fix)
          VALUES (
              $1, $2, $3, $4, 'src/lib.rs',
              1, 1, 'right', 'Finding', 'Body', 'high',
-             9000, 'correctness', NULL
+             9000, 8500, 'correctness', NULL
          )",
     )
     .bind(uuid(0x344))
@@ -4034,13 +4135,14 @@ async fn inv040_schema_rejects_half_populated_line_range() -> Result<(), Box<dyn
     let fixture = insert_review_pass_fixture(&pool).await;
     let half_populated_range = sqlx::query(
         "INSERT INTO review_finding
-            (finding_id, run_id, target_id, producing_pass_id, file_path,
+             (finding_id, run_id, target_id, producing_pass_id, file_path,
              line_start, line_end, diff_side, title, body, severity,
-             confidence, category, recommended_fix)
+             is_real_confidence, severity_label_confidence, category,
+             recommended_fix)
          VALUES (
              $1, $2, $3, $4, 'src/lib.rs',
              1, NULL, 'right', 'Finding', 'Body', 'high',
-             9000, 'correctness', NULL
+             9000, 8500, 'correctness', NULL
          )",
     )
     .bind(uuid(0x603))
@@ -4612,13 +4714,14 @@ async fn inv040_cross_wired_pass_ancestry_is_rejected() -> Result<(), Box<dyn Er
 
     let cross_wired = sqlx::query(
         "INSERT INTO review_finding
-            (finding_id, run_id, target_id, producing_pass_id, file_path,
+             (finding_id, run_id, target_id, producing_pass_id, file_path,
              line_start, line_end, diff_side, title, body, severity,
-             confidence, category, recommended_fix)
+             is_real_confidence, severity_label_confidence, category,
+             recommended_fix)
          VALUES (
              $1, $2, $3, $4, 'src/lib.rs',
              1, 1, 'right', 'Finding', 'Body', 'high',
-             9000, 'correctness', NULL
+             9000, 8500, 'correctness', NULL
          )",
     )
     .bind(uuid(0x403))
@@ -5757,13 +5860,14 @@ async fn inv040_finding_rejects_queued_producer() -> Result<(), Box<dyn Error>> 
     let fixture = insert_review_pass_fixture(&pool).await;
     let unauthorized = sqlx::query(
         "INSERT INTO review_finding
-            (finding_id, run_id, target_id, producing_pass_id, file_path,
+             (finding_id, run_id, target_id, producing_pass_id, file_path,
              line_start, line_end, diff_side, title, body, severity,
-             confidence, category, recommended_fix)
+             is_real_confidence, severity_label_confidence, category,
+             recommended_fix)
          VALUES (
              $1, $2, $3, $4, 'src/lib.rs',
              NULL, NULL, NULL, 'Finding', 'Body', 'high',
-             9000, 'correctness', NULL
+             9000, 8500, 'correctness', NULL
          )",
     )
     .bind(uuid(0x705))
