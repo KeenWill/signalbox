@@ -2,10 +2,11 @@
 
 This page specifies the implemented review-workflow bounded context. Its domain
 and store foundation was verified through PR #221
-(`agent/review-workflow-spec`); this stack additionally verifies the executable
-process surface described below. It owns review targets, workflow runs,
-session-backed passes, findings, external links, and their relational store.
-Session execution remains owned by
+(`agent/review-workflow-spec`); two-axis finding confidence is verified through
+PR #329 (`agent/review-finding-confidence`). The orchestration section below is
+a contract only and remains unimplemented. This page owns review targets,
+workflow runs, session-backed passes, findings, external links, and their
+relational store. Session execution remains owned by
 [sessions and transcript](sessions-and-transcript.md), turn evidence by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
 execution by [tool loop](tool-loop.md), and relational mechanics shared with the
