@@ -21,7 +21,7 @@ credential-file value narrowing and the credential-shaped code-host detail were
 verified through PR #285 (`agent/dev-instance-code-host-credential`). The static
 copy-on-create session-template catalog was verified through PR #311
 (`agent/session-templates-spec`). The static web-fetch egress allowlist is
-verified through `agent/audit-verified-fixes`. Invariant law lives in
+verified through PR #330 (`agent/audit-verified-fixes`). Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration and credential paragraphs are the foundation proposal at the
 bottom of their implementing stack and become verified only with those child

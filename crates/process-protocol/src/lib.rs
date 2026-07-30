@@ -2251,7 +2251,7 @@ pub enum FailedModelCallCause {
 }
 
 /// Optional terminal call evidence carried by a failed transcript turn.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FailedTerminalModelCall {
     model_call_id: CanonicalUuid,
@@ -2273,10 +2273,17 @@ impl FailedTerminalModelCall {
         }
     }
 
-    /// Attaches one closed provider-error classification.
-    pub const fn with_cause(mut self, cause: FailedModelCallCause) -> Self {
-        self.cause = Some(cause);
-        self
+    /// Constructs one known-failed call with its closed provider-error
+    /// classification.
+    pub const fn known_failed_with_cause(
+        model_call_id: CanonicalUuid,
+        cause: FailedModelCallCause,
+    ) -> Self {
+        Self {
+            model_call_id,
+            disposition: FailedModelCallDisposition::KnownFailed,
+            cause: Some(cause),
+        }
     }
 
     /// Returns the terminal model-call identity.
@@ -2292,6 +2299,33 @@ impl FailedTerminalModelCall {
     /// Returns the closed provider-error classification when retained.
     pub const fn cause(&self) -> Option<FailedModelCallCause> {
         self.cause
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFailedTerminalModelCall {
+    model_call_id: CanonicalUuid,
+    disposition: FailedModelCallDisposition,
+    cause: Option<FailedModelCallCause>,
+}
+
+impl<'de> Deserialize<'de> for FailedTerminalModelCall {
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        let raw = RawFailedTerminalModelCall::deserialize(deserializer)?;
+        if raw.cause.is_some() && raw.disposition != FailedModelCallDisposition::KnownFailed {
+            return Err(serde::de::Error::custom(
+                "provider failure cause requires a known-failed disposition",
+            ));
+        }
+        Ok(Self {
+            model_call_id: raw.model_call_id,
+            disposition: raw.disposition,
+            cause: raw.cause,
+        })
     }
 }
 
@@ -4540,21 +4574,29 @@ mod tests {
                 state: TurnState::Failed {
                     terminal_frontier_id: uuid(2),
                     terminal_attempt_id: Some(uuid(3)),
-                    terminal_model_call: Some(
-                        FailedTerminalModelCall::new(
-                            uuid(4),
-                            FailedModelCallDisposition::KnownFailed,
-                        )
-                        .with_cause(FailedModelCallCause::QuotaExhausted),
-                    ),
+                    terminal_model_call: Some(FailedTerminalModelCall::known_failed_with_cause(
+                        uuid(4),
+                        FailedModelCallCause::QuotaExhausted,
+                    )),
                 },
             },
             r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":"quota_exhausted"}}}"#,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_terminal_call_rejects_an_unknown_failure_cause() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":"future_provider_error"}}}}"#,
         );
-        Ok(())
+    }
+
+    #[test]
+    fn failed_terminal_call_rejects_a_cause_on_cancelled_disposition() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"cancelled","cause":"quota_exhausted"}}}}"#,
+        );
     }
 
     #[test]

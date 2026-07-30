@@ -14,7 +14,7 @@ production `FileCredentialAccess` were verified through PR #258
 (`agent/signalboxd-rename`); the Anthropic adapter's server-side
 `fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The HTTP fallback-body redaction
-ordering was verified through `agent/audit-verified-fixes`. The five
+ordering was verified through PR #330 (`agent/audit-verified-fixes`). The five
 persistence-repository families in the operator-failure inventory were verified
 through PR #288 (`agent/audit-fix-docs-coherence`). The streamed-delivery bridge
 and ephemeral text-delta projection were verified through PR #300

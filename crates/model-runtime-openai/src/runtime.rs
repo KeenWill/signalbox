@@ -37,6 +37,7 @@ use crate::wire::ErrorEnvelope;
 
 const MAX_BUFFERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STREAMED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_NATIVE_MESSAGE_BYTES: usize = 2_048;
 
 /// The OpenAI Chat Completions adapter.
 ///
@@ -795,12 +796,11 @@ fn request_id_from(headers: &HeaderMap) -> Option<ProviderRequestId> {
 }
 
 fn lossy_truncated(body: &[u8]) -> String {
-    const LIMIT: usize = 2048;
     let text = String::from_utf8_lossy(body);
-    if text.len() <= LIMIT {
+    if text.len() <= MAX_NATIVE_MESSAGE_BYTES {
         return text.into_owned();
     }
-    let mut end = LIMIT;
+    let mut end = MAX_NATIVE_MESSAGE_BYTES;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
@@ -1836,16 +1836,20 @@ mod tests {
 
     #[test]
     fn fallback_error_body_is_sanitized_before_escape_splitting_truncation() {
+        const PADDING_BEFORE_ESCAPED_CREDENTIAL_BYTES: usize = 1_987;
+        const TRAILING_BODY_BYTES: usize = 200;
+        const FALLBACK_STATUS: u16 = 502;
         let credential_text = "fixture_abcdefghijklmnopqrstuvwxyzZ";
         let credential = CredentialValue::new(credential_text.as_bytes().to_vec());
         let body = format!(
             r#"{{"padding":"{}","message":"fixture_abcdefghijklmnopqrstuvwxyz\u005a{}"}}"#,
-            "x".repeat(1_987),
-            "y".repeat(200)
+            "x".repeat(PADDING_BEFORE_ESCAPED_CREDENTIAL_BYTES),
+            "y".repeat(TRAILING_BODY_BYTES)
         );
-        assert!(body.as_bytes()[..2_048].ends_with(br"\u"));
+        assert!(body.as_bytes()[..super::MAX_NATIVE_MESSAGE_BYTES].ends_with(br"\u"));
 
-        let evidence = fallback_provider_error(ExchangeFacts::default(), 502, body.as_bytes());
+        let evidence =
+            fallback_provider_error(ExchangeFacts::default(), FALLBACK_STATUS, body.as_bytes());
         let persisted_evidence = redact_evidence(evidence, &credential);
         let TerminalEvidence::ProviderError(error) = persisted_evidence else {
             panic!("fallback provider evidence remains a provider error");

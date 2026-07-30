@@ -23,7 +23,7 @@ model-call cause codes were verified through PR #280
 (`agent/provider-identity-normalization`). The complete frontier-payload
 projection and identity-before-terminal-evidence precedence were verified
 through PR #288 (`agent/audit-fix-docs-coherence`); durable closed
-provider-failure causes were verified through `agent/audit-verified-fixes`; the
+provider-failure causes were verified through PR #330 (`agent/audit-verified-fixes`); the
 session system prompt on the prepared operation was verified through PR #286
 (`agent/session-system-prompt`). Provider-reported token evidence retention and
 exact commit-ambiguity comparison were verified through PR #301

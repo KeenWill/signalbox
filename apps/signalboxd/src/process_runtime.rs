@@ -7671,20 +7671,31 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
             terminal_attempt_id: terminal_attempt.map(|attempt| wire_uuid(attempt.into_uuid())),
             terminal_model_call: terminal_model_call.map(|call| {
-                let projected = FailedTerminalModelCall::new(
-                    wire_uuid(call.call().into_uuid()),
-                    match call.disposition() {
-                        ProcessFailedModelCallDisposition::KnownFailed => {
-                            FailedModelCallDisposition::KnownFailed
-                        }
-                        ProcessFailedModelCallDisposition::Cancelled => {
-                            FailedModelCallDisposition::Cancelled
-                        }
-                    },
-                );
-                match call.provider_failure_cause() {
-                    Some(cause) => projected.with_cause(wire_provider_failure_cause(cause)),
-                    None => projected,
+                let model_call_id = wire_uuid(call.call().into_uuid());
+                match (call.disposition(), call.provider_failure_cause()) {
+                    (ProcessFailedModelCallDisposition::KnownFailed, Some(cause)) => {
+                        FailedTerminalModelCall::known_failed_with_cause(
+                            model_call_id,
+                            wire_provider_failure_cause(cause),
+                        )
+                    }
+                    (ProcessFailedModelCallDisposition::KnownFailed, None) => {
+                        FailedTerminalModelCall::new(
+                            model_call_id,
+                            FailedModelCallDisposition::KnownFailed,
+                        )
+                    }
+                    (ProcessFailedModelCallDisposition::Cancelled, None) => {
+                        FailedTerminalModelCall::new(
+                            model_call_id,
+                            FailedModelCallDisposition::Cancelled,
+                        )
+                    }
+                    (ProcessFailedModelCallDisposition::Cancelled, Some(_)) => {
+                        unreachable!(
+                            "process-read validation rejects causes on cancelled model calls"
+                        )
+                    }
                 }
             }),
         },
