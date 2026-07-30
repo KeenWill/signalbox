@@ -1,20 +1,19 @@
 //! Stateful decoding of one Codex exec JSONL event stream.
 
-use std::cell::Cell;
 use std::collections::HashSet;
-use std::fmt;
 
-use serde::de::{DeserializeOwned, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use signalbox_model_runtime::{
-    AssistantPart, BoundaryLossEvidence, CompletionEvidence, CompletionFinish, DeliveryMode,
-    ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation, ObservationFact,
-    ObservationSink, ProviderErrorEvidence, ProviderMessageId, ProviderRequestId, RefusalEvidence,
+    AssistantPart, BoundaryLossEvidence, CliDecodeFailure, CliDecodeFailureClass, CliSession,
+    CompletionEvidence, CompletionFinish, DeliveryMode, ExchangeFacts, FinishReason, LossCause,
+    NativeErrorFacts, Observation, ObservationFact, ObservationSink, ProviderErrorEvidence,
+    ProviderMessageId, ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence,
     TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+    provider_json_has_duplicate_members, redact_text, trailing_credential_context,
     validate_provider_json_nesting,
 };
 
-use crate::redaction::{REDACTED, RedactingSink, redact_text, trailing_credential_context};
 use crate::status::classify_error;
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{
@@ -22,139 +21,13 @@ use crate::wire::{
     ThreadError, ThreadStarted, TurnCompleted, TurnFailed,
 };
 
-/// A validation-only JSON walk that rejects repeated object members at every
-/// nesting depth before serde projects the event into its last-value-wins
-/// [`Value`] representation.
-struct DuplicateFreeJson<'a> {
-    duplicate_found: &'a Cell<bool>,
-}
-
-impl<'de> DeserializeSeed<'de> for DuplicateFreeJson<'_> {
-    type Value = ();
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(DuplicateFreeVisitor {
-            duplicate_found: self.duplicate_found,
-        })
-    }
-}
-
-struct DuplicateFreeVisitor<'a> {
-    duplicate_found: &'a Cell<bool>,
-}
-
-impl<'de> Visitor<'de> for DuplicateFreeVisitor<'_> {
-    type Value = ();
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("JSON without repeated object members")
-    }
-
-    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
-        Ok(())
-    }
-
-    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
-        Ok(())
-    }
-
-    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
-        Ok(())
-    }
-
-    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
-        Ok(())
-    }
-
-    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
-        Ok(())
-    }
-
-    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
-        Ok(())
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(())
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(())
-    }
-
-    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        DuplicateFreeJson {
-            duplicate_found: self.duplicate_found,
-        }
-        .deserialize(deserializer)
-    }
-
-    fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        DuplicateFreeJson {
-            duplicate_found: self.duplicate_found,
-        }
-        .deserialize(deserializer)
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        while sequence
-            .next_element_seed(DuplicateFreeJson {
-                duplicate_found: self.duplicate_found,
-            })?
-            .is_some()
-        {}
-        Ok(())
-    }
-
-    fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut members = HashSet::new();
-        while let Some(member) = object.next_key::<String>()? {
-            if members.contains(&member) {
-                self.duplicate_found.set(true);
-                return Err(serde::de::Error::custom(format!(
-                    "duplicate JSON member `{member}`"
-                )));
-            }
-            members.insert(member);
-            object.next_value_seed(DuplicateFreeJson {
-                duplicate_found: self.duplicate_found,
-            })?;
-        }
-        Ok(())
-    }
-}
-
 fn reject_duplicate_json_members(line: &str) -> Result<(), DecodeFailure> {
-    let duplicate_found = Cell::new(false);
-    let mut deserializer = serde_json::Deserializer::from_str(line);
-    let result = DuplicateFreeJson {
-        duplicate_found: &duplicate_found,
-    }
-    .deserialize(&mut deserializer)
-    .and_then(|()| deserializer.end());
-    match result {
-        Ok(()) => Ok(()),
-        Err(_) if duplicate_found.get() => Err(DecodeFailure::stream_protocol(
+    if provider_json_has_duplicate_members(line) {
+        Err(DecodeFailure::stream_protocol(
             "JSON input has duplicate object members",
-        )),
-        // The ordinary decoder below owns every other JSON-shape failure and
-        // preserves its established provider-error classification.
-        Err(_) => Ok(()),
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -617,7 +490,7 @@ impl<C: Clone> EventDecoder<C> {
             EnvelopeOutcome::Completed => FinishReason::ToolUse,
         };
         if self.delivery == DeliveryMode::Streamed {
-            sink.begin_terminal_text_capture();
+            sink.begin_terminal_text_capture(true);
         }
         if let Err(detail) = self.emit_completion_observations(
             sink,
@@ -638,7 +511,7 @@ impl<C: Clone> EventDecoder<C> {
             // evidence carries exactly those bytes; an independent stateless
             // re-redaction of the raw text would miss a credential value whose
             // marker arrived in an earlier fragment.
-            let captured = sink.take_terminal_text_capture();
+            let captured = sink.take_terminal_text_capture().into_text();
             if let Some(index) = content
                 .iter()
                 .position(|part| matches!(part, AssistantPart::Text(_)))
@@ -1199,5 +1072,61 @@ impl DecodeFailure {
 
     pub(crate) fn into_detail(self) -> String {
         self.detail
+    }
+}
+
+impl<C: Clone> CliSession<C> for EventDecoder<C> {
+    fn terminal_observed(&self) -> bool {
+        EventDecoder::terminal_observed(self)
+    }
+
+    fn push(
+        &mut self,
+        line: &[u8],
+        sink: &mut RedactingSink<'_, C>,
+    ) -> Result<(), CliDecodeFailure> {
+        EventDecoder::push(self, line, sink).map_err(|error| {
+            let class = match error.class() {
+                DecodeFailureClass::ProviderDecode => CliDecodeFailureClass::ProviderDecode,
+                DecodeFailureClass::StreamProtocolViolation => {
+                    CliDecodeFailureClass::StreamProtocolViolation
+                }
+            };
+            CliDecodeFailure::new(class, error.into_detail())
+        })
+    }
+
+    fn decode_failure(self, class: CliDecodeFailureClass, detail: String) -> TerminalEvidence {
+        match class {
+            CliDecodeFailureClass::ProviderDecode => self.provider_error(&detail),
+            CliDecodeFailureClass::StreamProtocolViolation => {
+                self.boundary_loss(LossCause::StreamProtocolViolation { detail })
+            }
+        }
+    }
+
+    fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
+        EventDecoder::finish(self, sink)
+    }
+
+    fn boundary_loss(self, cause: LossCause) -> TerminalEvidence {
+        EventDecoder::boundary_loss(self, cause)
+    }
+
+    fn boundary_loss_unless_provider_failure(
+        self,
+        cause: LossCause,
+        sink: &mut RedactingSink<'_, C>,
+    ) -> TerminalEvidence {
+        EventDecoder::boundary_loss_unless_provider_failure(self, cause, sink)
+    }
+
+    fn provider_error_after_exit(
+        self,
+        message: &str,
+        classification: &str,
+        sink: &mut RedactingSink<'_, C>,
+    ) -> TerminalEvidence {
+        EventDecoder::provider_error_after_exit(self, message, classification, sink)
     }
 }

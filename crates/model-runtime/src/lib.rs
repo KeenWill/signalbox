@@ -40,6 +40,9 @@
 //! remains a Layer-1 interface: application and domain crates neither import
 //! these types nor delegate lifecycle policy to them.
 
+#[cfg(feature = "cli-process")]
+mod cli_process;
+mod cli_redaction;
 mod credential;
 mod evidence;
 mod input_count;
@@ -59,6 +62,15 @@ mod target;
 mod tool;
 mod usage;
 
+#[cfg(feature = "cli-process")]
+pub use cli_process::{
+    CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CliDecodeFailure, CliDecodeFailureClass,
+    CliProcessLabels, CliProcessRequest, CliSession, CliTerminalTextCapture, execute_cli_process,
+};
+pub use cli_redaction::{
+    REDACTED, RedactingSink, TerminalTextCapture, redact_json, redact_text,
+    trailing_credential_context,
+};
 pub use credential::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
     CredentialValue,
@@ -83,7 +95,7 @@ pub use output::{
 pub use preparation::{PreparationDefect, PreparationFailure, PreparationOutcome};
 pub use provider_json::{
     PROVIDER_JSON_NESTING_LIMIT, ProviderJsonNestingExceeded, ProviderJsonNestingValidator,
-    validate_provider_json_nesting,
+    provider_json_has_duplicate_members, validate_provider_json_nesting,
 };
 pub use provider_support::{
     MAX_BUFFERED_PROVIDER_RESPONSE_BYTES, MAX_STREAMED_PROVIDER_RESPONSE_BYTES,

@@ -1,5 +1,11 @@
 //! Resource bounds for provider-controlled JSON.
 
+use std::cell::Cell;
+use std::collections::HashSet;
+use std::fmt;
+
+use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
+
 /// Maximum permitted nesting of JSON object and array containers in one
 /// provider-controlled value.
 pub const PROVIDER_JSON_NESTING_LIMIT: usize = 127;
@@ -88,10 +94,139 @@ pub fn validate_provider_json_nesting(bytes: &[u8]) -> Result<(), ProviderJsonNe
     ProviderJsonNestingValidator::new().validate_fragment(bytes)
 }
 
+struct DuplicateFreeJson<'a> {
+    duplicate_found: &'a Cell<bool>,
+}
+
+impl<'de> DeserializeSeed<'de> for DuplicateFreeJson<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DuplicateFreeVisitor {
+            duplicate_found: self.duplicate_found,
+        })
+    }
+}
+
+struct DuplicateFreeVisitor<'a> {
+    duplicate_found: &'a Cell<bool>,
+}
+
+impl<'de> Visitor<'de> for DuplicateFreeVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JSON without repeated object members")
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        DuplicateFreeJson {
+            duplicate_found: self.duplicate_found,
+        }
+        .deserialize(deserializer)
+    }
+
+    fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        DuplicateFreeJson {
+            duplicate_found: self.duplicate_found,
+        }
+        .deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence
+            .next_element_seed(DuplicateFreeJson {
+                duplicate_found: self.duplicate_found,
+            })?
+            .is_some()
+        {}
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut members = HashSet::new();
+        while let Some(member) = object.next_key::<String>()? {
+            if !members.insert(member) {
+                self.duplicate_found.set(true);
+                return Err(serde::de::Error::custom("duplicate JSON member"));
+            }
+            object.next_value_seed(DuplicateFreeJson {
+                duplicate_found: self.duplicate_found,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// Reports whether valid or malformed provider JSON repeats an object member
+/// at any nesting depth.
+///
+/// Other syntax failures remain the typed decoder's responsibility. This scan
+/// exists only to detect the ambiguity that serde's last-value-wins object
+/// projection would otherwise erase.
+pub fn provider_json_has_duplicate_members(text: &str) -> bool {
+    let duplicate_found = Cell::new(false);
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let _ = DuplicateFreeJson {
+        duplicate_found: &duplicate_found,
+    }
+    .deserialize(&mut deserializer)
+    .and_then(|()| deserializer.end());
+    duplicate_found.get()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        PROVIDER_JSON_NESTING_LIMIT, ProviderJsonNestingValidator, validate_provider_json_nesting,
+        PROVIDER_JSON_NESTING_LIMIT, ProviderJsonNestingValidator,
+        provider_json_has_duplicate_members, validate_provider_json_nesting,
     };
 
     #[test]
@@ -138,5 +273,19 @@ mod tests {
             Ok(())
         );
         assert_eq!(validator.validate_fragment(b"]}"), Ok(()));
+    }
+
+    #[test]
+    fn duplicate_member_scan_checks_every_object_depth() {
+        assert!(provider_json_has_duplicate_members(
+            r#"{"event":"first","event":"second"}"#
+        ));
+        assert!(provider_json_has_duplicate_members(
+            r#"{"outer":{"event":"first","event":"second"}}"#
+        ));
+        assert!(!provider_json_has_duplicate_members(
+            r#"{"event":"first","nested":{"event":"second"}}"#
+        ));
+        assert!(!provider_json_has_duplicate_members("{"));
     }
 }

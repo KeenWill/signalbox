@@ -13,6 +13,7 @@
 
 mod config;
 mod event;
+#[cfg(test)]
 mod redaction;
 mod runtime;
 mod status;
