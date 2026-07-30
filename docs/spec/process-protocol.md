@@ -204,7 +204,7 @@ that variant.
 | `read_imported_conversation`            | `imported_conversation_id` (canonical UUID string)                                                                                                                                                                                                                       | Read one immutable imported conversation's complete entry inventory, including the positions `create_session_from_imported_frontier` consumes.                                                                                                                                                                                                                                  |
 | `list_model_aliases`                    | none                                                                                                                                                                                                                                                                     | Read the deployment's complete configured alias-to-direct-selection catalog.                                                                                                                                                                                                                                                                                                    |
 | `compact_session`                       | `command_id` and `session_id` (canonical UUID strings), `through_position` (positive canonical decimal string or null)                                                                                                                                                   | Append a dedicated-call summary through the exact requested safe position, or through the latest safe boundary for null, without deleting or rewriting transcript history.                                                                                                                                                                                                      |
-| `read_runner_status` (proposed)         | none                                                                                                                                                                                                                                                                     | Read the active and optional pending runner registrations, connection/loss state, advertised availability, and startup workspace-leak reports.                                                                                                                                                                                                                                  |
+| `read_runner_status` (proposed)         | `page_size` (canonical decimal string) and `after` (runner-evidence cursor object or null)                                                                                                                                                                               | Read the active and optional pending runner registrations, connection/loss state, advertised availability, retained operation failures, and startup workspace-leak reports, with one bounded evidence page.                                                                                                                                                                     |
 | `replace_lost_runner` (proposed)        | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string), and `replacement` (target object)                                                                                                             | Replace the exact current lost placement with a different live runner, atomically activate one pending replacement enrollment, or — for a registration-triggered loss, where it is the only version-one recovery — re-enroll the same runner against its current connection; pinned loss provisions a new workspace boundary, while pre-pin loss returns to unpinned selection. |
 | `abandon_lost_runner` (proposed)        | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string)                                                                                                                                                | Terminalize the exact lost placement only after the existing turn-control algebra has left no active turn; queued work remains and later sees only daemon-executable tools.                                                                                                                                                                                                     |
 | `promote_pending_runner` (proposed)     | `command_id` and `pending_request_id` (canonical UUID strings)                                                                                                                                                                                                           | Activate the one provisioning-only pending enrollment on the deployment-scoped fact that this daemon's active runner is durably gone; it names and mutates no session placement.                                                                                                                                                                                                |
@@ -602,43 +602,76 @@ snapshot and becomes authoritative only after ordering and count validation; the
 terminal client buffers no prompt or bundle content because none crosses the
 protocol.
 
-The proposed `read_runner_status` response is a bounded sequence:
+The proposed `read_runner_status` response is one bounded page:
 `runner_status_start`; zero or more `runner_status` messages, of which version
-one emits at most one; zero or one `pending_runner_status` message; zero or more
-`runner_operation_failure` messages; zero or more `runner_workspace_leak`
-messages; and `runner_status_end { runner_count, failure_count, leak_count }`.
-The repeating shape is deliberate: a daemon with several enrolled runners needs
-no new response vocabulary. Each status carries issued request, runner,
-enrollment, and registration identities, connection state (`connected`,
-`suspect`, or `lost`), registration revision, advertised capability classes,
-tool names, credential-profile names, repository entries — each naming its
-repository key and the credential-profile name that key requires — workspace
-capabilities, and sandbox profiles. Each `runner_operation_failure` names its
-runner, the refused operation's correlation, one closed daemon-actionable
-`category` (`credential_unavailable`, `repository_unavailable`,
-`sandbox_unavailable`, `workspace_conflict`, `workspace_cleanup_failed`, or
-`lease_admission_refused`), and the runner-authored `detail` object carrying its
-bounded `code`, `message`, and structured `payload` verbatim. The daemon bounds
-that detail and reproduces it without interpretation; the runner applies the
-same exact-value redaction it applies to tool output before sending it, so the
-detail carries no credential value, and it carries no absolute host path or
-configured repository URL. That `category` set is exactly the closed
-daemon-actionable set the runner wire carries
+one emits at most one and only a null-cursor request emits registration status;
+zero or one `pending_runner_status` message under that same condition; zero
+through the requested page size of `runner_operation_failure` and
+`runner_workspace_leak` messages in the total order below; and
+`runner_status_end { runner_count, failure_count, leak_count, next_after }`.
+`page_size` is one through 100 and `after` is an exclusive keyset cursor. The
+ordinary first request carries page size 100 and null `after`; a nonnull
+`next_after` is copied unchanged into the next request. The terminal failure and
+leak counts cover this page, while `runner_count` covers the statuses on this
+page. A terminal null cursor proves that traversal reached the end. The
+repeating shape is deliberate: a daemon with several enrolled runners needs no
+new response vocabulary. Each status carries issued request, runner, enrollment,
+and registration identities, connection state (`connected`, `suspect`, or
+`lost`), registration revision, advertised capability classes, tool names,
+credential-profile names, repository entries — each naming its repository key
+and optional credential-profile name, with the configuration meaning of absence
+owned by
+[runner credential lifecycle](configuration-and-credentials.md#runner-credential-lifecycle)
+— workspace capabilities, and sandbox profiles. Each `runner_operation_failure`
+names its runner, the refused operation's correlation, one closed
+daemon-actionable `category` (`credential_unavailable`,
+`repository_unavailable`, `sandbox_unavailable`, `workspace_conflict`,
+`workspace_cleanup_failed`, or `lease_admission_refused`), and the
+runner-authored `detail` object carrying its bounded `code`, `message`, and
+structured `payload` verbatim. The daemon bounds that detail and reproduces it
+without interpretation; the runner applies the same exact-value redaction it
+applies to tool output before sending it, so the detail carries no credential
+value, and it carries no absolute host path or configured repository URL. That
+`category` set is exactly the closed daemon-actionable set the runner wire
+carries
 ([runner protocol and placement](runner-protocol.md#local-transport-and-connection-protocol)),
 member for member, so every retained failure is serializable here and the
 projection never has to choose between omitting one that `failure_count` counts
-and rejecting the response. Owner inspection is therefore the surface on which
-the complete runner-specific failure is readable even though daemon logic keys
-only off the category. `pending_runner_status` also carries the literal
+and rejecting the response. Runner status inspection is therefore the surface on
+which the complete runner-specific failure is readable even though daemon logic
+keys only off the category. `pending_runner_status` also carries the literal
 authority state `provisioning_only`; it is never presented as dispatch-capable.
 Each leak names its exact runner id and carries the exact closed `kind`, bounded
 runner-root-relative `locator`, lowercase manifest-or-entry SHA-256 digest, and
 nullable `session_id` and positive `placement_revision` admitted by that runner
 final acknowledged wire report. It never carries an absolute host path,
-repository URL, or credential fact. Runner-id then locator-byte ordering for
-leaks, runner-id then operation-correlation ordering for failures, and the
-terminal counts make the complete sequence authoritative without an aggregate
-frame bound.
+repository URL, or credential fact. Evidence-kind order is failures before
+leaks. A failure key compares the runner identity first, then the correlation
+discriminator in the fixed order `workspace_provision`, `workspace_release`,
+`lease_offer`, then only that arm's fields in this fixed sequence: provisioning
+authorization identity; retired session identity, placement revision,
+workspace-manifest identity; or offered lease identity, generation. Each
+identity, integer, and manifest identity uses its runner-protocol canonical wire
+bytes; comparison is unsigned lexicographic-byte order, and a shorter value
+precedes a longer value when one is a prefix. No absent field or field from
+another arm participates. A leak key compares runner-identity canonical bytes,
+then the complete runner-protocol fact tuple: locator, kind, digest, optional
+session, optional placement revision, under that tuple's exact order. The closed
+cursor object is therefore either `operation_failure { runner_id, correlation }`
+or
+`workspace_leak { runner_id, locator, kind, digest, session_id, placement_revision }`
+and exactly reproduces the last emitted evidence key, including null optional
+members. Runner report admission permits each complete fact tuple at most once,
+so runner plus tuple is unique within the published snapshot and an exclusive
+cursor never straddles equal leak keys. The daemon fetches at most
+`page_size + 1` checked evidence rows, using the extra row only to determine
+`next_after`; it never materializes the retained history. Each page is
+authoritative for the read that produced it. Concurrent durable additions that
+sort at or before a cursor need not appear in that traversal, so a caller that
+needs a fresh observation starts again with a null cursor. Why:
+operation-failure evidence is append-only and therefore unbounded; a singular
+unpaged status read would eventually make durable diagnostics unreadable or
+require unbounded memory.
 
 Followers additionally admit
 `provider_text_delta { session_id, turn_id, model_call_id, part_index, content }`
@@ -1538,8 +1571,10 @@ Omitting `--sandbox-profile` selects `workspace-restricted` before the request
 is encoded, so `ambient` requires that exact flag, and either profile is
 admissible with or without a repository. Tool overrides require a runner
 selector, duplicate or cross-listed names fail locally, and every selected fact
-is printed with the created session. `runner status` validates the complete
-status, failure, and leak sequence and prints profile availability,
+is printed with the created session. `runner status` starts with page size 100
+and a null cursor, validates and prints each status, failure, and leak page
+without buffering prior pages, copies a nonnull terminal cursor into the next
+request, and stops only at a null cursor. It prints profile availability,
 runner-reported failure detail, and leaks without host paths. Replace, abandon,
 and promote print command identity before socket I/O; replace and abandon also
 print the expected placement revision, and each requires the complete recovery
