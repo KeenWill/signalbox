@@ -9,7 +9,7 @@ adapter implementation was verified through PR #320
 (`agent/claude-cli-adapter`). The Codex CLI adapter stack comprises PR #264
 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
 escalation closeout is PR #317 (`agent/escalation-closeout`). The Codex CLI
-compatibility-smoke automation was verified through PR #328
+compatibility-smoke automation was verified through PR #333
 (`agent/ci-tells-truth`). The `signalboxd` names this page states for the
 composition root, its telemetry, and the production `FileCredentialAccess` were
 verified through PR #258 (`agent/signalboxd-rename`); the Anthropic adapter's
@@ -582,11 +582,18 @@ The manifest carries no minimum-release-age gate and never automerges. Why: for
 a dependency that releases this often, calendar age is not evidence, and the two
 gates below are.
 
-An offline test asserts that the pinned version equals the adapter's supported
-version. It runs unconditionally in the ordinary Rust check, so a pin bump fails
-that check until the supported-version constant moves with it — which is what
-forces the fixture corpus to be re-examined against the new release rather than
-inherited.
+The adapter build reads that manifest and derives its exported supported-version
+constant from the exact dependency value, so the manifest is the single source
+of truth and a Renovate change is mechanically complete. An unconditional
+offline test still rejects a range, tag, alias, prerelease, or any shape other
+than exactly three numeric components. The live smoke verifies that the
+installed executable reports the derived version.
+
+This mechanical binding deliberately removes the old human-attestation tripwire.
+One live exchange proves that the installed CLI still works through the adapter;
+it does not prove that the recorded offline fixture corpus still represents
+every current CLI event shape. A fixture-regeneration or fixture-validation step
+against the installed CLI is required to close that residual gap.
 
 The compatibility smoke is the second gate: one exchange against the cheapest
 model the smoke credential can address, run through this adapter with the real
@@ -597,24 +604,38 @@ equals the supported version, then compares the CLI's complete feature list —
 including stage and default — with an exact inventory that classifies every
 entry as a hard-disabled capability or as non-capability behavior. A new,
 removed, or changed entry fails the smoke until the version bump classifies it.
-An isolated synthetic ambient skill must appear in the pinned CLI's ordinary
-model-visible prompt input and disappear when the production
-`skills.include_instructions=false` control is applied; an unreadable,
-unparsable, or mismatched version likewise fails rather than skipping. Why:
-evidence recorded against a version that never ran, or whose capability gap
-nobody reviewed, is worse than no evidence. The smoke then asserts only the
-protocol surfaces a version bump moves — the thread identifier reaching the
-exchange facts, the terminal usage counters, and the response envelope decoding
-as a completed or refused terminal outcome — and nothing about answer quality.
-It never runs on a pull-request event, so no fork can reach its credentials;
-manual dispatch remains available, and it runs automatically on `main` or an
-in-repository versioned Renovate branch matching `renovate/openai-codex-*.x`
-when the pin manifest, committed lockfile, supported-version marker, or
-live-smoke compatibility fixture changes. A fork cannot emit a push event for
-either base-repository ref. Moving the marker with the pin test's named sync
-script retriggers the smoke, as does a subsequent compatibility-fixture
-correction. The model dispatch itself still performs no version probe: this
-check lives in the smoke, never in the hot path.
+An isolated synthetic ambient skill must contribute the skills block plus its
+name and description to the pinned CLI's ordinary model-visible catalog, while
+its on-demand body remains absent; the complete catalog must disappear when the
+production `skills.include_instructions=false` control is applied. An
+unreadable, unparsable, or mismatched version likewise fails rather than
+skipping. These three real-CLI controls also have a separate ignored,
+credential-free entry point so they can run locally before the gated workflow
+authenticates. Why: evidence recorded against a version that never ran, or whose
+capability gap nobody reviewed, is worse than no evidence.
+
+The smoke then asserts only the protocol surfaces a version bump moves — the
+thread identifier reaching the exchange facts, the terminal usage counters, and
+the response envelope decoding as a completed or refused terminal outcome — and
+nothing about answer quality. The workflow reports on every pull request without
+a path filter. GitHub independently withholds secrets from ordinary fork
+`pull_request` runs regardless of environment policy. Its secretless eligibility
+job then checks the complete pull request file list: no pin change is an
+immediate success; for a pin change it compares
+`github.event.pull_request.head.repo.full_name` with `github.repository`, fails
+a mismatch with a manual-dispatch instruction, and admits the live job only for
+a same-repository head. A final always-running job folds the eligibility and
+conditional live results into the required check, so a skipped or failed
+required smoke cannot appear green. Manual dispatch remains available, and a
+path-filtered push to `main` reruns the smoke after merge.
+
+The `codex-smoke` environment is configured for all branches because GitHub
+evaluates an environment used by `pull_request` against `GITHUB_REF`, which is
+the synthetic merge ref rather than the head branch. That setting admits fork
+and same-repository merge refs alike and supplies no security boundary. Forks
+are excluded, in order, by GitHub's independent secret withholding and the
+explicit repository-name comparison above. The model dispatch still performs no
+version probe: this check lives in the smoke, never in the hot path.
 
 The smoke authenticates the CLI through its own non-interactive API-key login,
 piped from an environment-scoped secret into the CLI's credential store, which
