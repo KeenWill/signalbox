@@ -10,6 +10,60 @@ use signalbox_domain::{
 };
 use sqlx::types::Uuid;
 
+/// Closed durable-command kinds stored by the owner-global registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DurableCommandKind {
+    /// Session creation.
+    CreateSession,
+    /// Session creation from an imported frontier.
+    CreateSessionFromImportedFrontier,
+    /// Session-default replacement.
+    ReplaceSessionDefaults,
+    /// Session-metadata replacement.
+    ReplaceSessionMetadata,
+    /// Session input submission.
+    SubmitInput,
+    /// Tool-request decision.
+    DecideToolRequest,
+    /// Review-workflow command.
+    ReviewWorkflow,
+    /// Session context compaction.
+    CompactSession,
+}
+
+/// Encodes a durable-command kind as its closed PostgreSQL spelling.
+pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'static str {
+    match value {
+        DurableCommandKind::CreateSession => "create_session",
+        DurableCommandKind::CreateSessionFromImportedFrontier => {
+            "create_session_from_imported_frontier"
+        }
+        DurableCommandKind::ReplaceSessionDefaults => "replace_session_defaults",
+        DurableCommandKind::ReplaceSessionMetadata => "replace_session_metadata",
+        DurableCommandKind::SubmitInput => "submit_input",
+        DurableCommandKind::DecideToolRequest => "decide_tool_request",
+        DurableCommandKind::ReviewWorkflow => "review_workflow",
+        DurableCommandKind::CompactSession => "compact_session",
+    }
+}
+
+/// Decodes a closed durable-command kind from its PostgreSQL spelling.
+pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableCommandKind> {
+    match value {
+        "create_session" => Some(DurableCommandKind::CreateSession),
+        "create_session_from_imported_frontier" => {
+            Some(DurableCommandKind::CreateSessionFromImportedFrontier)
+        }
+        "replace_session_defaults" => Some(DurableCommandKind::ReplaceSessionDefaults),
+        "replace_session_metadata" => Some(DurableCommandKind::ReplaceSessionMetadata),
+        "submit_input" => Some(DurableCommandKind::SubmitInput),
+        "decide_tool_request" => Some(DurableCommandKind::DecideToolRequest),
+        "review_workflow" => Some(DurableCommandKind::ReviewWorkflow),
+        "compact_session" => Some(DurableCommandKind::CompactSession),
+        _ => None,
+    }
+}
+
 /// Why a PostgreSQL `numeric(20, 0)` value is not a positive domain ordinal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PositiveOrdinalMappingError {
@@ -189,14 +243,28 @@ mod tests {
     use sqlx::types::Uuid;
 
     use super::{
-        DurableCommandIdMappingError, PositiveOrdinalMappingError, accepted_input_id_from_uuid,
-        accepted_input_id_to_uuid, defaults_version_from_numeric, defaults_version_to_numeric,
-        durable_command_id_from_uuid, durable_command_id_to_uuid, input_position_from_numeric,
+        DurableCommandIdMappingError, DurableCommandKind, PositiveOrdinalMappingError,
+        accepted_input_id_from_uuid, accepted_input_id_to_uuid, defaults_version_from_numeric,
+        defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
+        durable_command_kind_from_str, durable_command_kind_to_str, input_position_from_numeric,
         input_position_to_numeric, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
         turn_id_to_uuid,
     };
 
     const OUT_OF_U64_RANGE: &str = "18446744073709551616";
+
+    #[test]
+    fn compact_session_command_kind_mapping_is_closed() {
+        assert_eq!(
+            durable_command_kind_to_str(DurableCommandKind::CompactSession),
+            "compact_session"
+        );
+        assert_eq!(
+            durable_command_kind_from_str("compact_session"),
+            Some(DurableCommandKind::CompactSession)
+        );
+        assert_eq!(durable_command_kind_from_str("unknown"), None);
+    }
 
     /// INV-002: PostgreSQL numeric values are decoded and checked before a
     /// domain defaults version exists.

@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from check_docs_consistency import (
+    TrackedFilesError,
     markdown_sources,
     mask_block_content,
     rust_comment_text,
@@ -111,7 +112,12 @@ def main() -> int:
     )
     arguments = parser.parse_args()
 
-    orphans = orphan_invariant_references(ROOT)
+    try:
+        orphans = orphan_invariant_references(ROOT)
+        expected = render(ROOT)
+    except TrackedFilesError as error:
+        print(f"invariant index check FAILED: {error}", file=sys.stderr)
+        return 1
     if orphans:
         print(
             "INV references without tagged Rust tests:",
@@ -121,7 +127,6 @@ def main() -> int:
             print(f"  {tag}: {', '.join(locations)}", file=sys.stderr)
         return 1
 
-    expected = render(ROOT)
     destination = ROOT / OUTPUT
     if arguments.write:
         destination.write_text(expected, encoding="utf-8")

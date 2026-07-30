@@ -470,6 +470,67 @@ class MarkdownLink:
     definition_offset: int | None = None
 
 
+class TrackedFilesError(RuntimeError):
+    """Git could not provide a trustworthy tracked-file inventory."""
+
+
+def tracked_files(root: Path) -> list[Path]:
+    """Return tracked files beneath ``root`` using the repository index.
+
+    Git is the authority for the validator input domain. A missing executable,
+    non-repository directory, failed inventory, or empty inventory is a hard
+    error so validation can never pass after examining no source files.
+    """
+    requested_root = root.resolve()
+    try:
+        repository = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=requested_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise TrackedFilesError(
+            f"Git tracked-file discovery is unavailable: {error}"
+        ) from error
+    if repository.returncode != 0 or not repository.stdout.strip():
+        raise TrackedFilesError(
+            "Git tracked-file discovery failed: the requested path is not a Git repository"
+        )
+
+    repository_root = Path(repository.stdout.strip()).resolve()
+    try:
+        inventory = subprocess.run(
+            ["git", "ls-files", "--full-name", "-z"],
+            cwd=repository_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise TrackedFilesError(
+            f"Git tracked-file discovery is unavailable: {error}"
+        ) from error
+    if inventory.returncode != 0:
+        detail = inventory.stderr.strip() or "git ls-files failed"
+        raise TrackedFilesError(f"Git tracked-file discovery failed: {detail}")
+    labels = [label for label in inventory.stdout.split("\0") if label]
+    if not labels:
+        raise TrackedFilesError("Git tracked-file discovery returned no files")
+
+    files: list[Path] = []
+    for label in labels:
+        path = (repository_root / label).resolve()
+        try:
+            path.relative_to(requested_root)
+        except ValueError:
+            continue
+        if path.is_file():
+            files.append(path)
+    return sorted(files)
+
+
 def repository_path(root: Path, path: Path) -> str:
     """Render a path relative to the checked repository when possible."""
     try:
@@ -2003,11 +2064,15 @@ def extract_markdown_links(text: str) -> list[MarkdownLink]:
 
 
 def markdown_sources(root: Path) -> list[Path]:
-    sources = sorted((root / "docs").rglob("*.md"))
-    agents = root / "AGENTS.md"
-    if agents.is_file():
-        sources.append(agents)
-    return sorted(sources)
+    """Return tracked Markdown inputs in ``docs`` plus the root guidance."""
+    docs = (root / "docs").resolve()
+    agents = (root / "AGENTS.md").resolve()
+    return [
+        path
+        for path in tracked_files(root)
+        if path.suffix == ".md"
+        and (path == agents or docs in path.parents)
+    ]
 
 
 def split_destination(destination: str) -> tuple[str, str] | None:
@@ -2634,9 +2699,9 @@ def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
 def cargo_package_directories(root: Path) -> dict[str, Path]:
     """Return each Cargo package name and its manifest directory."""
     packages: dict[str, Path] = {}
-    for manifest in sorted(root.rglob("Cargo.toml")):
-        if ".git" in manifest.parts or "target" in manifest.parts:
-            continue
+    for manifest in (
+        path for path in tracked_files(root) if path.name == "Cargo.toml"
+    ):
         try:
             declared = tomllib.loads(manifest.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError):
@@ -2730,15 +2795,32 @@ def cargo_target_roots(root: Path) -> list[Path]:
     it.
     """
     roots: set[Path] = set()
-    for manifest in sorted(root.rglob("Cargo.toml")):
-        if ".git" in manifest.parts or "target" in manifest.parts:
-            continue
+    tracked = tracked_files(root)
+    tracked_set = frozenset(tracked)
+    for manifest in (path for path in tracked if path.name == "Cargo.toml"):
         package = manifest.parent
         for relative in CARGO_CONVENTIONAL_ROOTS:
-            roots.add(package / relative)
-        for directory in CARGO_TARGET_DIRECTORIES:
-            roots.update((package / directory).glob("*.rs"))
-            roots.update((package / directory).glob("*/main.rs"))
+            candidate = package / relative
+            if candidate in tracked_set:
+                roots.add(candidate)
+        for path in tracked:
+            try:
+                relative = path.relative_to(package)
+            except ValueError:
+                continue
+            if path.suffix != ".rs" or not relative.parts:
+                continue
+            if any(
+                relative.parent == Path(directory)
+                or (
+                    len(relative.parts) == len(Path(directory).parts) + 2
+                    and relative.name == "main.rs"
+                    and relative.parts[: len(Path(directory).parts)]
+                    == Path(directory).parts
+                )
+                for directory in CARGO_TARGET_DIRECTORIES
+            ):
+                roots.add(path)
         try:
             declared = tomllib.loads(
                 manifest.read_text(encoding="utf-8", errors="replace")
@@ -2769,11 +2851,7 @@ def rust_sources(root: Path) -> list[RustSource]:
     because a `pub use` rename in a crate root names an attribute the modules
     beneath it import.
     """
-    paths = [
-        path
-        for path in sorted(root.rglob("*.rs"))
-        if ".git" not in path.parts and "target" not in path.parts
-    ]
+    paths = [path for path in tracked_files(root) if path.suffix == ".rs"]
     prepared: list[RustSource] = []
     for path in paths:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -3392,7 +3470,10 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
     base_renames = renamed_from(root, event_base_sha)
     in_flight_identity: tuple[int, str] | None = None
     specification_index = (root / SPEC_DIR / "README.md").resolve()
-    for source in sorted((root / SPEC_DIR).rglob("*.md")):
+    specification_root = (root / SPEC_DIR).resolve()
+    for source in markdown_sources(root):
+        if specification_root not in source.parents:
+            continue
         if source.resolve() == specification_index:
             continue
         text = mask_block_content(source.read_text(encoding="utf-8"))
@@ -3510,7 +3591,11 @@ def run_checks(root: Path = ROOT) -> list[Violation]:
 
 
 def main() -> int:
-    failures = run_checks()
+    try:
+        failures = run_checks()
+    except TrackedFilesError as error:
+        print(f"docs-consistency check FAILED: {error}")
+        return 1
     if failures:
         print("docs-consistency check FAILED:")
         for failure in failures:
