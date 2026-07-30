@@ -438,6 +438,47 @@ class DocsConsistencyTests(unittest.TestCase):
         self.assertIn("| INV-001", rendered)
         self.assertNotIn("| INV-002", rendered)
 
+    def test_ci_ignored_test_skips_exclude_only_named_enforcement(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        selected = self.root / "tests/selected.rs"
+        selected.parent.mkdir()
+        selected.write_text(
+            "#[test]\n"
+            "#[ignore]\n"
+            "fn inv_001_selected_by_ci() {}\n"
+            "#[test]\n"
+            "#[ignore]\n"
+            "fn inv_002_skipped_by_ci() {}\n"
+            "#[test]\n"
+            "#[ignore]\n"
+            "fn inv_003_also_skipped_by_ci() {}\n",
+            encoding="utf-8",
+        )
+        workflow = self.root / ".github/workflows/rust.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text(
+            "jobs:\n"
+            "  integration:\n"
+            "    strategy:\n"
+            "      matrix:\n"
+            "        include:\n"
+            "          - suite: fixture\n"
+            "            command: >-\n"
+            "              cargo test --no-fail-fast -p fixture --test selected\n"
+            "              -- --ignored --skip inv_002 --skip=inv_003\n",
+            encoding="utf-8",
+        )
+
+        rendered = render_invariant_index(self.root)
+
+        self.assertIn("| INV-001", rendered)
+        self.assertNotIn("| INV-002", rendered)
+        self.assertNotIn("| INV-003", rendered)
+
     def test_windows_only_test_does_not_register_invariant_enforcement(self) -> None:
         disabled = self.root / "src/windows.rs"
         disabled.write_text(
