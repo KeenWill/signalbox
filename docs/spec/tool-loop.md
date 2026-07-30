@@ -237,13 +237,19 @@ infrastructure uncertainty after process start remains ambiguous according to
 the tool effect.
 
 Output caps are derived from the durable evidence that has to hold them rather
-than chosen independently of it. A success commits as one
+than chosen independently of it, and every cap is stated in decoded bytes so an
+executor enforces it while it reads. A success commits as one
 `ToolResultContent::Text` value under the 1 MiB bound below, so stdout and
-stderr are each captured to at most 262,144 decoded bytes: both base64 forms
-plus the result object's framing fit that bound with room for worst-case JSON
-escaping. A known failure's durable detail is bounded at 4,096 bytes, so the
-streams a failure carries are captured within that same budget, divided evenly
-between them.
+stderr are each captured to at most 262,144 decoded bytes: padded base64 makes
+each 349,528 bytes, and both encoded streams plus the result object's framing
+and counters fit that bound with room for worst-case JSON escaping. A known
+failure's durable detail is bounded at 4,096 bytes, which no pair of
+megabyte-class streams can fit, so a failure captures at most 1,024 decoded
+bytes per stream: 1,368 bytes of padded base64 each, 2,736 for the pair, leaving
+more than a kibibyte for the failure object's framing, its signal or exit
+status, and its per-stream size counters. The truncation marker below is
+retained inside a stream's cap rather than added to it, so no marker can push an
+encoded failure past the bound.
 
 Truncation has one shape for success and failure alike, and it is honest. The
 runner retains the head and tail of each stream within that stream's cap, keeps
@@ -287,14 +293,17 @@ model-facing description names the spec-fixed default for its operation: 1,800
 for `git_clone`, 900 for `git_push`, 600 for `git_fetch`, and 120 for
 `git_branch` and `git_commit`. The runner enforces the deadline by terminating
 the process group, so a stalled Git subprocess can no longer hold the runner's
-single global execution permit while heartbeats stay healthy. A deadline
-produces the typed `timed_out` known failure whose retry-safety is stated per
-operation rather than left to the caller: a timed-out `git_fetch` is retry-safe,
-and so is a timed-out `git_clone`, whose incomplete destination the runner
-removes before reporting; a timed-out `git_branch` or `git_commit` is locally
-recoverable and honestly retains any ref or index change already made; and a
-timed-out `git_push` has unknown side effects, so it follows the `SideEffecting`
-runner-uncertainty law instead of committing as a known failure.
+single global execution permit while heartbeats stay healthy. What a deadline
+produces is stated per operation rather than universally, because the operations
+differ in whether the runner still knows what happened. A timed-out `git_fetch`,
+`git_clone`, `git_branch`, or `git_commit` closes as the typed `timed_out` known
+failure and carries its own retry-safety: fetch is retry-safe, so is clone,
+whose incomplete destination the runner removes before reporting, and branch and
+commit are locally recoverable and honestly retain any ref or index change
+already made. A timed-out `git_push` is not a known failure at all: the remote
+may already have accepted the update, so it follows the `SideEffecting`
+runner-uncertainty law and is neither recorded as definitely failed nor retried
+as though it were.
 
 The exact tools are:
 
@@ -381,16 +390,20 @@ session advertises. `workspace_read`, `workspace_write`, `workspace_edit`,
 `shell_exec`, and `build_test` require only a writable root, which every
 runner-backed session has. `git_fetch`, `git_branch`, `git_commit`, and
 `git_push` require the session's writable root to be a repository worktree;
-`git_clone` requires one configured repository key; and each operation that
-reaches a remote additionally requires the granted credential profile its
-repository entry names. A session whose composition does not satisfy a
-declaration's requirement is never offered that declaration
+`git_clone` requires a writable root and one configured repository key, because
+it clones into that root instead of presuming the root is already a worktree;
+and each operation that reaches a remote additionally requires the granted
+credential profile its repository entry names. A session whose composition does
+not satisfy a declaration's requirement is never offered that declaration
 ([model-call execution](model-call-execution.md#frontier-rendering) prepares the
-snapshot), so a workspace-free session advertises the five writable-root tools
-and no repository tool, and nothing it can propose fails at lease claim for a
-capability it never had. Why: a requirement stated on the declaration is checked
-once at preparation, while a requirement implied only by a tool's argument
-contract can be discovered no earlier than the dispatch that fails.
+snapshot), so a session whose writable root is not a worktree advertises the
+five writable-root tools, none of the four worktree Git tools, and `git_clone`
+exactly when its selected runner advertises at least one repository key — a
+session on a runner that advertises none advertises no Git tool at all. Nothing
+such a session can propose fails at lease claim for a capability it never had.
+Why: a requirement stated on the declaration is checked once at preparation,
+while a requirement implied only by a tool's argument contract can be discovered
+no earlier than the dispatch that fails.
 
 Each provider operation carries the exact session-executable definition and
 locus snapshot prepared under

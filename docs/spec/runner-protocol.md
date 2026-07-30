@@ -58,6 +58,18 @@ to be found and undone before a second runner can connect.
 
 ### Committed functionality beyond version one
 
+Nothing in this section describes implemented behaviour. Version one has no
+`move_healthy_session` request, no client may send one, and no daemon or runner
+surface answers one, exactly as no second simultaneous enrollment exists above.
+Every statement here is a constraint on future change rather than a capability
+present today, and that constraint is the only force it carries: the version-one
+mechanisms it names may not be altered in a way that forecloses these
+commitments. What remains genuinely undecided about them — workspace portability
+between runners, and any automatic-placement policy — stays in
+[open questions](../open-questions.md#scheduling-and-runners), which remains the
+one home for undecided design; a commitment whose implementation is deferred is
+not an undecided question.
+
 Owner-directed relocation of a healthy session is committed functionality that
 version one does not implement. `move_healthy_session` is the owner command that
 re-places a healthy session on a different runner; its same-runner form changes
@@ -183,6 +195,37 @@ by one presence byte so an absent field is distinguishable from a present empty
 one. Why: length prefixing is what makes two different field splittings hash
 differently, and domain separation is what keeps an advertisement digest from
 ever equalling a manifest digest computed over the same bytes.
+
+Every field takes exactly one of these encodings, so no implementation picks a
+representation: text is its exact UTF-8 bytes; an identity is its canonical
+lowercase hyphenated 36-byte UUID text; a digest is its lowercase 64-byte hex
+text; a closed-vocabulary value is its exact wire token; an unsigned integer is
+exactly eight bytes big-endian; and a boolean is exactly one byte, `0x00` or
+`0x01`. A sorted inventory is its element count as an unsigned integer followed
+by each element as its own length-prefixed field, and a nested record is one
+length-prefixed field whose bytes are that record's own canonical encoding under
+these same rules. A decimal, textual, or other-width integer is therefore never
+admissible, and a registration revision has exactly one byte sequence.
+
+Each kind's field sequence is complete and fixed here:
+
+- `advertisement` — capability classes, tool names, workspace capabilities,
+  sandbox profiles, credential-profile names, then repository keys, each as a
+  sorted inventory of its exact names or closed tokens
+  ([advertised catalogs and daemon authority](#advertised-catalogs-and-daemon-authority));
+- `leak-report` — one inventory holding the report's complete sorted fact
+  sequence, each fact a nested record of fact kind, locator, entry digest,
+  optional session, then optional placement revision;
+- `leak-page` — registration revision, report digest, page number, optional
+  prior-page digest, final-page flag, then that page's facts as one inventory of
+  those same nested records;
+- `workspace-manifest` — lifecycle, session, placement revision, runner,
+  optional repository key, optional canonical-clone-URL digest, optional
+  credential-profile name, sandbox profile, relative workspace path, then the
+  bounded recovery commit-or-branch facts
+  ([workspace provisioning and recovery](#workspace-provisioning-and-recovery));
+  and
+- `clone-url` — the single configuration-validated canonical URL text.
 
 `enroll` and `resume` carry the exact digest version the runner will compute,
 and the daemon admits only the version it implements. A mismatch is the fatal
@@ -672,9 +715,10 @@ inferred from another:
 
 - **workspace** — none, a plain directory on the runner, or a repository
   worktree;
-- **repository** — none, an empty repository, or a populated repository. An
-  empty repository is an ordinary starting state, and no repository at all is an
-  ordinary session shape rather than a degenerate one;
+- **repository** — none, an empty repository, or a populated repository, which
+  is the state of whatever repository the session reaches rather than a separate
+  request member. An empty repository is an ordinary starting state, and no
+  repository at all is an ordinary session shape rather than a degenerate one;
 - **credentials** — none, or one exact credential-profile name the selected
   runner advertises. A profile is grantable with no repository and no workspace,
   because a session may need a credential for work that has nothing to clone;
@@ -684,14 +728,26 @@ inferred from another:
   session's own workspace and need not be a repository clone. Either profile is
   selectable with any choice on the other three axes.
 
-Every combination is a stated choice at creation, and the version-one
-combinations are exactly the cross product: nothing is inferred, not the
+Every combination is a stated choice at creation: nothing is inferred, not the
 credential profile, not the repository, not the working directory. A creation
 request that selects nothing on an axis states that absence explicitly and
-receives absence, never a daemon-selected or runner-selected substitute. Runner
-capability varies over the same axes: a runner may advertise no workspace
-capability and no repository key at all, and such a runner is a fully usable
-placement target for every session composition that needs neither.
+receives absence, never a daemon-selected or runner-selected substitute. The
+axes are independent in what they admit, and the request shape says exactly
+which member carries each. Workspace and repository share one member, because a
+repository reaches a session as its worktree and in no other way:
+`WorkspaceRequirement::None` is both the no-workspace and the plain-directory
+choice, `WorkspaceRequirement::RepositoryWorktree` carries the exact repository
+key, and whether that repository is empty or populated is a fact about the
+repository rather than a third value the request selects. A session with no
+worktree therefore has no session repository, and it reaches a repository only
+by cloning one into its writable root under a runner-configured repository key
+([tool loop](tool-loop.md#version-one-workstation-tool-contracts)). Credentials
+and sandbox constrain neither of those: every credential choice composes with
+every workspace choice, and either sandbox profile composes with every
+combination of the other two. Runner capability varies over the same axes: a
+runner may advertise no workspace capability and no repository key at all, and
+such a runner is a fully usable placement target for every session composition
+that needs neither.
 
 The advertised executable tool set is therefore a function of the session's
 actual capabilities rather than of the compiled registry. A declaration whose
@@ -897,14 +953,22 @@ paths read-only.
 Confinement is defined over that writable root, which need not be a repository.
 The root is the provisioned repository when the placement requires a worktree,
 the exact selected working directory when the placement requires no worktree and
-names one, and otherwise one private empty per-placement directory the runner
-creates below its own state root. Exactly one writable root exists per placement
-in every case, so the profile means the same thing — one writable subtree, no
-host interface, no inherited environment — for a workspace-free session as for a
-repository-backed one. Why: defining restricted confinement in terms of the
-session repository made a repository a precondition for being sandboxed at all,
-which would have pushed every workspace-free session into `ambient` for no
-security reason.
+names one, and otherwise one private per-placement directory the runner creates
+below its own state root, empty when it first creates it. Exactly one writable
+root exists per placement in every case, so the profile means the same thing —
+one writable subtree, no host interface, no inherited environment — for a
+workspace-free session as for a repository-backed one. Each of the three roots
+is identified by durable facts rather than by process memory: the provisioned
+repository by its manifest, the selected working directory by the placement
+value that names it, and the private root by its deterministic per-placement
+path and its own manifest
+([workspace provisioning and recovery](#workspace-provisioning-and-recovery)). A
+restarted runner therefore re-adopts the root it was already using, with
+whatever the session wrote into it, and never substitutes a fresh empty
+directory for one holding session files. Why: defining restricted confinement in
+terms of the session repository made a repository a precondition for being
+sandboxed at all, which would have pushed every workspace-free session into
+`ambient` for no security reason.
 
 Repository provisioning uses the same profile before publication: it binds only
 the authorized empty staging repository at the fixed guest workspace path, uses
@@ -1078,10 +1142,11 @@ workspace-leak report, which the owner can read, and stops there. Reclaiming
 that disk is an operator and tooling concern — periodic cleanup jobs, added per
 backend over time — and is deliberately outside this contract. Why: making
 cleanup a runner obligation turned every loss-based replacement into a state the
-design could reach and not leave, while leaked disk on runner death is a cost
-the owner accepts. The consequence is stated plainly rather than solved: a
-replaced or dead runner's workspace is leaked, and the leak record is the whole
-of the version-one response.
+design could reach and not leave, while the alternative costs only disk — the
+leak is recorded, it is bounded by the workspaces that one runner held, and no
+correctness property depends on reclaiming it. The consequence is stated plainly
+rather than solved: a replaced or dead runner's workspace is leaked, and the
+leak record is the whole of the version-one response.
 
 The runner opens one effective-user-owned real `0700` root without following its
 final component, pins and retains its directory identity, and holds a
@@ -1104,18 +1169,36 @@ proceeds exactly as for a populated repository
 ([tool loop](tool-loop.md#version-one-workstation-tool-contracts) owns the
 `git_clone` result shape).
 
-The manifest records lifecycle, session, placement revision, runner, repository
-key, the lowercase SHA-256 digest of the configuration-validated canonical clone
-URL, credential-profile name, sandbox profile, relative repository path, and the
-bounded commit or branch facts needed for recovery. The canonical URL is
-credential-free, but its digest is sufficient identity and avoids repeating the
-operator configuration value. Recovery resolves the repository key again and
-requires the current canonical URL digest to equal the protected manifest value;
-a changed mapping is `manifest_conflict` and can never reinterpret an existing
-clone. The writable repository `.git/config` is not authority. The manifest
-records no credential path or value. The same runner state root durably spools
-one unacknowledged terminal result, one unacknowledged workspace release, and
-one unacknowledged operation failure per the serial wire protocol.
+A placement that requires no worktree and names no working directory still needs
+one writable root, and that private root is a managed workspace rather than
+scratch space the runner forgets. It lives at the sibling path
+`sessions/<canonical-session-uuid>/<placement-revision>/work`, and the runner
+creates it on first use with the same fsynced non-secret manifest in the
+non-mounted placement parent, recording no repository key, clone-URL digest, or
+credential-profile name. Because the path is a function of durable placement
+facts alone, a restarted runner recomputes it, authenticates it against that
+manifest, and re-adopts the same directory rather than creating a second one,
+and startup reconciliation treats it exactly as it treats a provisioned
+worktree: a private root whose placement is retired is reported as a typed
+retired-but-present leak, and no cleanup authority resumes for it. Why: a
+restricted session's writable root is where its file and shell tools put durable
+work, so a root the runner could not re-identify after a restart would discard
+that work silently while the session kept running.
+
+The manifest records lifecycle, session, placement revision, runner, optional
+repository key, the optional lowercase SHA-256 digest of the
+configuration-validated canonical clone URL, optional credential-profile name,
+sandbox profile, relative workspace path, and the bounded commit or branch facts
+needed for recovery; the repository-bound members are absent together for a
+private root. The canonical URL is credential-free, but its digest is sufficient
+identity and avoids repeating the operator configuration value. Recovery
+resolves the repository key again and requires the current canonical URL digest
+to equal the protected manifest value; a changed mapping is `manifest_conflict`
+and can never reinterpret an existing clone. The writable repository
+`.git/config` is not authority. The manifest records no credential path or
+value. The same runner state root durably spools one unacknowledged terminal
+result, one unacknowledged workspace release, and one unacknowledged operation
+failure per the serial wire protocol.
 
 Every Git invocation, in provisioning and in every Git tool alike, runs with its
 effective configuration forced by the runner rather than validated after the
@@ -1123,34 +1206,47 @@ fact. The runner neutralizes ambient configuration by pointing
 `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_GLOBAL` at `/dev/null`, passes the transport
 allowlist as command-line configuration — `protocol.allow=never`,
 `protocol.https.allow=always`, and `protocol.ext.allow=never` — and disables
-repository-local hooks. Command-line configuration outranks the model-writable
+repository-local hooks. The same command line also empties the accumulated
+credential-helper list before naming any helper the runner itself supplies, so
+the effective helper set for an invocation is exactly what the runner chose:
+nothing for a Git tool, and only the per-provisioning broker helper for a clone
+under a granted profile. Command-line configuration outranks the model-writable
 repository configuration, so `url.<base>.insteadOf` rewrites, a re-enabled
 external helper, and a hook cannot move the effective transport off HTTPS or
 substitute an executable for a fetch. Validating the stored `remote.<name>.url`
 remains defense in depth and is not the boundary. Why: the boundary has to hold
 over the transport Git actually uses, because the only configuration the model
-can write is exactly the configuration a pre-rewrite URL check reads as valid.
+can write is exactly the configuration a pre-rewrite URL check reads as valid —
+and a repository-local `credential.helper` whose value begins with `!` is a
+shell snippet Git runs, so leaving the helper list unemptied would let an
+auto-approved, retry-classified `git_fetch` execute model-authored code while
+every transport setting still read as valid.
 
 A daemon release is accepted only for an exact retired placement revision —
 either superseded by replacement or terminal `RunnerAbandoned` — after no live
 lease or unacknowledged result remains. The session itself need not be terminal
 and may continue on its successor placement or with daemon-only tools. The
-runner marks release in the manifest, atomically renames the placement below
-`trash/`, fsyncs, and then deletes it by descriptor-relative traversal that
-unlinks symlinks instead of following them. Release then follows the same
-acknowledge-and-journal pattern that provisioning and results already use: the
-runner journals the release and resends `workspace_released` until the daemon
-durably admits it and replies `workspace_release_recorded`, and only that
-acknowledgement lets the runner discard the journaled release and free its
-single workspace-operation slot. A daemon restart therefore cannot leave a
-resent release without a boundary, and a runner that deleted the manifest and
-crashed resumes at its durable acknowledgement boundary exactly as it does for a
-retained result. Startup resumes deletion only for manifest-proven trash and may
-remove staging whose manifest proves it was never published. It reconciles every
-ready or active manifest with the daemon before execution and reports every
-unknown, retired-but-present, conflicting, or otherwise unreconciled workspace
-as a typed leak. It never silently deletes a reported leak. This startup report
-is visible even when no session can be resumed.
+runner journals the release before it does anything irreversible, following the
+same acknowledge-and-journal pattern that provisioning and results already use.
+It first fsyncs a `release_accepted` journal entry carrying the complete release
+correlation below its state root; only then does it mark release in the
+manifest, atomically rename the placement below `trash/`, fsync, and delete it
+by descriptor-relative traversal that unlinks symlinks instead of following
+them. It advances the same entry to `release_completed` after the deletion and
+resends `workspace_released` until the daemon durably admits it and replies
+`workspace_release_recorded`; only that acknowledgement lets the runner discard
+the journaled release and free its single workspace-operation slot. A crash
+anywhere in the interval therefore resumes from the journal rather than from a
+manifest the runner may already have deleted: `release_accepted` resumes the
+deletion and then reports, `release_completed` resends the correlation, and a
+daemon restart cannot leave a resent release without a boundary — exactly as for
+a retained result. Startup resumes deletion for trash proven by a manifest or by
+a retained release entry, and may remove staging whose manifest proves it was
+never published. It reconciles every ready or active manifest with the daemon
+before execution and reports every unknown, retired-but-present, conflicting, or
+otherwise unreconciled workspace as a typed leak. It never silently deletes a
+reported leak. This startup report is visible even when no session can be
+resumed.
 
 ## Open edges
 

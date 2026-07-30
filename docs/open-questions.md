@@ -243,11 +243,10 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 Dispatch fencing, initial scheduler mechanics, and the complete version-one
 local runner orchestration are specified in
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
-[runner protocol and placement](spec/runner-protocol.md). Owner rulings on
-2026-07-29 closed the loss, replacement, cleanup, contract-gap, and
-session-composition questions this section previously carried, and each
-resolution now lives in the contract page that owns it: staged replacement
-ordering and the runner-recovery turn phase in
+[runner protocol and placement](spec/runner-protocol.md). The loss, replacement,
+cleanup, contract-gap, and session-composition questions this section previously
+carried are decided, and each decision is stated by the contract page that owns
+it: staged replacement ordering and the runner-recovery turn phase in
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md#runner-loss-session-recovery);
 same-runner recovery after a registration-triggered loss, deployment-scoped
 successor promotion, non-transferable workspace cleanup, pinned canonical digest
@@ -267,10 +266,13 @@ capability-derived tool advertisement in
 [model-call-execution](spec/model-call-execution.md#frontier-rendering); and Git
 subprocess deadlines, full-ref branch validation, unborn-HEAD clones, and honest
 output truncation in
-[tool-loop](spec/tool-loop.md#version-one-workstation-tool-contracts). Multiple
-simultaneously enrolled runners and owner-directed relocation of a healthy
-session are committed functionality that version one defers rather than open
-questions
+[tool-loop](spec/tool-loop.md#version-one-workstation-tool-contracts). Why: a
+decided question is a contract, and a contract binds only where the implementer
+of that contract reads it; a decision restated on this page would be a second
+authority over prose that already owns it, free to drift from the page it
+paraphrases. Multiple simultaneously enrolled runners and owner-directed
+relocation of a healthy session are committed functionality that version one
+defers rather than open questions
 ([runner protocol and placement](spec/runner-protocol.md#the-singleton-runner-rule-is-temporary)).
 The questions below remain open.
 
@@ -396,13 +398,15 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   PostgreSQL `text` columns with no physical ceiling near those values. Version
   one derives its
   [process output caps](spec/tool-loop.md#version-one-workstation-tool-contracts)
-  from exactly those bounds, so an oversized result truncates honestly instead
-  of failing. Deliberately delivering larger payloads — files well past 1 MiB —
-  needs its own design: where the bytes live, how a result references rather
-  than embeds them, what the model and each client see, and the abuse and
-  denial-of-service controls a larger bound requires. Recorded as a design
-  question rather than a blocker; the truncating caps remain correct until it is
-  answered.
+  from exactly those bounds, so oversized executor output is truncated honestly
+  before result admission rather than turning a working command into a failure;
+  `ResultTooLarge` remains the admission classification for an admitted result
+  that still exceeds the durable bound. Deliberately delivering larger payloads
+  — files well past 1 MiB — needs its own design: where the bytes live, how a
+  result references rather than embeds them, what the model and each client see,
+  and the abuse and denial-of-service controls a larger bound requires. Recorded
+  as a design question rather than a blocker; the truncating caps remain correct
+  until it is answered.
 
 ## Identity, credentials, and resource governance
 

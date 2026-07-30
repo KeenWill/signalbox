@@ -254,20 +254,22 @@ New `CreateSession` records use storage version 5 and new
 `ReplaceSessionDefaults` records use version 3. All three families reconstitute
 version 1 with dangerous blanket approval disabled and versions 1 and 2 with no
 system prompt. Create-session versions 1 through 3 carry no template provenance;
-version 4 requires provenance for template mode and requires its absence for
-explicit mode. The two creation families' newest versions are the ones that
-carry the optional session runner placement; every earlier version requires its
-complete absence, so a reader that supports only earlier versions rejects a
-runner-backed creation record instead of projecting it as daemon-only.
-`ReplaceSessionMetadata`, `SubmitInput`, and `DecideToolRequest` use version 1.
-`CreateSession` records applied results only (its one preparation failure is an
-error, not a recorded rejection); `CreateSessionFromImportedFrontier` also
-records applied results only, because a missing conversation named by the
-frontier or a boundary absent from that conversation is a pre-claim admission
-error rather than an authoritative rejection; `ReplaceSessionDefaults`,
-`ReplaceSessionMetadata`, `SubmitInput`, and `DecideToolRequest` record both
-applied results and closed, typed rejection discriminators. Authoritative
-rejections claim the identifier exactly as applied results do.
+version 4 and every later version require provenance for template mode and
+require its absence for explicit mode, so template provenance and the placement
+below compose in one version-5 record. The two creation families' newest
+versions are the ones that carry the optional session runner placement; every
+earlier version requires its complete absence, so a reader that supports only
+earlier versions rejects a runner-backed creation record instead of projecting
+it as daemon-only. `ReplaceSessionMetadata`, `SubmitInput`, and
+`DecideToolRequest` use version 1. `CreateSession` records applied results only
+(its one preparation failure is an error, not a recorded rejection);
+`CreateSessionFromImportedFrontier` also records applied results only, because a
+missing conversation named by the frontier or a boundary absent from that
+conversation is a pre-claim admission error rather than an authoritative
+rejection; `ReplaceSessionDefaults`, `ReplaceSessionMetadata`, `SubmitInput`,
+and `DecideToolRequest` record both applied results and closed, typed rejection
+discriminators. Authoritative rejections claim the identifier exactly as applied
+results do.
 
 ## Replay and equality
 

@@ -155,13 +155,14 @@ Representation rules, all enforced in the schema:
   `create_session_command`. Both members are absent or present together; names
   satisfy the domain's 1-through-128-byte lowercase ASCII grammar and digests
   are exactly 32 bytes. The create-command row carries the same pair only at
-  storage version 4; versions 1 through 3 require two nulls. A present pair also
-  requires a nonnull command system prompt in both the schema and Rust reader.
-  Reciprocal foreign keys bind every present pair across the creation command
-  and its created session, so command replay and checked reconstitution cannot
-  cross-wire provenance. Preexisting, imported, and explicit sessions carry two
-  nulls. Both tables retain their append-only guards; no template catalog or
-  mutable template object exists in Postgres (INV-047).
+  storage version 4 or a later version; versions 1 through 3 require two nulls,
+  and the placement bump below neither removes nor re-gates the pair. A present
+  pair also requires a nonnull command system prompt in both the schema and Rust
+  reader. Reciprocal foreign keys bind every present pair across the creation
+  command and its created session, so command replay and checked reconstitution
+  cannot cross-wire provenance. Preexisting, imported, and explicit sessions
+  carry two nulls. Both tables retain their append-only guards; no template
+  catalog or mutable template object exists in Postgres (INV-047).
 - Migration `202607280303` adds the optional bounded `system_prompt` column to
   `session_defaults_version` and the three defaults-bearing command tables, each
   guarded by the 1,048,576-UTF-8-byte and nonempty CHECK constraints and, on
@@ -352,20 +353,24 @@ identifier: `command_id` is the primary key across all kinds and sessions
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
 `review_workflow`, `compact_session`, `replace_lost_runner`,
 `abandon_lost_runner`, `promote_pending_runner`) and a kind-scoped
-`storage_version`. Create-session records write the provenance-gated version
-specified above; defaults-bearing imported-create and replace-defaults records
-write version 3. Create-session records reconstitute version 1 with the disabled
-dangerous-tool posture, and versions 1 and 2 with no system prompt — a
-pre-version-three row carrying one fails closed in both the schema and every
-Rust reader. A pre-version-four create row carrying template provenance likewise
-fails closed; therefore a rollback reader that supports only versions 1 through
-3 rejects every new create record instead of projecting template creation as
-explicit creation. Metadata, submit, decision, review-workflow, compaction, and
-runner-recovery records use version 1. Each kind has one typed subordinate
-request record keyed by `command_id` that stores every caller-supplied semantic
-field in typed, `CHECK`-constrained columns. Every kind except runner
-replacement also stores the terminal `applied`/`rejected` result and typed
-result fields there. `replace_lost_runner_command` is the immutable request and
+`storage_version`. The gates above fix the current numbers: create-session
+records write version 5, defaults-bearing imported-create records write version
+4, and replace-defaults records write version 3. Create-session records
+reconstitute version 1 with the disabled dangerous-tool posture, and versions 1
+and 2 with no system prompt — a pre-version-three row carrying one fails closed
+in both the schema and every Rust reader. A pre-version-four create row carrying
+template provenance and a pre-version-five create row carrying a runner
+placement likewise fail closed; therefore a rollback reader that supports only
+versions 1 through 4 rejects every new create record instead of projecting a
+runner-backed creation as daemon-only, exactly as a reader supporting only
+versions 1 through 3 rejects every template-provenance record instead of
+projecting template creation as explicit creation. Metadata, submit, decision,
+review-workflow, compaction, and runner-recovery records use version 1. Each
+kind has one typed subordinate request record keyed by `command_id` that stores
+every caller-supplied semantic field in typed, `CHECK`-constrained columns.
+Every kind except runner replacement also stores the terminal
+`applied`/`rejected` result and typed result fields there.
+`replace_lost_runner_command` is the immutable request and
 provisioning-authorization root; at most one append-only
 `replace_lost_runner_result` supplies its terminal result after off-transaction
 runner I/O. Result-shape `CHECK` constraints tie each rejection kind to exactly
@@ -737,12 +742,17 @@ protocol scope). Implemented storage:
   relocation, and abandonment from the same family. The family is deliberately
   shaped for extension: a later runner fact — another relocation shape, or
   runner metadata and attributes — adds a state and its columns to this one
-  record kind rather than a second event kind, so a client that decodes the
-  family keeps decoding it. Tool-batch transition records carry the producing
-  call and exactly one closed state shape: `proposed` names the yielded
-  assistant/tool-use frontier, `results_projected` names the all-resolved result
-  frontier, and `recovery_required` names the exact ambiguous physical attempt.
-  The header and typed record tables are append-only
+  record kind rather than a second event kind, so a follower already decoding
+  the family needs no new kind to keep hearing runner news. Extension stays
+  version-gated rather than silent: an addition every existing decoder can
+  ignore leaves the kind-scoped `storage_version` alone, while a new closed
+  transition state or a newly required column advances it, and a decoder that
+  predates the advance rejects the record as `Unsupported` instead of coercing
+  an unknown state onto one it knows. Tool-batch transition records carry the
+  producing call and exactly one closed state shape: `proposed` names the
+  yielded assistant/tool-use frontier, `results_projected` names the
+  all-resolved result frontier, and `recovery_required` names the exact
+  ambiguous physical attempt. The header and typed record tables are append-only
   (`reject_immutable_record_change`), and every outbox table rejects `TRUNCATE`.
   A context-compacted record names the authoritative compaction, its completed
   dedicated call, exact positive through position, appended summary, and result
@@ -810,14 +820,21 @@ and failed, completed, refused, cancelled, and reconciliation-required records
 must agree with the durable turn, terminal frontier, semantic marker where
 present, and terminal model call or tool attempt where present. A
 reconciliation-required event carries exactly one of those two operation
-references. A runner-state-transition record must agree with the named session's
-current durable placement state and revision, and with the placement entry when
-its transition installed one. A context-compacted event must agree with one
-completed dedicated call and the authoritative compaction, applied command,
-exact through position, summary entry, and result frontier before dispatch.
-Tool-batch cancellation and known crash-failure records validate their terminal
-marker after the earlier producing model call and ended physical attempts rather
-than requiring an otherwise empty call history. Historical Prepared and InFlight
+references. A runner-state-transition record must agree with the retained
+immutable placement record at exactly the revision the record itself names, and
+with the placement entry when its transition installed one; it is never required
+to equal the session's current placement state, and historical runner
+transitions remain dispatchable after their placement advances exactly as
+historical Prepared and InFlight transition records remain dispatchable after
+their call advances. Why: delivery is one ordered singleton cursor, so a
+validation that demanded current state would let any later committed transition
+— a loss committing behind a queued suspicion — permanently block that event and
+every event after it. A context-compacted event must agree with one completed
+dedicated call and the authoritative compaction, applied command, exact through
+position, summary entry, and result frontier before dispatch. Tool-batch
+cancellation and known crash-failure records validate their terminal marker
+after the earlier producing model call and ended physical attempts rather than
+requiring an otherwise empty call history. Historical Prepared and InFlight
 transition records remain dispatchable after their call advances. Exhausted
 delivery still validates the allocator singleton and cursor. Daemon task
 ownership, polling, fan-out, and client observation semantics are owned by
