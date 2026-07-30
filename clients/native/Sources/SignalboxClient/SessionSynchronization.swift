@@ -1421,9 +1421,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         !entriesStarted,
         turn.acceptancePosition.rawValue != 0,
         priorAcceptancePosition.map({ $0 < turn.acceptancePosition.rawValue }) ?? true,
-        requiredTerminalModelCallID.map {
+        (requiredTerminalModelCallID.map {
           unmatchedTerminalModelCallOwners[$0] == nil
-        } ?? true,
+        } ?? true),
         turnAcceptancePositions.updateValue(
           turn.acceptancePosition.rawValue, forKey: turn.turnID
         ) == nil
@@ -1459,9 +1459,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         !entriesStarted,
         evidence.modelCallIndex.rawValue == modelCallCount,
         modelCallOwningTurnIDs.contains(evidence.turnID),
-        unmatchedTerminalModelCallOwners[evidence.modelCallID].map {
+        (unmatchedTerminalModelCallOwners[evidence.modelCallID].map {
           $0 == evidence.turnID
-        } ?? true,
+        } ?? true),
         followsPriorModelCall,
         modelCallIDs.insert(evidence.modelCallID).inserted
       else {
