@@ -144,10 +144,14 @@ jobs:
           cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli
           --test live_smoke --no-run
       - name: Run credential-free pre-spend probes
-        run: >-
-          cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli
-          --test live_smoke --
-          --ignored --exact the_pinned_codex_cli_pre_spend_contract_holds
+        run: |
+          set -euo pipefail
+          test_name=the_pinned_codex_cli_pre_spend_contract_holds
+          cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli \
+            --test live_smoke -- --ignored --exact "${test_name}" --list \
+            | grep -Fqx "${test_name}: test"
+          cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli \
+            --test live_smoke -- --ignored --exact "${test_name}"
       # The CLI reads the key from stdin and writes its own credential store
       # under CODEX_HOME. The value is never an argument (process listings),
       # never echoed, and never exported to the smoke step: the adapter's
@@ -179,10 +183,14 @@ jobs:
           # name is not sensitive. Which models an API key can address is
           # account-scoped, so the environment may override the code default.
           SIGNALBOX_CODEX_SMOKE_MODEL: ${{ vars.CODEX_SMOKE_MODEL }}
-        run: >-
-          cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli
-          --test live_smoke --
-          --ignored --exact the_pinned_codex_cli_completes_one_exchange
+        run: |
+          set -euo pipefail
+          test_name=the_pinned_codex_cli_completes_one_exchange
+          cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli \
+            --test live_smoke -- --ignored --exact "${test_name}" --list \
+            | grep -Fqx "${test_name}: test"
+          cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli \
+            --test live_smoke -- --ignored --exact "${test_name}"
       - name: Remove the credential store
         if: ${{ always() }}
         run: rm -rf "${CODEX_HOME}"
