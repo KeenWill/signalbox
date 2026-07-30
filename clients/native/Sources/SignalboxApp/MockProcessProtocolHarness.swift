@@ -473,9 +473,10 @@ private actor MockProcessProtocolState {
       ]
     ]
     messages.append(contentsOf: fixture.records.prefix(1))
+    messages.append(contentsOf: fixture.modelCallUsage)
     messages.append([
       "type": "transcript_model_calls_end",
-      "model_call_count": "0",
+      "model_call_count": String(fixture.modelCallUsage.count),
     ])
     messages.append(contentsOf: fixture.records.dropFirst())
     messages.append([
@@ -490,6 +491,7 @@ private actor MockProcessProtocolState {
 
   private struct TranscriptFixture {
     let records: [[String: Any]]
+    let modelCallUsage: [[String: Any]]
     let turnCount: String
     let entryCount: String
   }
@@ -498,6 +500,12 @@ private actor MockProcessProtocolState {
     if session.id == MockSignalboxFixtures.approvalSessionID {
       return TranscriptFixture(
         records: approvalTranscript(sessionID: session.id),
+        modelCallUsage: [
+          modelCallUsage(
+            turnID: MockProcessProtocolFixtures.approvalTurnID,
+            modelCallID: MockProcessProtocolFixtures.approvalModelCallID
+          )
+        ],
         turnCount: MockProcessProtocolFixtures.singleTurnCount,
         entryCount: MockProcessProtocolFixtures.transcriptEntryCount
       )
@@ -505,6 +513,7 @@ private actor MockProcessProtocolState {
     if session.id == MockSignalboxFixtures.failedSessionID {
       return TranscriptFixture(
         records: failedTranscript(sessionID: session.id),
+        modelCallUsage: [],
         turnCount: MockProcessProtocolFixtures.singleTurnCount,
         entryCount: MockProcessProtocolFixtures.transcriptEntryCount
       )
@@ -512,6 +521,12 @@ private actor MockProcessProtocolState {
     if session.id == MockSignalboxFixtures.activeSessionID, scenario == .completedTool {
       return TranscriptFixture(
         records: completedToolTranscript(sessionID: session.id),
+        modelCallUsage: [
+          modelCallUsage(
+            turnID: MockProcessProtocolFixtures.activeTurnID,
+            modelCallID: MockProcessProtocolFixtures.activeModelCallID
+          )
+        ],
         turnCount: MockProcessProtocolFixtures.singleTurnCount,
         entryCount: "3"
       )
@@ -523,9 +538,33 @@ private actor MockProcessProtocolState {
         userText: conversation.user,
         assistantText: conversation.assistant
       ),
+      modelCallUsage: [
+        modelCallUsage(
+          turnID: MockProcessProtocolFixtures.activeTurnID,
+          modelCallID: MockProcessProtocolFixtures.activeModelCallID
+        )
+      ],
       turnCount: MockProcessProtocolFixtures.singleTurnCount,
       entryCount: MockProcessProtocolFixtures.transcriptEntryCount
     )
+  }
+
+  private func modelCallUsage(
+    turnID: String,
+    modelCallID: String
+  ) -> [String: Any] {
+    [
+      "type": "transcript_model_call_usage",
+      "model_call_index": "0",
+      "turn_id": turnID,
+      "model_call_id": modelCallID,
+      "usage": [
+        "input_tokens": NSNull(),
+        "output_tokens": NSNull(),
+        "cache_creation_input_tokens": NSNull(),
+        "cache_read_input_tokens": NSNull(),
+      ],
+    ]
   }
 
   private func conversationTranscript(

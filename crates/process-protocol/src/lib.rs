@@ -2309,7 +2309,22 @@ impl FailedTerminalModelCall {
 struct RawFailedTerminalModelCall {
     model_call_id: CanonicalUuid,
     disposition: FailedModelCallDisposition,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_failed_model_call_cause"
+    )]
     cause: Option<FailedModelCallCause>,
+}
+
+// Field default handles omission; invoking this decoder means the member was
+// present, so a JSON null must fail instead of collapsing into `None`.
+fn deserialize_present_failed_model_call_cause<'de, DeserializerT>(
+    deserializer: DeserializerT,
+) -> Result<Option<FailedModelCallCause>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+{
+    FailedModelCallCause::deserialize(deserializer).map(Some)
 }
 
 impl<'de> Deserialize<'de> for FailedTerminalModelCall {
@@ -4591,6 +4606,13 @@ mod tests {
     fn failed_terminal_call_rejects_an_unknown_failure_cause() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":"future_provider_error"}}}}"#,
+        );
+    }
+
+    #[test]
+    fn failed_terminal_call_rejects_explicit_null_cause() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":null}}}}"#,
         );
     }
 

@@ -43,6 +43,10 @@ public struct SignalboxProcessTranscriptProjection: Equatable, Sendable {
   }
 }
 
+/// Presentation identities survive authoritative refreshes and side reads, but
+/// only a wholly valid projection may advance that identity table. Candidate
+/// state is committed after projection so malformed snapshots cannot consume
+/// identities or discard retained tool context.
 public struct SignalboxProcessTranscriptProjector: Sendable {
   private enum PresentationIdentity: Hashable, Sendable {
     case semantic(sourceSessionID: String, entryID: String)

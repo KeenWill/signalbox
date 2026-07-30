@@ -14,6 +14,7 @@ use signalbox_tools_basic::{
     PublicDestinationClientError, has_more_response_bytes, public_destination_client,
 };
 
+use super::arguments::valid_revision;
 use super::result::absolute_https_url;
 use super::review_slog::{
     ReviewerActivity, author_class, authorized_association, disposition_class, finding_title,
@@ -306,6 +307,35 @@ impl GitHubCodeHostTransport {
         arguments: super::FilePatchArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        let initial_revision = self
+            .change_request_diff_revision(arguments.repository(), arguments.number(), credential)
+            .await?;
+        let outcome = self.find_file_patch(arguments.clone(), credential).await;
+        match &outcome {
+            Ok(_) | Err(CodeHostTransportFailure::NotFound) => {}
+            Err(
+                CodeHostTransportFailure::InvalidCredential
+                | CodeHostTransportFailure::Rejected
+                | CodeHostTransportFailure::InvalidResponse
+                | CodeHostTransportFailure::ResponseTooLarge
+                | CodeHostTransportFailure::ChangeRequestRevisionChanged
+                | CodeHostTransportFailure::DispatchUnknown,
+            ) => return outcome,
+        }
+        let current_revision = self
+            .change_request_diff_revision(arguments.repository(), arguments.number(), credential)
+            .await?;
+        if initial_revision != current_revision {
+            return Err(CodeHostTransportFailure::ChangeRequestRevisionChanged);
+        }
+        outcome
+    }
+
+    async fn find_file_patch(
+        &self,
+        arguments: super::FilePatchArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
         for page in 1..=MAX_CHANGED_FILE_PAGES {
             let page_text = page.to_string();
             let url = self.repository_url(
@@ -331,6 +361,20 @@ impl GitHubCodeHostTransport {
             }
         }
         Err(CodeHostTransportFailure::InvalidResponse)
+    }
+
+    async fn change_request_diff_revision(
+        &self,
+        repository: &super::CodeHostRepository,
+        number: CodeHostChangeRequestNumber,
+        credential: &CredentialValue,
+    ) -> Result<ChangeRequestDiffRevision, CodeHostTransportFailure> {
+        let url = self.repository_url(repository, &["pulls", &number.get().to_string()], None)?;
+        let response = self
+            .send_authenticated(Method::GET, url, None, credential)
+            .await?;
+        let value = self.json_response(response, StatusCode::OK).await?;
+        parse_change_request_diff_revision(&value, number)
     }
 
     async fn checks_status(
@@ -1158,6 +1202,7 @@ impl GitHubCodeHostTransport {
                 | CodeHostTransportFailure::NotFound => failure,
                 CodeHostTransportFailure::InvalidResponse
                 | CodeHostTransportFailure::ResponseTooLarge
+                | CodeHostTransportFailure::ChangeRequestRevisionChanged
                 | CodeHostTransportFailure::DispatchUnknown => {
                     CodeHostTransportFailure::DispatchUnknown
                 }
@@ -1808,6 +1853,37 @@ fn required_string(
         .ok_or(CodeHostTransportFailure::InvalidResponse)
 }
 
+#[cfg_attr(test, derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
+struct ChangeRequestDiffRevision {
+    base: String,
+    head: String,
+}
+
+fn parse_change_request_diff_revision(
+    value: &serde_json::Value,
+    expected_number: CodeHostChangeRequestNumber,
+) -> Result<ChangeRequestDiffRevision, CodeHostTransportFailure> {
+    let object = required_object(value)?;
+    let number: u32 = required_u64(object, "number")?
+        .try_into()
+        .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+    if number != expected_number.get() {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    let base = required_object(required(object, "base")?)?;
+    let base_revision = required_string(base, "sha")?;
+    let head = required_object(required(object, "head")?)?;
+    let head_revision = required_string(head, "sha")?;
+    if !valid_revision(&base_revision) || !valid_revision(&head_revision) {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    Ok(ChangeRequestDiffRevision {
+        base: base_revision,
+        head: head_revision,
+    })
+}
+
 fn optional_string(
     object: &serde_json::Map<String, serde_json::Value>,
     member: &str,
@@ -1880,6 +1956,27 @@ mod tests {
     use crate::{
         CodeHostRepository, ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus,
     };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    const FILE_PATCH_REPOSITORY: &str = "owner/repository";
+    const FILE_PATCH_NUMBER: u32 = 17;
+    const FILE_PATCH_TARGET_PATH: &str = "src/target.rs";
+    const FILE_PATCH_BASE_REVISION: &str = "1111111111111111111111111111111111111111";
+    const FILE_PATCH_HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
+    const FILE_PATCH_MOVED_REVISION: &str = "3333333333333333333333333333333333333333";
+    const FILE_PATCH_SERVER_TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct FilePatchRevisionTransitionInput {
+        before: ChangeRequestDiffRevision,
+        after: ChangeRequestDiffRevision,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct FilePatchRevisionChangeServerObservation {
+        transition: FilePatchRevisionTransitionInput,
+        requests: [String; 4],
+    }
 
     fn repository() -> CodeHostRepository {
         CodeHostRepository::try_new(String::from("owner/repository"))
@@ -1973,6 +2070,191 @@ mod tests {
                 .map(|index| changed_file_value(format!("generated/file-{index}.rs")))
                 .collect(),
         )
+    }
+
+    /// A paginated patch assembled while the pull-request head moves is not
+    /// returned as evidence from any single revision.
+    #[tokio::test]
+    async fn file_patch_fails_closed_when_head_moves_during_pagination() {
+        let expected_transition = FilePatchRevisionTransitionInput {
+            before: ChangeRequestDiffRevision {
+                base: String::from(FILE_PATCH_BASE_REVISION),
+                head: String::from(FILE_PATCH_HEAD_REVISION),
+            },
+            after: ChangeRequestDiffRevision {
+                base: String::from(FILE_PATCH_BASE_REVISION),
+                head: String::from(FILE_PATCH_MOVED_REVISION),
+            },
+        };
+        let (failure, observation) =
+            file_patch_revision_change_failure(expected_transition.clone()).await;
+
+        assert_file_patch_revision_change(failure, observation, expected_transition);
+    }
+
+    /// A stable head does not make pages revision-consistent when the base
+    /// revision moves during the search.
+    #[tokio::test]
+    async fn file_patch_fails_closed_when_base_moves_without_head() {
+        let expected_transition = FilePatchRevisionTransitionInput {
+            before: ChangeRequestDiffRevision {
+                base: String::from(FILE_PATCH_BASE_REVISION),
+                head: String::from(FILE_PATCH_HEAD_REVISION),
+            },
+            after: ChangeRequestDiffRevision {
+                base: String::from(FILE_PATCH_MOVED_REVISION),
+                head: String::from(FILE_PATCH_HEAD_REVISION),
+            },
+        };
+        let (failure, observation) =
+            file_patch_revision_change_failure(expected_transition.clone()).await;
+
+        assert_file_patch_revision_change(failure, observation, expected_transition);
+    }
+
+    async fn file_patch_revision_change_failure(
+        revision_transition: FilePatchRevisionTransitionInput,
+    ) -> (
+        CodeHostTransportFailure,
+        FilePatchRevisionChangeServerObservation,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener binds");
+        let address = listener
+            .local_addr()
+            .expect("listener address is available");
+        let server = tokio::spawn(serve_changed_file_patch_revision(
+            listener,
+            revision_transition,
+        ));
+        let mut transport = GitHubCodeHostTransport::try_new().expect("fixed transport constructs");
+        transport.rest_base =
+            Url::parse(&format!("http://{address}/")).expect("loopback REST base is valid");
+        let arguments = moved_head_file_patch_arguments();
+        let credential = CredentialValue::new(b"synthetic-test-token".to_vec());
+
+        let failure = transport
+            .file_patch_transaction(arguments, &credential)
+            .await
+            .expect_err("a moved diff revision cannot yield consistent patch evidence");
+        let requests = tokio::time::timeout(FILE_PATCH_SERVER_TIMEOUT, server)
+            .await
+            .expect("loopback server observes every expected request")
+            .expect("loopback server task completes");
+
+        (failure, requests)
+    }
+
+    #[track_caller]
+    fn assert_file_patch_revision_change(
+        failure: CodeHostTransportFailure,
+        observation: FilePatchRevisionChangeServerObservation,
+        expected_transition: FilePatchRevisionTransitionInput,
+    ) {
+        assert_eq!(
+            failure,
+            CodeHostTransportFailure::ChangeRequestRevisionChanged
+        );
+        assert_eq!(
+            crate::code_host::transport_failure_class(
+                crate::code_host::CodeHostToolKind::FilePatch,
+                failure,
+            ),
+            Some(crate::code_host::OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
+            })
+        );
+        assert_eq!(observation.transition, expected_transition);
+        assert_eq!(observation.requests, moved_head_file_patch_requests());
+    }
+
+    fn moved_head_file_patch_arguments() -> crate::FilePatchArguments {
+        serde_json::from_value(serde_json::json!({
+            "repository": FILE_PATCH_REPOSITORY,
+            "number": FILE_PATCH_NUMBER,
+            "path": FILE_PATCH_TARGET_PATH,
+        }))
+        .expect("fixture file-patch arguments decode")
+    }
+
+    fn moved_head_file_patch_requests() -> [String; 4] {
+        let prefix = format!("/repos/{FILE_PATCH_REPOSITORY}/pulls/{FILE_PATCH_NUMBER}");
+        [
+            format!("GET {prefix} HTTP/1.1"),
+            format!("GET {prefix}/files?per_page=100&page=1 HTTP/1.1"),
+            format!("GET {prefix}/files?per_page=100&page=2 HTTP/1.1"),
+            format!("GET {prefix} HTTP/1.1"),
+        ]
+    }
+
+    async fn serve_changed_file_patch_revision(
+        listener: tokio::net::TcpListener,
+        revision_transition: FilePatchRevisionTransitionInput,
+    ) -> FilePatchRevisionChangeServerObservation {
+        let FilePatchRevisionTransitionInput { before, after } = revision_transition;
+        let initial_revision = change_request_revision_value(&before);
+        let target_page = serde_json::Value::Array(vec![changed_file_value(String::from(
+            FILE_PATCH_TARGET_PATH,
+        ))]);
+        let initial_request =
+            serve_json_response(&listener, &initial_revision.to_string(), None).await;
+        let first_page_request = serve_json_response(
+            &listener,
+            &first_changed_file_page().to_string(),
+            Some(r#"<http://fixture.invalid/page/2>; rel="next""#),
+        )
+        .await;
+        let target_page_request =
+            serve_json_response(&listener, &target_page.to_string(), None).await;
+        let final_revision = change_request_revision_value(&after);
+        let final_request = serve_json_response(&listener, &final_revision.to_string(), None).await;
+        FilePatchRevisionChangeServerObservation {
+            transition: FilePatchRevisionTransitionInput { before, after },
+            requests: [
+                initial_request,
+                first_page_request,
+                target_page_request,
+                final_request,
+            ],
+        }
+    }
+
+    fn change_request_revision_value(revision: &ChangeRequestDiffRevision) -> serde_json::Value {
+        serde_json::json!({
+            "number": FILE_PATCH_NUMBER,
+            "base": {"sha": revision.base},
+            "head": {"sha": revision.head},
+        })
+    }
+
+    async fn serve_json_response(
+        listener: &tokio::net::TcpListener,
+        body: &str,
+        link: Option<&str>,
+    ) -> String {
+        let (mut stream, _) = listener.accept().await.expect("one request connects");
+        let mut request_line = String::new();
+        let mut reader = BufReader::new(&mut stream);
+        reader
+            .read_line(&mut request_line)
+            .await
+            .expect("request line is readable");
+        drop(reader);
+        let link_header = link
+            .map(|value| format!("Link: {value}\r\n"))
+            .unwrap_or_default();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{link_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("JSON response is writable");
+        request_line.trim_end().to_owned()
     }
 
     /// A requested patch beyond GitHub's first hundred changed files remains
