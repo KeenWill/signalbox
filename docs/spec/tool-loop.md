@@ -12,21 +12,22 @@ detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
 decision surface through PR #291 (`agent/turn-control-verbs`), and
 runner-protocol batch reconstitution through PR #260
 (`agent/runner-protocol-domain`). Template-derived blanket creation was verified
-through PR #311 (`agent/session-templates-spec`). The runner executable stack
-rooted at this foundation proposal extends the same laws to the runner locus.
-This page owns logical tool requests, approval policy and decisions, physical
-tool attempts, result admission, intra-turn continuation, crash classification,
-the compiled registry, and the daemon-local catalog. Turn and attempt lifecycle
-law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
-semantic entry vocabulary in
-[sessions-and-transcript](sessions-and-transcript.md); model-call staging and
-provider translation in [model-call-execution](model-call-execution.md);
-durable-command identity in [identity-and-commands](identity-and-commands.md);
-and relational mechanics in [persistence-protocol](persistence-protocol.md).
-Invariant tags cite [the invariant test index](../invariants.md). The
-runner-locus paragraphs in this page are the foundation proposal at the bottom
-of their implementing stack and become verified only with those child pull
-requests.
+through PR #311 (`agent/session-templates-spec`), and the exact-origin
+`web_fetch` egress policy and complete bounded file-patch lookup through PR #330
+(`agent/audit-verified-fixes`). The runner executable stack rooted at this
+foundation proposal extends the same laws to the runner locus. This page owns
+logical tool requests, approval policy and decisions, physical tool attempts,
+result admission, intra-turn continuation, crash classification, the compiled
+registry, and the daemon-local catalog. Turn and attempt lifecycle law lives in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
+entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
+model-call staging and provider translation in
+[model-call-execution](model-call-execution.md); durable-command identity in
+[identity-and-commands](identity-and-commands.md); and relational mechanics in
+[persistence-protocol](persistence-protocol.md). Invariant tags cite
+[the invariant test index](../invariants.md). The runner-locus paragraphs in
+this page are the foundation proposal at the bottom of their implementing stack
+and become verified only with those child pull requests.
 
 ## Intra-turn rounds and request batches
 
@@ -791,21 +792,26 @@ tools:
   effect class is `EffectFree`: execution observes no external state.
 - `web_fetch` requires exactly one absolute HTTP(S) `url` no longer than 8 KiB.
   User information, fragments, and direct non-public IP destinations are
-  invalid. Before dispatch, a domain must resolve to between one and 32
-  addresses and every address must be public; the admitted addresses are pinned
-  into the request client so connection setup cannot substitute a later DNS
-  answer. Its permission default is `Auto`; its effect class is `ExternalEffect`
-  because the remote server can observe a GET. One dispatch performs at most one
-  credential-free request: ambient proxies, redirects, protocol retries, and
-  idle reuse are disabled, TLS uses rustls with a TLS 1.2 floor, and a 15-second
-  timeout bounds resolution and the exchange. The executor retains at most 64
-  KiB of response bytes and at most 1,024 bytes of a valid content-type header.
-  Success is compact JSON containing the exact requested `url`, numeric
-  `status`, optional `content_type`, a lossy UTF-8 `body`, and `truncated`.
-  Resolution, client-setup, and definite connection-establishment failure before
-  request dispatch returns a fixed sanitized known failure; timeout, transport,
-  or body loss after dispatch begins is commit-ambiguous. Truncation stops body
-  consumption and never follows or issues another request.
+  invalid. Before dispatch, its canonical origin must satisfy the
+  deployment-owned
+  [web-fetch catalog policy](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog),
+  which owns the origin bound, canonicalization, and absent-or-empty behavior;
+  this admission gates automatic execution. A domain must resolve to between one
+  and 32 addresses and every address must be public; the admitted addresses are
+  pinned into the request client so connection setup cannot substitute a later
+  DNS answer. Its permission default is `Auto`; its effect class is
+  `ExternalEffect` because the remote server can observe a GET. One dispatch
+  performs at most one credential-free request: ambient proxies, redirects,
+  protocol retries, and idle reuse are disabled, TLS uses rustls with a TLS 1.2
+  floor, and a 15-second timeout bounds resolution and the exchange. The
+  executor retains at most 64 KiB of response bytes and at most 1,024 bytes of a
+  valid content-type header. Success is compact JSON containing the exact
+  requested `url`, numeric `status`, optional `content_type`, a lossy UTF-8
+  `body`, and `truncated`. Resolution, client-setup, and definite
+  connection-establishment failure before request dispatch returns a fixed
+  sanitized known failure; timeout, transport, or body loss after dispatch
+  begins is commit-ambiguous. Truncation stops body consumption and never
+  follows or issues another request.
 - `session_status_update` requires one complete existing session-metadata shape:
   nullable `title`, complete `tags`, complete string-to-string `attributes`, and
   `archived`. Partial patches are invalid. The invocation's session is the
@@ -846,9 +852,12 @@ The declarations and compact result objects are:
   the first page of at most 100 files, each with path, code-host status,
   additions, and deletions, plus `truncated`.
 - `change_request_file_patch` accepts `repository`, `number`, and one
-  repository-relative `path`; it searches that same first 100-file page and
-  returns its file summary plus the optional code-host patch. A path outside the
-  bounded page is a known failure rather than an unbounded pagination request.
+  repository-relative `path`; it searches consecutive 100-file pages through
+  GitHub's 3,000-file endpoint ceiling and returns the matching file summary
+  plus the optional code-host patch. A complete search miss reports the fixed
+  semantic detail `requested changed file was not found in the change request`;
+  it is not presented as a host rejection. A next-page signal beyond page 30
+  violates the bounded response contract and fails closed.
 - `change_request_checks_status` accepts `repository` and one exact lowercase
   40-hex `revision`; it returns that revision and the first page of at most 100
   check runs, each with id, name, status, optional conclusion, and URL, plus

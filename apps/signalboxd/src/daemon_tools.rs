@@ -13,7 +13,7 @@ use signalbox_tools_basic::{
     CURRENT_TIME_NAME, CurrentTimeClock, CurrentTimeExecutor, CurrentTimeTool, ECHO_NAME,
     EchoExecutor, EchoTool, PostgresSessionStatusWriter, ReqwestWebFetchTransport,
     SESSION_STATUS_UPDATE_NAME, SessionStatusExecutor, SessionStatusTool, SessionStatusWriter,
-    WEB_FETCH_NAME, WebFetchExecutor, WebFetchTool, WebFetchTransport,
+    WEB_FETCH_NAME, WebFetchEgressPolicy, WebFetchExecutor, WebFetchTool, WebFetchTransport,
 };
 use signalbox_tools_code_host::{
     CodeHostExecutor, CodeHostTools, CodeHostTransport, GitHubCodeHostTransport,
@@ -45,8 +45,9 @@ impl<Clock>
         pool: PgPool,
         credentials: FileCredentialAccess,
         code_host_transport: GitHubCodeHostTransport,
+        web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
-        let web_fetch = WebFetchTool::try_new_production()
+        let web_fetch = WebFetchTool::try_new_production(web_fetch_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
         let status = SessionStatusTool::try_new_postgres(pool)
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
@@ -67,9 +68,10 @@ impl<Clock, Transport, Writer, Credentials, HostTransport>
         writer: Writer,
         credentials: Credentials,
         code_host_transport: HostTransport,
+        web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
-        let web_fetch =
-            WebFetchTool::try_new(transport).map_err(|_| DaemonToolsConstructionError::WebFetch)?;
+        let web_fetch = WebFetchTool::try_new(transport, web_fetch_egress_policy)
+            .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
         let status = SessionStatusTool::try_new(writer)
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
         let code_host = CodeHostTools::try_new(credentials, code_host_transport)
@@ -398,6 +400,7 @@ mod tests {
             OfflineWriter,
             OfflineCredentials,
             OfflineCodeHostTransport,
+            WebFetchEgressPolicy::deny_all(),
         )
         .expect("static daemon tools compile")
         .into_parts();

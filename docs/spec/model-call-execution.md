@@ -22,20 +22,21 @@ were verified through PR #258 (`agent/signalboxd-rename`); the
 model-call cause codes were verified through PR #280
 (`agent/provider-identity-normalization`). The complete frontier-payload
 projection and identity-before-terminal-evidence precedence were verified
-through PR #288 (`agent/audit-fix-docs-coherence`); the session system prompt on
-the prepared operation was verified through PR #286
-(`agent/session-system-prompt`). Provider-reported token evidence retention and
-exact commit-ambiguity comparison were verified through PR #301
-(`agent/token-usage`); the empty-thinking completion rule was verified through
-PR #305 (`agent/sonnet-streamed-tool-use`). The context-summary projection and
-dedicated compaction-call evidence were verified through PR #312
-(`agent/context-compaction-core`); the explicit trigger, pre-activation context
-guard, configured prompt, and provider-native input counting were verified
-through PR #314 (`agent/context-compaction-protocol`). The runner-placement
-rendering and executable session-tool snapshot paragraphs are the foundation
-proposal at the bottom of their implementing stack and become verified only with
-those child pull requests. Invariant tags cite
-[docs/invariants.md](../invariants.md).
+through PR #288 (`agent/audit-fix-docs-coherence`); durable closed
+provider-failure causes were verified through PR #330
+(`agent/audit-verified-fixes`); the session system prompt on the prepared
+operation was verified through PR #286 (`agent/session-system-prompt`).
+Provider-reported token evidence retention and exact commit-ambiguity comparison
+were verified through PR #301 (`agent/token-usage`); the empty-thinking
+completion rule was verified through PR #305 (`agent/sonnet-streamed-tool-use`).
+The context-summary projection and dedicated compaction-call evidence were
+verified through PR #312 (`agent/context-compaction-core`); the explicit
+trigger, pre-activation context guard, configured prompt, and provider-native
+input counting were verified through PR #314
+(`agent/context-compaction-protocol`). The runner-placement rendering and
+executable session-tool snapshot paragraphs are the foundation proposal at the
+bottom of their implementing stack and become verified only with those child
+pull requests. Invariant tags cite [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
@@ -628,11 +629,13 @@ persistence commits it atomically with its outbox rows
   execution, result projection, and preparation of the next call follow
   [tool-loop](tool-loop.md). A physical call completion is therefore never
   treated alone as proof that the logical turn completed.
-- **KnownFailed.** The call ends `KnownFailed`; an unstopped attempt ends
-  `KnownFailure`, and the turn fails with a `TurnFailed` entry and terminal
-  frontier. A stop-requested attempt instead ends
-  `AfterCancellation(KnownFailure)` and still fails; the physical result has not
-  proven cancellation.
+- **KnownFailed.** The call ends `KnownFailed`; definitive provider-error
+  evidence additionally retains only its closed `ProviderErrorKind`
+  classification as the optional provider-failure cause — never provider prose.
+  An unstopped attempt ends `KnownFailure`, and the turn fails with a
+  `TurnFailed` entry and terminal frontier. A stop-requested attempt instead
+  ends `AfterCancellation(KnownFailure)` and still fails; the physical result
+  has not proven cancellation.
 - **Cancelled.** Without the exact applied-interrupt proof, a physical
   cancellation is an unstopped known failure. With the exact proof — carried
   directly by the atomic interrupt transition before any call exists or for an

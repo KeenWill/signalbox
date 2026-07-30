@@ -1580,6 +1580,22 @@ impl IssuedModelCallCorrelation {
             correlation: self,
             observation,
             usage,
+            provider_failure_cause: None,
+        }
+    }
+
+    /// Binds one definitive, classified provider error without retaining any
+    /// provider-authored error material.
+    pub fn bind_provider_failure_observation_with_usage(
+        self,
+        cause: ProviderModelCallFailureCause,
+        usage: ProviderReportedTokenUsage,
+    ) -> CorrelatedModelCallTerminalObservation {
+        CorrelatedModelCallTerminalObservation {
+            correlation: self,
+            observation: ModelCallTerminalObservation::KnownFailed,
+            usage,
+            provider_failure_cause: Some(cause),
         }
     }
 }
@@ -1658,12 +1674,43 @@ impl ProviderReportedTokenUsage {
     }
 }
 
+/// Closed, provider-neutral classification of one definitive provider error.
+///
+/// These values contain no provider-authored text, credential material, model
+/// content, or request/response body. Absence on a known failure means the
+/// failure arose outside a definitive provider error or predates persistence of
+/// this classification.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ProviderModelCallFailureCause {
+    /// The provider rejected the request credential.
+    CredentialRejected,
+    /// The credential was valid but lacked permission.
+    PermissionDenied,
+    /// The provider judged the request invalid.
+    InvalidRequest,
+    /// The requested model or resource was not found.
+    TargetNotFound,
+    /// The request exceeded a provider size limit.
+    RequestTooLarge,
+    /// The provider applied a transient rate limit.
+    RateLimited,
+    /// The account's available quota was exhausted.
+    QuotaExhausted,
+    /// The provider reported overload.
+    Overloaded,
+    /// The provider reported an internal error.
+    ProviderInternal,
+    /// The adapter did not recognize a definitive provider error class.
+    Unrecognized,
+}
+
 /// One provider-neutral terminal observation bound to exact issued authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CorrelatedModelCallTerminalObservation {
     correlation: IssuedModelCallCorrelation,
     observation: ModelCallTerminalObservation,
     usage: ProviderReportedTokenUsage,
+    provider_failure_cause: Option<ProviderModelCallFailureCause>,
 }
 
 impl CorrelatedModelCallTerminalObservation {
@@ -1685,6 +1732,12 @@ impl CorrelatedModelCallTerminalObservation {
     /// Returns the exact provider-reported token fields.
     pub const fn usage(&self) -> ProviderReportedTokenUsage {
         self.usage
+    }
+
+    /// Returns the closed provider classification when a definitive provider
+    /// error caused this known failure.
+    pub const fn provider_failure_cause(&self) -> Option<ProviderModelCallFailureCause> {
+        self.provider_failure_cause
     }
 }
 
@@ -4710,6 +4763,7 @@ mod tests {
             },
             observation,
             usage: ProviderReportedTokenUsage::unreported(),
+            provider_failure_cause: None,
         }
     }
 

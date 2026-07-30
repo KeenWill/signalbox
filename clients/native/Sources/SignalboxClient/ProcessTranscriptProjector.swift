@@ -129,6 +129,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         if case .activeAwaitingToolApproval(let requestID) = turn.state {
           awaitingToolDecisionRequestID = requestID.rawValue
         }
+      case .modelCallUsage:
+        continue
       case .textEntry(let message):
         textAssembly = TextAssembly(message: message)
       case .content(let content):
@@ -665,8 +667,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery,
       .reconciliationRequired, .toolReconciliationRequired:
       return .init(state: .recoveryRequired, label: "Recovery required")
-    case .failed:
-      return .init(state: .failed, label: "Failed")
+    case .failed(_, _, let terminalModelCall):
+      guard let cause = terminalModelCall?.cause else {
+        return .init(state: .failed, label: "Failed")
+      }
+      return .init(state: .failed, label: "Failed: \(providerFailureLabel(cause))")
     case .completed:
       return .init(state: .completed, label: "Completed")
     case .refused:
@@ -675,6 +680,31 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return .init(state: .cancelled, label: "Cancelled")
     case .unknown:
       return .unavailable
+    }
+  }
+
+  private func providerFailureLabel(_ cause: SignalboxFailedModelCallCause) -> String {
+    switch cause {
+    case .credentialRejected:
+      return "provider rejected credential"
+    case .permissionDenied:
+      return "credential lacks permission"
+    case .invalidRequest:
+      return "invalid provider request"
+    case .targetNotFound:
+      return "model or resource not found"
+    case .requestTooLarge:
+      return "provider request too large"
+    case .rateLimited:
+      return "provider rate limited; retry later"
+    case .quotaExhausted:
+      return "provider quota exhausted"
+    case .overloaded:
+      return "provider overloaded; retry later"
+    case .providerInternal:
+      return "provider internal error"
+    case .unrecognized:
+      return "unrecognized provider error"
     }
   }
 

@@ -20,7 +20,8 @@ defaults boundary was verified through PR #272 (`agent/mid-session-model`). The
 credential-file value narrowing and the credential-shaped code-host detail were
 verified through PR #285 (`agent/dev-instance-code-host-credential`). The static
 copy-on-create session-template catalog was verified through PR #311
-(`agent/session-templates-spec`). Invariant law lives in
+(`agent/session-templates-spec`). The static web-fetch egress allowlist is
+verified through PR #330 (`agent/audit-verified-fixes`). Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration and credential paragraphs are the foundation proposal at the
 bottom of their implementing stack and become verified only with those child
@@ -180,7 +181,7 @@ exists, and each dispatch rereads and validates its file as specified under
 request identity and daemon-issued receipt are runtime state below the root, not
 operator-authored configuration.
 
-## The static model and alias catalog
+## The static model, alias, and web-fetch catalog
 
 The file named by `SIGNALBOX_CONFIG_FILE` is a versioned TOML document
 (`config/signalboxd.example.toml` is the checked-in example). Parsing is
@@ -195,6 +196,15 @@ fail-closed:
   unrecognized content fails explicitly instead.
 - Parse errors are typed, sanitized values; no file content appears in error
   text. (signalboxd erases the type before logging, as described above.)
+
+The optional `[web_fetch]` table has exactly one `allowed_origins` array. It
+contains at most 64 distinct bare HTTP(S) origins: scheme, host, and optional
+port only, with no user information, path beyond `/`, query, or fragment. The
+loader canonicalizes the effective port and hostname before duplicate checks. An
+absent table or empty array admits no outbound `web_fetch` request. Every
+request must match one configured canonical origin before dispatch, so automatic
+approval cannot silently egress to an arbitrary host. Paths and queries remain
+unrestricted request data at an admitted origin.
 
 Each `[[models]]` entry defines one direct selection:
 

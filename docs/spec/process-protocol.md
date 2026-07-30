@@ -1,9 +1,10 @@
 # Process protocol
 
-Verified against the implementing change in PR #323 (`agent/protocol-collapse`).
-This page is the normative boundary between a local client process and
-`signalboxd`; domain values, PostgreSQL records, and wire messages remain
-distinct representations.
+Verified against the implementing change in PR #323 (`agent/protocol-collapse`)
+and the closed provider-failure/native transcript projections in PR #330
+(`agent/audit-verified-fixes`). This page is the normative boundary between a
+local client process and `signalboxd`; domain values, PostgreSQL records, and
+wire messages remain distinct representations.
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
@@ -979,13 +980,16 @@ One logical snapshot is a bounded message sequence sharing the request identity:
 5. `transcript_snapshot_end { session_id, cursor, turn_count, entry_count }`.
 
 Usage rows are ordered first by the owning turn's acceptance position and then
-by model-call UUID. Each row carries contiguous zero-based `model_call_index`,
-`turn_id`, `model_call_id`, and a required `usage` object with required-nullable
-`input_tokens`, `output_tokens`, `cache_creation_input_tokens`, and
-`cache_read_input_tokens`. A null field means the provider did not report it; a
-reported zero is the canonical decimal string `"0"`.
-`transcript_model_calls_end { model_call_count }` acknowledges the exact row
-count before any entry message. Every terminal call has one row, including
+by model-call UUID. The native client models both usage rows and the mandatory
+model-calls-end boundary, validates their contiguous indices, identities, and
+count, and retains usage rows in its bounded snapshot record set without
+presenting the former false unknown-frame diagnostic. Each row carries
+contiguous zero-based `model_call_index`, `turn_id`, `model_call_id`, and a
+required `usage` object with required-nullable `input_tokens`, `output_tokens`,
+`cache_creation_input_tokens`, and `cache_read_input_tokens`. A null field means
+the provider did not report it; a reported zero is the canonical decimal string
+`"0"`. `transcript_model_calls_end { model_call_count }` acknowledges the exact
+row count before any entry message. Every terminal call has one row, including
 historical, cancellation, and recovery calls whose four fields are all null.
 
 The daemon builds that complete sequence in a secure unnamed temporary file
@@ -1018,9 +1022,14 @@ Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 - `failed { terminal_frontier_id, terminal_attempt_id, terminal_model_call }`,
   where `terminal_attempt_id` is null only for an evidence-free recovery
   failure, and `terminal_model_call` is null when that failure or physical
-  attempt owns no call; otherwise it is `{ model_call_id, disposition }` with
-  disposition exactly `known_failed` or `cancelled`. A nonnull
-  `terminal_model_call` requires a nonnull `terminal_attempt_id`;
+  attempt owns no call; otherwise it is `{ model_call_id, disposition, cause? }`
+  with disposition exactly `known_failed` or `cancelled`. `cause` is absent for
+  legacy and non-provider failures; when present it is one of
+  `credential_rejected`, `permission_denied`, `invalid_request`,
+  `target_not_found`, `request_too_large`, `rate_limited`, `quota_exhausted`,
+  `overloaded`, `provider_internal`, or `unrecognized`, and classifies only a
+  `known_failed` provider response. It never carries provider-authored prose. A
+  nonnull `terminal_model_call` requires a nonnull `terminal_attempt_id`;
 - `completed { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`;
 - `refused { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`;
 - `cancelled { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`,
@@ -1716,8 +1725,13 @@ pages while retaining only the selected session's defaults facts.
 
 After completion, `send` rereads and prints only authoritative committed
 assistant text produced for its exact turn. A failed or refused turn produces a
-typed diagnostic and a nonzero exit without reply text; cancelled and
-reconciliation-required turns do the same with their distinct typed diagnostics.
+typed diagnostic and a nonzero exit without reply text; when a failed terminal
+call carries a provider cause, both CLI and native client render the closed
+classification (for example, credential rejection versus retry-later overload)
+without provider prose. Cancelled and reconciliation-required turns use their
+distinct typed diagnostics. The native synchronization surface reports a truly
+unrecognized frame as a nonfatal decoding diagnostic, while a known frame that
+fails its closed shape is named as a malformed-known protocol violation.
 `follow` prints the initial transcript, ephemeral provider-text deltas, and
 subsequent typed durable updates until interrupted. Each delta is flushed as one
 line:
