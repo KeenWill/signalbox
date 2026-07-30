@@ -12,21 +12,22 @@ detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
 decision surface through PR #291 (`agent/turn-control-verbs`), and
 runner-protocol batch reconstitution through PR #260
 (`agent/runner-protocol-domain`). Template-derived blanket creation was verified
-through PR #311 (`agent/session-templates-spec`). The runner executable stack
-rooted at this foundation proposal extends the same laws to the runner locus.
-This page owns logical tool requests, approval policy and decisions, physical
-tool attempts, result admission, intra-turn continuation, crash classification,
-the compiled registry, and the daemon-local catalog. Turn and attempt lifecycle
-law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
-semantic entry vocabulary in
-[sessions-and-transcript](sessions-and-transcript.md); model-call staging and
-provider translation in [model-call-execution](model-call-execution.md);
-durable-command identity in [identity-and-commands](identity-and-commands.md);
-and relational mechanics in [persistence-protocol](persistence-protocol.md).
-Invariant tags cite [the invariant test index](../invariants.md). The
-runner-locus paragraphs in this page are the foundation proposal at the bottom
-of their implementing stack and become verified only with those child pull
-requests.
+through PR #311 (`agent/session-templates-spec`), and the exact-origin
+`web_fetch` egress policy through `agent/audit-verified-fixes`. The runner
+executable stack rooted at this foundation proposal extends the same laws to the
+runner locus. This page owns logical tool requests, approval policy and
+decisions, physical tool attempts, result admission, intra-turn continuation,
+crash classification, the compiled registry, and the daemon-local catalog. Turn
+and attempt lifecycle law lives in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
+entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
+model-call staging and provider translation in
+[model-call-execution](model-call-execution.md); durable-command identity in
+[identity-and-commands](identity-and-commands.md); and relational mechanics in
+[persistence-protocol](persistence-protocol.md). Invariant tags cite
+[the invariant test index](../invariants.md). The runner-locus paragraphs in
+this page are the foundation proposal at the bottom of their implementing stack
+and become verified only with those child pull requests.
 
 ## Intra-turn rounds and request batches
 
@@ -671,21 +672,25 @@ tools:
   effect class is `EffectFree`: execution observes no external state.
 - `web_fetch` requires exactly one absolute HTTP(S) `url` no longer than 8 KiB.
   User information, fragments, and direct non-public IP destinations are
-  invalid. Before dispatch, a domain must resolve to between one and 32
-  addresses and every address must be public; the admitted addresses are pinned
-  into the request client so connection setup cannot substitute a later DNS
-  answer. Its permission default is `Auto`; its effect class is `ExternalEffect`
-  because the remote server can observe a GET. One dispatch performs at most one
-  credential-free request: ambient proxies, redirects, protocol retries, and
-  idle reuse are disabled, TLS uses rustls with a TLS 1.2 floor, and a 15-second
-  timeout bounds resolution and the exchange. The executor retains at most 64
-  KiB of response bytes and at most 1,024 bytes of a valid content-type header.
-  Success is compact JSON containing the exact requested `url`, numeric
-  `status`, optional `content_type`, a lossy UTF-8 `body`, and `truncated`.
-  Resolution, client-setup, and definite connection-establishment failure before
-  request dispatch returns a fixed sanitized known failure; timeout, transport,
-  or body loss after dispatch begins is commit-ambiguous. Truncation stops body
-  consumption and never follows or issues another request.
+  invalid. The URL's canonical scheme, host, and effective port must exactly
+  match one of at most 64 origins in the deployment-owned `[web_fetch]`
+  `allowed_origins` list; an absent or empty list disables all outbound fetches.
+  Paths and queries do not broaden that set. Before dispatch, a domain must
+  resolve to between one and 32 addresses and every address must be public; the
+  admitted addresses are pinned into the request client so connection setup
+  cannot substitute a later DNS answer. Its permission default is `Auto`; its
+  effect class is `ExternalEffect` because the remote server can observe a GET.
+  One dispatch performs at most one credential-free request: ambient proxies,
+  redirects, protocol retries, and idle reuse are disabled, TLS uses rustls with
+  a TLS 1.2 floor, and a 15-second timeout bounds resolution and the exchange.
+  The executor retains at most 64 KiB of response bytes and at most 1,024 bytes
+  of a valid content-type header. Success is compact JSON containing the exact
+  requested `url`, numeric `status`, optional `content_type`, a lossy UTF-8
+  `body`, and `truncated`. Resolution, client-setup, and definite
+  connection-establishment failure before request dispatch returns a fixed
+  sanitized known failure; timeout, transport, or body loss after dispatch
+  begins is commit-ambiguous. Truncation stops body consumption and never
+  follows or issues another request.
 - `session_status_update` requires one complete existing session-metadata shape:
   nullable `title`, complete `tags`, complete string-to-string `attributes`, and
   `archived`. Partial patches are invalid. The invocation's session is the

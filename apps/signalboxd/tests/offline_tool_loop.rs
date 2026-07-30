@@ -75,7 +75,8 @@ use signalboxd::{
     ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, SessionStatusWrite,
     SessionStatusWriteOutcome, SessionStatusWriter, StackStateFields, StackStateResult,
     ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult, WebFetchBodyCompleteness,
-    WebFetchRequest, WebFetchResponse, WebFetchTransport, WebFetchTransportFailure,
+    WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse, WebFetchTransport,
+    WebFetchTransportFailure,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use tempfile::tempdir;
@@ -1087,6 +1088,7 @@ async fn code_host_tool_completes_offline(
         UnusedSessionStatusWriter,
         OfflineCodeHostCredentials,
         code_host.clone(),
+        WebFetchEgressPolicy::deny_all(),
     )?
     .into_parts();
     let (execution, runtime) = fixture.execution(
@@ -1632,6 +1634,7 @@ async fn tier_zero_echo_completes_offline_tool_loop() -> Result<(), Box<dyn Erro
         UnusedSessionStatusWriter,
         OfflineCodeHostCredentials,
         UnusedCodeHostTransport,
+        WebFetchEgressPolicy::deny_all(),
     )?
     .into_parts();
     let (execution, runtime) = fixture.execution(
@@ -1687,6 +1690,7 @@ async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn
         UnusedSessionStatusWriter,
         OfflineCodeHostCredentials,
         UnusedCodeHostTransport,
+        WebFetchEgressPolicy::try_from_allowed_origins([String::from("https://example.com")])?,
     )?
     .into_parts();
     let arguments = serde_json::json!({"url": expected_url}).to_string();
@@ -1754,6 +1758,7 @@ async fn tier_zero_session_status_updates_metadata_offline() -> Result<(), Box<d
         PostgresSessionStatusWriter::new(fixture.pool.clone()),
         OfflineCodeHostCredentials,
         UnusedCodeHostTransport,
+        WebFetchEgressPolicy::deny_all(),
     )?
     .into_parts();
     let (execution, runtime) = fixture.execution(

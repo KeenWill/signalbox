@@ -1,6 +1,7 @@
 //! Bounded daemon-local single-URL web fetch.
 
 use std::{
+    collections::BTreeSet,
     error::Error,
     fmt,
     future::Future,
@@ -31,7 +32,109 @@ const DEFAULT_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_URL_BYTES: usize = 8 * 1024;
 const MAX_CONTENT_TYPE_BYTES: usize = 1024;
 const MAX_RESOLVED_ADDRESSES: usize = 32;
+const MAX_ALLOWED_ORIGINS: usize = 64;
 pub(crate) const MAX_WEB_FETCH_BODY_BYTES: usize = 64 * 1024;
+
+/// Deployment-owned exact origins to which `web_fetch` may automatically
+/// egress.
+///
+/// An empty policy disables physical web fetches. Each admitted origin is
+/// canonicalized to its scheme, host, and effective port; paths and query
+/// strings remain request data and do not broaden the destination set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebFetchEgressPolicy {
+    allowed_origins: BTreeSet<WebFetchOrigin>,
+}
+
+impl WebFetchEgressPolicy {
+    /// Constructs a fail-closed policy with no admitted egress destination.
+    pub const fn deny_all() -> Self {
+        Self {
+            allowed_origins: BTreeSet::new(),
+        }
+    }
+
+    /// Validates a bounded set of exact HTTP(S) origins.
+    pub fn try_from_allowed_origins(
+        origins: impl IntoIterator<Item = String>,
+    ) -> Result<Self, WebFetchEgressPolicyError> {
+        let mut allowed_origins = BTreeSet::new();
+        for supplied in origins {
+            if allowed_origins.len() == MAX_ALLOWED_ORIGINS {
+                return Err(WebFetchEgressPolicyError::TooManyOrigins);
+            }
+            let origin = WebFetchOrigin::try_from_configuration(&supplied)?;
+            if !allowed_origins.insert(origin) {
+                return Err(WebFetchEgressPolicyError::DuplicateOrigin);
+            }
+        }
+        Ok(Self { allowed_origins })
+    }
+
+    fn admits(&self, url: &Url) -> bool {
+        WebFetchOrigin::from_url(url).is_some_and(|origin| self.allowed_origins.contains(&origin))
+    }
+}
+
+impl Default for WebFetchEgressPolicy {
+    fn default() -> Self {
+        Self::deny_all()
+    }
+}
+
+/// Why a deployment web-fetch egress policy was rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebFetchEgressPolicyError {
+    /// More than 64 exact origins were supplied.
+    TooManyOrigins,
+    /// Two entries canonicalized to the same exact origin.
+    DuplicateOrigin,
+    /// An entry was not one bare absolute HTTP(S) origin.
+    InvalidOrigin,
+}
+
+impl fmt::Display for WebFetchEgressPolicyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::TooManyOrigins => "web_fetch egress policy contains too many origins",
+            Self::DuplicateOrigin => "web_fetch egress policy repeats an origin",
+            Self::InvalidOrigin => "web_fetch egress policy contains an invalid origin",
+        })
+    }
+}
+
+impl Error for WebFetchEgressPolicyError {}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct WebFetchOrigin {
+    scheme: String,
+    host: String,
+    port: u16,
+}
+
+impl WebFetchOrigin {
+    fn try_from_configuration(supplied: &str) -> Result<Self, WebFetchEgressPolicyError> {
+        let url = Url::parse(supplied).map_err(|_| WebFetchEgressPolicyError::InvalidOrigin)?;
+        if url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err(WebFetchEgressPolicyError::InvalidOrigin);
+        }
+        Self::from_url(&url).ok_or(WebFetchEgressPolicyError::InvalidOrigin)
+    }
+
+    fn from_url(url: &Url) -> Option<Self> {
+        matches!(url.scheme(), "http" | "https").then_some(())?;
+        Some(Self {
+            scheme: url.scheme().to_owned(),
+            host: url.host_str()?.to_owned(),
+            port: url.port_or_known_default()?,
+        })
+    }
+}
 
 /// A static `web_fetch` declaration or production transport could not be
 /// constructed.
@@ -149,16 +252,21 @@ impl TryFrom<String> for WebFetchUrl {
 
 impl WebFetchTool<ReqwestWebFetchTransport> {
     /// Builds the production tool with the fixed bounded transport policy.
-    pub fn try_new_production() -> Result<Self, WebFetchToolConstructionError> {
+    pub fn try_new_production(
+        egress_policy: WebFetchEgressPolicy,
+    ) -> Result<Self, WebFetchToolConstructionError> {
         let transport = ReqwestWebFetchTransport::try_new(DEFAULT_EXCHANGE_TIMEOUT)
             .map_err(|_| WebFetchToolConstructionError::Transport)?;
-        Self::try_new(transport)
+        Self::try_new(transport, egress_policy)
     }
 }
 
 impl<Transport> WebFetchTool<Transport> {
     /// Compiles immutable metadata around one injected transport.
-    pub fn try_new(transport: Transport) -> Result<Self, WebFetchToolConstructionError> {
+    pub fn try_new(
+        transport: Transport,
+        egress_policy: WebFetchEgressPolicy,
+    ) -> Result<Self, WebFetchToolConstructionError> {
         let invalid_arguments_detail =
             ToolExecutionErrorDetail::try_new(String::from(INVALID_ARGUMENTS_DETAIL))
                 .map_err(|_| WebFetchToolConstructionError::ErrorDetail)?;
@@ -177,6 +285,7 @@ impl<Transport> WebFetchTool<Transport> {
             definition,
             WebFetchArgumentValidator {
                 detail: invalid_arguments_detail,
+                egress_policy: egress_policy.clone(),
             },
         );
         let catalog = CompiledToolCatalog::try_new([compiled])
@@ -186,6 +295,7 @@ impl<Transport> WebFetchTool<Transport> {
             executor: WebFetchExecutor {
                 transport,
                 request_failed_detail,
+                egress_policy,
             },
         })
     }
@@ -199,6 +309,7 @@ impl<Transport> WebFetchTool<Transport> {
 #[derive(Clone, Debug)]
 struct WebFetchArgumentValidator {
     detail: ToolExecutionErrorDetail,
+    egress_policy: WebFetchEgressPolicy,
 }
 
 impl ToolArgumentValidator for WebFetchArgumentValidator {
@@ -206,7 +317,7 @@ impl ToolArgumentValidator for WebFetchArgumentValidator {
         &self,
         arguments: &NormalizedToolArguments,
     ) -> Result<(), ToolExecutionErrorDetail> {
-        decode_arguments(arguments)
+        decode_admitted_arguments(arguments, &self.egress_policy)
             .map(|_| ())
             .map_err(|_| self.detail.clone())
     }
@@ -533,6 +644,7 @@ fn parse_url_host_ip(host: &str) -> Option<IpAddr> {
 pub struct WebFetchExecutor<Transport> {
     transport: Transport,
     request_failed_detail: ToolExecutionErrorDetail,
+    egress_policy: WebFetchEgressPolicy,
 }
 
 /// A checked catalog/executor assumption failed inside `web_fetch`.
@@ -581,8 +693,9 @@ where
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
-        let request = decode_arguments(invocation.request().arguments())
-            .map_err(|_| WebFetchExecutorError::ArgumentValidationDrift)?;
+        let request =
+            decode_admitted_arguments(invocation.request().arguments(), &self.egress_policy)
+                .map_err(|_| WebFetchExecutorError::ArgumentValidationDrift)?;
         let evidence = match self.transport.fetch(request.clone()).await {
             Ok(response) => web_fetch_success_evidence(&request, response)?,
             Err(WebFetchTransportFailure::RequestFailed) => ToolExecutorEvidence::KnownFailed {
@@ -611,6 +724,17 @@ fn decode_arguments(
     let decoded: WebFetchArguments =
         serde_json::from_str(arguments.as_str()).map_err(|_| InvalidWebFetchArguments)?;
     Ok(WebFetchRequest { url: decoded.url.0 })
+}
+
+fn decode_admitted_arguments(
+    arguments: &NormalizedToolArguments,
+    egress_policy: &WebFetchEgressPolicy,
+) -> Result<WebFetchRequest, InvalidWebFetchArguments> {
+    let request = decode_arguments(arguments)?;
+    if !egress_policy.admits(request.url()) {
+        return Err(InvalidWebFetchArguments);
+    }
+    Ok(request)
 }
 
 fn web_fetch_success_evidence(
@@ -645,11 +769,16 @@ mod tests {
             .expect("fixture arguments are admitted")
     }
 
+    fn fixture_egress_policy() -> WebFetchEgressPolicy {
+        WebFetchEgressPolicy::try_from_allowed_origins([String::from("https://example.com")])
+            .expect("fixture origin is admitted")
+    }
+
     /// The read-only operation is auto-approved but crash-relevant because a
     /// remote server observes the GET.
     #[test]
     fn web_fetch_definition_carries_exact_policy() {
-        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport)
+        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport, fixture_egress_policy())
             .expect("static web_fetch tool compiles")
             .into_parts();
         let definitions = catalog.definitions();
@@ -662,6 +791,33 @@ mod tests {
         assert_eq!(definition.effect_class(), ToolEffectClass::ExternalEffect);
     }
 
+    /// Automatic approval cannot egress to an origin absent from the exact
+    /// deployment allowlist, while an ordinary path at an admitted origin
+    /// remains automatic and valid.
+    #[test]
+    fn web_fetch_auto_permission_is_bounded_to_configured_origin() {
+        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport, fixture_egress_policy())
+            .expect("static web_fetch tool compiles")
+            .into_parts();
+        let definition = &catalog.definitions()[0];
+
+        assert_eq!(definition.permission_default(), ToolPermissionDefault::Auto);
+        assert_eq!(
+            catalog.validate_arguments(
+                definition.name(),
+                &arguments(r#"{"url":"https://example.com/ordinary"}"#),
+            ),
+            Ok(())
+        );
+        assert!(matches!(
+            catalog.validate_arguments(
+                definition.name(),
+                &arguments(r#"{"url":"https://collector.example/encoded-secret"}"#),
+            ),
+            Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
+        ));
+    }
+
     /// The complete rendered wire schema. The pretty golden is the review
     /// surface; the byte-exact assertion pins the canonical compact form the
     /// registry stores and providers receive as its exact serialization. The
@@ -669,7 +825,7 @@ mod tests {
     /// enforced while the earlier literal declared a bare string.
     #[test]
     fn web_fetch_rendered_schema_is_the_exact_wire_artifact() {
-        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport)
+        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport, fixture_egress_policy())
             .expect("static web_fetch tool compiles")
             .into_parts();
         let definition = &catalog.definitions()[0];
@@ -699,7 +855,7 @@ mod tests {
     /// Typed decoding accepts one absolute credential-free URL.
     #[test]
     fn web_fetch_typed_decode_accepts_https_url() {
-        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport)
+        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport, fixture_egress_policy())
             .expect("static web_fetch tool compiles")
             .into_parts();
         let definition = &catalog.definitions()[0];
@@ -716,7 +872,7 @@ mod tests {
     /// Typed decoding rejects URL-embedded credentials.
     #[test]
     fn web_fetch_typed_decode_rejects_user_information() {
-        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport)
+        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport, fixture_egress_policy())
             .expect("static web_fetch tool compiles")
             .into_parts();
         let definition = &catalog.definitions()[0];
@@ -750,7 +906,7 @@ mod tests {
     /// Typed decoding rejects a direct loopback destination before execution.
     #[test]
     fn web_fetch_typed_decode_rejects_loopback_ip() {
-        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport)
+        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport, fixture_egress_policy())
             .expect("static web_fetch tool compiles")
             .into_parts();
         let definition = &catalog.definitions()[0];
@@ -767,7 +923,7 @@ mod tests {
     /// Typed decoding rejects a direct private destination before execution.
     #[test]
     fn web_fetch_typed_decode_rejects_private_ip() {
-        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport)
+        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport, fixture_egress_policy())
             .expect("static web_fetch tool compiles")
             .into_parts();
         let definition = &catalog.definitions()[0];
@@ -785,7 +941,7 @@ mod tests {
     /// execution.
     #[test]
     fn web_fetch_typed_decode_rejects_unique_local_ipv6() {
-        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport)
+        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport, fixture_egress_policy())
             .expect("static web_fetch tool compiles")
             .into_parts();
         let definition = &catalog.definitions()[0];

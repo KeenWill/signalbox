@@ -416,6 +416,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
         pool.clone(),
         code_host_credentials,
         code_host_transport,
+        model_configuration.web_fetch_egress_policy(),
     ) {
         Ok(tools) => tools.into_parts(),
         Err(_) => {
