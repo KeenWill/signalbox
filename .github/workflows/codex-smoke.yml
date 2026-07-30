@@ -147,9 +147,11 @@ jobs:
         run: |
           set -euo pipefail
           test_name=the_pinned_codex_cli_pre_spend_contract_holds
+          listing="${RUNNER_TEMP}/codex-smoke-pre-spend-tests"
           cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli \
             --test live_smoke -- --ignored --exact "${test_name}" --list \
-            | grep -Fqx "${test_name}: test"
+            > "${listing}"
+          grep -Fqx "${test_name}: test" "${listing}"
           cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli \
             --test live_smoke -- --ignored --exact "${test_name}"
       # The CLI reads the key from stdin and writes its own credential store
@@ -186,9 +188,11 @@ jobs:
         run: |
           set -euo pipefail
           test_name=the_pinned_codex_cli_completes_one_exchange
+          listing="${RUNNER_TEMP}/codex-smoke-live-tests"
           cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli \
             --test live_smoke -- --ignored --exact "${test_name}" --list \
-            | grep -Fqx "${test_name}: test"
+            > "${listing}"
+          grep -Fqx "${test_name}: test" "${listing}"
           cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli \
             --test live_smoke -- --ignored --exact "${test_name}"
       - name: Remove the credential store
