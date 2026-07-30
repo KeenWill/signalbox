@@ -335,14 +335,21 @@ Each fact contains only `unknown_manifest`, `retired_present`,
 `manifest_conflict`, `cleanup_failed`, or `unreconciled`, a bounded
 runner-root-relative locator, a lowercase SHA-256 manifest-or-entry digest, and
 nullable session and placement revision when independently parseable. Facts are
-sorted by the complete tuple locator, kind, digest, optional session, optional
-placement revision. Locator and digest compare as unsigned lexicographic UTF-8
-bytes, with the shorter value first when one is a prefix; kind order is the
-closed order just listed; and each optional value compares by its ordinary
-canonical presence-byte encoding followed, when present, by its canonical wire
-bytes. The locator is relative to the runner state root and not to any
-repository, so a workspace-free private root, staging, and trash are all
-nameable. It carries no absolute host path, matching the projection in
+strictly increasing by the complete tuple locator, kind, digest, optional
+session, optional placement revision. Locator and digest compare as unsigned
+lexicographic UTF-8 bytes, with the shorter value first when one is a prefix;
+kind order is the closed order just listed; and each optional value compares by
+its ordinary canonical presence-byte encoding followed, when present, by its
+canonical wire bytes. An exact duplicate tuple is a malformed report: the runner
+rejects it before naming, journaling, or spooling the report, and the daemon
+rejects any nonempty page after page one whose first fact is not greater than
+the prior staged page's last fact, or any page whose later fact is not greater
+than its predecessor, without acknowledging that page or publishing the
+snapshot. Why: equal tuples have one exclusive keyset cursor, so admitting
+duplicates could make a page boundary silently omit retained evidence. The
+locator is relative to the runner state root and not to any repository, so a
+workspace-free private root, staging, and trash are all nameable. It carries no
+absolute host path, matching the projection in
 [process protocol](process-protocol.md#client-requests). Each page carries the
 prior page digest, null only on page one, so equal replay is exact and omission
 or reordering fails closed. The runner journals the report and current page

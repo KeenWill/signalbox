@@ -661,14 +661,17 @@ cursor object is therefore either `operation_failure { runner_id, correlation }`
 or
 `workspace_leak { runner_id, locator, kind, digest, session_id, placement_revision }`
 and exactly reproduces the last emitted evidence key, including null optional
-members. The daemon fetches at most `page_size + 1` checked evidence rows, using
-the extra row only to determine `next_after`; it never materializes the retained
-history. Each page is authoritative for the read that produced it. Concurrent
-durable additions that sort at or before a cursor need not appear in that
-traversal, so a caller that needs a fresh observation starts again with a null
-cursor. Why: operation-failure evidence is append-only and therefore unbounded;
-a singular unpaged status read would eventually make durable diagnostics
-unreadable or require unbounded memory.
+members. Runner report admission permits each complete fact tuple at most once,
+so runner plus tuple is unique within the published snapshot and an exclusive
+cursor never straddles equal leak keys. The daemon fetches at most
+`page_size + 1` checked evidence rows, using the extra row only to determine
+`next_after`; it never materializes the retained history. Each page is
+authoritative for the read that produced it. Concurrent durable additions that
+sort at or before a cursor need not appear in that traversal, so a caller that
+needs a fresh observation starts again with a null cursor. Why:
+operation-failure evidence is append-only and therefore unbounded; a singular
+unpaged status read would eventually make durable diagnostics unreadable or
+require unbounded memory.
 
 Followers additionally admit
 `provider_text_delta { session_id, turn_id, model_call_id, part_index, content }`

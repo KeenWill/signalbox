@@ -269,32 +269,30 @@ genuinely larger than these caps need the storage architecture recorded under
 [Tool safety](../open-questions.md#tool-safety), not a wider constant here.
 
 Git `remote` is 1 through 64 ASCII bytes matching `[A-Za-z0-9][A-Za-z0-9._-]*`.
-Before network use, the complete effective-URL sequence Git will actually use —
-resolved by Git itself under the runner-forced configuration, so every
-`insteadOf` and `pushurl` expansion is already applied — must have the
-operation-specific count and every member must equal one canonical URL from the
-runner repository map. Fetch accepts exactly its one used URL; push validates
-every destination returned by `--push --all`. When the placement selected a
-credential profile, that entry must name the exact granted profile. A placement
-that selected no profile performs anonymous HTTPS only for an entry that also
-names no profile; an entry that requires one fails `credential_unavailable`
-rather than resolving a profile the placement never selected. Every Git
-invocation additionally runs under the runner-forced effective configuration —
-neutralized system and global configuration, a command-line transport allowlist,
-forced HTTP-path credential queries when a helper is installed, and disabled
-repository hooks — and that forced configuration is the transport boundary while
-the effective-URL check above is the repository boundary it cannot supply, both
-specified by
+Before network use, every Git tool that reaches a remote applies the complete
+effective-URL and multiplicity contract owned by
 [runner protocol and placement](runner-protocol.md#workspace-provisioning-and-recovery);
-validating the stored remote URL is defense in depth above the pair, not a
-boundary itself. A `branch` is at most 255 bytes and is validated as the
-complete ref form `refs/heads/<input>` rather than as a branch shorthand, so a
-token Git would expand — `@{-1}` and its kin — is rejected instead of admitted
-as a literal name; a `ref` or refspec is 1 through 1,024 UTF-8 bytes, contains
-no U+0000, and is passed after option termination. A commit message is 1 through
-65,536 UTF-8 bytes with no U+0000. Git commands never use a credential-bearing
-URL, force, delete, tag, recurse-submodule, hook-bypass, amend, or signing
-option unless a later contract adds that operation explicitly.
+this page defines no alternate destination set or count. The repository entry
+used by the profile rule below is the same entry that owning binding selects.
+When the placement selected a credential profile, that entry must name the exact
+granted profile. A placement that selected no profile performs anonymous HTTPS
+only for an entry that also names no profile; an entry that requires one fails
+`credential_unavailable` rather than resolving a profile the placement never
+selected. Every Git invocation additionally runs under the runner-forced
+effective configuration — neutralized system and global configuration, a
+command-line transport allowlist, forced HTTP-path credential queries when a
+helper is installed, and disabled repository hooks — and that forced
+configuration is the transport boundary while the owning effective-URL check is
+the repository boundary it cannot supply. Validating the stored remote URL is
+defense in depth above the pair, not a boundary itself. A `branch` is at most
+255 bytes and is validated as the complete ref form `refs/heads/<input>` rather
+than as a branch shorthand, so a token Git would expand — `@{-1}` and its kin —
+is rejected instead of admitted as a literal name; a `ref` or refspec is 1
+through 1,024 UTF-8 bytes, contains no U+0000, and is passed after option
+termination. A commit message is 1 through 65,536 UTF-8 bytes with no U+0000.
+Git commands never use a credential-bearing URL, force, delete, tag,
+recurse-submodule, hook-bypass, amend, or signing option unless a later contract
+adds that operation explicitly.
 
 Every Git tool carries the same required `timeout_seconds` member as
 `shell_exec`, on the same 1-through-1,800-second bound, and each declaration's
@@ -412,22 +410,26 @@ prepares the snapshot), so a session whose writable root is not a worktree
 advertises the five writable-root tools, none of the four worktree Git tools,
 and `git_clone` only when its selected runner advertises at least one repository
 entry whose optional credential-profile name equals the optional profile that
-session selected. Every configured repository entry names either one exact
-profile or explicit anonymous access
+session selected. For `git_fetch` and `git_push`, the required entry is instead
+the exact repository key recorded by the workspace manifest, paired in the
+current advertisement with that same optional profile. Every configured
+repository entry names either one exact profile or explicit anonymous access
 ([configuration and credentials](configuration-and-credentials.md#runner-configuration)),
 and the advertisement carries each key together with that optional profile
 ([runner protocol and placement](runner-protocol.md#advertised-catalogs-and-daemon-authority)),
-so preparation decides this from the registration snapshot alone: a profileless
-session matches anonymous entries, a profiled session matches entries carrying
-exactly its grant, and a session on a runner with no matching entry advertises
-no remote Git tool. Which matching key a request names remains the runner's
-admission check, and its `repository_unavailable` or `credential_unavailable`
-refusal names a specific rejected argument rather than a capability the session
-was told it had. Why: a requirement stated on the declaration is checked once at
-preparation, while a requirement implied only by a tool's argument contract can
-be discovered no earlier than the dispatch that fails — and the
-key/optional-profile pairing is what makes this particular requirement decidable
-at preparation, including anonymous access.
+so preparation decides both forms from the registration snapshot alone: a
+profileless session matches anonymous access, a profiled session matches only
+its exact grant, and a session whose required entry is absent or differently
+paired advertises no affected remote Git tool. Which eligible key a `git_clone`
+request names remains the runner's admission check; a worktree remote tool has
+no alternate key because its manifest already fixed one. A
+`repository_unavailable` or `credential_unavailable` refusal therefore names a
+specific rejected argument or a post-preparation availability change rather than
+a capability the session was told it had. Why: a requirement stated on the
+declaration is checked once at preparation, while a requirement implied only by
+a tool's argument contract can be discovered no earlier than the dispatch that
+fails — and the key/optional-profile pairing is what makes this particular
+requirement decidable at preparation, including anonymous access.
 
 Each provider operation carries the exact session-executable definition and
 locus snapshot prepared under

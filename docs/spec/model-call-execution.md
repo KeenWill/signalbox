@@ -216,10 +216,14 @@ are defined relative to a session repository is included only for a session that
 has a repository worktree. A declaration whose session capability itself
 requires a credential profile is included only for a session that was granted
 one. When a remote declaration's credential requirement comes from a repository
-entry instead, preparation includes it only when the current advertisement pairs
-some repository key with an optional credential-profile name equal to the
-session's optional selection: absence equals absence and means anonymous access,
-while a present name must equal the exact grant. No absent/present pair matches,
+entry instead, preparation compares that entry's advertised optional profile to
+the session's optional selection: absence equals absence and means anonymous
+access, while a present name must equal the exact grant. For a declaration that
+operates on the session's repository worktree, that entry is the exact
+repository key recorded by the workspace manifest; no other matching key can
+satisfy it. For `git_clone`, which introduces a repository into a writable root
+rather than operating on an existing worktree, any advertised entry with the
+matching optional profile satisfies preparation. No absent/present pair matches,
 and absence never selects a credential. A session composed without a workspace
 therefore advertises exactly the tools that can execute in it and no placement
 combination is rejected merely for being workspace-free

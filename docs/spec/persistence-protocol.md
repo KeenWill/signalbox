@@ -169,7 +169,6 @@ Representation rules, all enforced in the schema:
   cannot cross-wire provenance. Preexisting, imported, and explicit sessions
   carry two nulls. Both tables retain their append-only guards; no template
   catalog or mutable template object exists in Postgres (INV-047).
-
 - Migration `202607280303` adds the optional bounded `system_prompt` column to
   `session_defaults_version` and the three defaults-bearing command tables, each
   guarded by the 1,048,576-UTF-8-byte and nonempty CHECK constraints and, on
@@ -178,7 +177,6 @@ Representation rules, all enforced in the schema:
   foreign keys, because megabyte text cannot join a btree key; the empty bytea
   stands for an absent prompt so a `MATCH SIMPLE` member never skips enforcement
   ([sessions-and-transcript](sessions-and-transcript.md)).
-
 - Migration `202607280201` adds the closed `model_identity_changed`
   semantic-entry payload, whose turn, positive defaults epoch, and direct
   selection are total only for that kind. Deferred checks bind it to the named
@@ -190,7 +188,6 @@ Representation rules, all enforced in the schema:
   turn-start frontier ends with the boundary entry immediately followed by the
   turn origin. The lifecycle insertion trigger admits that two-entry suffix
   atomically while preserving the predecessor prefix and exact count.
-
 - A `context_frontier` header records its immutable total member count and an
   optional same-session prefix frontier. `context_frontier_delta` stores only
   the absolute-position suffix beyond that prefix; roots store their complete
@@ -203,7 +200,6 @@ Representation rules, all enforced in the schema:
   inherited duplicates, gaps, and a resolved count different from the header.
   Why: append-derived histories store and load each immutable suffix once while
   preserving the complete-snapshot contract.
-
 - Closed variant sets are `text` discriminators under `CHECK` constraints, with
   variant payload columns constrained present exactly when the discriminator
   requires them (for example `turn_lifecycle_state_payload_shape`). The
@@ -216,7 +212,6 @@ Representation rules, all enforced in the schema:
   `without_stop` and `after_cancellation`, and model-call state
   `prepared`/`in_flight`/`cancellation_requested`/`terminal` with terminal
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
-
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -233,7 +228,6 @@ Representation rules, all enforced in the schema:
   rows are inserted `prepared` and an `ended` attempt is immutable. Why: restart
   trusts durable rows as evidence, so the schema itself must forbid rewriting
   them (INV-006, INV-007).
-
 - The current `session_metadata` root remains mutable by complete replacement
   but rejects deletion and any change to its `session_id`. Once a session has a
   recorded metadata write, root absence can therefore never be reinterpreted as
@@ -253,12 +247,10 @@ Representation rules, all enforced in the schema:
   current root and every applied receipt to the evidence. Reinstalling an older
   receipt after a later replacement cannot commit, and installation evidence
   cannot be updated, deleted, or truncated.
-
 - INV-009 is database-level: partial unique indexes
   `turn_lifecycle_one_active_per_session`, `turn_attempt_one_live_per_turn`, and
   `turn_attempt_one_initial_per_turn` reject a second active turn, second live
   attempt, or second initial attempt regardless of process memory.
-
 - Pending steering is durable current state (migration `202607180005`): an
   `accepted_input` row with disposition `pending_steering` records a
   `next_safe_point` delivery and names its expected active source turn, with
@@ -282,7 +274,6 @@ Representation rules, all enforced in the schema:
   proof. Those lifecycle checks preserve the immutable next-safe-point command
   receipt, so equal replay after either transition still returns the original
   applied pending-steering result (INV-012, INV-016).
-
 - The runner-orchestration slice adds the `awaiting_runner_recovery` active
   phase to `turn_lifecycle` with payload columns total only for that
   discriminator: the exact lost runner, the positive placement revision the loss
@@ -296,7 +287,6 @@ Representation rules, all enforced in the schema:
   correlated facts rather than from the stored discriminator. Without this shape
   the loss transaction has nowhere to store the phase and restart cannot rebuild
   it.
-
 - The same slice adds the closed `runner_placement_changed` semantic-entry
   payload: one positive placement revision, total only for that kind, with a
   foreign key to the same session's placement record at exactly that revision.
@@ -306,7 +296,6 @@ Representation rules, all enforced in the schema:
   it. Reconstitution resolves the referenced placement record and rejects a
   missing, cross-session, non-successor, or duplicated reference rather than
   rendering the entry from its own payload.
-
 - The runner-orchestration foundation adds one append-only
   `runner_operation_failure` record for every durably admitted
   `operation_failed` frame. It stores the exact runner, one closed
@@ -327,22 +316,20 @@ Representation rules, all enforced in the schema:
   checks owned by
   [runner protocol](runner-protocol.md#local-transport-and-connection-protocol);
   none is stored in a generic payload column or normalized on admission. The
-  record and its JSON text reject update, delete, and truncate.
-
-  Admission inserts that evidence in the same transaction that resolves the
-  correlated operation as refused. Provisioning can then produce no
-  `workspace_ready` receipt; a release can produce neither `workspace_released`
-  nor a second refusal and is retired as refused; and an offered lease can
-  produce no `lease_claim` and terminalizes with exact no-execution evidence.
-  Deferred checks require exactly one of the operation's success and refusal
-  proofs and preserve the failure after the mutable operation head retires.
-  Equal retransmission rereads the equal record and returns
+  record and its JSON text reject update, delete, and truncate. Admission
+  inserts that evidence in the same transaction that resolves the correlated
+  operation as refused. Provisioning can then produce no `workspace_ready`
+  receipt; a release can produce neither `workspace_released` nor a second
+  refusal and is retired as refused; and an offered lease can produce no
+  `lease_claim` and terminalizes with exact no-execution evidence. Deferred
+  checks require exactly one of the operation's success and refusal proofs and
+  preserve the failure after the mutable operation head retires. Equal
+  retransmission rereads the equal record and returns
   `operation_failure_recorded`; unequal reuse is a correlation error. Why:
   acknowledging volatile detail would let a restart forget evidence operator
   inspection must reproduce, while delaying the operation transition until after
   acknowledgement would leave the runner resending a failure the daemon had
   already acted on.
-
 - Both creation command families store the caller's optional placement.
   `create_session_command` and `create_session_from_imported_frontier_command`
   carry the complete request — selector kind with its runner identity or class
@@ -356,7 +343,6 @@ Representation rules, all enforced in the schema:
   present placement additionally requires the created session's revision-one
   placement record to carry the equal request, so replay and session state
   cannot disagree about what was requested.
-
 - Cross-table completeness uses deferrable-initially-deferred foreign keys and
   constraint triggers so rows of one atomic fact can be inserted in any order
   inside a transaction while every commit boundary sees the complete shape: each
@@ -376,15 +362,12 @@ Representation rules, all enforced in the schema:
   rejection directly against its named turn's recorded `awaiting_tool_approval`
   wait, so a receipt naming a running or terminal turn cannot commit and
   therefore never replays as authoritative.
-
 - Accepted user text is bounded to 1 MiB of UTF-8 in both the command record and
   `accepted_input` (`octet_length(convert_to(...))` checks), independent of the
   application admission bound.
-
 - Current and receipt metadata tag and attribute-key columns are bounded to
   1,024 UTF-8 bytes with the same explicit octet-length checks as their domain
   admission boundary.
-
 - Current and applied-receipt metadata timestamps reject PostgreSQL positive and
   negative infinity, so every admitted value reaches the checked
   Unix-microsecond decoder.
@@ -712,23 +695,34 @@ cause attached to any disposition other than `known_failed`. Active-phase,
 terminal-evidence, and acceptance-tail validation semantics are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
-Runner-status reconstitution pages retained operation failures through one
-closed correlation input with `WorkspaceProvisioning`, `WorkspaceRelease`, and
-`LeaseOffer` arms. The adapter applies the process protocol's exclusive typed
-evidence cursor in runner-and-correlation order, loads at most the requested
-page size plus one checked evidence row, and uses the extra row only to produce
-the continuation cursor; it never loads the append-only failure history into
-memory. For each emitted failure, it loads the complete typed target beside the
+Runner-status reconstitution applies the process protocol's closed exclusive
+evidence cursor to retained operation failures and to each runner's currently
+published, final-acknowledged workspace-leak snapshot. Staged, interrupted, and
+superseded leak reports are never readable. Evidence-kind order is failures
+before leaks. A null or operation-failure cursor continues failures exclusively
+in runner-and-correlation order and, only when that query leaves capacity,
+continues from the first leak; a workspace-leak cursor skips failures and
+continues leaks exclusively in their complete runner-and-fact-tuple order. The
+two queries share one limit of `page_size + 1` checked rows, and the extra row
+is used only to produce the continuation cursor; neither query materializes the
+retained evidence history.
+
+For each emitted failure, the adapter loads the complete typed target beside the
 failure row, decodes the category and every detail bound, requires the target's
 runner and full correlation to equal the retained arm, and requires the target
-to carry the matching refused/no-execution terminal proof. A missing target,
-success/refusal conflict, invalid detail, impossible category/arm pair, or
-duplicate correlation is typed corruption; it is never dropped from the page
-count. The resulting checked failures are projected verbatim by
-`read_runner_status`, so restart and continuation reproduce the same category,
-code, message, and structured payload that durable admission acknowledged. The
-records remain append-only without a retention cap; bounded reads, rather than
-lossy retention, keep an arbitrarily long history inspectable.
+to carry the matching refused/no-execution terminal proof. For each emitted
+leak, it loads the published-snapshot header beside the fact row, requires the
+header to be the runner's final-acknowledged current snapshot, and validates the
+exact runner, closed kind, locator, digest, optional session and placement
+revision, and strictly increasing unique fact tuple admitted by runner protocol.
+A missing target or snapshot, staged or superseded snapshot membership,
+runner/correlation mismatch, success/refusal conflict, invalid failure detail,
+impossible category/arm pair, duplicate correlation, malformed leak fact, or
+duplicate leak tuple is typed corruption; it is never dropped from the page
+count. The checked evidence is projected verbatim by `read_runner_status`, so
+restart and continuation reproduce exactly what durable admission acknowledged.
+Failure records remain append-only without a retention cap; bounded reads,
+rather than lossy retention, keep an arbitrarily long history inspectable.
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired
