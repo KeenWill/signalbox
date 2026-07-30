@@ -611,24 +611,25 @@ no new response vocabulary. Each status carries issued request, runner,
 enrollment, and registration identities, connection state (`connected`,
 `suspect`, or `lost`), registration revision, advertised capability classes,
 tool names, credential-profile names, repository entries — each naming its
-repository key and the credential-profile name that key requires — workspace
-capabilities, and sandbox profiles. Each `runner_operation_failure` names its
-runner, the refused operation's correlation, one closed daemon-actionable
-`category` (`credential_unavailable`, `repository_unavailable`,
-`sandbox_unavailable`, `workspace_conflict`, `workspace_cleanup_failed`, or
-`lease_admission_refused`), and the runner-authored `detail` object carrying its
-bounded `code`, `message`, and structured `payload` verbatim. The daemon bounds
-that detail and reproduces it without interpretation; the runner applies the
-same exact-value redaction it applies to tool output before sending it, so the
-detail carries no credential value, and it carries no absolute host path or
-configured repository URL. That `category` set is exactly the closed
-daemon-actionable set the runner wire carries
+repository key and the optional credential-profile name that key requires, with
+absence meaning anonymous HTTPS — workspace capabilities, and sandbox profiles.
+Each `runner_operation_failure` names its runner, the refused operation's
+correlation, one closed daemon-actionable `category` (`credential_unavailable`,
+`repository_unavailable`, `sandbox_unavailable`, `workspace_conflict`,
+`workspace_cleanup_failed`, or `lease_admission_refused`), and the
+runner-authored `detail` object carrying its bounded `code`, `message`, and
+structured `payload` verbatim. The daemon bounds that detail and reproduces it
+without interpretation; the runner applies the same exact-value redaction it
+applies to tool output before sending it, so the detail carries no credential
+value, and it carries no absolute host path or configured repository URL. That
+`category` set is exactly the closed daemon-actionable set the runner wire
+carries
 ([runner protocol and placement](runner-protocol.md#local-transport-and-connection-protocol)),
 member for member, so every retained failure is serializable here and the
 projection never has to choose between omitting one that `failure_count` counts
-and rejecting the response. Owner inspection is therefore the surface on which
-the complete runner-specific failure is readable even though daemon logic keys
-only off the category. `pending_runner_status` also carries the literal
+and rejecting the response. Runner status inspection is therefore the surface on
+which the complete runner-specific failure is readable even though daemon logic
+keys only off the category. `pending_runner_status` also carries the literal
 authority state `provisioning_only`; it is never presented as dispatch-capable.
 Each leak names its exact runner id and carries the exact closed `kind`, bounded
 runner-root-relative `locator`, lowercase manifest-or-entry SHA-256 digest, and

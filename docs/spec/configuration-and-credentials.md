@@ -138,8 +138,8 @@ The root contains:
   `crates.io`, and `api.anthropic.com` entries;
 - one checked Git author name and email used by Git tools;
 - `[repositories.<name>]` tables mapping checked repository keys to an exact
-  credential-free GitHub HTTPS clone URL and one configured credential-profile
-  name; and
+  credential-free GitHub HTTPS clone URL and an optional configured
+  credential-profile name; and
 - `[credentials.<name>]` tables mapping checked profile names to `file` and
   `injection_env` strings.
 
@@ -147,26 +147,27 @@ Names use the runner-protocol checked-name grammar. A version-one clone URL has
 scheme `https`, exact lowercase host `github.com`, no user information, port,
 query, fragment, percent encoding, empty component, or dot component, and an
 exact owner/repository path with an optional terminal `.git`. Its named
-credential profile must exist. Any repository requires `github.com` in the
-effective network list. Environment names use `[A-Z_][A-Z0-9_]*`, cannot name
-runner control, model-provider, or dynamic-loader variables, and are unique.
-Absolute paths are canonicalized without following a final credential symlink;
-duplicate, nested, writable/read-only-overlapping, or runner-root-overlapping
-allowlist paths fail closed. Configuration may narrow network entries but cannot
-add a hostname.
+credential profile, when present, must exist. Absence means that the entry
+admits anonymous HTTPS access only; it never asks the runner or daemon to select
+a credential. Any repository requires `github.com` in the effective network
+list. Environment names use `[A-Z_][A-Z0-9_]*`, cannot name runner control,
+model-provider, or dynamic-loader variables, and are unique. Absolute paths are
+canonicalized without following a final credential symlink; duplicate, nested,
+writable/read-only-overlapping, or runner-root-overlapping allowlist paths fail
+closed. Configuration may narrow network entries but cannot add a hostname.
 
 The shipped example contains exactly one credential entry:
 `credentials.github-runner`, whose `file` names a fine-grained repository-scoped
 PAT file and whose `injection_env` is `GH_TOKEN`. The parser and resolver are
 otherwise name-generic: adding another credential shape is a configuration
 entry, not a code branch. The runner advertises the exact configured credential
-names, and each configured repository key paired with the profile name its own
-entry carries, as availability; the daemon records no credential-specific effect
-or approval policy, and an owner placement may grant only a name the current
-registration advertised. Reserved model-provider profile and environment names
-are rejected. Because arbitrary secret bytes have no self-describing type, file
-contents cannot be classified as a provider key; the runner has no
-model-provider config field or daemon path that supplies one.
+names, and each configured repository key paired with the optional profile name
+its own entry carries, as availability; the daemon records no
+credential-specific effect or approval policy, and the daemon may grant only a
+name the current registration advertised. Reserved model-provider profile and
+environment names are rejected. Because arbitrary secret bytes have no
+self-describing type, file contents cannot be classified as a provider key; the
+runner has no model-provider config field or daemon path that supplies one.
 
 Startup opens or creates `runner_root` as an effective-user-owned real `0700`
 directory without following its final component, retains its device/inode
@@ -421,12 +422,12 @@ credential path or value (INV-035, INV-045).
 A session may hold no credential at all, and no boundary infers one. When the
 placement selected no profile the daemon issues no grant, the lease carries no
 credential dispatch authorization, and the runner resolves no path and injects
-no value for that session's dispatches; a repository whose configured entry
-requires a profile fails with the typed `credential_unavailable` class rather
-than resolving a profile the owner never selected. The converse is equally
-admitted: a named profile is granted to a session with no repository and no
-workspace, because the credential is scoped to that session's dispatches rather
-than to a clone
+no value for that session's dispatches. A repository entry with no profile then
+uses anonymous HTTPS, while an entry that names a profile fails with the typed
+`credential_unavailable` class rather than resolving a profile the placement
+never selected. Conversely, a named profile is granted to a session with no
+repository and no workspace, because the credential is scoped to that session's
+dispatches rather than to a clone
 ([runner protocol and placement](runner-protocol.md#session-composition)).
 
 At lease admission the runner requires the exact granted name in its startup
@@ -452,10 +453,15 @@ configured entry the runner resolves before the invocation. The helper returns
 the selected value only when the query's protocol, exact `github.com` host, and
 owner/repository path all match that entry's configuration-validated canonical
 URL and that entry names exactly the granted credential profile; every other
-query returns no credential. Why: binding the helper to the provisioned
-workspace left the operation that introduces a session's first repository
-unauthorizable, because a clone runs in a writable root whose manifest names no
-repository key at all
+query returns no credential. Every guarded Git command that installs this helper
+also forces `credential.useHttpPath=true` on the same command line as the
+transport and helper configuration. Why: Git otherwise defaults that setting to
+false and strips the owner/repository path before calling the helper, so the
+required exact-path check would reject every authenticated clone, fetch, and
+push; preserving the path is the authorization boundary, not a convenience.
+Binding the helper to the provisioned workspace would also leave the operation
+that introduces a session's first repository unauthorizable, because a clone
+runs in a writable root whose manifest names no repository key at all
 ([runner protocol and placement](runner-protocol.md#workspace-provisioning-and-recovery)).
 The runner scrubs the exact value and its JSON-string-escaped form from admitted
 stdout, stderr, and result text before forwarding. This reduces accidental echo;

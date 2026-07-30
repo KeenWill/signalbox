@@ -268,18 +268,22 @@ genuinely larger than these caps need the storage architecture recorded under
 [Tool safety](../open-questions.md#tool-safety), not a wider constant here.
 
 Git `remote` is 1 through 64 ASCII bytes matching `[A-Za-z0-9][A-Za-z0-9._-]*`.
-Before network use, the URL Git will actually use for it — resolved by Git
-itself under the runner-forced configuration, so that every `insteadOf` and
-`pushurl` expansion is already applied — must equal a canonical URL from the
-runner repository map, and when the placement selected a credential profile that
-entry must name the exact granted profile. A placement that selected no profile
-performs no authenticated network operation: a repository entry that requires
-one fails `credential_unavailable` rather than resolving a profile the owner
-never chose. Every Git invocation additionally runs under the runner-forced
-effective configuration — neutralized system and global configuration, a
-command-line transport allowlist, and disabled repository hooks — and that
-forced configuration is the transport boundary while the effective-URL check
-above is the repository boundary it cannot supply, both specified by
+Before network use, the complete effective-URL sequence Git will actually use —
+resolved by Git itself under the runner-forced configuration, so every
+`insteadOf` and `pushurl` expansion is already applied — must have the
+operation-specific count and every member must equal one canonical URL from the
+runner repository map. Fetch accepts exactly its one used URL; push validates
+every destination returned by `--push --all`. When the placement selected a
+credential profile, that entry must name the exact granted profile. A placement
+that selected no profile performs anonymous HTTPS only for an entry that also
+names no profile; an entry that requires one fails `credential_unavailable`
+rather than resolving a profile the placement never selected. Every Git
+invocation additionally runs under the runner-forced effective configuration —
+neutralized system and global configuration, a command-line transport allowlist,
+forced HTTP-path credential queries when a helper is installed, and disabled
+repository hooks — and that forced configuration is the transport boundary while
+the effective-URL check above is the repository boundary it cannot supply, both
+specified by
 [runner protocol and placement](runner-protocol.md#workspace-provisioning-and-recovery);
 validating the stored remote URL is defense in depth above the pair, not a
 boundary itself. A `branch` is at most 255 bytes and is validated as the
@@ -329,10 +333,11 @@ The exact tools are:
 - `git_clone` takes
   `{ "repository": checked_repository_key, "destination": path, "timeout_seconds": timeout }`.
   Destination must not exist and its parent must be real. The runner resolves
-  the named entry's canonical URL and the granted credential profile that entry
-  names, requires Git's own expansion of that URL under the forced configuration
-  to return it unchanged, clones without submodules into that destination, and
-  returns
+  the named entry's canonical URL and optional credential profile, requires that
+  optional profile to equal the placement's selection, requires Git's own
+  expansion of that URL under the forced configuration to return it unchanged,
+  clones anonymously when both profiles are absent and through the fixed helper
+  when both carry the same name, and returns
   `{ "head": canonical_full_commit_hex | null, "branch": string | null, "unborn_branch": string | null }`.
   A populated repository returns its exact `head` with the nullable `branch` and
   a null `unborn_branch`. An empty repository is a success, not a failure and
@@ -399,30 +404,29 @@ runner-backed session has. `git_fetch`, `git_branch`, `git_commit`, and
 `git_clone` requires a writable root and one configured repository entry,
 because it clones into that root instead of presuming the root is already a
 worktree; and each operation that reaches a remote additionally requires the
-granted credential profile its repository entry names. A session whose
+optional credential profile its repository entry names. A session whose
 composition does not satisfy a declaration's requirement is never offered that
 declaration ([model-call execution](model-call-execution.md#frontier-rendering)
 prepares the snapshot), so a session whose writable root is not a worktree
 advertises the five writable-root tools, none of the four worktree Git tools,
 and `git_clone` only when its selected runner advertises at least one repository
-entry whose credential-profile name is exactly the profile that session was
-granted. Every configured repository entry names exactly one profile
+entry whose optional credential-profile name equals the optional profile that
+session selected. Every configured repository entry names either one exact
+profile or explicit anonymous access
 ([configuration and credentials](configuration-and-credentials.md#runner-configuration)),
-and the advertisement carries each key together with the profile that key
-requires
+and the advertisement carries each key together with that optional profile
 ([runner protocol and placement](runner-protocol.md#advertised-catalogs-and-daemon-authority)),
 so preparation decides this from the registration snapshot alone: a profileless
-session, a session on a runner with no repository entry, and a session whose
-granted profile no advertised entry names each advertise no Git tool at all.
-Which of the matching keys a given request names remains the runner's admission
-check, and its `repository_unavailable` or `credential_unavailable` refusal
-names a specific rejected argument rather than a capability the session was told
-it had. Why: a requirement stated on the declaration is checked once at
+session matches anonymous entries, a profiled session matches entries carrying
+exactly its grant, and a session on a runner with no matching entry advertises
+no remote Git tool. Which matching key a request names remains the runner's
+admission check, and its `repository_unavailable` or `credential_unavailable`
+refusal names a specific rejected argument rather than a capability the session
+was told it had. Why: a requirement stated on the declaration is checked once at
 preparation, while a requirement implied only by a tool's argument contract can
-be discovered no earlier than the dispatch that fails — and the key/profile
-pairing is what makes this particular requirement decidable at preparation,
-because two independent inventories can each be nonempty with no usable pair
-between them, which is a promise of a tool no argument could execute.
+be discovered no earlier than the dispatch that fails — and the
+key/optional-profile pairing is what makes this particular requirement decidable
+at preparation, including anonymous access.
 
 Each provider operation carries the exact session-executable definition and
 locus snapshot prepared under

@@ -165,17 +165,24 @@ messages:
 - `RunnerPlacementChanged` resolves its complete same-session successor
   placement record and renders as a structured provider-neutral placement change
   retaining the positive placement revision and selected sandbox profile. The
-  provider bridge projects it as an injected user-role message whose exact text
-  is
-  `Signalbox session event: runner placement changed to revision {revision} with profile {profile}; prior runner-local execution state is unavailable.`
-  The braces are replaced by the canonical decimal revision and exact
-  `workspace-restricted` or `ambient` token. Missing, stale, cross-session, or
-  non-successor placement authority fails rendering instead of inventing text.
-  The same text renders every relocation, including a working-directory move on
-  the same runner and a later owner-directed move of a healthy session
-  ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)):
-  what the model must be told is that runner-local state from before the
-  boundary is gone, which is equally true of each;
+  provider bridge projects one of two exact injected user-role messages. For
+  `workspace-restricted` it emits
+  `Signalbox session event: runner placement changed to revision {revision} with profile workspace-restricted; the prior placement can no longer execute. The successor writable root and working directory are now active. Relocation did not delete prior files; they may still exist, but only paths exposed inside the successor restricted workspace are reachable.`
+  For `ambient` it emits
+  `Signalbox session event: runner placement changed to revision {revision} with profile ambient; the prior placement can no longer execute. The successor working directory is now active. Relocation did not delete prior files, and they may remain reachable at their previous paths through the invoking user's filesystem; check before recreating or overwriting them.`
+  The braces are replaced by the canonical decimal revision. Missing, stale,
+  cross-session, or non-successor placement authority fails rendering instead of
+  inventing text. The same profile-specific text renders every relocation,
+  including a working-directory move on the same runner and a later
+  owner-directed move of a healthy session
+  ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)).
+  What is genuinely unavailable is authority to execute through the retired
+  placement; the old path is no longer the active working directory or writable
+  root. Physical files are not reported lost: a restricted successor exposes
+  only its own namespace, while an ambient successor may still expose an old
+  path, particularly after a same-runner move. Why: reporting deletion or
+  inaccessibility the relocation did not enforce can cause the model to recreate
+  or overwrite work that still exists;
 - `AssistantText` renders as an assistant message retaining its producing-call
   provenance;
 - imported `Text` with an attested value renders with its imported user or

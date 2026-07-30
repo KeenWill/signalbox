@@ -80,11 +80,10 @@ positive placement revisions, the `RunnerPlacementChanged` semantic boundary,
 the runner event family, and the placement fields carried by session-creation
 records — are specified so that adding it changes no other contract, and every
 later change to those mechanisms must remain compatible with a relocation that
-no loss caused. Its model-facing consequence is already correct and stays as
-written: the injected placement event states that prior runner-local execution
-state is unavailable
-([model-call execution](model-call-execution.md#frontier-rendering)), which is
-exactly what an owner-directed move must say.
+no loss caused. Its model-facing consequence distinguishes retired placement
+authority from filesystem reachability: the injected placement event never
+claims that relocation deleted prior files
+([model-call execution](model-call-execution.md#frontier-rendering)).
 
 Successor promotion stays owner-initiated in every form. Fresh-install
 enrollment is instantly active; only a successor after loss waits, and it waits
@@ -168,11 +167,12 @@ The closed version-one frame vocabulary is:
 An advertisement contains at most 16 capability classes, 256 tools, 64
 credential-profile names, and 64 repository entries; names are sorted and
 unique. A repository entry is one exact repository key paired with the exact
-credential-profile name that key's runner configuration names, and entries are
-sorted and unique by key. Why: the daemon has to decide before a model call
-whether a session can clone anything at all, and two independent inventories of
-keys and profiles cannot answer that — only the pairing shows whether some key's
-entry names the profile this session was granted
+optional credential-profile name that key's runner configuration carries, and
+entries are sorted and unique by key. Absence advertises anonymous HTTPS
+availability rather than an incomplete pair. Why: the daemon has to decide
+before a model call whether a session can clone anything at all, and independent
+inventories of keys and profiles cannot answer that — only the pairing shows
+whether an entry is anonymous or requires the profile this session was granted
 ([tool loop](tool-loop.md#registry-placement-and-effect-metadata) owns the
 advertisement condition that reads it). Workspace and sandbox inventories are
 their closed vocabularies. A reconnect inventory contains at most one lease, one
@@ -219,8 +219,8 @@ Each kind's field sequence is complete and fixed here:
 - `advertisement` — capability classes, tool names, workspace capabilities,
   sandbox profiles, and credential-profile names, each as a sorted inventory of
   its exact names or closed tokens, then repository entries as one sorted
-  inventory of nested records of repository key followed by credential-profile
-  name
+  inventory of nested records of repository key followed by optional
+  credential-profile name, using the ordinary presence-byte encoding
   ([advertised catalogs and daemon authority](#advertised-catalogs-and-daemon-authority));
 - `leak-report` — one inventory holding the report's complete sorted fact
   sequence, each fact a nested record of fact kind, locator, entry digest,
@@ -564,8 +564,9 @@ bootstrap their own authority. Duplicate names or an internally inconsistent
 placement declaration rejects the complete catalog. Credential-profile names and
 repository entries remain exact availability inventories recorded by that
 registration and acquire no policy by being stored: the profile name a
-repository entry carries states which configured credential that repository
-requires, never that any session holds it.
+repository entry carries, when present, states which configured credential that
+repository requires, never that any session holds it; absence states that the
+entry is anonymous.
 
 The version-one daemon composition constructs this value once from the compiled
 workstation registry, the exact `workstation-v1` class, and fixed profile
@@ -626,13 +627,13 @@ Unknown tools, capability classes, workspace capabilities, and sandbox profiles,
 or malformed credential-profile names reject the complete advertisement. A
 daemon-only tool or a runner tool whose declared identity-or-class selector the
 advertisement does not satisfy also rejects the complete advertisement, as does
-a repository entry whose credential-profile name is absent from the same
+a repository entry whose present credential-profile name is absent from the same
 advertisement's profile inventory: an entry naming a profile the runner does not
-offer could never be granted, and admitting it would put an unusable pair into
-the very correlation preparation reads. The resulting
-`ValidatedRunnerRegistration` exposes only exact advertised availability paired
-with daemon-owned policy. A runner can therefore neither self-widen its tool
-surface nor replace confirmation with automatic approval (INV-042).
+offer could never be granted, while an entry naming none is intentionally usable
+without a grant. The resulting `ValidatedRunnerRegistration` exposes only exact
+advertised availability paired with daemon-owned policy. A runner can therefore
+neither self-widen its tool surface nor replace confirmation with automatic
+approval (INV-042).
 
 ## Effect classes and runner leases
 
@@ -819,7 +820,7 @@ key, and whether that repository is empty or populated is a fact about the
 repository rather than a third value the request selects. A session with no
 worktree therefore has no session repository, and it reaches a repository only
 by cloning one into its writable root under a runner-configured repository key
-and the credential profile that key's entry names
+and the optional credential profile that key's entry names
 ([tool loop](tool-loop.md#version-one-workstation-tool-contracts)). Credentials
 and sandbox constrain neither of those: every credential choice composes with
 every workspace choice, and either sandbox profile composes with every
@@ -827,6 +828,15 @@ combination of the other two. Runner capability varies over the same axes: a
 runner may advertise no workspace capability and no repository entry at all, and
 such a runner is a fully usable placement target for every session composition
 that needs neither.
+
+The four repository/credential compositions have exact outcomes. No repository
+and no profile performs no repository operation and creates no grant; no
+repository with a named profile creates the grant for other admitted dispatches;
+a repository with no profile provisions anonymously only when its entry also
+names no profile, otherwise it fails `credential_unavailable`; and a repository
+with a named profile provisions with that grant only when the entry names the
+same profile, otherwise it fails `credential_unavailable`. No case selects,
+removes, or substitutes a credential implicitly.
 
 The advertised executable tool set is therefore a function of the session's
 actual capabilities rather than of the compiled registry. A declaration whose
@@ -1146,14 +1156,13 @@ choice is always explicit and never inferred. A session may be created with no
 credentials at all: the request states either one named profile or an explicit
 none, and neither the daemon nor the runner may substitute a profile for an
 absent selection. A profileless placement creates no grant, resolves no
-configured path, and injects no value, including when it requires a repository
-worktree — a repository whose configured clone needs authentication and whose
-placement selected no profile fails provisioning with the
-`credential_unavailable` category rather than proceeding under a profile the
-owner did not choose. Conversely a named profile is grantable to a placement
-with no repository and no workspace, because the credential belongs to the
-session's work rather than to a clone
-([session composition](#session-composition)). Why: a silently inferred
+configured path, and injects no value. When it requires a repository worktree,
+an entry with no profile is cloned anonymously, while an entry whose configured
+clone requires a profile fails provisioning with the `credential_unavailable`
+category rather than proceeding under a profile the placement did not select.
+Conversely a named profile is grantable to a placement with no repository and no
+workspace, because the credential belongs to the session's work rather than to a
+clone ([session composition](#session-composition)). Why: a silently inferred
 credential is an authorization the owner never granted, and refusing to guess is
 the only behavior that keeps the grant record a truthful statement of intent.
 
@@ -1210,13 +1219,14 @@ a direct lease-row insert (INV-035, INV-045).
 `WorkspaceRequirement::RepositoryWorktree` is satisfiable only when the selected
 validated registration advertises `WorkspaceCapability::WorktreePerSession` and
 the repository key resolves in checked runner configuration to a credential-free
-HTTPS clone URL. The runner accepts the provisioning authorization only when
-that entry names exactly the credential profile the authorization carries; a
-mismatched or absent profile is a `credential_unavailable` refusal rather than a
-clone attempted under a grant the entry does not name. That same equality
-governs every authenticated Git operation, however the entry was reached —
-through the workspace manifest, through this authorization, or through a checked
-`git_clone` argument
+HTTPS clone URL. The runner accepts the provisioning authorization only when the
+entry's optional profile equals the authorization's optional profile. Two absent
+values authorize an anonymous clone; two equal present values authorize the
+matching grant; one absent value or two unequal present values produce a
+`credential_unavailable` refusal rather than a clone attempted under an
+unselected or mismatched grant. That same optional equality governs every Git
+operation, however the entry was reached — through the workspace manifest,
+through this authorization, or through a checked `git_clone` argument
 ([configuration and credentials](configuration-and-credentials.md#runner-credential-lifecycle)
 owns the helper that enforces it). The provisioned workspace binds the session,
 placement revision, runner, repository key, exact clone URL identity, sandbox
@@ -1313,6 +1323,13 @@ leaving the helper list unemptied would let an auto-approved, retry-classified
 `git_fetch` execute model-authored code while every transport setting still read
 as valid.
 
+Every invocation that installs a credential helper also forces
+`credential.useHttpPath=true` on that same guarded command line. An anonymous
+remote invocation installs no helper. Why: with Git's false default, the helper
+receives protocol and host but not the owner/repository path, so the exact-path
+authorization check must return no credential and every authenticated remote
+operation fails.
+
 That forced configuration gates the transport and nothing else, and one
 repository-local key defeats every check built on it. `url.<base>.insteadOf`
 rewrites any URL beginning with the configured value to begin with `<base>`
@@ -1332,23 +1349,39 @@ and no highest-priority value clears it.
 
 The canonical repository binding therefore gets its own boundary, placed where
 the transport boundary cannot reach. Every invocation that reaches a remote
-first resolves the URL Git will actually use — for a remote name and for a
-literal URL alike — and requires it to equal, byte for byte, the canonical URL
-of the placement's repository entry. The runner does not compute that resolution
-itself; it asks Git for it, so the answer is the post-rewrite URL rather than an
-approximation of Git's rules. The version-one mechanism is `ls-remote --get-url`
-for a fetch or a literal URL and `remote get-url --push` for a push, each run
-under exactly the forced configuration, working directory, and repository
-selection its guarded invocation will use, so the resolution observes the same
-rewrite table, `remote.<name>.url`, and `remote.<name>.pushurl` that invocation
-would. A resolved URL that differs from the canonical value fails the operation
-before the network is touched and is reported as the mismatch it is; neither URL
-is ever treated as a correction of the other. Validating the stored
-`remote.<name>.url` remains defense in depth above this check rather than the
-check itself. Why: every pre-rewrite reading of the configuration reads exactly
-the value the model left in place to be read, so only the effective URL is
-evidence — and the canonical binding is the whole of what stands between an
-auto-approved `git_fetch` and content served by an attacker-chosen repository.
+first resolves the complete effective-URL sequence Git will use and requires
+every member, byte for byte, to equal the canonical URL of the placement's
+repository entry. The runner does not compute that resolution itself; it asks
+Git, under exactly the forced configuration, working directory, and repository
+selection its guarded invocation will use, so each answer is post-rewrite rather
+than an approximation of Git's rules.
+
+Multiplicity follows the guarded operation rather than one generic query. A
+literal URL resolves through `ls-remote --get-url` and must produce exactly one
+canonical URL. A named fetch enumerates `remote get-url --all`; the result must
+contain exactly one URL, and it must be canonical, because Git fetch consumes
+only the first configured fetch URL. A named push enumerates
+`remote get-url --push --all`; the nonempty result has exactly the destination
+count Git push will use after `remote.<name>.pushurl` fallback, and every
+destination must be canonical. Any count mismatch, empty result, or unequal
+member fails before network use. Extra fetch URLs are rejected rather than left
+unchecked even though Git would consume only the first; duplicate canonical push
+URLs remain admissible because every actual destination is still bound.
+
+A singular check is insufficient for push: `remote.<name>.pushurl` is
+multi-valued, Git pushes to every configured value, and `remote get-url --push`
+returns only the first. A canonical first value could therefore pass while a
+later attacker-controlled destination received the pack, or while its later
+failure obscured an already completed canonical push. Fetch does not share that
+fan-out — it consumes only its first URL — but enumerating and rejecting fetch
+multiplicity makes the checked count equal the operation's count instead of
+preserving another implicit singular assumption. Validating the stored
+`remote.<name>.url` remains defense in depth above these checks rather than the
+boundary itself. Why: every pre-rewrite reading of the configuration reads
+exactly the value the model left in place to be read, so only the complete
+effective sequence is evidence — and the canonical binding is the whole of what
+stands between an auto-approved remote operation and an attacker-chosen
+repository.
 
 What that check covers is worth stating exactly, because the root cause survives
 it. It resolves and then uses, and it holds because the two invocations are
