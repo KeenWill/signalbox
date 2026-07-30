@@ -296,6 +296,40 @@ Representation rules, all enforced in the schema:
   it. Reconstitution resolves the referenced placement record and rejects a
   missing, cross-session, non-successor, or duplicated reference rather than
   rendering the entry from its own payload.
+- The runner-orchestration foundation adds one append-only
+  `runner_operation_failure` record for every durably admitted
+  `operation_failed` frame. It stores the exact runner, one closed
+  `operation_kind` (`workspace_provision`, `workspace_release`, or
+  `lease_offer`), the runner protocol's closed category, and the complete
+  runner-authored detail as separate code, message, and exact JSON-object
+  payload fields. The discriminator makes exactly one correlation arm total: the
+  workspace-provisioning authorization identity; the retired session, positive
+  placement revision, and workspace-manifest identity of a release; or the
+  offered lease identity and positive generation. Composite foreign keys bind
+  that arm to its typed authorization, release, or offered-lease record and to
+  the same runner; a unique constraint permits only one retained failure for an
+  exact operation correlation. Each arm admits exactly the category/correlation
+  pairs owned by
+  [runner protocol](runner-protocol.md#local-transport-and-connection-protocol);
+  every other pair is rejected. Code, message, payload, aggregate detail size,
+  JSON member-name grammar, container cardinality, and depth carry the exact
+  checks owned by
+  [runner protocol](runner-protocol.md#local-transport-and-connection-protocol);
+  none is stored in a generic payload column or normalized on admission. The
+  record and its JSON text reject update, delete, and truncate. Admission
+  inserts that evidence in the same transaction that resolves the correlated
+  operation as refused. Provisioning can then produce no `workspace_ready`
+  receipt; a release can produce neither `workspace_released` nor a second
+  refusal and is retired as refused; and an offered lease can produce no
+  `lease_claim` and terminalizes with exact no-execution evidence. Deferred
+  checks require exactly one of the operation's success and refusal proofs and
+  preserve the failure after the mutable operation head retires. Equal
+  retransmission rereads the equal record and returns
+  `operation_failure_recorded`; unequal reuse is a correlation error. Why:
+  acknowledging volatile detail would let a restart forget evidence operator
+  inspection must reproduce, while delaying the operation transition until after
+  acknowledgement would leave the runner resending a failure the daemon had
+  already acted on.
 - Both creation command families store the caller's optional placement.
   `create_session_command` and `create_session_from_imported_frontier_command`
   carry the complete request — selector kind with its runner identity or class
@@ -503,8 +537,9 @@ Locks per transaction, in acquisition order:
   never reordering them: `session_scheduler` when present; current enrollment or
   pending replacement-request heads in canonical identity order; runner
   connection/loss heads in runner-identity order; current registration head;
-  placement; current credential grant; lease; and only then semantic-frontier
-  and turn rows. A durable owner-command claim precedes this subsequence.
+  placement; current credential grant; lease; operation-failure evidence after
+  its correlated operation; and only then semantic-frontier and turn rows. A
+  durable owner-command claim precedes this subsequence.
 - **Runner enrollment and registration**: the current enrollment or pending
   replacement-request head is locked first, followed by the relevant runner
   heads in runner-identity order and then the current registration head.
@@ -580,6 +615,17 @@ Locks per transaction, in acquisition order:
   leaves its workspace under that same recorded-leak response. Until one of the
   three commits, an unacknowledged release is redelivered after restart exactly
   as an unacknowledged result is.
+- **Runner operation failure**: durable admission takes `session_scheduler` for
+  the correlated session, then the applicable enrollment, connection/loss,
+  registration, placement, grant, and lease rows in the runner total order.
+  Provisioning and release omit the absent lease row; lease refusal includes it.
+  Only after those authority rows are locked does the transaction insert
+  `runner_operation_failure` and install the correlated refused/no-execution
+  transition; a release refusal also retires that exact release in the same
+  transaction. It never performs runner I/O under those locks. A simultaneous
+  claim, workspace receipt, release acknowledgement, loss transition, or
+  duplicate failure therefore wins the shared authority row and makes the loser
+  reread the one committed terminal proof instead of committing both outcomes.
 - **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
   exactly `delivered_through + 1` and its typed record are read. Only an
   accepted synchronous offer advances that same singleton inside the
@@ -648,6 +694,35 @@ projection also decodes the nullable closed provider-failure cause and rejects a
 cause attached to any disposition other than `known_failed`. Active-phase,
 terminal-evidence, and acceptance-tail validation semantics are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
+
+Runner-status reconstitution applies the process protocol's closed exclusive
+evidence cursor to retained operation failures and to each runner's currently
+published, final-acknowledged workspace-leak snapshot. Staged, interrupted, and
+superseded leak reports are never readable. Evidence-kind order is failures
+before leaks. A null or operation-failure cursor continues failures exclusively
+in runner-and-correlation order and, only when that query leaves capacity,
+continues from the first leak; a workspace-leak cursor skips failures and
+continues leaks exclusively in their complete runner-and-fact-tuple order. The
+two queries share one limit of `page_size + 1` checked rows, and the extra row
+is used only to produce the continuation cursor; neither query materializes the
+retained evidence history.
+
+For each emitted failure, the adapter loads the complete typed target beside the
+failure row, decodes the category and every detail bound, requires the target's
+runner and full correlation to equal the retained arm, and requires the target
+to carry the matching refused/no-execution terminal proof. For each emitted
+leak, it loads the published-snapshot header beside the fact row, requires the
+header to be the runner's final-acknowledged current snapshot, and validates the
+exact runner, closed kind, locator, digest, optional session and placement
+revision, and strictly increasing unique fact tuple admitted by runner protocol.
+A missing target or snapshot, staged or superseded snapshot membership,
+runner/correlation mismatch, success/refusal conflict, invalid failure detail,
+impossible category/arm pair, duplicate correlation, malformed leak fact, or
+duplicate leak tuple is typed corruption; it is never dropped from the page
+count. The checked evidence is projected verbatim by `read_runner_status`, so
+restart and continuation reproduce exactly what durable admission acknowledged.
+Failure records remain append-only without a retention cap; bounded reads,
+rather than lossy retention, keep an arbitrarily long history inspectable.
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired
