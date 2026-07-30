@@ -210,7 +210,8 @@ impl CreateSessionRepository {
             Some(
                 CommandKind::SubmitInput
                 | CommandKind::DecideToolRequest
-                | CommandKind::ReviewWorkflow,
+                | CommandKind::ReviewWorkflow
+                | CommandKind::CompactSession,
             ) => {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
@@ -248,7 +249,8 @@ impl CreateSessionRepository {
                     | CommandKind::ReplaceSessionMetadata
                     | CommandKind::SubmitInput
                     | CommandKind::DecideToolRequest
-                    | CommandKind::ReviewWorkflow,
+                    | CommandKind::ReviewWorkflow
+                    | CommandKind::CompactSession,
                 ) => CreateSessionHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(
@@ -290,7 +292,8 @@ impl CreateSessionRepository {
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::SubmitInput
                 | CommandKind::DecideToolRequest
-                | CommandKind::ReviewWorkflow,
+                | CommandKind::ReviewWorkflow
+                | CommandKind::CompactSession,
             ) => Err(CreateSessionRepositoryError::DifferentCommandKind { command_id }),
         }
     }

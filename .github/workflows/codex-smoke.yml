@@ -14,12 +14,14 @@
 # authors. First, GitHub withholds secrets from ordinary fork pull_request runs
 # regardless of environment policy. Second, the secretless gate compares
 # github.event.pull_request.head.repo.full_name with github.repository and
-# rejects a changed fork before the credentialed job can start.
+# rejects a changed fork before the credentialed job can start. Third, the
+# credentialed job condition repeats that comparison. The required aggregate
+# also refuses a smoke-required fork, so weakening one site is insufficient.
 #
 # The smoke remains bound to the codex-smoke environment, which is configured
 # for all branches so main, manual, and synthetic pull-request merge refs can
 # enter. That availability setting admits fork and same-repository refs alike
-# and supplies no security boundary; only the two defenses above exclude forks.
+# and supplies no security boundary; the defenses above exclude forks.
 #
 # The credential is referenced only in the authentication step, piped to the
 # CLI login command on stdin, and never echoed or passed in argv or a child
@@ -99,7 +101,7 @@ jobs:
   smoke:
     name: Codex live compatibility
     needs: gate
-    if: ${{ needs.gate.outputs.smoke_required == 'true' }}
+    if: ${{ needs.gate.outputs.smoke_required == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     permissions:
       contents: read
     # Repository → Settings → Environments → codex-smoke holds
@@ -214,15 +216,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
+      EVENT_NAME: ${{ github.event_name }}
       GATE_RESULT: ${{ needs.gate.result }}
       SMOKE_REQUIRED: ${{ needs.gate.outputs.smoke_required }}
       SMOKE_RESULT: ${{ needs.smoke.result }}
+      HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+      BASE_REPOSITORY: ${{ github.repository }}
     steps:
       - name: Report the binding result
         run: |
           set -euo pipefail
           if [[ "${GATE_RESULT}" != "success" ]]; then
             echo "The Codex smoke eligibility gate failed."
+            exit 1
+          fi
+          if [[ "${EVENT_NAME}" == "pull_request" \
+            && "${SMOKE_REQUIRED}" == "true" \
+            && "${HEAD_REPOSITORY}" != "${BASE_REPOSITORY}" ]]; then
+            echo "A fork pull request cannot use the credentialed Codex smoke."
             exit 1
           fi
           if [[ "${SMOKE_REQUIRED}" == "true" && "${SMOKE_RESULT}" != "success" ]]; then
