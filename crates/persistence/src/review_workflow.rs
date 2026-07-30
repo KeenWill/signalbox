@@ -1045,6 +1045,55 @@ impl ReviewWorkflowStore {
                 format!("domain reconstitution failed: {:?}", error.failure()),
             )
         })?;
+        let head_is_complete = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM review_finding_event_head AS head
+                   LEFT JOIN review_finding_event AS event
+                     ON event.finding_id = head.finding_id
+                    AND event.event_ordinal = head.event_ordinal
+                   LEFT JOIN review_pass AS event_pass
+                     ON event_pass.pass_id = event.event_pass_id
+                    AND event_pass.run_id = event.event_pass_run_id
+                    AND event_pass.target_id = event.target_id
+                  WHERE head.finding_id = $1
+                    AND (
+                        (
+                            head.event_ordinal IS NULL
+                            AND head.status = $2
+                            AND head.event_pass_kind IS NULL
+                            AND head.external_link_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1
+                                  FROM review_finding_event AS existing
+                                 WHERE existing.finding_id = $1
+                            )
+                        )
+                        OR (
+                            head.event_ordinal IS NOT NULL
+                            AND event.event_kind = head.status
+                            AND event_pass.pass_kind = head.event_pass_kind
+                            AND event.external_link_id
+                                IS NOT DISTINCT FROM head.external_link_id
+                            AND head.event_ordinal = (
+                                SELECT max(latest.event_ordinal)
+                                  FROM review_finding_event AS latest
+                                 WHERE latest.finding_id = $1
+                            )
+                        )
+                    )
+             )",
+        )
+        .bind(finding.proposal().reference().finding().into_uuid())
+        .bind(encode_finding_status(ReviewFindingStatus::Open))
+        .fetch_one(&mut *connection)
+        .await?;
+        if !head_is_complete {
+            return Err(corruption(
+                "review_finding_event_head",
+                String::from("event head does not name the exact latest event"),
+            ));
+        }
         Ok(Some(finding))
     }
 
@@ -1167,10 +1216,17 @@ impl ReviewWorkflowStore {
             _ => None,
         }
         .transpose()?;
-        if let Some(event) = posted_event.as_ref() {
-            let finding = vec![event.finding().finding().into_uuid()];
+        let transition_finding = posted_event
+            .as_ref()
+            .map(|event| event.finding().finding())
+            .or_else(|| match next.association() {
+                ReviewExternalLinkAssociation::Finding(reference) => Some(reference.finding()),
+                ReviewExternalLinkAssociation::Run(_)
+                | ReviewExternalLinkAssociation::Target(_) => None,
+            });
+        if let Some(finding) = transition_finding {
             sqlx::query(crate::lock_inventory::REVIEW_FINDINGS_TRANSITION)
-                .bind(&finding)
+                .bind(vec![finding.into_uuid()])
                 .fetch_all(&mut *transaction)
                 .await?;
         }

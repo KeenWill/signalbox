@@ -5,11 +5,12 @@ and store foundation was verified through PR #221
 (`agent/review-workflow-spec`); two-axis finding confidence is verified through
 PR #329 (`agent/review-finding-confidence`); targeted cross-run finding
 references and the application orchestration boundary are verified through PR
-#336 (`agent/review-orchestrator`). Daemon and process-protocol wiring remain
-unimplemented as identified below. This page owns review targets, workflow runs,
-session-backed passes, findings, external links, their relational store, and
-application orchestration. Session execution remains owned by
-[sessions and transcript](sessions-and-transcript.md), turn evidence by
+#336 (`agent/review-orchestrator`); durable relational current-status admission
+is verified through PR #343 (`agent/review-orchestrator`). Daemon and
+process-protocol wiring remain unimplemented as identified below. This page owns
+review targets, workflow runs, session-backed passes, findings, external links,
+their relational store, and application orchestration. Session execution remains
+owned by [sessions and transcript](sessions-and-transcript.md), turn evidence by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
 execution by [tool loop](tool-loop.md), and relational mechanics shared with the
 rest of the daemon by [persistence protocol](persistence-protocol.md). Invariant
@@ -268,19 +269,36 @@ admission fact. For ordinary event admission, the store locks the complete
 target finding inventory in identity order, then verifies the referenced
 finding's current history under those locks and appends the fact. A waiter loads
 the graph from read-committed snapshots taken after the winning event commits;
-the held inventory stabilizes that graph across the loader statements. Later
-reconstitution validates the frozen fact rather than comparing it with a status
-that may since have advanced. A finding becomes terminal when it acquires either
-reference, so no later reference may point back to it; direct and transitive
-reference cycles therefore fail closed. Reconstitution validates the complete
-history and fails closed on a foreign owner, run-workflow or policy mismatch,
-gaps, illegal edges, incompatible or contradictory pass evidence, an event not
-exactly named by its pass result, self-reference, foreign-run or ineligible
-finding references, reuse of a link consumed by an earlier posted event, or a
-publication event whose external link is not an attached link associated with
-that finding or whose external object kind is not review, review-thread,
-inline-review-comment, or general change-request-comment. A posted event's pass
-is the attachment's exact producing pass (INV-040).
+the held inventory stabilizes that graph across the loader statements.
+Relational admission additionally owns one mutable current-event head per
+finding. Every event insert locks the subject and referenced heads in identity
+order and authenticates the ordinal, subject transition, and referenced status
+from those post-wait values before insertion. Only after the append-only event
+exists does its trigger advance the subject head; a direct head advance must
+name that exact next durable event. Because terminalization advances the locked
+head, a waiter receives its post-wait version even when the outer insert began
+with an older event-table snapshot. No event-history snapshot may independently
+decide the ordinal, referenced status, or subject transition. The head and its
+trigger functions remain in the persistent schema selected by the migration
+connection, with temporary objects ordered after that schema for trigger-time
+lookup. Deferred constraints bind each head to the exact latest append-only
+event and prove that its ordinal equals the contiguous history length, while
+reconstitution rejects a missing or mismatched head. Read-committed
+external-link transitions lock the reservation and then any associated finding
+before loading its multi-statement projection, so a concurrent finding event
+cannot split that projection across snapshots. Later reconstitution validates
+the frozen fact rather than comparing it with a status that may since have
+advanced. A finding becomes terminal when it acquires either reference, so no
+later reference may point back to it; direct and transitive reference cycles
+therefore fail closed. Reconstitution validates the complete history and fails
+closed on a foreign owner, run-workflow or policy mismatch, gaps, illegal edges,
+incompatible or contradictory pass evidence, an event not exactly named by its
+pass result, self-reference, foreign-run or ineligible finding references, reuse
+of a link consumed by an earlier posted event, or a publication event whose
+external link is not an attached link associated with that finding or whose
+external object kind is not review, review-thread, inline-review-comment, or
+general change-request-comment. A posted event's pass is the attachment's exact
+producing pass (INV-040).
 
 ## External links and posting reservations
 
