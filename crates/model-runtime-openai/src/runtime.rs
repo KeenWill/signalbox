@@ -663,9 +663,14 @@ async fn finish_error(
             usage: TokenUsage::unreported(),
         });
     }
-    // A complete terminal error status whose body is not the documented
-    // envelope is still definitive (per the runtime-substrate spec);
-    // classify by status and retain the raw body as native material.
+    fallback_provider_error(exchange, status, &body)
+}
+
+fn fallback_provider_error(exchange: ExchangeFacts, status: u16, body: &[u8]) -> TerminalEvidence {
+    // Preserve the complete bounded body until the execution boundary can
+    // sanitize JSON escapes with the exact prepared credential. Truncating
+    // first can make valid JSON unparseable and hide a reversible credential
+    // representation from JSON-aware redaction.
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
         exchange,
         reported_model: None,
@@ -673,7 +678,7 @@ async fn finish_error(
         native: NativeErrorFacts {
             error_token: None,
             error_code: None,
-            message: Some(lossy_truncated(&body)),
+            message: Some(String::from_utf8_lossy(body).into_owned()),
         },
         usage: TokenUsage::unreported(),
     })
@@ -1392,7 +1397,7 @@ fn redact_native_message(text: String, credential: &CredentialValue) -> String {
         redacted.push_str(TRUNCATION_SUFFIX);
         redacted
     } else {
-        redact_native_body(text, credential)
+        lossy_truncated(redact_native_body(text, credential).as_bytes())
     }
 }
 
@@ -1624,9 +1629,9 @@ mod tests {
 
     use super::{
         MAX_STREAMED_RESPONSE_BYTES, PrefixBudget, RedactingSink, build_http_request,
-        process_streamed_chunk, redact_evidence, redact_json, redact_json_stream_fragment,
-        redact_native_message, serialize_request, streamed_response_prefix_len,
-        without_unproven_refusal,
+        fallback_provider_error, process_streamed_chunk, redact_evidence, redact_json,
+        redact_json_stream_fragment, redact_native_message, serialize_request,
+        streamed_response_prefix_len, without_unproven_refusal,
     };
     use crate::response::StopSequences;
     use crate::stream::StreamDecoder;
@@ -1827,6 +1832,33 @@ mod tests {
             redact_native_message(r#"{"message":"key_\u006coop"}"#.to_string(), &credential),
             r#"{"message":"[redacted]"}"#
         );
+    }
+
+    #[test]
+    fn fallback_error_body_is_sanitized_before_escape_splitting_truncation() {
+        let credential_text = "fixture_abcdefghijklmnopqrstuvwxyzZ";
+        let credential = CredentialValue::new(credential_text.as_bytes().to_vec());
+        let body = format!(
+            r#"{{"padding":"{}","message":"fixture_abcdefghijklmnopqrstuvwxyz\u005a{}"}}"#,
+            "x".repeat(1_987),
+            "y".repeat(200)
+        );
+        assert!(body.as_bytes()[..2_048].ends_with(br"\u"));
+
+        let evidence = fallback_provider_error(ExchangeFacts::default(), 502, body.as_bytes());
+        let persisted_evidence = redact_evidence(evidence, &credential);
+        let TerminalEvidence::ProviderError(error) = persisted_evidence else {
+            panic!("fallback provider evidence remains a provider error");
+        };
+        let message = error
+            .native
+            .message
+            .expect("fallback provider evidence retains a sanitized message");
+
+        assert!(message.contains("[redacted]"));
+        assert!(message.ends_with(" … [truncated]"));
+        assert!(!message.contains(credential_text));
+        assert!(!message.contains(r"fixture_abcdefghijklmnopqrstuvwxyz\u005a"));
     }
 
     #[test]
