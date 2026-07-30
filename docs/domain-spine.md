@@ -6333,6 +6333,16 @@ impl ReviewConfidenceError {
     pub const fn basis_points(self) -> u16;
 }
 
+pub struct ReviewFindingConfidenceAxes { /* private */ }
+impl ReviewFindingConfidenceAxes {
+    pub const fn new(
+        is_real_confidence: ReviewConfidence,
+        severity_label_confidence: ReviewConfidence,
+    ) -> Self;
+    pub const fn is_real_confidence(self) -> ReviewConfidence;
+    pub const fn severity_label_confidence(self) -> ReviewConfidence;
+}
+
 pub struct ReviewPolicyVersion(/* private NonZeroU32 */);
 pub struct ReviewPolicy { /* version and two confidence thresholds */ }
 pub struct ReviewPolicyError { /* rejected complete policy */ }
@@ -6792,12 +6802,13 @@ impl ReviewFindingContent {
         title: ReviewText,
         body: ReviewText,
         severity: ReviewFindingSeverity,
-        confidence: ReviewConfidence,
+        confidence_axes: ReviewFindingConfidenceAxes,
         category: ReviewKey,
         recommended_fix: Option<ReviewText>,
     ) -> Self;
-    // accessors: location(), title(), body(), severity(), confidence(),
-    // category(), recommended_fix()
+    // accessors: location(), title(), body(), severity(),
+    // is_real_confidence(), severity_label_confidence(), category(),
+    // recommended_fix()
 }
 
 pub struct ReviewFindingProposal { /* reference + producing pass + content */ }
@@ -7076,7 +7087,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: review_workflow                            | 81                   |
+| domain: review_workflow                            | 82                   |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 53                   |
 | **signalbox-domain total**                         | **537 (+1 free fn)** |

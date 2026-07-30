@@ -498,8 +498,10 @@ pub struct ReviewFindingInput {
     pub body: String,
     /// Severity classification.
     pub severity: ReviewSeverity,
-    /// Producer confidence in basis points.
-    pub confidence: CanonicalU64,
+    /// Producer confidence that the issue is real, in basis points.
+    pub is_real_confidence: CanonicalU64,
+    /// Producer confidence that the severity label is correct, in basis points.
+    pub severity_label_confidence: CanonicalU64,
     /// Opaque canonical category key.
     pub category: String,
     /// Optional exact recommended repair.

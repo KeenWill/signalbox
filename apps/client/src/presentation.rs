@@ -582,7 +582,7 @@ impl<'a> Output<'a> {
         writeln!(
             self.stdout,
             "finding={} target={} run={} pass={} status={} events={} line_start={} line_end={} \
-             diff_side={} severity={} confidence={}",
+             diff_side={} severity={} is_real_confidence={} severity_label_confidence={}",
             finding.finding.finding_id,
             finding.target_id,
             finding.run_id,
@@ -602,7 +602,8 @@ impl<'a> Output<'a> {
                 .diff_side
                 .map_or("none", review_diff_side_label),
             review_severity_label(finding.finding.severity),
-            finding.finding.confidence.value(),
+            finding.finding.is_real_confidence.value(),
+            finding.finding.severity_label_confidence.value(),
         )?;
         self.review_text_field("file_path", &finding.finding.file_path)?;
         self.review_text_field("title", &finding.finding.title)?;
@@ -1896,7 +1897,7 @@ mod tests {
 
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
-            finding=00000000-0000-0000-0000-000000000004 target=00000000-0000-0000-0000-000000000001 run=00000000-0000-0000-0000-000000000002 pass=00000000-0000-0000-0000-000000000003 status=open events=2 line_start=7 line_end=9 diff_side=right severity=high confidence=9000
+            finding=00000000-0000-0000-0000-000000000004 target=00000000-0000-0000-0000-000000000001 run=00000000-0000-0000-0000-000000000002 pass=00000000-0000-0000-0000-000000000003 status=open events=2 line_start=7 line_end=9 diff_side=right severity=high is_real_confidence=9000 severity_label_confidence=8500
             file_path=src/lib.rs
             title=Retain evidence
             body=First line\u{a}Second line
@@ -2980,7 +2981,8 @@ mod tests {
                 title: String::from("Retain evidence"),
                 body: String::from("First line\nSecond line"),
                 severity: ReviewSeverity::High,
-                confidence: CanonicalU64::new(9_000),
+                is_real_confidence: CanonicalU64::new(9_000),
+                severity_label_confidence: CanonicalU64::new(8_500),
                 category: String::from("correctness"),
                 recommended_fix: Some(String::from("Bind the exact\npass.")),
             },
