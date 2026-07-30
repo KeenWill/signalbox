@@ -3,10 +3,12 @@
 This page specifies the implemented review-workflow bounded context. Its domain
 and store foundation was verified through PR #221
 (`agent/review-workflow-spec`); two-axis finding confidence is verified through
-PR #329 (`agent/review-finding-confidence`). The orchestration section below is
-a contract only and remains unimplemented. This page owns review targets,
-workflow runs, session-backed passes, findings, external links, and their
-relational store. Session execution remains owned by
+PR #329 (`agent/review-finding-confidence`); targeted cross-run finding
+references and the application orchestration boundary are verified through PR
+#336 (`agent/review-orchestrator`). Daemon and process-protocol wiring remain
+unimplemented as identified below. This page owns review targets, workflow runs,
+session-backed passes, findings, external links, their relational store, and
+application orchestration. Session execution remains owned by
 [sessions and transcript](sessions-and-transcript.md), turn evidence by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
 execution by [tool loop](tool-loop.md), and relational mechanics shared with the
@@ -262,20 +264,23 @@ finding-repair block names none.
 Duplicate and superseded events freeze the referenced finding's canonically
 authenticated current status at admission. That status must be `Open` or
 `Accepted`. The append-only event stores that authenticated status as a durable
-admission fact. The store locks both finding roots in identity order, verifies
-the referenced finding's current history under those locks, and appends the
-fact; later reconstitution validates the frozen fact rather than comparing it
-with a status that may since have advanced. A finding becomes terminal when it
-acquires either reference, so no later reference may point back to it; direct
-and transitive reference cycles therefore fail closed. Reconstitution validates
-the complete history and fails closed on a foreign owner, run-workflow or policy
-mismatch, gaps, illegal edges, incompatible or contradictory pass evidence, an
-event not exactly named by its pass result, self-reference, foreign-run or
-ineligible finding references, reuse of a link consumed by an earlier posted
-event, or a publication event whose external link is not an attached link
-associated with that finding or whose external object kind is not review,
-review-thread, inline-review-comment, or general change-request-comment. A
-posted event's pass is the attachment's exact producing pass (INV-040).
+admission fact. For ordinary event admission, the store locks the complete
+target finding inventory in identity order, then verifies the referenced
+finding's current history under those locks and appends the fact. A waiter loads
+the graph from read-committed snapshots taken after the winning event commits;
+the held inventory stabilizes that graph across the loader statements. Later
+reconstitution validates the frozen fact rather than comparing it with a status
+that may since have advanced. A finding becomes terminal when it acquires either
+reference, so no later reference may point back to it; direct and transitive
+reference cycles therefore fail closed. Reconstitution validates the complete
+history and fails closed on a foreign owner, run-workflow or policy mismatch,
+gaps, illegal edges, incompatible or contradictory pass evidence, an event not
+exactly named by its pass result, self-reference, foreign-run or ineligible
+finding references, reuse of a link consumed by an earlier posted event, or a
+publication event whose external link is not an attached link associated with
+that finding or whose external object kind is not review, review-thread,
+inline-review-comment, or general change-request-comment. A posted event's pass
+is the attachment's exact producing pass (INV-040).
 
 ## External links and posting reservations
 
@@ -334,9 +339,9 @@ and rejects contradictory evidence reused under one pass identity across the
 attachment or observations. Observations describe the external object's reported
 state; they do not rewrite finding status.
 
-## Review orchestration contract
+## Review orchestration
 
-This section fixes the orchestration contract that is not yet implemented. It
+This section specifies the implemented application orchestration boundary. It
 composes the one-pass run and finding primitives above; it does not replace
 their lifecycle, finding-state, publication-reservation, or frozen-policy
 contracts.
@@ -350,43 +355,56 @@ change request, changing policy, editing the concern set, or changing any
 resolved prompt template requires a new attempt; an orchestrator never mixes
 those inputs while resuming an old attempt.
 
-The concern list lives in owner-supplied, versioned review-orchestration
-configuration loaded and validated once at daemon startup. It is not inferred
-from repository contents, model output, or findings. Each entry has a unique
-closed concern key, an explicit order, and a session-template reference. The
-configured set may cover build-versus-buy, interface quality, defects, naming,
-test style, and other owner-selected concerns without changing domain
-vocabulary. The template mechanism is the natural home for the concern's model
-selection, tool-approval blanket, prompt body, version, and copy-on-create
-provenance. The orchestration configuration additionally names one shared
-review-header prompt asset. Configuration stores that header once and each
-concern body once. For a fan-out member, the orchestrator constructs the exact
-system prompt as the header bytes, two LF bytes, and that concern's body bytes,
-with no trimming or interpolation, then copies the resolved bundle into the
-session. The copied session necessarily retains the complete assembled prompt as
-execution evidence; N configuration records do not duplicate the header. The
-derived template digest commits the shared-header digest, concern-body digest,
-concern key, source template version, model selection, and approval blanket so
-an equal retry cannot silently pick up edited configuration.
+The application accepts one owner-supplied immutable attempt with an exact
+target, policy, concern-set version, non-concern stage digests, and ordered
+concern specifications. It rejects an empty inventory or a repeated concern key.
+Recording the attempt before any pass starts makes an equal retry resume those
+values and makes a distinct reuse conflict.
 
-The provider adapter resolves the immutable target, imports external context,
-and performs reserved publication. The model adapter executes session turns and
-the structured-output contract below. The workspace adapter prepares either a
-read-only checkout for review and judgment or an explicitly writable checkout
-for repair, always at the target's exact head and comparison revision. Adapter
-success returns typed evidence naming those exact inputs. A mismatched revision,
-workspace, target, run, pass, session, template digest, or policy blocks the
-attempt; adapters never repair such a cross-wire by substitution.
+Daemon startup loading, concern configuration, prompt-library resolution, and
+template-digest derivation are committed but unimplemented. No present daemon
+surface resolves or supplies those assets. A future daemon configuration must
+name one shared review-header prompt asset, store that header once and each
+concern body once, and construct each exact system prompt as the header bytes,
+two LF bytes, and that concern body bytes, with no trimming or interpolation
+before copying the resolved bundle into the session. The copied session must
+retain the complete assembled prompt as execution evidence; N configuration
+records must not duplicate the header. The derived digest must commit the shared
+header and concern-body digests, concern key, source template version, model
+selection, and approval blanket.
+
+The application exposes ports for immutable-target context import,
+session-backed passes, repair, and reserved publication. Adapter success returns
+typed evidence naming the exact target, policy, run, pass, session, and template
+inputs; a mismatch blocks the attempt rather than being repaired by
+substitution. Failed, blocked, and post-admission cancelled imports likewise
+carry their canonical terminal pass and run plus the exact import template. A
+successful import pass may be result-free or carry one domain-compatible
+attachment, observation, or no-change result. A result-bearing success also
+carries the canonical external-link aggregate; its association must own the
+attempt target and its exact attachment, observation, or durable no-change claim
+must authenticate the pass result. Every success carries the imported-context
+digest as evidence bound to that exact import pass; a context value naming
+another pass fails before it can be sealed or fanned out. Only cancellation
+before pass admission may omit both pass and run; every other passless or
+partially populated terminal outcome fails closed.
+
+Concrete provider, model, and workspace adapters are committed but
+unimplemented; no present daemon surface supplies them. Future workspace
+adapters must prepare either a read-only checkout for review and judgment or an
+explicitly writable checkout for repair, always at the exact target head and
+comparison revision.
 
 ### Fan-out and complete-set barrier
 
-After an external-context-import pass has ingested the code host's current
-review context, the orchestrator starts exactly one concurrent read-only-review
-run and pass for every configured concern. All members name the same target and
-equal frozen policy. Each receives the shared header, exactly one
-concern-specific body, the frozen diff, and imported external context. A member
-cannot publish, mutate the workspace, or see another concurrent member's
-uncommitted output.
+After a validated external-context-import result is durable, the service calls
+its session-backed pass port concurrently once for every configured concern.
+Each work item carries the immutable attempt, the digest from the authenticated
+pass-bound imported-context evidence, and one exact concern specification.
+Successful members must report the same target, equal frozen policy, and exact
+resolved concern-template digest from their own runner evidence.
+`ReviewConcernWork` carries no repair or publication handle and no other
+member's uncommitted output.
 
 The attempt durably records the complete expected concern inventory before any
 member starts. Judgment is eligible only after every expected member has
@@ -395,18 +413,26 @@ explicit empty inventory. If one member fails, blocks, or is cancelled while
 others succeed, the successful findings remain valid evidence but the fan-out
 set is incomplete and no judgment, repair, or publication work is eligible. The
 orchestrator may retry only the failed member against the same target, policy,
-concern-set version, and template digests; a changed input starts a new attempt.
-The eventual barrier includes exactly one successful member for every expected
+concern-set version, and template digests. Before scheduling that retry it
+rejects any extra or repeated current claim, then authenticates the current
+failed claim's target and template; mismatched durable evidence blocks the
+attempt and cannot be overwritten. A changed input starts a new attempt. The
+eventual barrier includes exactly one successful member for every expected
 concern and rejects missing, extra, repeated, or superseded member claims. It
 therefore cannot silently present a partial review as complete.
 
 ### Structured finding return
 
-Every read-only-review pass uses a structured-output contract named
-`submit_review_findings`. As realized by the model runtime, the contract is one
-forced tool call with parallel tool use disabled. Provider-independent decode
-must observe exactly one contract value. Free-form assistant text is transcript
-evidence only and never becomes a finding.
+The application pass port returns typed findings plus canonical producer pass
+and run evidence. Its complete-set barrier accepts them only when the exact
+canonical `ProducedFindings` inventory agrees, including an explicit empty
+inventory.
+
+The model-runtime realization of the `submit_review_findings` structured-output
+contract is committed but unimplemented. No present adapter forces its one tool
+call, disables parallel tool use, or performs provider-independent decoding. A
+future realization must observe exactly one contract value. Free-form assistant
+text is transcript evidence only and never becomes a finding.
 
 The exact logical JSON Schema is below. The post-decode domain validator
 enforces `line_end >= line_start` and the UTF-8 byte rules that JSON Schema
@@ -491,52 +517,62 @@ cannot state portably.
 }
 ```
 
-After schema decode, ordinary finding construction enforces byte bounds,
-nonempty and U+0000 rules, target comparison evidence, and all typed
-vocabularies. The orchestrator assigns stable finding identities and admits the
-entire canonical identity-ordered inventory atomically. No structured value,
-several values, malformed JSON, schema mismatch, domain-invalid item, more than
-32 items, or failure to admit the complete inventory fails the pass; none of its
-proposed findings is retained as untyped text or as a partial inventory.
+A future adapter must fail the pass on no structured value, several values,
+malformed JSON, schema mismatch, a domain-invalid item, more than 32 items, or
+failure to admit the complete inventory. After decode, ordinary finding
+construction enforces byte bounds, nonempty and U+0000 rules, target comparison
+evidence, and all typed vocabularies. The adapter must assign stable finding
+identities and admit the entire canonical identity-ordered inventory atomically;
+none of its proposals may survive as untyped text or a partial inventory.
 
 ### Judgment and cross-run deduplication
 
 One judgment analysis pass consumes the sealed finding inventories from all
-fan-out members, not a concern subset. Its structured result contains exactly
-one disposition for every input finding identity and no unknown or repeated
-identity. A disposition is `accepted`, `rejected { reason }`,
-`duplicate { canonical_finding }`, `superseded { successor_finding }`, or
-`stale`. Referenced findings carry their complete original finding references.
-The result is invalid unless every accepted finding meets
-`minimum_judge_confidence` on `is_real_confidence`; severity-label confidence is
-available to the judge but never filters a finding. The orchestrator seals this
-complete plan before admitting its per-finding judgment and deduplication events
-through the existing single-effect pass primitives in canonical finding order.
+fan-out members, not a concern subset. The canonical analysis pass must be a
+result-free succeeded `Judge` pass; a result-bearing per-finding effect pass
+cannot authenticate or be reused as the complete-set analysis. Its structured
+result contains exactly one disposition for every input finding identity and no
+unknown or repeated identity. A disposition is `accepted`,
+`rejected { reason }`, `duplicate { canonical_finding }`,
+`superseded { successor_finding }`, or `stale`. Referenced findings carry their
+complete original finding references. The result is invalid unless every
+accepted finding meets `minimum_judge_confidence` on `is_real_confidence`;
+severity-label confidence is available to the judge but never filters a finding.
+The orchestrator seals this complete plan before admitting its per-finding
+judgment and deduplication events through the existing single-effect pass
+primitives in canonical finding order. An `Applied` result carries the canonical
+finding event, its independently loaded pass and run evidence, and the exact
+judgment-template digest. The service validates the exact planned disposition
+and committed pass result before recording the durable effect receipt. On
+resume, loaded receipts must equal the first `k` members of the plan in that
+canonical order. A gap, reordering, duplicate, foreign attempt, or unknown
+finding fails before runner invocation; only the remaining suffix may execute.
 Until every planned event is durably admitted, repair and publication remain
 ineligible; a crash resumes the plan rather than asking a model for a different
 partial judgment.
 
-The current implementation cannot perform the required cross-concern
-deduplication. Today a duplicate or superseded reference must name a finding
-from the same exact producing read-only-review pass; because a run admits at
-most one pass, it is necessarily also the same run. This is enforced both by
-domain reconstitution and by relational foreign keys and event guards. An
-N-concern fan-out uses N producing passes and N runs, so its findings cannot
-currently reference one another.
+Duplicate and superseded events may reference a finding produced by another run
+only within one immutable target and one equal complete frozen policy. Each
+finding retains its original `ReviewFindingRef`; findings are not copied,
+reparented, or promoted into the judgment run. The event and pass result carry
+the referenced finding's independent target, run, producing pass, and finding
+identities.
 
-The implementing change shall admit cross-run duplicate and superseded
-references only within one immutable target and one equal complete frozen
-policy. Each finding retains its original `ReviewFindingRef`; findings are not
-copied, reparented, or promoted into the judgment run. The event and pass result
-must carry the referenced finding's independent target, run, producing pass, and
-finding identities. Persistence must authenticate that complete ancestry with
-composite references to a canonically succeeded read-only-review producer whose
-sealed inventory contains the finding. The subject producer, referenced
-producer, and event pass must all name the same exact target and policy. Ordered
-root locks still authenticate an `Open` or `Accepted` referenced status, and
-self-reference, repeated reference, and direct or transitive cycles still fail
-closed. Missing or mismatched target/run/pass/finding evidence is corruption,
-never a best-effort match.
+Admission authenticates that complete ancestry against a canonically succeeded
+read-only-review producer whose sealed `ProducedFindings` inventory contains the
+finding. The subject producer, referenced producer, and event pass must all name
+the same exact target and policy. Persistence locks the complete target finding
+inventory in identity order and, after any lock wait, admits the reference only
+while the referenced finding is `Open` or `Accepted`. A finding already in a
+terminal status cannot be newly named as the referenced root.
+
+Self-reference, repeated reference, and direct or transitive cycles fail closed.
+Complete-graph domain reconstitution checks every referenced root and edge,
+including the edge's frozen producer policy against the supplied root's actual
+producer policy, while relational composite references and event guards
+authenticate each independent identity. Missing or mismatched
+target/run/pass/finding evidence, an unsealed or nonmember producer inventory, a
+policy mismatch, or a graph cycle is corruption rather than a best-effort match.
 
 This targeted relaxation preserves one pass per run and the original evidence
 chain. Allowing multiple passes per run would overturn the run lifecycle,
@@ -548,34 +584,48 @@ change is needed to authenticate a same-target, same-policy reference.
 
 ### Repair, publication, import, and escalation
 
-Finding-repair passes consume the accepted, nonterminal findings after the
-complete judgment plan is applied. A repair pass alone receives a writable
-workspace. `Fixed` findings leave the publication set. A failed or cancelled
-repair leaves its finding accepted and therefore surviving; a blocked repair
-retains its explicit reason and requires reconciliation under the existing
-machine. Publication cannot begin until every selected repair attempt is
-terminal, and it never treats an unstarted or lost repair as success.
+Finding-repair work contains the exact accepted finding inventory only after
+every sealed judgment effect is durably applied. A `Fixed` member carries the
+canonical fixed event, independently loaded Fix pass and run evidence, and exact
+repair-template digest. Only evidence that commits the exact fixed event may
+remove a finding from the publication set; a failed or cancelled repair leaves
+its finding surviving. The service records the exact terminal outcome inventory
+before advancing. A blocked repair returns a typed `RepairIncomplete` attempt
+outcome and prevents all publication for that attempt. Resuming a blocked repair
+after reconciliation is committed but unimplemented; no present
+application-store operation replaces that sealed outcome.
 
-External-publication passes publish the surviving findings through the existing
-reservation-then-attachment protocol. The `minimum_publication_confidence` check
-uses only `is_real_confidence`. Publication uses the target's exact head; a
-moved change request is a different target, not permission to post stale
-results. After publication, external-context-import passes ingest current code
-host comments and link state without performing an external write. Equal
-observations bind no-change evidence as already specified above.
+External-publication work contains the exact canonical surviving inventory and
+uses the existing reservation-then-attachment pass boundary. A `Published`
+member carries the canonical finding-associated attached link, independently
+loaded publication-run evidence, and exact resolved publication-template digest.
+Before sealing or completing the attempt, the service authenticates their target
+and policy, the succeeded `Publish` pass and concluding `PublishReview` run, and
+the attachment result with its exact posted finding event. The result must cover
+the inventory exactly; any failed, blocked, or cancelled member returns a typed
+`PublicationIncomplete` outcome rather than `Complete`. The existing publication
+admission check uses only `is_real_confidence` and the immutable target head; a
+moved change request is another target, not permission to post stale results.
 
-A workspace conflict, moved revision, incomplete concern barrier, malformed
-structured return, irreconcilable reservation, or adapter evidence mismatch
-blocks the orchestration attempt with a typed reason and exposes it for owner
-action. It does not drop a concern, regenerate an untracked prose answer,
-silently retarget, or publish the subset that happened to succeed.
+Post-publication external-context import is committed but unimplemented by the
+present application service. A future continuation must use the existing import
+pass and no-change evidence rather than inferring external state.
 
-Implementing this section requires additive process-protocol operations to start
-and read an orchestration attempt, record its frozen concern/template/run
-inventory, seal the complete fan-out barrier, bind the judgment pass's complete
-disposition plan, and resume the plan's per-finding effects idempotently. Those
-wire additions are not part of the current process protocol and are not
-implemented by this specification change.
+An incomplete concern barrier, invalid import or judgment evidence, durable seal
+conflict, invalid downstream inventory, or incomplete judgment, repair, or
+publication outcome stops the service through a closed application result or
+error. Adapter-specific workspace, revision, structured-return, and reservation
+failures remain typed by the corresponding port implementation. The service does
+not drop a concern, silently retarget, or publish a partial successful subset as
+complete.
+
+Daemon driving of orchestration is committed but unimplemented. The process
+protocol has no present operations to start or read an orchestration attempt,
+record its frozen concern/template/run inventory, seal and read the complete
+fan-out and judgment plan, load and record per-finding effect receipts, seal
+repair and publication inventories, or load and record their exact terminal
+outcomes. A daemon integration must add those closed wire operations before it
+can drive this application service.
 
 ## Store and reconstitution
 
@@ -588,7 +638,13 @@ immutable canonical finding rows. Each finding row stores independent
 `is_real_confidence` and `severity_label_confidence` columns under the shared
 zero-through-10,000 bound. Deferred relational validation compares the complete
 canonical identity-ordered inventory with every finding owned by that producing
-pass. The only mutable workflow columns are the current run and pass state
+pass. Cross-run references store the referenced finding's independent target,
+run, pass, and finding identities. Composite foreign keys authenticate the
+canonical finding ancestry and membership in the succeeded producer's sealed
+inventory; identity-ordered complete-target root locking protects eligible
+status and cycle checks across the multi-statement graph load.
+
+The only mutable workflow columns are the current run and pass state
 projections; their evidence-bearing fields, including the one-time
 absent-to-bound result, change atomically under row lock, and database checks
 close every nullable shape. Immutable content and history tables reject update
@@ -601,10 +657,17 @@ record, unknown discriminator, incomplete history, or failed domain check is
 reported as corruption rather than normalized into a plausible aggregate
 (INV-040, INV-041).
 
-The store creates and loads complete aggregates, idempotently reserves external
-links, attaches external identifiers, appends external observations, lists a
-run's findings in identity order, and implements crash-recoverable durable
-command receipts for the caller-driven process surface.
+The application defines its durable attempt-store port, including current
+concern slots, stage seals, plan and effect receipts, and terminal repair and
+publication outcomes. A concrete relational adapter for that port is committed
+but unimplemented; no present daemon can persist or resume an attempt through
+it.
+
+The review-workflow store creates and loads complete aggregates, idempotently
+reserves external links, attaches external identifiers, appends external
+observations, lists a run's findings in identity order, and implements
+crash-recoverable durable command receipts for the caller-driven process
+surface.
 
 ## Process and terminal surface
 
@@ -656,7 +719,7 @@ the process protocol.
 
 ## Open edges
 
-- Implementation of the orchestration contract above, its configuration and
+- Daemon configuration loading, the concern prompt library, concrete adapters,
   process-protocol additions, and merge-based stack propagation remain under
   [review-workflow orchestration](../open-questions.md#destination-features-target-model).
 - [Artifacts](../open-questions.md#general-purpose-artifacts) remain a separate
