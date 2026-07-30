@@ -688,7 +688,8 @@ async fn assert_ambient_skill_instructions_disabled(executable: &std::path::Path
     assert!(
         !disabled.contains("<skills_instructions>")
             && !disabled.contains(SYNTHETIC_SKILL_NAME)
-            && !disabled.contains(SYNTHETIC_SKILL_DESCRIPTION),
+            && !disabled.contains(SYNTHETIC_SKILL_DESCRIPTION)
+            && !disabled.contains(SYNTHETIC_SKILL_BODY),
         "`{SKILL_INSTRUCTIONS_CONFIG}` did not remove ambient skills from model-visible input"
     );
 }

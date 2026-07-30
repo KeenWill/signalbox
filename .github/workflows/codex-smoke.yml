@@ -38,16 +38,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      pull-requests: read
+      contents: read
     outputs:
       smoke_required: ${{ steps.gate.outputs.smoke_required }}
     steps:
+      - name: Check out the pull request head for path inspection
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
       - name: Decide whether compatibility smoke is required
         id: gate
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          CHANGED_FILE_COUNT: ${{ github.event.pull_request.changed_files }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPOSITORY: ${{ github.repository }}
         run: |
@@ -59,17 +65,16 @@ jobs:
           fi
 
           changed_paths="${RUNNER_TEMP}/codex-smoke-changed-files"
-          gh api --paginate \
-            "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
-            --jq '.[].filename' > "${changed_paths}"
-          listed_count=$(wc -l < "${changed_paths}")
-          if [[ "${listed_count}" -ne "${CHANGED_FILE_COUNT}" ]]; then
-            echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
-            echo "::error::GitHub returned ${listed_count} of ${CHANGED_FILE_COUNT} changed paths; refusing to guess whether the Codex CLI pin changed."
-            exit 1
-          fi
-          if ! awk 'index($0, "tooling/codex-cli/") == 1 { changed = 1 } END { exit !changed }' "${changed_paths}"
-          then
+          git diff --no-renames --name-only -z \
+            "${BASE_SHA}...${HEAD_SHA}" > "${changed_paths}"
+          tooling_changed=false
+          while IFS= read -r -d '' path; do
+            if [[ "${path}" == tooling/codex-cli/* ]]; then
+              tooling_changed=true
+              break
+            fi
+          done < "${changed_paths}"
+          if [[ "${tooling_changed}" != "true" ]]; then
             echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
             echo "Not applicable: tooling/codex-cli/** did not change."
             exit 0
