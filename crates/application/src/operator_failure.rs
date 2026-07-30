@@ -24,4 +24,19 @@ pub enum OperatorFailureClass {
 pub trait ClassifyOperatorFailure {
     /// Returns a user-content-free classification for shared telemetry.
     fn operator_failure_class(&self) -> OperatorFailureClass;
+
+    /// Returns a stable, user-content-free cause token for shared telemetry.
+    ///
+    /// Implementations with a narrower typed stage override this default so an
+    /// operator can distinguish which projection or transition failed without
+    /// formatting adapter detail. The default preserves a safe diagnostic for
+    /// errors that expose only the four-class taxonomy.
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self.operator_failure_class() {
+            OperatorFailureClass::Infrastructure { .. } => "infrastructure",
+            OperatorFailureClass::FailClosedCorruption => "durable_state_corruption",
+            OperatorFailureClass::IdentityCollision => "identity_collision",
+            OperatorFailureClass::CallerOrHubBug => "caller_or_hub_bug",
+        }
+    }
 }

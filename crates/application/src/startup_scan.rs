@@ -204,6 +204,10 @@ where
     fn operator_failure_class(&self) -> OperatorFailureClass {
         self.repository_error.operator_failure_class()
     }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        self.repository_error.operator_failure_cause_code()
+    }
 }
 
 /// Coordinates one finite, idempotent startup recovery scan.

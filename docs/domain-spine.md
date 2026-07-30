@@ -5695,6 +5695,7 @@ pub enum OperatorFailureClass {
 
 pub trait ClassifyOperatorFailure {
     fn operator_failure_class(&self) -> OperatorFailureClass;
+    fn operator_failure_cause_code(&self) -> &'static str;
 }
 ```
 
@@ -5801,6 +5802,8 @@ pub trait EligibilityWorkSource {
 pub trait EligibilityPass {
     type Error;
 
+    fn failure_stage(_error: &Self::Error) -> &'static str;
+    fn failure_turn(_error: &Self::Error) -> Option<TurnId>;
     fn run(
         &mut self,
         session: SessionId,

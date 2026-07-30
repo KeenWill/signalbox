@@ -741,6 +741,28 @@ where
             }
         }
     }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::Load(_) => "tool_batch_load",
+            Self::Prepare(_) => "tool_attempt_prepare",
+            Self::Authorize(_) => "tool_attempt_authorization",
+            Self::AuthorizationReread { .. } => "tool_attempt_authorization_reread",
+            Self::AuthorizationReconciliation(_) => "tool_attempt_authorization_reconciliation",
+            Self::PreflightCommit(_) => "tool_preflight_commit",
+            Self::Executor(_) => "tool_executor",
+            Self::ExecutorCrashClassification { .. } => "tool_executor_crash_classification",
+            Self::ExecutorCorrelationMismatch => "tool_executor_correlation_mismatch",
+            Self::ExecutorCorrelationMismatchCrashClassification(_) => {
+                "tool_executor_correlation_mismatch_crash_classification"
+            }
+            Self::ObservationCommit(_) => "tool_observation_commit",
+            Self::ObservationReconciliation(_) => "tool_observation_reconciliation",
+            Self::CrashClassification(_) => "tool_crash_classification",
+            Self::Continuation(_) => "tool_continuation",
+            Self::CatalogDrift => "tool_catalog_drift",
+        }
+    }
 }
 
 /// Coordinates one serialized tool-loop stage.
@@ -1207,6 +1229,7 @@ where
         let expected_correlation = authorized.correlation();
         let invocation = ToolExecutionInvocation::try_new(request, definition, &authorized)
             .ok_or(ToolExecutionServiceError::CatalogDrift)?;
+        report_tool_dispatch(&dispatched_tool, &expected_correlation);
         let evidence = match self.executor.execute(invocation).await {
             Ok(evidence) => evidence,
             Err(error) => {
@@ -1407,6 +1430,7 @@ where
                     return Ok(ToolExecutionServiceOutcome::ContinuationCheckpointed(call));
                 }
                 Ok(PrepareToolContinuationOutcome::TargetUnavailable(failed)) => {
+                    report_tool_turn_terminalization(&failed);
                     return Ok(ToolExecutionServiceOutcome::ContinuationTargetUnavailable(
                         failed,
                     ));
@@ -1470,6 +1494,36 @@ const fn tool_attempt_signal(observation: &ToolAttemptObservation) -> ToolAttemp
             ToolAttemptSignal::Silent
         }
     }
+}
+
+/// Records the point at which authorized tool work leaves application control.
+///
+/// A durable attempt without this event is waiting to dispatch; an attempt with
+/// it but no terminal evidence is stuck in an executor. Sanitization is closed
+/// over the daemon-authored catalog name and minted aggregate identifiers: no
+/// tool arguments, result content, credential, or adapter prose is recorded.
+fn report_tool_dispatch(name: &ToolName, correlation: &ToolAttemptDispatchCorrelation) {
+    tracing::info!(
+        tool = name.as_str(),
+        session_id = %correlation.session().as_uuid(),
+        turn_id = %correlation.turn().as_uuid(),
+        tool_attempt_id = %correlation.attempt().as_uuid(),
+        "tool attempt dispatched"
+    );
+}
+
+/// Records the terminal turn outcome caused by an unavailable continuation target.
+///
+/// This event distinguishes a terminalized turn from one waiting on tool-loop
+/// work. Its closed outcome label and daemon-minted identities cannot contain
+/// provider prose, credentials, tool arguments, or conversation content.
+fn report_tool_turn_terminalization(failed: &FailedModelCallTurn) {
+    tracing::info!(
+        session_id = %failed.session().as_uuid(),
+        turn_id = %failed.turn().as_uuid(),
+        terminal_outcome = "continuation_target_unavailable",
+        "turn terminalized"
+    );
 }
 
 /// Records one definitively failed tool attempt for operators.
