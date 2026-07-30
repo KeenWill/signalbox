@@ -2848,8 +2848,8 @@ async fn inv040_referenced_finding_retains_producing_pass() -> Result<(), Box<dy
     Ok(())
 }
 
-/// INV-040: reference admission observes terminalization that commits while
-/// waiting for the target finding inventory locks.
+/// INV-040: reference admission and reconstitution observe terminalization
+/// that commits while waiting for the relational transition barrier.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv040_reference_refreshes_after_terminalization_wait() -> Result<(), Box<dyn Error>> {
@@ -2959,11 +2959,60 @@ async fn inv040_reference_refreshes_after_terminalization_wait() -> Result<(), B
     .execute(&mut *terminalizing)
     .await?;
 
-    let appending_store = fixture.store.clone();
+    let mut appending_transaction = pool.begin().await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET result_kind = 'finding_event',
+                result_finding_id = $2,
+                result_finding_run_id = $3,
+                result_finding_pass_id = $4,
+                result_event_ordinal = $5,
+                result_event_kind = 'duplicate',
+                result_referenced_finding_id = $6,
+                result_referenced_finding_run_id = $7,
+                result_referenced_finding_target_id = $8,
+                result_referenced_finding_pass_id = $9,
+                result_referenced_finding_status = 'open'
+          WHERE pass_id = $1",
+    )
+    .bind(duplicate.pass().pass().into_uuid())
+    .bind(duplicate.finding().finding().into_uuid())
+    .bind(duplicate.finding().run().run().into_uuid())
+    .bind(duplicate.finding().pass().pass().into_uuid())
+    .bind(i64::from(duplicate.ordinal().get()))
+    .bind(canonical_ref.finding().into_uuid())
+    .bind(canonical_ref.run().run().into_uuid())
+    .bind(canonical_ref.target().into_uuid())
+    .bind(canonical_ref.pass().pass().into_uuid())
+    .execute(&mut *appending_transaction)
+    .await?;
     let appending = tokio::spawn(async move {
-        appending_store
-            .append_finding_event(subject_ref.finding(), duplicate)
-            .await
+        sqlx::query(
+            "INSERT INTO review_finding_event
+                (finding_id, event_ordinal, finding_run_id, target_id,
+                 event_pass_id, event_pass_run_id, event_kind, reason,
+                 referenced_finding_id, referenced_finding_run_id,
+                 referenced_finding_target_id, referenced_finding_pass_id,
+                 referenced_finding_status, external_link_id,
+                 external_link_association_kind)
+             VALUES (
+                 $1, $2, $3, $4, $5, $6, 'duplicate', NULL,
+                 $7, $8, $9, $10, 'open', NULL, NULL
+             )",
+        )
+        .bind(duplicate.finding().finding().into_uuid())
+        .bind(i64::from(duplicate.ordinal().get()))
+        .bind(duplicate.finding().run().run().into_uuid())
+        .bind(duplicate.finding().target().into_uuid())
+        .bind(duplicate.pass().pass().into_uuid())
+        .bind(duplicate.pass().run().run().into_uuid())
+        .bind(canonical_ref.finding().into_uuid())
+        .bind(canonical_ref.run().run().into_uuid())
+        .bind(canonical_ref.target().into_uuid())
+        .bind(canonical_ref.pass().pass().into_uuid())
+        .execute(&mut *appending_transaction)
+        .await?;
+        appending_transaction.commit().await
     });
     assert!(
         blocked_backends_reached(&pool, 1).await?,
@@ -2974,10 +3023,6 @@ async fn inv040_reference_refreshes_after_terminalization_wait() -> Result<(), B
         .await
         .expect("reference admission task remains live")
         .expect_err("terminal canonical status must reject the stale reference");
-    let ReviewWorkflowStoreError::Database(error) = error else {
-        panic!("expected relational eligible-status rejection");
-    };
-
     assert_sqlstate(&error, "23514");
     assert_eq!(
         fixture.store.load_finding(canonical_ref.finding()).await?,
@@ -2986,6 +3031,26 @@ async fn inv040_reference_refreshes_after_terminalization_wait() -> Result<(), B
     assert_eq!(
         fixture.store.load_finding(subject_ref.finding()).await?,
         Some(subject)
+    );
+
+    sqlx::query(
+        "ALTER TABLE review_finding_event_head
+         DISABLE TRIGGER ALL",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE review_finding_event_head
+            SET status = $2
+          WHERE finding_id = $1",
+    )
+    .bind(canonical_ref.finding().into_uuid())
+    .bind("accepted")
+    .execute(&pool)
+    .await?;
+    assert_finding_reference_load_corruption(
+        fixture.store.load_finding(canonical_ref.finding()).await,
+        "review_finding_event_head",
     );
     Ok(())
 }
@@ -3651,7 +3716,8 @@ async fn inv040_loader_rejects_transitive_cross_run_reference_cycle() -> Result<
 
     sqlx::query(
         "ALTER TABLE review_finding_event
-         DISABLE TRIGGER review_finding_event_sequence_is_guarded",
+         DISABLE TRIGGER review_finding_event_sequence_is_guarded,
+         DISABLE TRIGGER review_finding_event_transition_head_is_guarded",
     )
     .execute(&pool)
     .await?;
@@ -3705,10 +3771,24 @@ async fn inv040_loader_rejects_transitive_cross_run_reference_cycle() -> Result<
     .bind(first.pass().pass().into_uuid())
     .execute(&mut *transaction)
     .await?;
+    sqlx::query(
+        "UPDATE review_finding_event_head
+            SET event_ordinal = 1,
+                status = $2,
+                event_pass_kind = $3,
+                external_link_id = NULL
+          WHERE finding_id = $1",
+    )
+    .bind(third.finding().into_uuid())
+    .bind("duplicate")
+    .bind("dedupe")
+    .execute(&mut *transaction)
+    .await?;
     transaction.commit().await?;
     sqlx::query(
         "ALTER TABLE review_finding_event
-         ENABLE TRIGGER review_finding_event_sequence_is_guarded",
+         ENABLE TRIGGER review_finding_event_sequence_is_guarded,
+         ENABLE TRIGGER review_finding_event_transition_head_is_guarded",
     )
     .execute(&pool)
     .await?;
@@ -7717,6 +7797,12 @@ async fn inv040_inv041_review_workflow_tables_reject_truncate() -> Result<(), Bo
         &pool,
         "review_finding_event",
         "TRUNCATE TABLE review_finding_event CASCADE",
+    )
+    .await;
+    assert_review_workflow_truncate_rejected(
+        &pool,
+        "review_finding_event_head",
+        "TRUNCATE TABLE review_finding_event_head CASCADE",
     )
     .await;
     assert_review_workflow_truncate_rejected(

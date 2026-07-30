@@ -268,19 +268,27 @@ admission fact. For ordinary event admission, the store locks the complete
 target finding inventory in identity order, then verifies the referenced
 finding's current history under those locks and appends the fact. A waiter loads
 the graph from read-committed snapshots taken after the winning event commits;
-the held inventory stabilizes that graph across the loader statements. Later
-reconstitution validates the frozen fact rather than comparing it with a status
-that may since have advanced. A finding becomes terminal when it acquires either
-reference, so no later reference may point back to it; direct and transitive
-reference cycles therefore fail closed. Reconstitution validates the complete
-history and fails closed on a foreign owner, run-workflow or policy mismatch,
-gaps, illegal edges, incompatible or contradictory pass evidence, an event not
-exactly named by its pass result, self-reference, foreign-run or ineligible
-finding references, reuse of a link consumed by an earlier posted event, or a
-publication event whose external link is not an attached link associated with
-that finding or whose external object kind is not review, review-thread,
-inline-review-comment, or general change-request-comment. A posted event's pass
-is the attachment's exact producing pass (INV-040).
+the held inventory stabilizes that graph across the loader statements.
+Relational admission additionally owns one mutable current-event head per
+finding. Every event insert locks the subject and referenced heads in identity
+order, authenticates the ordinal, subject transition, and referenced status from
+the locked head values, and advances the subject head in the same transaction.
+Because terminalization advances that head, a waiter receives its post-wait
+version even when the outer insert began with an older event-table snapshot.
+Deferred constraints bind each head to the exact latest append-only event, and
+reconstitution rejects a missing or mismatched head. Later reconstitution
+validates the frozen fact rather than comparing it with a status that may since
+have advanced. A finding becomes terminal when it acquires either reference, so
+no later reference may point back to it; direct and transitive reference cycles
+therefore fail closed. Reconstitution validates the complete history and fails
+closed on a foreign owner, run-workflow or policy mismatch, gaps, illegal edges,
+incompatible or contradictory pass evidence, an event not exactly named by its
+pass result, self-reference, foreign-run or ineligible finding references, reuse
+of a link consumed by an earlier posted event, or a publication event whose
+external link is not an attached link associated with that finding or whose
+external object kind is not review, review-thread, inline-review-comment, or
+general change-request-comment. A posted event's pass is the attachment's exact
+producing pass (INV-040).
 
 ## External links and posting reservations
 

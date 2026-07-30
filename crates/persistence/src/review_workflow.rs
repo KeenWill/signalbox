@@ -1045,6 +1045,55 @@ impl ReviewWorkflowStore {
                 format!("domain reconstitution failed: {:?}", error.failure()),
             )
         })?;
+        let head_is_complete = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM review_finding_event_head AS head
+                   LEFT JOIN review_finding_event AS event
+                     ON event.finding_id = head.finding_id
+                    AND event.event_ordinal = head.event_ordinal
+                   LEFT JOIN review_pass AS event_pass
+                     ON event_pass.pass_id = event.event_pass_id
+                    AND event_pass.run_id = event.event_pass_run_id
+                    AND event_pass.target_id = event.target_id
+                  WHERE head.finding_id = $1
+                    AND (
+                        (
+                            head.event_ordinal IS NULL
+                            AND head.status = $2
+                            AND head.event_pass_kind IS NULL
+                            AND head.external_link_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1
+                                  FROM review_finding_event AS existing
+                                 WHERE existing.finding_id = $1
+                            )
+                        )
+                        OR (
+                            head.event_ordinal IS NOT NULL
+                            AND event.event_kind = head.status
+                            AND event_pass.pass_kind = head.event_pass_kind
+                            AND event.external_link_id
+                                IS NOT DISTINCT FROM head.external_link_id
+                            AND head.event_ordinal = (
+                                SELECT max(latest.event_ordinal)
+                                  FROM review_finding_event AS latest
+                                 WHERE latest.finding_id = $1
+                            )
+                        )
+                    )
+             )",
+        )
+        .bind(finding.proposal().reference().finding().into_uuid())
+        .bind("open")
+        .fetch_one(&mut *connection)
+        .await?;
+        if !head_is_complete {
+            return Err(corruption(
+                "review_finding_event_head",
+                String::from("event head does not name the exact latest event"),
+            ));
+        }
         Ok(Some(finding))
     }
 
