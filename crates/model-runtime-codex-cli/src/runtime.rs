@@ -63,9 +63,16 @@ const PROCESS_GROUP_SUPERVISION_SUPPORTED: bool = cfg!(all(
 
 /// Every pinned-CLI feature that can add a model-visible tool, external
 /// interaction, instruction source, or delegated execution surface outside
-/// the declared `ModelOperation` tools. The version-bump smoke classifies the
-/// CLI's complete feature inventory so a new unclassified feature fails that
-/// gate before this list can silently become incomplete.
+/// the declared `ModelOperation` tools, or that can replace the pinned
+/// executable this adapter's version contract names. The version-bump smoke
+/// classifies the CLI's complete feature inventory so a new unclassified
+/// feature fails that gate before this list can silently become incomplete.
+///
+/// The invocation passes `--disable` for every name here. The pinned CLI
+/// accepts a name its registry still declares — including one whose stage is
+/// `removed` — and rejects an unknown name outright, so a release that
+/// *deletes* a name would fail every model call. The smoke's exact inventory
+/// comparison is what catches such a deletion before the pin moves.
 ///
 /// Exported so the compatibility smoke can prove that its pinned feature
 /// classification and the invocation's hard disables remain the same set.
@@ -84,15 +91,25 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
     "current_time_reminder",
     "default_mode_request_user_input",
     "deferred_executor",
+    "deferred_tool_world_state",
     "enable_mcp_apps",
     "exec_permission_approvals",
     "executor_capability_discovery",
     "external_agent_memory_import",
     "goals",
     "guardian_approval",
+    "guardianv2",
     "hooks",
     "image_generation",
     "in_app_browser",
+    // The CLI's own update check and update flow: it reaches package-registry
+    // hosts unrelated to the model exchange and can replace the executable
+    // whose version this adapter pins. Its machinery lives in the interactive
+    // front end and the app-server daemon, so a `codex exec` dispatch does not
+    // reach it today; disabling it keeps that boundary explicit rather than
+    // inherited from where the CLI happens to wire the feature.
+    "in_app_updates",
+    "mcp_2026_07_28",
     "memories",
     "multi_agent",
     "multi_agent_v2",
