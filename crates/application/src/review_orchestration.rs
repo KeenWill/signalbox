@@ -322,7 +322,15 @@ fn validate_import(
         ReviewImportOutcome::Succeeded { .. } => {
             matches!(
                 pass.state(),
-                ReviewPassState::Succeeded { result: None, .. }
+                ReviewPassState::Succeeded {
+                    result: None
+                        | Some(
+                            ReviewPassResult::ExternalLinkAttachment(_)
+                                | ReviewPassResult::ExternalLinkObservation(_)
+                                | ReviewPassResult::ExternalLinkNoChange(_)
+                        ),
+                    ..
+                }
             ) && run.state()
                 == (ReviewRunState::Succeeded {
                     concluding_pass: pass_ref,
@@ -3011,6 +3019,36 @@ mod tests {
             .expect("exact blocked repair inventory is classified");
 
         assert_eq!(stage, CompletedRepairStage::Blocked(repairs));
+    }
+
+    #[test]
+    fn successful_import_accepts_an_external_link_attachment_result() {
+        let immutable_attempt = attempt();
+        let result =
+            ReviewPassResult::ExternalLinkAttachment(ReviewExternalLinkAttachmentResult::new(
+                ReviewExternalLinkId::from_uuid(Uuid::from_u128(1_000)),
+                ReviewKey::try_new(String::from("external-object"))
+                    .expect("external object key is valid"),
+                None,
+            ));
+        let (pass, run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            1_010,
+            ReviewPassKind::ImportExternalContext,
+            ReviewWorkflowKind::ImportExternalContext,
+            Some(result),
+        );
+        let imported = ReviewImportOutcome::Succeeded {
+            pass: Box::new(pass),
+            run,
+            template_digest: immutable_attempt.stage_templates().import(),
+            context_digest: [90; 32],
+        };
+
+        let result = validate_import(&immutable_attempt, &imported);
+
+        assert_eq!(result, Ok(()));
     }
 
     #[test]

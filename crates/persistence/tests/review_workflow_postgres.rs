@@ -1381,17 +1381,17 @@ fn assert_read_only_success_requires_atomic_inventory(error: ReviewWorkflowStore
 #[track_caller]
 fn assert_finding_reference_load_corruption(
     loaded: Result<Option<ReviewFinding>, ReviewWorkflowStoreError>,
+    expected_aggregate: &str,
 ) {
     let error = loaded.expect_err("corrupt finding reference must fail loading closed");
     let ReviewWorkflowStoreError::Corruption(error) = error else {
         panic!("expected typed finding-reference corruption");
     };
-    assert!(
-        error.aggregate() == "review_finding_event"
-            || error.aggregate() == "review_pass"
-            || error.aggregate() == "review_finding"
-            || error.aggregate() == "review_run"
-            || error.aggregate() == "review_pass_produced_finding"
+    assert_eq!(
+        error.aggregate(),
+        expected_aggregate,
+        "corruption detail: {}",
+        error.detail(),
     );
 }
 
@@ -3080,7 +3080,10 @@ async fn inv040_loader_rejects_reference_policy_or_producer_mismatch() -> Result
     let ReviewWorkflowStoreError::Corruption(error) = error else {
         panic!("expected typed referenced-policy corruption");
     };
-    assert_finding_reference_load_corruption(Err(ReviewWorkflowStoreError::Corruption(error)));
+    assert_finding_reference_load_corruption(
+        Err(ReviewWorkflowStoreError::Corruption(error)),
+        "review_pass",
+    );
     sqlx::query(
         "UPDATE review_run
             SET minimum_judge_confidence = 7000
@@ -3105,6 +3108,7 @@ async fn inv040_loader_rejects_reference_policy_or_producer_mismatch() -> Result
     .await?;
     assert_finding_reference_load_corruption(
         fixture.store.load_finding(subject_ref.finding()).await,
+        "review_pass",
     );
     Ok(())
 }
@@ -3186,6 +3190,7 @@ async fn inv040_loader_rejects_each_cross_wired_reference_ancestry_leg()
     .await?;
     assert_finding_reference_load_corruption(
         fixture.store.load_finding(subject_ref.finding()).await,
+        "review_finding_event",
     );
     sqlx::query(
         "UPDATE review_finding_event
@@ -3200,6 +3205,7 @@ async fn inv040_loader_rejects_each_cross_wired_reference_ancestry_leg()
     .await?;
     assert_finding_reference_load_corruption(
         fixture.store.load_finding(subject_ref.finding()).await,
+        "review_finding_event",
     );
     sqlx::query(
         "UPDATE review_finding_event
@@ -3214,6 +3220,7 @@ async fn inv040_loader_rejects_each_cross_wired_reference_ancestry_leg()
     .await?;
     assert_finding_reference_load_corruption(
         fixture.store.load_finding(subject_ref.finding()).await,
+        "review_finding_event",
     );
     sqlx::query(
         "UPDATE review_finding_event
@@ -3228,6 +3235,7 @@ async fn inv040_loader_rejects_each_cross_wired_reference_ancestry_leg()
     .await?;
     assert_finding_reference_load_corruption(
         fixture.store.load_finding(subject_ref.finding()).await,
+        "review_finding_event",
     );
     Ok(())
 }
@@ -3303,6 +3311,7 @@ async fn inv040_loader_rejects_unsealed_or_nonmember_referenced_producer()
     .await?;
     assert_finding_reference_load_corruption(
         fixture.store.load_finding(subject_ref.finding()).await,
+        "review_pass_produced_finding",
     );
     sqlx::query(
         "INSERT INTO review_pass_finding_inventory_seal
@@ -3342,6 +3351,7 @@ async fn inv040_loader_rejects_unsealed_or_nonmember_referenced_producer()
     .await?;
     assert_finding_reference_load_corruption(
         fixture.store.load_finding(subject_ref.finding()).await,
+        "review_pass_produced_finding",
     );
     Ok(())
 }
@@ -3663,6 +3673,7 @@ async fn inv040_finding_load_rejects_missing_referenced_producer() -> Result<(),
 
     assert_finding_reference_load_corruption(
         fixture.store.load_finding(finding_ref.finding()).await,
+        "review_pass_produced_finding",
     );
     Ok(())
 }
