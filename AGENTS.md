@@ -188,10 +188,13 @@ a technology that constrains several components, or closing an open question
 with any of those effects — are proposed as a specification diff at the bottom
 of the implementing stack; owner merge is acceptance. A foundation spec diff
 describes behavior its stack implements and merges only with that stack, so
-`main` never carries prose for unimplemented behavior. Do not silently change a
-foundational contract or close a recorded open question. Keep domain types
-distinct from storage records, protocol messages, and framework types. Keep pull
-requests narrow and reviewable.
+`main` never carries prose describing unimplemented behavior as implemented.
+Committed unimplemented functionality, per the three categories above, is the
+one admitted exception, and it is not a weakening of this rule: it describes no
+behavior and states only the compatibility constraint it places on future
+change. Do not silently change a foundational contract or close a recorded open
+question. Keep domain types distinct from storage records, protocol messages,
+and framework types. Keep pull requests narrow and reviewable.
 
 Tests reference the scenario and invariant identifiers they enforce when the
 connection is meaningful (for example `S12_INV011_rejects_stale_generation`, or

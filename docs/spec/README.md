@@ -18,10 +18,12 @@ historical ADR corpus these pages distilled is retired: the
 [ADR mapping](#adr-mapping) below resolves every record number to its
 destination, and git history is the archive.
 
-Conventions: pages state implemented behavior only; load-bearing design choices
-carry one-sentence "Why:" rationales; invariant references use INV tags resolved
-through the generated [invariants.md](../invariants.md) index; deferred or
-undecided items are recorded in [open-questions.md](../open-questions.md) and
+Conventions: pages state implemented behavior, plus the committed unimplemented
+functionality that constrains it, per the three prose categories
+[AGENTS.md](../../AGENTS.md) defines and normatively owns; load-bearing design
+choices carry one-sentence "Why:" rationales; invariant references use INV tags
+resolved through the generated [invariants.md](../invariants.md) index; deferred
+or undecided items are recorded in [open-questions.md](../open-questions.md) and
 surfaced as pointers in each page's "Open edges" section; a topic normatively
 owned by a sibling page is linked, never restated.
 
