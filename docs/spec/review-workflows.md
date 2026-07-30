@@ -4,8 +4,8 @@ This page specifies the implemented review-workflow bounded context. Its domain
 and store foundation was verified through PR #221
 (`agent/review-workflow-spec`); two-axis finding confidence is verified through
 PR #329 (`agent/review-finding-confidence`); targeted cross-run finding
-references and the application orchestration boundary are verified through this
-PR (`agent/review-orchestrator`). Daemon and process-protocol wiring remain
+references and the application orchestration boundary are verified through PR
+#336 (`agent/review-orchestrator`). Daemon and process-protocol wiring remain
 unimplemented as identified below. This page owns review targets, workflow runs,
 session-backed passes, findings, external links, their relational store, and
 application orchestration. Session execution remains owned by
