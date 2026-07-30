@@ -54,7 +54,13 @@ const EXECUTABLE_VARIABLE: &str = "SIGNALBOX_CODEX_SMOKE_EXECUTABLE";
 const MODEL_VARIABLE: &str = "SIGNALBOX_CODEX_SMOKE_MODEL";
 
 const DEFAULT_EXECUTABLE: &str = "codex";
-const DEFAULT_MODEL: &str = "gpt-5.1-codex-mini";
+/// The cheapest model the pinned CLI's own catalog advertises — the sole `-mini`
+/// entry, which `codex debug models` describes as "Small, fast, and
+/// cost-efficient". A slug the catalog does not carry is not merely a stale
+/// default: the CLI reports the missing metadata as an error item and falls back
+/// to generic metadata, so the smoke would record compatibility evidence from a
+/// degraded run.
+const DEFAULT_MODEL: &str = "gpt-5.4-mini";
 const CODEX_SMOKE_WORKFLOW: &str = include_str!("../../../.github/workflows/codex-smoke.yml");
 const LOGIN_TIMEOUT_INVOCATION: &str =
     "env -u CODEX_SMOKE_API_KEY timeout --signal=TERM --kill-after=5s 30s";
@@ -90,6 +96,7 @@ concurrent_reasoning_summaries       under development  false
 current_time_reminder                under development  false
 default_mode_request_user_input      under development  false
 deferred_executor                    under development  false
+deferred_tool_world_state            under development  false
 elevated_windows_sandbox             removed            false
 enable_fanout                        removed            false
 enable_mcp_apps                      under development  false
@@ -102,14 +109,17 @@ external_migration                   removed            false
 fast_mode                            stable             true
 goals                                stable             true
 guardian_approval                    stable             true
+guardianv2                           under development  false
 hooks                                stable             true
 image_detail_original                removed            false
 image_generation                     stable             true
 in_app_browser                       stable             true
-item_ids                             under development  false
+in_app_updates                       stable             true
+item_ids                             removed            true
 js_repl                              removed            false
 js_repl_tools_only                   removed            false
 local_thread_store_compression       under development  false
+mcp_2026_07_28                       under development  false
 memories                             stable             false
 mentions_v2                          stable             true
 multi_agent                          stable             true
@@ -233,17 +243,26 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
 const PROMPT: &str = "Reply with the single word: ready";
 
 const SKILL_INSTRUCTIONS_CONFIG: &str = "skills.include_instructions=false";
+const SKILL_INSTRUCTIONS_BLOCK: &str = "<skills_instructions>";
+const SYNTHETIC_SKILL_NAME: &str = "ambient_probe";
 const SYNTHETIC_SKILL_DESCRIPTION: &str = "ambient-skill-injection-description-probe-317";
 const SYNTHETIC_SKILL_BODY: &str = "ambient-skill-injection-body-probe-317";
-const SYNTHETIC_SKILL_FILE: &str = r#"---
-name: ambient_probe
-description: ambient-skill-injection-description-probe-317
----
 
-# Ambient probe
-
-ambient-skill-injection-body-probe-317
-"#;
+/// The synthetic `SKILL.md`, rendered from the three probe tokens the
+/// assertions read, so no assertion compares against a literal this fixture
+/// also states independently.
+fn synthetic_skill_file() -> String {
+    format!(
+        "---\n\
+         name: {SYNTHETIC_SKILL_NAME}\n\
+         description: {SYNTHETIC_SKILL_DESCRIPTION}\n\
+         ---\n\
+         \n\
+         # Ambient probe\n\
+         \n\
+         {SYNTHETIC_SKILL_BODY}\n"
+    )
+}
 
 /// Arbitrary non-default facts that prove the shared response projection
 /// preserves terminal evidence rather than manufacturing defaults.
@@ -640,11 +659,22 @@ enum SkillInstructionDisposition {
 /// Fails before spend unless the pinned CLI both discovers the isolated synthetic
 /// ambient skill under its ordinary home and removes all model-visible skill
 /// instructions under the exact config value the production invocation passes.
+///
+/// What the pinned CLI injects is a *catalog*: the block states its own contract
+/// — each entry carries a name, a description, and a source locator — and a
+/// skill's body is read on demand when the skill is used, never up front. Both
+/// halves of that are pinned here. Requiring the body in the baseline would fail
+/// against every release that behaves this way, and would also make the
+/// disabled-side body clause vacuously true, retiring a third of this control
+/// without saying so.
 async fn assert_ambient_skill_instructions_disabled(executable: &std::path::Path) {
     let isolated_home = tempfile::tempdir().expect("skill probe home is created");
-    let skill_directory = isolated_home.path().join("skills").join("ambient_probe");
+    let skill_directory = isolated_home
+        .path()
+        .join("skills")
+        .join(SYNTHETIC_SKILL_NAME);
     std::fs::create_dir_all(&skill_directory).expect("synthetic skill directory is created");
-    std::fs::write(skill_directory.join("SKILL.md"), SYNTHETIC_SKILL_FILE)
+    std::fs::write(skill_directory.join("SKILL.md"), synthetic_skill_file())
         .expect("synthetic skill is written");
 
     let baseline = skill_prompt_input(
@@ -661,17 +691,43 @@ async fn assert_ambient_skill_instructions_disabled(executable: &std::path::Path
     .await;
 
     assert!(
-        baseline.contains("<skills_instructions>")
-            && baseline.contains(SYNTHETIC_SKILL_DESCRIPTION)
-            && baseline.contains(SYNTHETIC_SKILL_BODY),
-        "the pinned CLI did not discover and inject the isolated synthetic control skill"
+        baseline.contains(SKILL_INSTRUCTIONS_BLOCK),
+        "the pinned CLI injected no `{SKILL_INSTRUCTIONS_BLOCK}` block, so this \
+         probe's baseline no longer establishes that ambient skills reach the model"
     );
     assert!(
-        !disabled.contains("<skills_instructions>")
-            && !disabled.contains(SYNTHETIC_SKILL_DESCRIPTION)
-            && !disabled.contains(SYNTHETIC_SKILL_BODY),
-        "`{SKILL_INSTRUCTIONS_CONFIG}` did not remove ambient skills from model-visible input"
+        baseline.contains(SYNTHETIC_SKILL_NAME),
+        "the pinned CLI did not catalog the isolated synthetic control skill by name"
     );
+    assert!(
+        baseline.contains(SYNTHETIC_SKILL_DESCRIPTION),
+        "the pinned CLI did not catalog the isolated synthetic control skill's description"
+    );
+    // Positive half of the catalog contract: the entry is injected and the
+    // skill's contents are not. A release that started injecting bodies would
+    // widen the ambient instruction surface this probe exists to bound, so it
+    // fails the gate rather than passing unnoticed.
+    assert!(
+        !baseline.contains(SYNTHETIC_SKILL_BODY),
+        "the pinned CLI injected the synthetic control skill's body, not just its \
+         catalog entry; the ambient instruction surface is wider than this probe assumes"
+    );
+    assert!(
+        !disabled.contains(SKILL_INSTRUCTIONS_BLOCK),
+        "`{SKILL_INSTRUCTIONS_CONFIG}` left the `{SKILL_INSTRUCTIONS_BLOCK}` block \
+         in model-visible input"
+    );
+    assert!(
+        !disabled.contains(SYNTHETIC_SKILL_NAME),
+        "`{SKILL_INSTRUCTIONS_CONFIG}` left the ambient skill's name in model-visible input"
+    );
+    assert!(
+        !disabled.contains(SYNTHETIC_SKILL_DESCRIPTION),
+        "`{SKILL_INSTRUCTIONS_CONFIG}` left the ambient skill's description in \
+         model-visible input"
+    );
+    // No body clause here: the baseline proves the body is absent in *both*
+    // dispositions, so asserting its absence again could not fail.
 }
 
 /// Captures only the bounded JSON prompt description from an isolated synthetic

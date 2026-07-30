@@ -1447,11 +1447,13 @@ async fn unknown_definitive_error_fails_closed() {
     assert_error_scenario("error_unrecognized", ProviderErrorKind::Unrecognized).await;
 }
 
-/// Defect regression (found by the gated compatibility smoke): the pinned
-/// CLI reports a failed exchange as a stream-level `error` event followed by
-/// its `turn.failed` lifecycle echo. The decoder accepts exactly that
-/// trailer and keeps the stream-level message, so the typed provider error
-/// is never downgraded to a post-terminal protocol violation.
+/// Defect regression: the pinned CLI reports a failed exchange as a
+/// stream-level `error` event followed by its `turn.failed` lifecycle echo. The
+/// decoder accepts exactly that trailer and keeps the stream-level message, so
+/// the typed provider error is never downgraded to a post-terminal protocol
+/// violation. This fixture is the record of that sequencing; the gated
+/// compatibility smoke could not have supplied it, because no run of that
+/// workflow had ever authenticated when this case was written.
 #[tokio::test]
 async fn a_turn_failed_echo_after_a_stream_error_keeps_the_typed_provider_error() {
     let result = execute_scenario(

@@ -10,10 +10,13 @@ adapter implementation was verified through PR #320
 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
 escalation closeout is PR #317 (`agent/escalation-closeout`). The Codex CLI
 compatibility-smoke automation was verified through PR #328
-(`agent/ci-tells-truth`). The `signalboxd` names this page states for the
-composition root, its telemetry, and the production `FileCredentialAccess` were
-verified through PR #258 (`agent/signalboxd-rename`); the Anthropic adapter's
-server-side `fallback`-block recognition was verified through PR #280
+(`agent/ci-tells-truth`); its feature classification, ambient-skill catalog
+probe, and pinned version were verified against the `0.146.0` executable through
+PR #321 (`renovate/openai-codex-0.x`). The `signalboxd` names this page states
+for the composition root, its telemetry, and the production
+`FileCredentialAccess` were verified through PR #258
+(`agent/signalboxd-rename`); the Anthropic adapter's server-side
+`fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The five persistence-repository
 families in the operator-failure inventory were verified through PR #288
 (`agent/audit-fix-docs-coherence`). The streamed-delivery bridge and ephemeral
@@ -420,7 +423,7 @@ fabricated.
 ## Codex CLI provider adapter
 
 `signalbox-model-runtime-codex-cli` wraps the locally installed Codex CLI event
-protocol captured by the offline fixture corpus at version `0.145.0`; its
+protocol captured by the offline fixture corpus at version `0.146.0`; its
 exported version constant is the contract a later composition must pin before
 wiring the adapter. The model dispatch itself performs no separate version
 probe. Preparation validates and renders the complete operation, writes the
@@ -433,18 +436,19 @@ Unix, passes the full rendered frontier on stdin, requires absolute configured
 executable and working-root paths, selects the exact resolved model, ignores
 user configuration and rule files, and explicitly disables every feature in the
 pinned CLI inventory that can add a model-visible tool, external interaction,
-instruction source, or delegated execution surface outside the declared tools.
-It independently disables configured agents, ambient skill-instruction
-injection, MCP servers, and web search, sets the project-instruction byte budget
-to zero, and uses the read-only CLI sandbox; prompt text is never a capability
-boundary. Strict configuration turns an unavailable control into a closed
-failure instead of silently relaxing this invocation boundary. Before spawn it
-clears the parent environment, then copies only its explicit home/Codex-home,
-executable and temporary path, XDG, locale/terminal, certificate, and proxy
-allowlist; unrelated service variables do not reach the CLI. A proxy variable
-whose URL authority embeds userinfo (`scheme://user:secret@host`) is refused
-before `SendCommenced` as `ProvenUnsent(ConnectFailed)` naming only the variable
-— the CLI could reflect its proxy configuration in output the adapter can only
+instruction source, or delegated execution surface outside the declared tools,
+or that can replace the pinned executable the version contract names. It
+independently disables configured agents, ambient skill-instruction injection,
+MCP servers, and web search, sets the project-instruction byte budget to zero,
+and uses the read-only CLI sandbox; prompt text is never a capability boundary.
+Strict configuration turns an unavailable control into a closed failure instead
+of silently relaxing this invocation boundary. Before spawn it clears the parent
+environment, then copies only its explicit home/Codex-home, executable and
+temporary path, XDG, locale/terminal, certificate, and proxy allowlist;
+unrelated service variables do not reach the CLI. A proxy variable whose URL
+authority embeds userinfo (`scheme://user:secret@host`) is refused before
+`SendCommenced` as `ProvenUnsent(ConnectFailed)` naming only the variable — the
+CLI could reflect its proxy configuration in output the adapter can only
 shape-redact, so an inherited proxy credential never reaches the child; a proxy
 value that is not UTF-8 cannot be verified credential-free and is refused the
 same way. A `HOME` or `CODEX_HOME` the parent cannot resolve to an absolute
@@ -593,8 +597,10 @@ equals the supported version, then compares the CLI's complete feature list —
 including stage and default — with an exact inventory that classifies every
 entry as a hard-disabled capability or as non-capability behavior. A new,
 removed, or changed entry fails the smoke until the version bump classifies it.
-An isolated synthetic ambient skill must appear in the pinned CLI's ordinary
-model-visible prompt input and disappear when the production
+An isolated synthetic ambient skill must be cataloged by name and description in
+the pinned CLI's ordinary model-visible prompt input, without its body — the
+injected block is a catalog of locators, and a skill's contents are read only
+when it is used — and every one of those must disappear when the production
 `skills.include_instructions=false` control is applied; an unreadable,
 unparsable, or mismatched version likewise fails rather than skipping. Why:
 evidence recorded against a version that never ran, or whose capability gap
