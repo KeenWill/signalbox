@@ -213,12 +213,51 @@ does.
 
 ## Mechanical enforcement
 
-The workspace compiler configuration forbids unsafe code and warns on missing
-public documentation. Clippy denies panicking convenience paths (`expect`,
-`panic`, `unwrap`, `todo`, `unimplemented`, and `unreachable`) and denies
-`sqlx::Row::get` plus `get_unchecked`. Clippy warns on wildcard enum match arms
-while the existing inventory is reduced. Warning-level gates make debt visible
-but do not yet certify a clean tree.
+The workspace compiler configuration forbids unsafe code. Clippy denies
+panicking convenience paths (`expect`, `panic`, `unwrap`, `todo`,
+`unimplemented`, and `unreachable`) and denies `sqlx::Row::get` plus
+`get_unchecked`. These are whole-tree gates: CI promotes every warning to an
+error, so a lint is configured only when the whole workspace passes it at
+`deny`.
+
+`missing_docs` is not configured yet. A whole-workspace probe reports 425
+remaining violations:
+
+- `signalbox-domain`: 291; `signalbox-process-protocol`: 48; `signalboxd`: 26;
+  `signalbox-application`: 24; `signalbox-tools-code-host`: 14;
+  `signalbox-persistence`: 8; `signalbox-tools-basic`: 4; `signalbox-client`: 3;
+  `signalbox-model-runtime-claude-cli` and `signalbox-tool-schema-derive`: 2
+  each; `signalbox-conversation-import-claude-code`,
+  `signalbox-conversation-import-codex`, and
+  `signalbox-model-runtime-codex-cli`: 1 each.
+
+The largest block is `crates/domain/src/runner.rs`, owned by the concurrent
+runner-domain follow-up; audit-fixes also owns outstanding items in
+`apps/signalboxd/`, `apps/client/src/`, the model-runtime crates, and the tool
+crates. The persistence remainder is crate-level and integration-test
+documentation outside the hardened `runner_protocol.rs` surface. A follow-up
+enables `missing_docs` at `deny` only after those owners clear the complete
+inventory.
+
+`clippy::wildcard_enum_match_arm` is also not configured. A whole-workspace
+probe reports 211 remaining violations:
+
+- `signalbox-client`: 47; `signalbox-persistence`: 41; `signalbox-domain`: 34;
+  `signalboxd`: 23; `signalbox-model-runtime-anthropic`: 15;
+  `signalbox-model-runtime-openai`: 11; `signalbox-model-runtime-claude-cli`: 7;
+  `signalbox-model-runtime-codex-cli`: 6; `signalbox-application`,
+  `signalbox-expect-table`, and `signalbox-tools-code-host`: 5 each;
+  `signalbox-conversation-import-codex`: 3; `signalbox-model-runtime`,
+  `signalbox-model-provider-runtime`, and `signalbox-process-protocol`: 2 each;
+  `signalbox-conversation-import-claude-code`, `signalbox-tool-contract`, and
+  `signalbox-tool-schema-derive`: 1 each.
+
+The audit-fixes effort owns active violations in `apps/client/src/`,
+`apps/signalboxd/`, `crates/domain/src/model_execution.rs`, the model-runtime
+crates, `crates/process-protocol/`, and `crates/tools-code-host/`; the remaining
+domain and persistence matches require a separate exhaustive-match follow-up.
+Review enforces explicit matching until that complete inventory reaches zero and
+the lint can be enabled at `deny`.
 
 Review continues to enforce the semantic halves that syntax alone cannot prove:
 which crate owns a bound or durable spelling, whether a row record's labels are
