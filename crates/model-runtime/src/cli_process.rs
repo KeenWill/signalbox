@@ -204,6 +204,14 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
     sink: &mut (dyn ObservationSink<C> + Send),
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence {
+    if !CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED {
+        return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+            cause: UnsentCause::ConnectFailed(TransportFacts::new(format!(
+                "{} process-group supervision is unsupported on this platform",
+                request.labels.process
+            ))),
+        });
+    }
     let CliProcessRequest {
         command,
         prompt,

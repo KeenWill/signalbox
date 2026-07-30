@@ -3584,6 +3584,17 @@ mod tests {
         assert!(output.contains(r#""safe":"kept""#));
     }
 
+    #[test]
+    fn credential_json_redaction_preserves_an_out_of_range_numeric_lexeme() {
+        const NUMERIC_LEXEME: &str = "18446744073709551616";
+        let fixture = format!(r#"{{"x":{NUMERIC_LEXEME},"api_key":"synthetic-secret"}}"#);
+
+        let output = redact_json(&fixture);
+
+        assert!(output.contains(NUMERIC_LEXEME));
+        assert!(output.contains(REDACTED));
+    }
+
     /// Credential redaction: quoted credential-shaped values are removed as one value.
     #[test]
     fn credential_redacts_complete_quoted_values() {

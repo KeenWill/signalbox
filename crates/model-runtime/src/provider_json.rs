@@ -288,4 +288,11 @@ mod tests {
         ));
         assert!(!provider_json_has_duplicate_members("{"));
     }
+
+    #[test]
+    fn duplicate_member_scan_continues_after_an_out_of_range_number() {
+        const PROVIDER_JSON: &str = r#"{"number":1e1000000,"event":"first","event":"second"}"#;
+
+        assert!(provider_json_has_duplicate_members(PROVIDER_JSON));
+    }
 }
