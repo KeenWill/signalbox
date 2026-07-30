@@ -14,10 +14,11 @@ compatibility-smoke automation was verified through PR #333
 composition root, its telemetry, and the production `FileCredentialAccess` were
 verified through PR #258 (`agent/signalboxd-rename`); the Anthropic adapter's
 server-side `fallback`-block recognition was verified through PR #280
-(`agent/provider-identity-normalization`). The five persistence-repository
-families in the operator-failure inventory were verified through PR #288
-(`agent/audit-fix-docs-coherence`). The streamed-delivery bridge and ephemeral
-text-delta projection were verified through PR #300
+(`agent/provider-identity-normalization`). The HTTP fallback-body redaction
+ordering was verified through PR #330 (`agent/audit-verified-fixes`). The five
+persistence-repository families in the operator-failure inventory were verified
+through PR #288 (`agent/audit-fix-docs-coherence`). The streamed-delivery bridge
+and ephemeral text-delta projection were verified through PR #300
 (`agent/token-level-streaming`); the Claude 5-family thinking-signature stream
 shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
 CLI redaction contract was verified through PR #316
@@ -199,13 +200,16 @@ strings appear only as retained detail inside already-classified variants:
   limited, quota exhausted, overloaded, provider internal, unrecognized; the
   kind lives in the core crate, and each adapter owns an exhaustive mapping into
   it) plus retained `NativeErrorFacts` that classification never reads. Retained
-  native message text is credential-redacted, not verbatim: Anthropic truncates
-  every native message at 2048 bytes (marked with the `… [truncated]` suffix) at
-  the evidence-redaction boundary, and OpenAI captures non-envelope error bodies
-  lossy-UTF-8 at the same 2048-byte bound. Why: audit evidence must be bounded
-  and secret-free before it leaves the adapter. Quota exhaustion is distinct
-  from rate limiting. Why: a billing condition must never be treated as
-  retry-later backoff.
+  native message text is credential-redacted, not verbatim: Anthropic and OpenAI
+  retain each complete adapter-bounded fallback body until the
+  evidence-redaction boundary, sanitize literal and JSON-escaped representations
+  with the exact prepared credential, and only then truncate native messages at
+  2048 bytes with the `… [truncated]` suffix. Why: truncating inside an escape
+  can make valid JSON unparseable and hide a reversible credential
+  representation from format-aware redaction; audit evidence must be bounded and
+  secret-free before it leaves the adapter. Quota exhaustion is distinct from
+  rate limiting. Why: a billing condition must never be treated as retry-later
+  backoff.
 - `CancellationConfirmed`: a definitive provider cancellation response. No
   in-repository adapter constructs one; the variant keeps the vocabulary total
   so observing one never forces a misclassification.
@@ -736,12 +740,13 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   sensitivity-marked HTTP header; execute performs no second lookup.
 - Provider-controlled text is credential-sanitized before leaving the adapter:
   terminal-evidence text (error messages, raw bodies, transport detail, reported
-  identifiers) is redacted with the exact preparation-time value, tool-argument
-  JSON is redacted JSON-aware (including escaped representations), and streamed
-  text/thinking deltas are redacted with a held-back trailing credential prefix
-  so a secret split across provider chunks can never be emitted piecewise; when
-  ordering forces a held prefix out, it is replaced with `[redacted]`. Why: fail
-  closed — a possible secret prefix is destroyed rather than delivered.
+  identifiers) is redacted with the exact preparation-time value before any
+  fallback-body truncation, tool-argument JSON is redacted JSON-aware (including
+  escaped representations), and streamed text/thinking deltas are redacted with
+  a held-back trailing credential prefix so a secret split across provider
+  chunks can never be emitted piecewise; when ordering forces a held prefix out,
+  it is replaced with `[redacted]`. Why: fail closed — a possible secret prefix
+  is destroyed rather than delivered.
 - The Codex CLI adapter accepts only the configured non-secret
   `CredentialReference` and delegates resolution to the CLI's ambient
   subscription login on every fresh spawn. It never locates, reads, copies,
