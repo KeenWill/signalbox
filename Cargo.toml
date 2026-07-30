@@ -32,12 +32,15 @@ repository = "https://github.com/KeenWill/signalbox"
 publish = false
 
 [workspace.lints.rust]
+missing_docs = "warn"
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
+disallowed_methods = "deny"
 expect_used = "deny"
 panic = "deny"
 todo = "deny"
 unimplemented = "deny"
 unreachable = "deny"
 unwrap_used = "deny"
+wildcard_enum_match_arm = "warn"

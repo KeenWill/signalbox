@@ -40,6 +40,7 @@ use crate::{
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
     },
+    model_execution::{SnapshotAppend, SnapshotAppendError, insert_snapshot_append},
     outbox,
 };
 
@@ -552,39 +553,27 @@ async fn insert_prepared(
     let seed_context = seed_snapshot.frontier();
     let member_count = u64::try_from(seed_snapshot.entry_count())
         .map_err(|_| ImportedSessionCorruption::Inconsistent("seed member count"))?;
-    sqlx::query(
-        "INSERT INTO context_frontier
-            (owning_session_id, context_frontier_id,
-             prefix_context_frontier_id, member_count)
-         VALUES ($1, $2, NULL, $3)",
+    insert_snapshot_append(
+        connection,
+        SnapshotAppend {
+            owning_session: seed_context.owning_session(),
+            frontier: seed_context.snapshot(),
+            prefix: None,
+            member_count,
+            prefix_member_count: 0,
+            appended_entries: seed_snapshot.ordered_entries().collect(),
+        },
     )
-    .bind(session_id_to_uuid(seed_context.owning_session()))
-    .bind(seed_context.snapshot().into_uuid())
-    .bind(Decimal::from(member_count))
-    .execute(&mut *connection)
     .await
-    .map_err(ImportedSessionRepositoryError::from_insert_failure)?;
-    for (index, entry) in seed_snapshot.ordered_entries().enumerate() {
-        let position = u64::try_from(index)
-            .ok()
-            .and_then(|index| index.checked_add(1))
-            .ok_or(ImportedSessionCorruption::Inconsistent(
-                "seed member position",
-            ))?;
-        sqlx::query(
-            "INSERT INTO context_frontier_delta
-                (owning_session_id, context_frontier_id, member_position,
-                 source_session_id, semantic_entry_id)
-             VALUES ($1, $2, $3, $4, $5)",
-        )
-        .bind(session_id_to_uuid(seed_context.owning_session()))
-        .bind(seed_context.snapshot().into_uuid())
-        .bind(Decimal::from(position))
-        .bind(session_id_to_uuid(entry.source_session()))
-        .bind(entry.entry().into_uuid())
-        .execute(&mut *connection)
-        .await?;
-    }
+    .map_err(|error| match error {
+        SnapshotAppendError::FrontierInsert(error) => {
+            ImportedSessionRepositoryError::from_insert_failure(error)
+        }
+        SnapshotAppendError::MemberInsert(error) => error.into(),
+        SnapshotAppendError::MemberPositionOverflow => {
+            ImportedSessionCorruption::Inconsistent("seed member position").into()
+        }
+    })?;
 
     let seed = prepared.imported_seed();
     sqlx::query(

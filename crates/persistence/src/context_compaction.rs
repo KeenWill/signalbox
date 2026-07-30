@@ -11,7 +11,12 @@ use signalbox_domain::{
 };
 use sqlx::{PgPool, Row, types::Uuid};
 
-use crate::{commit_failure_is_ambiguous, mapping::session_id_to_uuid, outbox};
+use crate::{
+    commit_failure_is_ambiguous,
+    mapping::session_id_to_uuid,
+    model_execution::{SnapshotAppend, SnapshotAppendError, insert_snapshot_append},
+    outbox,
+};
 
 /// All caller and hub-minted facts for a fresh explicit command attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -433,32 +438,29 @@ impl ContextCompactionRepository {
         .execute(&mut *transaction)
         .await
         .map_err(classify_completion_write)?;
-        sqlx::query(
-            "INSERT INTO context_frontier
-                (owning_session_id, context_frontier_id,
-                 prefix_context_frontier_id, member_count)
-             VALUES ($1, $2, $3, $4)",
+        insert_snapshot_append(
+            &mut transaction,
+            SnapshotAppend {
+                owning_session: prepared.session,
+                frontier: prepared.result_frontier,
+                prefix: Some(prepared.source_frontier),
+                member_count: result_count,
+                prefix_member_count: source_count,
+                appended_entries: vec![SemanticTranscriptEntryRef::from_source(
+                    prepared.session,
+                    prepared.summary_entry,
+                )],
+            },
         )
-        .bind(session_id_to_uuid(prepared.session))
-        .bind(prepared.result_frontier.into_uuid())
-        .bind(prepared.source_frontier.into_uuid())
-        .bind(Decimal::from(result_count))
-        .execute(&mut *transaction)
         .await
-        .map_err(classify_completion_write)?;
-        sqlx::query(
-            "INSERT INTO context_frontier_delta
-                (owning_session_id, context_frontier_id, member_position,
-                 source_session_id, semantic_entry_id)
-             VALUES ($1, $2, $3, $1, $4)",
-        )
-        .bind(session_id_to_uuid(prepared.session))
-        .bind(prepared.result_frontier.into_uuid())
-        .bind(Decimal::from(result_count))
-        .bind(prepared.summary_entry.into_uuid())
-        .execute(&mut *transaction)
-        .await
-        .map_err(classify_completion_write)?;
+        .map_err(|error| match error {
+            SnapshotAppendError::FrontierInsert(error)
+            | SnapshotAppendError::MemberInsert(error) => classify_completion_write(error),
+            SnapshotAppendError::MemberPositionOverflow => {
+                ContextCompactionCorruption::InvalidOrdinal("result frontier member position")
+                    .into()
+            }
+        })?;
         sqlx::query(
             "INSERT INTO context_compaction
                 (context_compaction_id, session_id, predecessor_compaction_id,
