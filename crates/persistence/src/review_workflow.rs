@@ -430,14 +430,16 @@ impl ReviewWorkflowStore {
             transaction.rollback().await?;
             return Ok(None);
         };
-        let (current_pass, turn_evidence) = decode_pass_for_transition(pass_row)?;
-        let (run_reference, workflow, policy, run_state) = decode_run_facts(&run_row)?;
-        let loaded_pass = LoadedReviewPass {
-            pass: current_pass.clone(),
-            policy,
-            turn_evidence,
-            run: ReviewRunEvidence::new(run_reference, workflow, policy, run_state),
-        };
+        let turn_evidence = decode_pass_turn_evidence(&pass_row)?;
+        let loaded_pass = load_pass_on_connection(&mut transaction, pass)
+            .await?
+            .ok_or_else(|| {
+                corruption(
+                    "review_pass",
+                    String::from("locked pass disappeared before complete decoding"),
+                )
+            })?;
+        let current_pass = loaded_pass.pass.clone();
         let (current_run, _) = decode_run_for_transition(&run_row, Some(&loaded_pass))?;
         let transitioned_pass =
             current_pass
@@ -3112,18 +3114,6 @@ fn projected_current_run_pass_evidence(
     )))
 }
 
-fn decode_pass_for_transition(
-    row: PgRow,
-) -> Result<(ReviewPass, Option<ReviewPassTurnEvidence>), ReviewWorkflowStoreError> {
-    let canonical_evidence = decode_pass_turn_evidence(&row)?;
-    let state = decode_pass_row_state(&row)?;
-    let current_evidence = projected_current_pass_turn_evidence(state, canonical_evidence)?;
-    Ok((
-        reconstitute_pass(&row, current_evidence, Vec::new(), None)?,
-        canonical_evidence,
-    ))
-}
-
 fn reconstitute_pass(
     row: &PgRow,
     turn_evidence: Option<ReviewPassTurnEvidence>,
@@ -3195,17 +3185,6 @@ fn decode_pass_accepted_input_evidence(
     ))
 }
 
-fn decode_pass_row_state(row: &PgRow) -> Result<ReviewPassState, ReviewWorkflowStoreError> {
-    decode_pass_state(
-        &row.try_get::<String, _>("state_kind")?,
-        row.try_get("turn_id")?,
-        row.try_get("output_frontier_id")?,
-        stored_pass_result(row, "target_id", "")?,
-        Vec::new(),
-        None,
-    )
-}
-
 fn decode_pass_turn_evidence(
     row: &PgRow,
 ) -> Result<Option<ReviewPassTurnEvidence>, ReviewWorkflowStoreError> {
@@ -3231,38 +3210,6 @@ fn decode_pass_turn_evidence(
             String::from("torn canonical turn evidence"),
         )),
     }
-}
-
-fn projected_current_pass_turn_evidence(
-    state: ReviewPassState,
-    canonical: Option<ReviewPassTurnEvidence>,
-) -> Result<Option<ReviewPassTurnEvidence>, ReviewWorkflowStoreError> {
-    let Some(expected_turn) = pass_state_turn(&state) else {
-        return Ok(None);
-    };
-    let Some(canonical) = canonical else {
-        return Err(corruption(
-            "review_pass",
-            String::from("referenced turn row is missing"),
-        ));
-    };
-    if canonical.turn() != expected_turn {
-        return Err(corruption(
-            "review_pass",
-            String::from("canonical turn identity mismatch"),
-        ));
-    }
-    let (outcome, frontier) = match state {
-        ReviewPassState::Running { .. } => (ReviewPassTurnOutcome::Active, None),
-        _ => (canonical.outcome(), canonical.terminal_frontier()),
-    };
-    Ok(Some(ReviewPassTurnEvidence::new(
-        canonical.turn(),
-        canonical.session(),
-        canonical.accepted_input(),
-        outcome,
-        frontier,
-    )))
 }
 
 fn decode_turn_outcome(

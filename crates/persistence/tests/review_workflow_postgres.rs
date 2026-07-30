@@ -2826,6 +2826,21 @@ async fn inv040_referenced_finding_retains_producing_pass() -> Result<(), Box<dy
         .append_finding_event(finding_ref.finding(), event)
         .await?;
 
+    let retry = fixture
+        .store
+        .transition_run_and_pass(
+            dedupe_pass.run().run(),
+            dedupe_pass.pass(),
+            ReviewRunState::Queued,
+            ReviewPassState::Queued,
+        )
+        .await
+        .expect_err("terminal referenced result rejects a later pass transition cleanly");
+
+    assert!(matches!(
+        retry,
+        ReviewWorkflowStoreError::InvalidTransition(ReviewWorkflowTransitionError::Pass(_))
+    ));
     assert_eq!(
         fixture.store.load_finding(finding_ref.finding()).await?,
         Some(expected)
