@@ -112,7 +112,7 @@ jobs:
           benchmark_log="$RUNNER_TEMP/domain-instruction-counts.txt"
           set +e
           SIGNALBOX_DOMAIN_INSTRUCTION_BENCHMARK=1 \
-            cargo bench -p signalbox-domain --bench instruction_counts \
+            cargo bench --locked -p signalbox-domain --bench instruction_counts \
             2>&1 | tee "$benchmark_log"
           benchmark_status="${PIPESTATUS[0]}"
           set -e

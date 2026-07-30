@@ -65,6 +65,7 @@ mod benchmark_runner {
 
     gungraun::main!(
         config = LibraryBenchmarkConfig::default()
+            .pass_through_env("SIGNALBOX_DOMAIN_INSTRUCTION_BENCHMARK")
             .tool(Callgrind::default().format([CallgrindMetrics::All]));
         library_benchmark_groups = domain_microbenchmarks
     );

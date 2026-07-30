@@ -38,6 +38,7 @@ const PREFIX_LAYER_COUNT: usize = 48;
 const TOTAL_ORDER_CHAIN_COUNT: u64 = 64;
 const TOTAL_ORDER_CHAIN_LENGTH: u64 = 4;
 const TOOL_ARGUMENT_MEMBER_COUNT: u32 = 128;
+const TOOL_ARGUMENT_CAPACITY_HINT_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub enum FixtureError {
@@ -569,7 +570,7 @@ pub fn project_compaction_frontier(input: &ProjectionFixture) -> ProjectionResul
 /// text is deterministic and exercises recursive parsing, lexical key
 /// canonicalization, and compact serialization.
 pub fn tool_arguments_fixture() -> String {
-    let mut value = String::with_capacity(16 * 1024);
+    let mut value = String::with_capacity(TOOL_ARGUMENT_CAPACITY_HINT_BYTES);
     value.push('{');
     for index in (0..TOOL_ARGUMENT_MEMBER_COUNT).rev() {
         if index + 1 != TOOL_ARGUMENT_MEMBER_COUNT {
