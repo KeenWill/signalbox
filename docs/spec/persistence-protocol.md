@@ -117,8 +117,8 @@ Implemented table families (across the forward-only migrations):
   `create_session_from_imported_frontier_command`,
   `replace_session_defaults_command`, `replace_session_metadata_command`,
   `submit_input_command`, `decide_tool_request_command`,
-  `replace_lost_runner_command`, `replace_lost_runner_result`, and
-  `abandon_lost_runner_command`);
+  `replace_lost_runner_command`, `replace_lost_runner_result`,
+  `abandon_lost_runner_command`, and `promote_pending_runner_command`);
 - `session`, `imported_session_seed`, `session_defaults_version`,
   `session_current_defaults`, `session_scheduler`;
 - `session_metadata` plus its current tag and attribute satellites,
@@ -198,8 +198,8 @@ Representation rules, all enforced in the schema:
   requires them (for example `turn_lifecycle_state_payload_shape`). The
   implemented sets are exactly the admitted slices: turn state
   `queued`/`active`/`terminal`, active phase `running`,
-  `awaiting_model_call_recovery`, `awaiting_tool_approval`, or
-  `awaiting_tool_recovery`, terminal disposition
+  `awaiting_model_call_recovery`, `awaiting_tool_approval`,
+  `awaiting_tool_recovery`, or `awaiting_runner_recovery`, terminal disposition
   `failed`/`completed`/`refused`/`cancelled`/`reconciliation_required`, attempt
   state `prepared`/`running`/`stop_requested`/`ended` with end variants
   `without_stop` and `after_cancellation`, and model-call state
@@ -267,6 +267,41 @@ Representation rules, all enforced in the schema:
   proof. Those lifecycle checks preserve the immutable next-safe-point command
   receipt, so equal replay after either transition still returns the original
   applied pending-steering result (INV-012, INV-016).
+- The runner-orchestration slice adds the `awaiting_runner_recovery` active
+  phase to `turn_lifecycle` with payload columns total only for that
+  discriminator: the exact lost runner, the positive placement revision the loss
+  was projected against, and a nullable tool attempt naming the physical attempt
+  the loss interrupted. Deferred checks require that runner and revision to name
+  the session's current lost placement, require a present tool attempt to belong
+  to the same session and to be the attempt the loss recorded, and admit the
+  phase only while that placement is `RunnerLost` or `RunnerLostBeforePin`. The
+  lifecycle transition matrix admits the phase exactly where
+  `awaiting_tool_recovery` is admitted, and restart reconstitutes it from those
+  correlated facts rather than from the stored discriminator. Without this shape
+  the loss transaction has nowhere to store the phase and restart cannot rebuild
+  it.
+- The same slice adds the closed `runner_placement_changed` semantic-entry
+  payload: one positive placement revision, total only for that kind, with a
+  foreign key to the same session's placement record at exactly that revision.
+  At most one such entry exists per session and revision, the session
+  placement-frontier pointer names the exact entry and revision, and a deferred
+  check requires the entry to be the final member of the frontier that installed
+  it. Reconstitution resolves the referenced placement record and rejects a
+  missing, cross-session, non-successor, or duplicated reference rather than
+  rendering the entry from its own payload.
+- Both creation command families store the caller's optional placement.
+  `create_session_command` and `create_session_from_imported_frontier_command`
+  carry the complete request — selector kind with its runner identity or class
+  name, working-directory selection, credential-profile name, workspace
+  requirement with its repository key, and sandbox profile — under
+  `CHECK`-constrained variant shape, with every member absent together for a
+  daemon-only session, plus one append-only tool-override satellite bounded at
+  64 rows per command. Each family advances one kind-scoped storage version for
+  these columns, so a reader that supports only earlier versions rejects the new
+  records instead of projecting a runner-backed creation as daemon-only. A
+  present placement additionally requires the created session's revision-one
+  placement record to carry the equal request, so replay and session state
+  cannot disagree about what was requested.
 - Cross-table completeness uses deferrable-initially-deferred foreign keys and
   constraint triggers so rows of one atomic fact can be inserted in any order
   inside a transaction while every commit boundary sees the complete shape: each
@@ -316,21 +351,21 @@ identifier: `command_id` is the primary key across all kinds and sessions
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
 `review_workflow`, `compact_session`, `replace_lost_runner`,
-`abandon_lost_runner`) and a kind-scoped `storage_version`. Create-session
-records write the provenance-gated version specified above; defaults-bearing
-imported-create and replace-defaults records write version 3. Create-session
-records reconstitute version 1 with the disabled dangerous-tool posture, and
-versions 1 and 2 with no system prompt — a pre-version-three row carrying one
-fails closed in both the schema and every Rust reader. A pre-version-four create
-row carrying template provenance likewise fails closed; therefore a rollback
-reader that supports only versions 1 through 3 rejects every new create record
-instead of projecting template creation as explicit creation. Metadata, submit,
-decision, review-workflow, compaction, and runner-recovery records use version
-1\. Each kind has one typed subordinate request record keyed by `command_id` that
-stores every caller-supplied semantic field in typed, `CHECK`-constrained
-columns. Every kind except runner replacement also stores the terminal
-`applied`/`rejected` result and typed result fields there.
-`replace_lost_runner_command` is the immutable request and
+`abandon_lost_runner`, `promote_pending_runner`) and a kind-scoped
+`storage_version`. Create-session records write the provenance-gated version
+specified above; defaults-bearing imported-create and replace-defaults records
+write version 3. Create-session records reconstitute version 1 with the disabled
+dangerous-tool posture, and versions 1 and 2 with no system prompt — a
+pre-version-three row carrying one fails closed in both the schema and every
+Rust reader. A pre-version-four create row carrying template provenance likewise
+fails closed; therefore a rollback reader that supports only versions 1 through
+3 rejects every new create record instead of projecting template creation as
+explicit creation. Metadata, submit, decision, review-workflow, compaction, and
+runner-recovery records use version 1. Each kind has one typed subordinate
+request record keyed by `command_id` that stores every caller-supplied semantic
+field in typed, `CHECK`-constrained columns. Every kind except runner
+replacement also stores the terminal `applied`/`rejected` result and typed
+result fields there. `replace_lost_runner_command` is the immutable request and
 provisioning-authorization root; at most one append-only
 `replace_lost_runner_result` supplies its terminal result after off-transaction
 runner I/O. Result-shape `CHECK` constraints tie each rejection kind to exactly
@@ -464,7 +499,10 @@ Locks per transaction, in acquisition order:
   heads in runner-identity order and then the current registration head.
   Activating a pending replacement retires the old enrollment, persists the
   issued successor identities and registration, and installs the owner-command
-  effect in one transaction.
+  effect in one transaction. Deployment-scoped promotion
+  (`promote_pending_runner`) uses that same subsequence, takes no
+  `session_scheduler`, placement, grant, or lease lock because it changes none
+  of them, and commits its claim, activation, and terminal result together.
 - **Runner dispatch and result**: `session_scheduler` is the first lock,
   followed by enrollment, current runner connection/loss, registration,
   placement, current credential grant when present, and lease heads in the total
@@ -500,7 +538,9 @@ Locks per transaction, in acquisition order:
   authorization resumable. Abandon requires an empty active-turn slot and stores
   only terminal placement state. Either transition enqueues the retired
   placement release; release acknowledgement uses the same
-  scheduler-then-placement order and never mutates turn lifecycle.
+  scheduler-then-placement order, never mutates turn lifecycle, and is the only
+  transition that retires the durable release record, so an unacknowledged
+  release is redelivered after restart exactly as an unacknowledged result is.
 - **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
   exactly `delivered_through + 1` and its typed record are read. Only an
   accepted synchronous offer advances that same singleton inside the
@@ -687,13 +727,22 @@ protocol scope). Implemented storage:
   `turn_activated_outbox_event`, `turn_failed_outbox_event`,
   `model_call_transition_outbox_event`, `tool_batch_transition_outbox_event`,
   `context_compacted_outbox_event`, `turn_completed_outbox_event`,
-  `turn_refused_outbox_event`, `turn_cancelled_outbox_event`, and
-  `turn_reconciliation_required_outbox_event` — with a deferred trigger
-  requiring exactly one typed record per header. Tool-batch transition records
-  carry the producing call and exactly one closed state shape: `proposed` names
-  the yielded assistant/tool-use frontier, `results_projected` names the
-  all-resolved result frontier, and `recovery_required` names the exact
-  ambiguous physical attempt. The header and typed record tables are append-only
+  `turn_refused_outbox_event`, `turn_cancelled_outbox_event`,
+  `turn_reconciliation_required_outbox_event`, and
+  `runner_state_transition_outbox_event` — with a deferred trigger requiring
+  exactly one typed record per header. A runner-transition record carries the
+  affected runner, the positive placement revision, the sandbox profile, one
+  closed transition state, and the relocation facts that state requires, so a
+  follower learns of loss, suspicion, recovery, replacement, working-directory
+  relocation, and abandonment from the same family. The family is deliberately
+  shaped for extension: a later runner fact — another relocation shape, or
+  runner metadata and attributes — adds a state and its columns to this one
+  record kind rather than a second event kind, so a client that decodes the
+  family keeps decoding it. Tool-batch transition records carry the producing
+  call and exactly one closed state shape: `proposed` names the yielded
+  assistant/tool-use frontier, `results_projected` names the all-resolved result
+  frontier, and `recovery_required` names the exact ambiguous physical attempt.
+  The header and typed record tables are append-only
   (`reject_immutable_record_change`), and every outbox table rejects `TRUNCATE`.
   A context-compacted record names the authoritative compaction, its completed
   dedicated call, exact positive through position, appended summary, and result
@@ -733,10 +782,17 @@ appends `turn_cancelled`, and live stopped ambiguity appends
 `context_compacted` in the same transaction as its dedicated call, summary
 entry, result frontier, compaction result, and applied command receipt. An
 interrupt against a parked ambiguous tool attempt appends the same event kind
-with that exact tool-attempt reference. A guarded transition that changes zero
-rows appends zero events. Why: writing the event in the committing transaction
-makes the dual-write failure (state without event, or event without state)
-unrepresentable.
+with that exact tool-attempt reference. Every durable runner state change
+appends one `runner_state_transition` per affected session in the same
+transaction that commits it: initial pin, first missed heartbeat, recovery
+before durable loss, loss before and after pin, owner replacement,
+working-directory relocation, and abandonment. Because a client cannot otherwise
+learn that its session lost its runner, this append is not optional bookkeeping:
+a loss or replacement committed without its event is a defect the deferred
+one-record-per-header trigger is there to catch. A guarded transition that
+changes zero rows appends zero events. Why: writing the event in the committing
+transaction makes the dual-write failure (state without event, or event without
+state) unrepresentable.
 
 The public `OutboxDispatcher` is the storage-side single-consumer seam. It locks
 the delivery singleton, decodes exactly the next typed event, invokes a
@@ -754,15 +810,17 @@ and failed, completed, refused, cancelled, and reconciliation-required records
 must agree with the durable turn, terminal frontier, semantic marker where
 present, and terminal model call or tool attempt where present. A
 reconciliation-required event carries exactly one of those two operation
-references. A context-compacted event must agree with one completed dedicated
-call and the authoritative compaction, applied command, exact through position,
-summary entry, and result frontier before dispatch. Tool-batch cancellation and
-known crash-failure records validate their terminal marker after the earlier
-producing model call and ended physical attempts rather than requiring an
-otherwise empty call history. Historical Prepared and InFlight transition
-records remain dispatchable after their call advances. Exhausted delivery still
-validates the allocator singleton and cursor. Daemon task ownership, polling,
-fan-out, and client observation semantics are owned by
+references. A runner-state-transition record must agree with the named session's
+current durable placement state and revision, and with the placement entry when
+its transition installed one. A context-compacted event must agree with one
+completed dedicated call and the authoritative compaction, applied command,
+exact through position, summary entry, and result frontier before dispatch.
+Tool-batch cancellation and known crash-failure records validate their terminal
+marker after the earlier producing model call and ended physical attempts rather
+than requiring an otherwise empty call history. Historical Prepared and InFlight
+transition records remain dispatchable after their call advances. Exhausted
+delivery still validates the allocator singleton and cursor. Daemon task
+ownership, polling, fan-out, and client observation semantics are owned by
 [process-protocol](process-protocol.md).
 
 ## Open edges

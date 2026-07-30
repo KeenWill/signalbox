@@ -180,27 +180,29 @@ key `command_id`, a closed `command_kind` discriminator (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
 `review_workflow`, `compact_session`, `replace_lost_runner`,
-`abandon_lost_runner`), a kind-scoped `storage_version`, and `claimed_at`
-(`transaction_timestamp()`), which is non-semantic operational metadata. No
-command kind, session, or client has a separate command-ID namespace.
+`abandon_lost_runner`, `promote_pending_runner`), a kind-scoped
+`storage_version`, and `claimed_at` (`transaction_timestamp()`), which is
+non-semantic operational metadata. No command kind, session, or client has a
+separate command-ID namespace.
 
 Each admitted kind has one purpose-specific typed record family
 (`create_session_command`, `create_session_from_imported_frontier_command`,
 `replace_session_defaults_command`, `replace_session_metadata_command`,
 `submit_input_command`, `decide_tool_request_command`,
 `review_workflow_command`, `compact_session_command`,
-`replace_lost_runner_command`, `abandon_lost_runner_command`) keyed one-to-one
-by `command_id`, storing every caller-supplied semantic field under `CHECK`
-constraints and foreign keys. Every family except replacement also stores its
-terminal `applied`/`rejected` discriminator and typed result fields in that row.
-A compact-session record begins `pending` with its exact dedicated Prepared
-call, then changes exactly once to `applied` with its receipt or to `failed`;
-its request fields never change. Runner replacement instead has one immutable
-request row plus at most one append-only `replace_lost_runner_result`: the
-request row satisfies typed-claim completeness while provisioning crosses the
-runner boundary, and no success or rejection response exists until the result
-row commits. Kind and version agreement between the registry row and its typed
-record is enforced by a composite foreign key, and a deferred constraint trigger
+`replace_lost_runner_command`, `abandon_lost_runner_command`,
+`promote_pending_runner_command`) keyed one-to-one by `command_id`, storing
+every caller-supplied semantic field under `CHECK` constraints and foreign keys.
+Every family except replacement also stores its terminal `applied`/`rejected`
+discriminator and typed result fields in that row. A compact-session record
+begins `pending` with its exact dedicated Prepared call, then changes exactly
+once to `applied` with its receipt or to `failed`; its request fields never
+change. Runner replacement instead has one immutable request row plus at most
+one append-only `replace_lost_runner_result`: the request row satisfies
+typed-claim completeness while provisioning crosses the runner boundary, and no
+success or rejection response exists until the result row commits. Kind and
+version agreement between the registry row and its typed record is enforced by a
+composite foreign key, and a deferred constraint trigger
 (`durable_command_requires_typed_record`, executing function
 `require_durable_command_typed_record`) requires exactly one typed record per
 claim at every transaction boundary. Why: typed relational records keep each
@@ -218,6 +220,14 @@ replay during provisioning joins the same durable operation and can neither
 start another workspace nor acquire another meaning. Startup resumes an
 unterminated request before client admission. `abandon_lost_runner` remains one
 ordinary atomic claim-and-terminal-result transaction.
+
+`promote_pending_runner` is the one owner command in this set whose payload
+names no session. It carries only the command identity and the pending
+enrollment-request identity it promotes, and it is a single atomic
+claim-and-terminal-result transaction: the deployment-scoped fact it acts on is
+that this daemon's active runner is durably gone, so no session placement is a
+required argument and none is mutated
+([runner protocol and placement](runner-protocol.md#identity-enrollment-and-registration)).
 
 For `SubmitInput`, each terminal command result must correlate with exactly its
 committed domain effects. Equal replay returns the recorded result only after
@@ -239,12 +249,16 @@ undecodable claim as unseen would let one identifier acquire a second meaning
 (INV-012). Corruption is a distinct error family from infrastructure failure and
 from recorded domain rejection.
 
-New `CreateSession` records use storage version 4. New
-`CreateSessionFromImportedFrontier` and `ReplaceSessionDefaults` records use
-version 3. All three families reconstitute version 1 with dangerous blanket
-approval disabled and versions 1 and 2 with no system prompt. Create-session
-versions 1 through 3 carry no template provenance; version 4 requires provenance
-for template mode and requires its absence for explicit mode.
+New `CreateSession` records use storage version 5 and new
+`CreateSessionFromImportedFrontier` records version 4; new
+`ReplaceSessionDefaults` records use version 3. All three families reconstitute
+version 1 with dangerous blanket approval disabled and versions 1 and 2 with no
+system prompt. Create-session versions 1 through 3 carry no template provenance;
+version 4 requires provenance for template mode and requires its absence for
+explicit mode. The two creation families' newest versions are the ones that
+carry the optional session runner placement; every earlier version requires its
+complete absence, so a reader that supports only earlier versions rejects a
+runner-backed creation record instead of projecting it as daemon-only.
 `ReplaceSessionMetadata`, `SubmitInput`, and `DecideToolRequest` use version 1.
 `CreateSession` records applied results only (its one preparation failure is an
 error, not a recorded rejection); `CreateSessionFromImportedFrontier` also
@@ -271,7 +285,11 @@ Structural equality (hand-written `PartialEq` on `CreateSession`,
 `ReplaceSessionMetadata`, and `DecideToolRequest` in `crates/domain`) covers
 every caller-supplied semantic field and excludes `DurableCommandId`. Why: the
 identifier is the lookup key that names the payload, not part of the meaning it
-names.
+names. The optional session runner placement is such a field in both creation
+families, so it participates in that equality in both creation modes — including
+template-derived creation, whose daemon-resolved defaults are excluded — and a
+replay carrying a different placement, or a placement where the first handling
+had none, is conflicting reuse.
 
 Every command repository, including
 `crates/persistence/src/context_compaction.rs`, follows one claim protocol, with

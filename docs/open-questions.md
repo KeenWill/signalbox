@@ -243,245 +243,57 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 Dispatch fencing, initial scheduler mechanics, and the complete version-one
 local runner orchestration are specified in
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
-[runner protocol and placement](spec/runner-protocol.md). The questions below
-remain open.
+[runner protocol and placement](spec/runner-protocol.md). Owner rulings on
+2026-07-29 closed the loss, replacement, cleanup, contract-gap, and
+session-composition questions this section previously carried, and each
+resolution now lives in the contract page that owns it: staged replacement
+ordering and the runner-recovery turn phase in
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md#runner-loss-session-recovery);
+same-runner recovery after a registration-triggered loss, deployment-scoped
+successor promotion, non-transferable workspace cleanup, pinned canonical digest
+bytes, runner-to-daemon failure frames, workspace-release acknowledgement,
+forced Git transport configuration, and the independent
+[session-composition axes](spec/runner-protocol.md#session-composition) in
+[runner protocol and placement](spec/runner-protocol.md); the runner-recovery
+phase, the placement transcript payload, creation-record placement, and the
+runner event family in
+[persistence-protocol](spec/persistence-protocol.md#relational-representation);
+the closed runner execution object, creation-request placement, and template
+creation carrying placement in
+[process-protocol](spec/process-protocol.md#client-requests); the relocation
+transcript boundary in
+[sessions-and-transcript](spec/sessions-and-transcript.md#semantic-transcript-entries);
+capability-derived tool advertisement in
+[model-call-execution](spec/model-call-execution.md#frontier-rendering); and Git
+subprocess deadlines, full-ref branch validation, unborn-HEAD clones, and honest
+output truncation in
+[tool-loop](spec/tool-loop.md#version-one-workstation-tool-contracts). Multiple
+simultaneously enrolled runners and owner-directed relocation of a healthy
+session are committed functionality that version one defers rather than open
+questions
+([runner protocol and placement](spec/runner-protocol.md#the-singleton-runner-rule-is-temporary)).
+The questions below remain open.
 
-The first four are one family. They are the loss, replacement, and cleanup
-deadlocks of the version-one singleton-runner model: each one is a state the
-specification can reach and cannot leave, and the runner implementation slice —
-daemon listener, placement and loss handling — hits all four in the same pass.
-They were raised as review findings on the specification pull request and are
-recorded here rather than closed, because the specification admits the states
-today and the implementer needs the decisions before writing the transaction
-set. Deciding them together is cheaper than deciding them one at a time: the
-same replacement transaction is the answer surface for three of them.
-
-- **Replacement ordering against an in-flight model call.** When heartbeat loss
-  occurs during an already-authorized daemon-local model call, the loss rules
-  let that call keep "its ordinary completion or ambiguity law" while
-  `ReplaceLostRunner` immediately appends the reference-only
-  `RunnerPlacementChanged` semantic entry and extends the next context frontier.
-  The later model observation must then append its assistant and tool entries
-  from the older frozen source frontier, so it either violates the prefix-only
-  frontier law or orders the placement event ahead of output that never saw it.
-  The two rules are jointly underspecified and cannot both hold. Decide whether
-  replacement is *rejected* while a call is in flight or *staged* until the call
-  reaches its observation boundary, with the placement event appended after that
-  output; the prefix-only law is enforced by persistence triggers that reject at
-  commit, so an implementation that guesses wrong fails loudly in its own tests
-  rather than writing a mis-ordered transcript. Blocks the replacement
-  transaction and any loss handling that can race a live call. (S16, S30–S32)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3662727053)
-- **Recovery after registration-triggered loss.** `RunnerLost` can arise when a
-  live runner re-registers without a pinned capability, without its connection
-  or enrollment being marked lost. In that state the singleton enrollment rule
-  admits no pending successor, while the replacement rule rejects the same
-  runner and requires a *different* currently-registered live runner — which
-  version one cannot supply. A session reaching this loss source can therefore
-  never call `replace_lost_runner`, the only transaction that would recover it.
-  Decide between a checked same-runner/current-enrollment recovery and admitting
-  a provisioning-only successor for this loss source specifically. Blocks
-  recovery from capability-losing re-registration. (S16, S30–S32)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3662727058)
-- **Cleanup ownership for a retired runner.** After a repository-owning runner
-  is durably lost and replaced, the predecessor enrollment is revoked and its
-  identity cannot resume, yet the specification states that "its cleanup owner
-  is structurally the runner that provisioned it; no daemon-cleanup alternative
-  is constructible" and the workspace cannot transfer to the successor. The
-  resulting `workspace_release` has no connection to deliver on, so every
-  loss-based replacement permanently strands the old clone. The consequence is
-  leaked sandbox disk rather than lost session data, but the design has no exit.
-  Decide between a cleanup-only fenced resume for the retired identity and a
-  checked transfer mechanism that moves cleanup ownership without granting lease
-  authority. Blocks a replacement path that does not leak clones. (S16, S30–S32)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3662727060)
-- **Promotion without a lost session placement.** `replace_lost_runner` is the
-  only transaction allowed to promote a pending successor, and it targets a lost
-  *session placement*. If the singleton runner is lost before any session is
-  pinned — a fresh deployment with no sessions, or one where every placement is
-  an unpinned capability-class request, which loss explicitly does not affect —
-  there is no placement for the transaction to target and the pending runner
-  stays provisioning-only forever. Decide on an owner promotion path independent
-  of any session placement. Blocks recovery of a deployment that loses its
-  runner before pinning a session. (S16, S30–S32)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3662727064)
-
-The remaining questions are independent of that family.
-
-- **Durable acknowledgement for workspace release.** `workspace_release` /
-  `workspace_released` is the only two-frame exchange in the frame table with no
-  daemon acknowledgement, unlike `workspace_leak_recorded`,
-  `workspace_recorded`, and `result_recorded`. A runner that deletes the
-  manifest and then crashes has no acknowledged boundary telling it when the
-  release record may be discarded, and a retained operation can never reach one;
-  a daemon restart can therefore resend a release whose manifest the runner no
-  longer holds, or the runner can retain the sole workspace-operation slot
-  indefinitely. Add a recorded acknowledgement and replay journal analogous to
-  provisioning and results — the pattern to copy already exists in both. Blocks
-  crash-safe workspace release. (S16, S30–S32)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3662727046)
-- **Credential profile requirement for repository placements.** Session creation
-  makes `--credential-profile` optional ("either selector requires
-  `--repository`; the credential profile is optional"), while the credential
-  lifecycle requires the exact granted profile name before a repository can be
-  provisioned. The two contracts cannot both be implemented: a null
-  authorization either fails every such creation or forces the runner to infer a
-  credential the owner never selected. Decide between requiring the
-  repository-bound profile explicitly at session creation and defining a
-  credential-free repository mode across both owning contracts, and make the two
-  sections agree. Blocks the first repository-bound session placement. (S13,
-  S16, S30–S32)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3662727040)
-- **Git subprocess deadlines.** Only `shell_exec` and `build_test` accept
-  `timeout_seconds`; `git_clone` and the other Git tool schemas specify neither
-  a timeout argument nor a fixed deadline. As written, a stalled clone, fetch,
-  push, or hook holds the runner's single global execution permit indefinitely
-  while heartbeats stay healthy, blocking every runner session and producing no
-  terminal evidence. Decide a bounded deadline and a timeout classification for
-  each Git operation — whether the deadline is fixed per operation or a caller
-  argument, and which terminal evidence a timeout produces. Blocks the
-  workstation-tools slice that writes these schemas. (S05, S06, S16)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3662727037)
-- **Branch-name validation admits Git shorthand.** Validation defined in terms
-  of `git check-ref-format --branch` inherits that command's operand, which its
-  own help text describes as `<branchname-shorthand>`; it accepts `@{-1}`, so a
-  token that is not a literal branch name passes. Subsequent create or push
-  operations can then target the previous branch, fail because the expanded
-  branch already exists, or construct the invalid literal `refs/heads/@{-1}`.
-  Decide the exact check: validate the complete `refs/heads/<input>` form, or
-  require the command's normalized output to equal the input exactly. Blocks
-  branch-argument validation in the workstation-tools slice. (S05, S06)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3662727050)
-
-A later review round raised a further set, recorded below. They divide into
-contract gaps — places where the runner specification requires something the
-owning persistence, protocol, or transcript contract does not yet admit — and
-executable-behaviour gaps, where the specified behaviour cannot be produced by
-the tools as described. The first group is what an implementer hits on day one,
-because each one is a write with nowhere to land.
-
-- **Persisting the runner-recovery phase.** Runner loss parking an active turn
-  requires `awaiting_runner_recovery`, but the closed persistence lifecycle
-  inventory admits only running, model and tool recovery, and approval. The loss
-  transaction cannot store the phase without violating the lifecycle
-  discriminator checks, and restart cannot reconstitute it. Add the storage
-  discriminator, payload correlations, transition checks, and migration to the
-  persistence contract. Blocks runner-loss handling end to end. (S16, S30–S32)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3670266219)
-- **Storage for runner-placement transcript entries.** The
-  `RunnerPlacementChanged` entry is mandatory on replacement, but the relational
-  specification defines no corresponding `semantic_transcript_entry` kind,
-  placement-revision payload, correlation constraint, migration, or
-  reconstitution arm. The replacement transaction must therefore either violate
-  the closed semantic-entry schema or invent an undocumented representation.
-  Specify the typed persistence contract. Pairs directly with the
-  replacement-ordering question above, which decides *when* this entry is
-  appended; this one decides whether it can be stored at all. Blocks
-  replacement. (S16, S30–S32)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3670266222)
-- **Runner transitions in the transactional outbox.** The closed outbox
-  inventory has no `runner_state_transition` event kind, typed record table, or
-  append rule, while runner-loss handling requires one such event appended per
-  affected session. Every loss, suspect, recovery, pin, replacement, or
-  abandonment event must therefore either violate the exactly-one-typed-record
-  trigger or disappear from followers. Add the runner event family and its
-  atomic append producers. Blocks followers observing any runner state change.
-  (S16, S30–S32)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3670201474)
-- **Placement through session creation.** A non-null `runner_placement` has
-  nowhere to land: both creation command families — ordinary and
-  imported-frontier — carry only provenance, defaults, and creation mode, their
-  storage versions have no placement payload, and the durable-command contract
-  requires every caller-supplied semantic field in its typed record. A valid
-  request therefore cannot atomically establish or truthfully replay its
-  placement. Extend both creation command families, storage versions, equality,
-  and commit transactions with the exact placement. Blocks creating a
-  runner-backed session at all. (S16, S30–S32)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3670201470)
-- **Runner execution metadata schema.** A runner-produced
-  `tool_execution_result` carries a required closed `execution` object, but the
-  runner arm defines no discriminator, no member holding the outcome, and no
-  allowed outcome tokens or associated fields. The daemon arm is
-  `{"type":"daemon"}`, which gives clients nothing to infer the runner shape
-  from, so the object cannot be encoded or validated interoperably. Enumerate
-  the exact runner object and its outcome variants. Blocks any client rendering
-  a runner-executed tool result. (S05, S06, S16)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3670201459)
-- **Canonical bytes hashed by runner digests.** Advertisement, leak-report,
-  page-chain, and workspace digests are defined over a "canonical checked
-  representation" that fixes no byte serialization, field framing or ordering,
-  Unicode treatment, or domain separation. Equal typed facts can therefore hash
-  differently across the daemon and runner implementations and fail enrollment,
-  acknowledgement, or reconnect replay, while ambiguous concatenations can hash
-  identically. Define the exact canonical byte encoding for every digest input,
-  including domain separation between digest kinds. Blocks enrollment and
-  reconnect replay, and is cheapest to decide before either side is written.
-  (S16, S30–S32)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3670201465)
-- **Runner-to-daemon operation failures.** A runner that cannot provision a
-  workspace — credential unavailable, repository unclonable, sandbox refusing
-  startup — has no frame with which to report it: `workspace_ready` carries only
-  a successful manifest, and the generic `rejected` frame is daemon-to-runner
-  only. The same gap applies when local lease admission refuses an offer before
-  `lease_claim`. The typed provisioning rejection the protocol requires, and
-  exposes as `replacement_provisioning_failed`, therefore cannot be recorded,
-  leaving a claimed replacement or prepared attempt waiting on an operation the
-  healthy runner has already refused. Add correlated, replayable
-  runner-to-daemon failure frames with their durable acknowledgement boundaries.
-  Blocks every unhappy path in provisioning and replacement. (S16, S30–S32)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3670266230)
-- **Neutralizing repository Git transport rewrites.** Validating the canonical
-  `remote.<name>.url` is not sufficient, because model-writable `.git/config`
-  can retain that URL while adding `url.<base>.insteadOf` together with
-  `protocol.ext.allow=always`, so Git executes a substituted external helper.
-  Because `git_fetch` is classified `Idempotent`, a claimed-loss retry can then
-  repeat arbitrary non-idempotent code rather than a fetch. Require a sanitized
-  Git configuration and an HTTPS-only *effective* transport, not validation of
-  the pre-rewrite remote URL. This is the highest-consequence item in this set:
-  it is the one whose wrong answer executes attacker-chosen code inside the
-  sandbox rather than merely failing. Blocks the repository tool surface. (S05,
-  S06, S16)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3670266227)
-- **Fitting process results into durable tool evidence.** The per-stream output
-  bounds admit results that cannot commit: roughly 800 KiB of stdout, once
-  base64-padded and wrapped in the result object, exceeds the 1 MiB
-  `ToolResultContent::Text` limit, converting a contract-valid success into
-  `ResultTooLarge`. A nonzero exit is worse, since the contract permits two 1
-  MiB streams while durable error detail is capped at 4,096 bytes. Set aggregate
-  encoded output bounds that fit the durable evidence algebra, or add a
-  structured bounded result representation, so the promised executor outcomes
-  can actually commit. Blocks `shell_exec` and `build_test` on realistic output.
-  (S05, S06)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3670266228)
-- **Successful clones of empty repositories.** `git clone` of an empty
-  repository exits successfully while reporting that fact, and
-  `git rev-parse HEAD` then fails because no commit exists, so the mandatory
-  `head` result cannot represent a valid successful clone. Recording it as a
-  known failure is both inaccurate and leaves the newly created destination
-  behind. Admit an explicit unborn or nullable HEAD result, or reject and clean
-  up empty repositories under a stated contract. Blocks first-clone provisioning
-  against a fresh repository, which is a normal starting state rather than an
-  exotic one. (S05, S06, S16)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3670201478)
-- **Runner placement flags against template creation.** The terminal syntax
-  admits `create --template NAME` together with `--runner` or `--runner-class`,
-  because the runner options sit outside the model/template alternative — but
-  the closed `create_session_from_template` request carries only `command_id`
-  and `template_name`. The selected placement must therefore be silently
-  discarded or encoded as an illegal extra member. Decide between making runner
-  flags conflict with `--template` and deliberately extending the template
-  request. Blocks template creation on a runner-backed session. (S16, S30–S32)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3670201444)
-- **Workspace-free restricted placements.** A placement selecting
-  `workspace: none` with `workspace-restricted` is admitted, yet the compiled
-  registry advertises all ten workstation tools, whose paths and working
-  directories are defined relative to the exact session repository and whose
-  restricted supervisor requires that repository as its sole writable bind. With
-  no provisioned repository those advertised tools cannot be admitted at lease
-  claim. Reject the combination in version one, or add an authoritative
-  workspace requirement that filters the executable snapshot. Blocks the
-  workspace-free placement mode. (S16, S30–S32)
-  [Thread](https://github.com/KeenWill/signalbox/pull/307#discussion_r3670201450)
+- **Workspace portability between runners.** Moving a session that owns a
+  workspace to another runner requires that workspace to exist, or to be
+  reconstructible, on the destination. Version one never carries a workspace
+  across a placement change: a replaced runner's clone is leaked and the
+  successor provisions its own. That is sufficient for a repository-backed
+  session whose work is already pushed and insufficient for uncommitted state,
+  and it is the missing prerequisite for interchangeable runners on a hosted
+  backend rather than persistent workstations. Decide what a portable workspace
+  is — reprovisioning from durable facts, an explicit transfer, or a shared
+  volume the destination binds — before any automated placement across a runner
+  family exists. Not a blocker: owner-directed moves of a workspace-free
+  session, and of a session whose work is pushed, require none of it. (S16,
+  S30–S32)
+- **Automatic scheduling, load balancing, and MCP placement.** Placement selects
+  a runner by exact identity or capability class and is never rescheduled; no
+  policy chooses among several satisfying runners, balances load, or admits an
+  MCP locus. Deciding those requires multiple simultaneously enrolled runners
+  plus a stated selection policy and its observability, and it composes with the
+  workspace portability question above. Blocks automatic placement, not manual
+  placement. (S16, S30–S32)
 
 ## Tool safety
 
@@ -578,6 +390,19 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
 - **Rich result-content variants.** Attempt content is text-only. Image and
   file/artifact arms, their resource governance, and provider/client rendering
   remain undecided.
+- **Large durable payload architecture.** Tool evidence is bounded by storage
+  policy rather than by physics: 1 MiB of result text, 1 MiB of arguments, 4,096
+  bytes of error detail, and 4,096 bytes of exact runner value, all held in
+  PostgreSQL `text` columns with no physical ceiling near those values. Version
+  one derives its
+  [process output caps](spec/tool-loop.md#version-one-workstation-tool-contracts)
+  from exactly those bounds, so an oversized result truncates honestly instead
+  of failing. Deliberately delivering larger payloads — files well past 1 MiB —
+  needs its own design: where the bytes live, how a result references rather
+  than embeds them, what the model and each client see, and the abuse and
+  denial-of-service controls a larger bound requires. Recorded as a design
+  question rather than a blocker; the truncating caps remain correct until it is
+  answered.
 
 ## Identity, credentials, and resource governance
 

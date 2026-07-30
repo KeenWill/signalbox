@@ -417,6 +417,17 @@ and resolved only by `signalbox-runner`. The daemon, client, database,
 transcript, workspace manifest, and runner wire never receive a runner
 credential path or value (INV-035, INV-045).
 
+A session may hold no credential at all, and no boundary infers one. When the
+placement selected no profile the daemon issues no grant, the lease carries no
+credential dispatch authorization, and the runner resolves no path and injects
+no value for that session's dispatches; a repository whose configured entry
+requires a profile fails with the typed `credential_unavailable` class rather
+than resolving a profile the owner never selected. The converse is equally
+admitted: a named profile is granted to a session with no repository and no
+workspace, because the credential is scoped to that session's dispatches rather
+than to a clone
+([runner protocol and placement](runner-protocol.md#session-composition)).
+
 At lease admission the runner requires the exact granted name in its startup
 configuration; absence rejects the claim before any executable capability is
 issued. Immediately before each provisioning or tool dispatch, it opens the
