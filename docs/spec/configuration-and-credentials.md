@@ -22,11 +22,11 @@ verified through PR #285 (`agent/dev-instance-code-host-credential`). The static
 copy-on-create session-template catalog was verified through PR #311
 (`agent/session-templates-spec`). The static web-fetch egress allowlist is
 verified through PR #330 (`agent/audit-verified-fixes`). The opt-in telemetry
-export contract is verified against `agent/telemetry-export`. Invariant law
-lives in [docs/invariants.md](../invariants.md), cited here by tag. The runner
-configuration and credential paragraphs are the foundation proposal at the
-bottom of their implementing stack and become verified only with those child
-pull requests.
+export contract is verified through PR #347 (`agent/telemetry-export`).
+Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
+tag. The runner configuration and credential paragraphs are the foundation
+proposal at the bottom of their implementing stack and become verified only with
+those child pull requests.
 
 ## Process configuration
 
