@@ -127,8 +127,11 @@ fn parse_args() -> HarnessResult<ParsedArgs> {
         Scenario::FullPath,
         Scenario::SchedulerLock,
     ];
-    let mut invoked_by_cargo_bench = false;
-    let mut arguments = env::args().skip(1);
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if !arguments.iter().any(|argument| argument == "--bench") {
+        return Ok(ParsedArgs::Skip);
+    }
+    let mut arguments = arguments.into_iter();
 
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -194,15 +197,12 @@ fn parse_args() -> HarnessResult<ParsedArgs> {
                     }
                 };
             }
-            "--bench" => invoked_by_cargo_bench = true,
+            "--bench" => {}
             "--help" | "-h" => return Ok(ParsedArgs::Help),
             _ => return Err(error(format!("unknown argument {argument:?}"))),
         }
     }
 
-    if !invoked_by_cargo_bench {
-        return Ok(ParsedArgs::Skip);
-    }
     if duration_seconds == 0 {
         return Err(error("--duration-seconds must be positive"));
     }
@@ -252,9 +252,12 @@ fn print_help() {
         "Usage: cargo bench -p signalbox-persistence --features postgres-integration \
          --bench postgres_load -- [OPTIONS]\n\n\
          Options:\n\
-           --duration-seconds N   Measurement duration per curve point (default: 10)\n\
-           --pool-size N          Pre-opened PostgreSQL pool size (default: 80)\n\
-           --concurrency LIST     Comma-separated sweep (default: 1,2,4,8,16,32,64)\n\
+           --duration-seconds N   Positive offered-load duration per point, in seconds \
+         (default: 10)\n\
+           --pool-size N          Pre-opened pool size, above the highest concurrency \
+         (default: 80)\n\
+           --concurrency LIST     Comma-separated positive sweep (default: \
+         1,2,4,8,16,32,64)\n\
            --fsync MODE           both, on, or off (default: both)\n\
            --scenario NAME        all, session-creation, full-path, or scheduler-lock\n\
            -h, --help             Show this help"
@@ -297,14 +300,15 @@ impl PostgresEnvironment {
         })
     }
 
-    async fn migrated_pool(&self, database: &str, pool_size: u32) -> HarnessResult<PgPool> {
+    async fn migrated_pool(&self, database_sequence: u64, pool_size: u32) -> HarnessResult<PgPool> {
+        let database = format!("signalbox_bench_{database_sequence}");
         let create_database = format!("CREATE DATABASE {database}");
-        // `database` is generated above from a fixed ASCII prefix and a u64;
+        // `database` is formed locally from a fixed ASCII prefix and a u64, so
         // no caller-controlled text reaches this audited identifier.
         sqlx::query(sqlx::AssertSqlSafe(create_database.as_str()))
             .execute(&self.admin_pool)
             .await?;
-        let url = database_url(&self.host, self.port, database);
+        let url = database_url(&self.host, self.port, &database);
         let pool = PgPoolOptions::new()
             .min_connections(pool_size)
             .max_connections(pool_size)
@@ -332,9 +336,48 @@ struct OperationIds {
     base: u128,
 }
 
+#[derive(Clone, Copy)]
+#[repr(u128)]
+enum IdentityRole {
+    CreationCommand = 1,
+    Session = 2,
+    ModelSelection = 3,
+    SubmitCommand = 4,
+    AcceptedInput = 5,
+    Turn = 6,
+    CancelledModelCallEntry = 7,
+    CancelledModelCallFrontier = 8,
+    CancelledModelCallSuccessorTurn = 9,
+    CancelledEntriesFrontier = 128,
+    ActivationUserEntry = 129,
+    ActivationAssistantEntry = 130,
+    ActivationFrontier = 131,
+    TurnAttempt = 132,
+    ProviderModel = 133,
+    ModelCall = 134,
+    FailedModelCallEntry = 135,
+    FailedModelCallFrontier = 136,
+    PreparedModelCallFrontier = 137,
+    FailedModelCallSuccessorEntry = 138,
+    FailedModelCallSuccessorTurn = 139,
+    ToolRequest = 140,
+    ToolResponseEntry = 141,
+    ToolRoundFrontier = 142,
+    ToolRoundSuccessorTurn = 143,
+    ToolDecisionCommand = 144,
+    ToolDecisionTurnAttempt = 145,
+    ToolAttempt = 146,
+}
+
+const CANCELLED_TOOL_ENTRY_OFFSET: u128 = 64;
+
 impl OperationIds {
-    const fn uuid(self, offset: u128) -> Uuid {
-        Uuid::from_u128(self.base + offset)
+    const fn uuid(self, role: IdentityRole) -> Uuid {
+        Uuid::from_u128(self.base + role as u128)
+    }
+
+    const fn cancelled_tool_entry(self, index: u128) -> Uuid {
+        Uuid::from_u128(self.base + CANCELLED_TOOL_ENTRY_OFFSET + index)
     }
 }
 
@@ -366,7 +409,8 @@ struct PointResult {
     scenario: Scenario,
     fsync: FsyncMode,
     concurrency: usize,
-    duration: Duration,
+    offered_duration: Duration,
+    elapsed: Duration,
     pool_size: u32,
     host_cpus: usize,
     latencies: Vec<Duration>,
@@ -388,7 +432,7 @@ impl PointResult {
     }
 
     fn throughput(&self) -> f64 {
-        self.completed() as f64 / self.duration.as_secs_f64()
+        self.completed() as f64 / self.elapsed.as_secs_f64()
     }
 
     fn percentile_milliseconds(&self, percentile: usize) -> Option<f64> {
@@ -428,18 +472,17 @@ async fn run_point(
                 let started = Instant::now();
                 perform_operation(config.scenario, &worker_pool, operation_ids).await?;
                 let completed = Instant::now();
-                if completed <= stop {
-                    measurements
-                        .latencies
-                        .push(completed.duration_since(started));
-                }
+                measurements
+                    .latencies
+                    .push(completed.duration_since(started));
             }
             Ok::<_, Box<dyn Error + Send + Sync + 'static>>(measurements)
         });
     }
 
+    let measurement_started = Instant::now();
     deadline
-        .set(Instant::now() + config.duration)
+        .set(measurement_started + config.duration)
         .map_err(|_| error("measurement deadline was initialized twice"))?;
     barrier.wait().await;
     let mut latencies = Vec::new();
@@ -449,12 +492,14 @@ async fn run_point(
         latencies.extend(measurements.latencies);
     }
     latencies.sort_unstable();
+    let elapsed = measurement_started.elapsed();
 
     Ok(PointResult {
         scenario: config.scenario,
         fsync: config.fsync,
         concurrency: config.concurrency,
-        duration: config.duration,
+        offered_duration: config.duration,
+        elapsed,
         pool_size: config.pool_size,
         host_cpus: config.host_cpus,
         latencies,
@@ -489,9 +534,9 @@ struct TurnFlow {
 }
 
 async fn create_session(pool: &PgPool, ids: OperationIds) -> HarnessResult<TurnFlow> {
-    let command = DurableCommandId::from_uuid(ids.uuid(1));
-    let session = SessionId::from_uuid(ids.uuid(2));
-    let selection = DirectModelSelection::from_uuid(ids.uuid(3));
+    let command = DurableCommandId::from_uuid(ids.uuid(IdentityRole::CreationCommand));
+    let session = SessionId::from_uuid(ids.uuid(IdentityRole::Session));
+    let selection = DirectModelSelection::from_uuid(ids.uuid(IdentityRole::ModelSelection));
     let prepared = CreateSession::new(
         command,
         SessionCreationProvenance::new(
@@ -520,16 +565,16 @@ async fn create_session(pool: &PgPool, ids: OperationIds) -> HarnessResult<TurnF
     }
     Ok(TurnFlow {
         session,
-        turn: TurnId::from_uuid(ids.uuid(6)),
+        turn: TurnId::from_uuid(ids.uuid(IdentityRole::Turn)),
         selection,
     })
 }
 
 async fn create_and_submit_turn(pool: &PgPool, ids: OperationIds) -> HarnessResult<TurnFlow> {
     let flow = create_session(pool, ids).await?;
-    let accepted_input = AcceptedInputId::from_uuid(ids.uuid(5));
+    let accepted_input = AcceptedInputId::from_uuid(ids.uuid(IdentityRole::AcceptedInput));
     let command = SubmitInput::new(
-        DurableCommandId::from_uuid(ids.uuid(4)),
+        DurableCommandId::from_uuid(ids.uuid(IdentityRole::SubmitCommand)),
         flow.session,
         UserContent::try_text(String::from("Measure the current state.")).map_err(
             |content_error| {
@@ -551,21 +596,28 @@ async fn create_and_submit_turn(pool: &PgPool, ids: OperationIds) -> HarnessResu
             accepted_input,
             Some(flow.turn),
             CancelledModelCallTurnIdentities::new(
-                SemanticTranscriptEntryId::from_uuid(ids.uuid(7)),
-                ContextFrontierId::from_uuid(ids.uuid(8)),
+                SemanticTranscriptEntryId::from_uuid(
+                    ids.uuid(IdentityRole::CancelledModelCallEntry),
+                ),
+                ContextFrontierId::from_uuid(ids.uuid(IdentityRole::CancelledModelCallFrontier)),
             ),
-            |_| TurnId::from_uuid(ids.uuid(9)),
+            |_| TurnId::from_uuid(ids.uuid(IdentityRole::CancelledModelCallSuccessorTurn)),
             |requests| {
-                let mut next_offset = 10_u128;
+                let mut next_index = 0_u128;
                 let entries = requests
                     .iter()
                     .map(|_| {
-                        let entry = SemanticTranscriptEntryId::from_uuid(ids.uuid(next_offset));
-                        next_offset = next_offset.saturating_add(1);
+                        let entry = SemanticTranscriptEntryId::from_uuid(
+                            ids.cancelled_tool_entry(next_index),
+                        );
+                        next_index = next_index.saturating_add(1);
                         entry
                     })
                     .collect();
-                (entries, ContextFrontierId::from_uuid(ids.uuid(20)))
+                (
+                    entries,
+                    ContextFrontierId::from_uuid(ids.uuid(IdentityRole::CancelledEntriesFrontier)),
+                )
             },
         )
         .await?;
@@ -588,10 +640,12 @@ async fn activate_turn(pool: &PgPool, ids: OperationIds, flow: TurnFlow) -> Harn
         .handle(
             flow.session,
             AcceptedInputTurnActivationIdentities::new(
-                SemanticTranscriptEntryId::from_uuid(ids.uuid(21)),
-                SemanticTranscriptEntryId::from_uuid(ids.uuid(22)),
-                ContextFrontierId::from_uuid(ids.uuid(23)),
-                TurnAttemptId::from_uuid(ids.uuid(24)),
+                SemanticTranscriptEntryId::from_uuid(ids.uuid(IdentityRole::ActivationUserEntry)),
+                SemanticTranscriptEntryId::from_uuid(
+                    ids.uuid(IdentityRole::ActivationAssistantEntry),
+                ),
+                ContextFrontierId::from_uuid(ids.uuid(IdentityRole::ActivationFrontier)),
+                TurnAttemptId::from_uuid(ids.uuid(IdentityRole::TurnAttempt)),
             ),
         )
         .await?;
@@ -610,7 +664,7 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
     let flow = create_and_submit_turn(pool, ids).await?;
     activate_turn(pool, ids, flow).await?;
 
-    let provider = ProviderModelIdentity::from_uuid(ids.uuid(25));
+    let provider = ProviderModelIdentity::from_uuid(ids.uuid(IdentityRole::ProviderModel));
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         flow.selection,
         ResolvedProviderTarget::naming(provider),
@@ -625,20 +679,22 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
         targets,
         ModelCallCredentialReference::new("benchmark-provider-primary"),
     );
-    let call = ModelCallId::from_uuid(ids.uuid(26));
+    let call = ModelCallId::from_uuid(ids.uuid(IdentityRole::ModelCall));
     let prepared = model_repository
         .prepare_initial_call(
             flow.session,
             call,
             FailedModelCallTurnIdentities::new(
-                SemanticTranscriptEntryId::from_uuid(ids.uuid(27)),
-                ContextFrontierId::from_uuid(ids.uuid(28)),
+                SemanticTranscriptEntryId::from_uuid(ids.uuid(IdentityRole::FailedModelCallEntry)),
+                ContextFrontierId::from_uuid(ids.uuid(IdentityRole::FailedModelCallFrontier)),
             ),
-            ContextFrontierId::from_uuid(ids.uuid(29)),
+            ContextFrontierId::from_uuid(ids.uuid(IdentityRole::PreparedModelCallFrontier)),
             |_| {
                 (
-                    SemanticTranscriptEntryId::from_uuid(ids.uuid(30)),
-                    TurnId::from_uuid(ids.uuid(31)),
+                    SemanticTranscriptEntryId::from_uuid(
+                        ids.uuid(IdentityRole::FailedModelCallSuccessorEntry),
+                    ),
+                    TurnId::from_uuid(ids.uuid(IdentityRole::FailedModelCallSuccessorTurn)),
                 )
             },
         )
@@ -656,7 +712,7 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
         }
     };
 
-    let request = ToolRequestId::from_uuid(ids.uuid(32));
+    let request = ToolRequestId::from_uuid(ids.uuid(IdentityRole::ToolRequest));
     let response =
         ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
             ToolCallProposal::new(
@@ -686,14 +742,14 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
             observation,
             ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
                 vec![ToolResponsePartIdentity::tool_call(
-                    SemanticTranscriptEntryId::from_uuid(ids.uuid(33)),
+                    SemanticTranscriptEntryId::from_uuid(ids.uuid(IdentityRole::ToolResponseEntry)),
                     request,
                     InitialToolApproval::Confirm,
                 )],
-                ContextFrontierId::from_uuid(ids.uuid(34)),
+                ContextFrontierId::from_uuid(ids.uuid(IdentityRole::ToolRoundFrontier)),
                 None,
             )),
-            |_| TurnId::from_uuid(ids.uuid(35)),
+            |_| TurnId::from_uuid(ids.uuid(IdentityRole::ToolRoundSuccessorTurn)),
         )
         .await?;
     if !matches!(model_outcome, ModelCallTerminalOutcome::ToolRound(_)) {
@@ -702,7 +758,7 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
 
     let tool_repository = PostgresToolLoopRepository::new(pool.clone());
     let decision = DecideToolRequest::try_new(
-        DurableCommandId::from_uuid(ids.uuid(36)),
+        DurableCommandId::from_uuid(ids.uuid(IdentityRole::ToolDecisionCommand)),
         request,
         ToolApprovalDecision::Approve,
     )
@@ -712,9 +768,11 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
         ))
     })?;
     tool_repository
-        .decide(decision, || TurnAttemptId::from_uuid(ids.uuid(37)))
+        .decide(decision, || {
+            TurnAttemptId::from_uuid(ids.uuid(IdentityRole::ToolDecisionTurnAttempt))
+        })
         .await?;
-    let attempt = ToolAttemptId::from_uuid(ids.uuid(38));
+    let attempt = ToolAttemptId::from_uuid(ids.uuid(IdentityRole::ToolAttempt));
     let prepared_attempt = tool_repository
         .prepare_next_attempt(
             flow.session,
@@ -756,20 +814,21 @@ fn format_optional(value: Option<f64>) -> String {
 
 fn print_results(results: &[PointResult]) {
     println!(
-        "| scenario | image | host CPUs | fsync | pool | concurrency | duration (s) | completed | \
-         ops/s | p50 (ms) | p95 (ms) | p99 (ms) |"
+        "| scenario | image | host CPUs | fsync | pool | concurrency | offered (s) | elapsed (s) \
+         | completed | ops/s | p50 (ms) | p95 (ms) | p99 (ms) |"
     );
-    println!("|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     for result in results {
         println!(
-            "| {} | postgres:{} | {} | {} | {} | {} | {:.0} | {} | {:.2} | {} | {} | {} |",
+            "| {} | postgres:{} | {} | {} | {} | {} | {:.0} | {:.3} | {} | {:.2} | {} | {} | {} |",
             result.scenario.label(),
             POSTGRES_IMAGE_TAG,
             result.host_cpus,
             result.fsync.label(),
             result.pool_size,
             result.concurrency,
-            result.duration.as_secs_f64(),
+            result.offered_duration.as_secs_f64(),
+            result.elapsed.as_secs_f64(),
             result.completed(),
             result.throughput(),
             format_optional(result.percentile_milliseconds(50)),
@@ -807,7 +866,6 @@ async fn main() -> HarnessResult<()> {
                 database_sequence = database_sequence
                     .checked_add(1)
                     .ok_or_else(|| error("benchmark database sequence exhausted"))?;
-                let database = format!("signalbox_bench_{database_sequence}");
                 eprintln!(
                     "running scenario={} fsync={} concurrency={} duration={}s pool={}",
                     scenario.label(),
@@ -817,7 +875,7 @@ async fn main() -> HarnessResult<()> {
                     config.pool_size
                 );
                 let pool = environment
-                    .migrated_pool(&database, config.pool_size)
+                    .migrated_pool(database_sequence, config.pool_size)
                     .await?;
                 let point = run_point(
                     PointConfig {
