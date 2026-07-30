@@ -1,7 +1,9 @@
 //! Closed inspection of the owner-global durable-command registry.
 
+use std::sync::LazyLock;
+
 use signalbox_domain::DurableCommandId;
-use sqlx::{AssertSqlSafe, PgConnection, Row};
+use sqlx::{PgConnection, Row};
 
 pub(crate) use crate::mapping::DurableCommandKind as CommandKind;
 use crate::mapping::{
@@ -117,7 +119,7 @@ pub(crate) async fn inspect(
     command_id: DurableCommandId,
 ) -> Result<Option<CommandKind>, RegistryInspectionError> {
     let query = inspection_query();
-    let row = sqlx::query(AssertSqlSafe(query))
+    let row = sqlx::query(query)
         .bind(durable_command_id_to_uuid(command_id))
         .fetch_optional(&mut *connection)
         .await
@@ -162,18 +164,22 @@ pub(crate) async fn inspect(
     .transpose()
 }
 
-fn inspection_query() -> String {
-    // Every interpolated identifier comes from the closed compile-time table;
-    // command data remains a bind parameter and never enters the SQL text.
-    let mut query = String::from("SELECT command.command_kind, command.storage_version");
-    for definition in COMMAND_KIND_DEFINITIONS {
-        query.push_str(", EXISTS (SELECT 1 FROM ");
-        query.push_str(definition.typed_table);
-        query.push_str(" AS typed WHERE typed.command_id = command.command_id) AS ");
-        query.push_str(definition.spelling);
-    }
-    query.push_str(" FROM durable_command AS command WHERE command.command_id = $1");
-    query
+fn inspection_query() -> &'static str {
+    static QUERY: LazyLock<String> = LazyLock::new(|| {
+        // Every interpolated identifier comes from the closed compile-time
+        // table; command data remains a bind parameter and never enters the
+        // SQL text.
+        let mut query = String::from("SELECT command.command_kind, command.storage_version");
+        for definition in COMMAND_KIND_DEFINITIONS {
+            query.push_str(", EXISTS (SELECT 1 FROM ");
+            query.push_str(definition.typed_table);
+            query.push_str(" AS typed WHERE typed.command_id = command.command_id) AS ");
+            query.push_str(definition.spelling);
+        }
+        query.push_str(" FROM durable_command AS command WHERE command.command_id = $1");
+        query
+    });
+    QUERY.as_str()
 }
 
 /// The registry's consistency rule: exactly one typed record exists, and it
