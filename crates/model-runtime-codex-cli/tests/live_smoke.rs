@@ -2,8 +2,9 @@
 //!
 //! Ignored by default: it spawns the installed executable, spends one real
 //! model exchange, and therefore needs credentials the ordinary Rust workflow
-//! never has. `.github/workflows/codex-smoke.yml` is the only automated caller
-//! — never on `pull_request`, so a fork can never reach the secret.
+//! never has. `.github/workflows/codex-smoke.yml` is the only automated caller:
+//! its unprivileged gate rejects changed fork pull requests before the
+//! environment-backed smoke job can start.
 //!
 //! What it proves is protocol compatibility, which is what a CLI version bump
 //! actually breaks: the `codex exec --json` event stream still starts a thread,
@@ -233,6 +234,7 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
 const PROMPT: &str = "Reply with the single word: ready";
 
 const SKILL_INSTRUCTIONS_CONFIG: &str = "skills.include_instructions=false";
+const SYNTHETIC_SKILL_NAME: &str = "ambient_probe";
 const SYNTHETIC_SKILL_DESCRIPTION: &str = "ambient-skill-injection-description-probe-317";
 const SYNTHETIC_SKILL_BODY: &str = "ambient-skill-injection-body-probe-317";
 const SYNTHETIC_SKILL_FILE: &str = r#"---
@@ -257,9 +259,7 @@ async fn the_pinned_codex_cli_completes_one_exchange() {
     let executable = absolute_executable(&executable_override_or_default());
     let model = variable_or(MODEL_VARIABLE, DEFAULT_MODEL);
 
-    assert_pinned_version(&executable).await;
-    assert_pinned_feature_inventory(&executable).await;
-    assert_ambient_skill_instructions_disabled(&executable).await;
+    assert_pre_spend_contract(&executable).await;
 
     let working_directory = tempfile::tempdir().expect("smoke working directory is created");
     let credential_reference = CredentialReference::new("codex-smoke");
@@ -302,6 +302,23 @@ async fn the_pinned_codex_cli_completes_one_exchange() {
             && decoded.usage.output_tokens.is_some(),
         "`turn.completed` no longer reports the usage counters the adapter reads"
     );
+}
+
+/// Credential-free entry point for the real-CLI controls that must pass before
+/// the live smoke authenticates or spends. Install the pinned CLI, point
+/// `SIGNALBOX_CODEX_SMOKE_EXECUTABLE` at it, and run this exact ignored test.
+#[tokio::test]
+#[ignore = "requires the installed pinned CLI; credential-free pre-spend probes only"]
+async fn the_pinned_codex_cli_pre_spend_contract_holds() {
+    let executable = absolute_executable(&executable_override_or_default());
+
+    assert_pre_spend_contract(&executable).await;
+}
+
+async fn assert_pre_spend_contract(executable: &std::path::Path) {
+    assert_pinned_version(executable).await;
+    assert_pinned_feature_inventory(executable).await;
+    assert_ambient_skill_instructions_disabled(executable).await;
 }
 
 /// `CodexCliPreparedRequest` deliberately implements no diagnostic formatting,
@@ -637,9 +654,10 @@ enum SkillInstructionDisposition {
     HardDisabled,
 }
 
-/// Fails before spend unless the pinned CLI both discovers the isolated synthetic
-/// ambient skill under its ordinary home and removes all model-visible skill
-/// instructions under the exact config value the production invocation passes.
+/// Fails before spend unless the pinned CLI catalogs the isolated synthetic
+/// ambient skill under its ordinary home without injecting the on-demand body,
+/// then removes the whole model-visible catalog under the exact config value
+/// the production invocation passes.
 async fn assert_ambient_skill_instructions_disabled(executable: &std::path::Path) {
     let isolated_home = tempfile::tempdir().expect("skill probe home is created");
     let skill_directory = isolated_home.path().join("skills").join("ambient_probe");
@@ -662,12 +680,14 @@ async fn assert_ambient_skill_instructions_disabled(executable: &std::path::Path
 
     assert!(
         baseline.contains("<skills_instructions>")
+            && baseline.contains(SYNTHETIC_SKILL_NAME)
             && baseline.contains(SYNTHETIC_SKILL_DESCRIPTION)
-            && baseline.contains(SYNTHETIC_SKILL_BODY),
-        "the pinned CLI did not discover and inject the isolated synthetic control skill"
+            && !baseline.contains(SYNTHETIC_SKILL_BODY),
+        "the pinned CLI did not inject exactly the isolated synthetic skill catalog"
     );
     assert!(
         !disabled.contains("<skills_instructions>")
+            && !disabled.contains(SYNTHETIC_SKILL_NAME)
             && !disabled.contains(SYNTHETIC_SKILL_DESCRIPTION)
             && !disabled.contains(SYNTHETIC_SKILL_BODY),
         "`{SKILL_INSTRUCTIONS_CONFIG}` did not remove ambient skills from model-visible input"
