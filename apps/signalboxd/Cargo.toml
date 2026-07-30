@@ -48,6 +48,7 @@ toml_edit = { version = "0.25.13", default-features = false, features = [
 ] }
 tracing = { version = "0.1.41", default-features = false }
 tracing-subscriber = { version = "0.3.20", default-features = false, features = [
+    "env-filter",
     "fmt",
 ] }
 uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
