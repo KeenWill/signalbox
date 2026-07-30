@@ -1380,9 +1380,12 @@ and no highest-priority value clears it.
 
 The canonical repository binding therefore gets its own boundary, placed where
 the transport boundary cannot reach. Every invocation that reaches a remote
-first resolves the complete effective-URL sequence Git will use and requires
-every member, byte for byte, to equal the canonical URL of the placement's
-repository entry. The runner does not compute that resolution itself; it asks
+first selects exactly one repository entry: provisioning uses the entry in its
+placement authorization, an existing-worktree tool uses the exact key recorded
+by the workspace manifest, and `git_clone` uses its checked `repository`
+argument. The invocation then resolves the complete effective-URL sequence Git
+will use and requires every member, byte for byte, to equal the canonical URL of
+that selected entry. The runner does not compute that resolution itself; it asks
 Git, under exactly the forced configuration, working directory, and repository
 selection its guarded invocation will use, so each answer is post-rewrite rather
 than an approximation of Git's rules.
