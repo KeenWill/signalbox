@@ -1044,34 +1044,39 @@ pub enum ReviewPassResult {
 pub struct ReviewReferencedFindingEvidence {
     reference: ReviewFindingRef,
     status: ReviewFindingStatus,
+    producer_policy: ReviewPolicy,
 }
 
 impl ReviewReferencedFindingEvidence {
-    /// Freezes canonical reference and status from a complete finding aggregate.
-    pub fn from_finding(finding: &ReviewFinding) -> Self {
-        Self {
+    /// Freezes canonical reference, eligible status, and authenticated producer
+    /// policy from a complete finding aggregate.
+    pub fn try_from_finding(finding: &ReviewFinding) -> Option<Self> {
+        referenced_finding_status_is_eligible(finding.status).then_some(Self {
             reference: finding.proposal.reference,
             status: finding.status,
-        }
+            producer_policy: finding.proposal.producing_pass.policy(),
+        })
     }
 
-    /// Reconstitutes independently authenticated eligible admission evidence.
-    pub const fn try_reconstitute(
+    /// Reconstitutes eligible admission evidence after authenticating the
+    /// referenced finding's complete ancestry against its canonical producing
+    /// pass, sealed inventory, and owning run.
+    pub fn try_reconstitute(
         reference: ReviewFindingRef,
         status: ReviewFindingStatus,
+        producing_pass: &ReviewPassEvidence,
+        producing_run: ReviewRunEvidence,
     ) -> Option<Self> {
-        match status {
-            ReviewFindingStatus::Open | ReviewFindingStatus::Accepted => {
-                Some(Self { reference, status })
-            }
-            ReviewFindingStatus::Rejected
-            | ReviewFindingStatus::Duplicate
-            | ReviewFindingStatus::Superseded
-            | ReviewFindingStatus::Stale
-            | ReviewFindingStatus::Posted
-            | ReviewFindingStatus::Fixed
-            | ReviewFindingStatus::BlockedWithReason => None,
+        if !referenced_finding_status_is_eligible(status)
+            || !finding_producer_authenticates(reference, producing_pass, producing_run)
+        {
+            return None;
         }
+        Some(Self {
+            reference,
+            status,
+            producer_policy: producing_pass.policy(),
+        })
     }
 
     /// Returns the complete referenced-finding identity.
@@ -1084,10 +1089,46 @@ impl ReviewReferencedFindingEvidence {
         self.status
     }
 
+    /// Returns the complete frozen policy authenticated by the referenced
+    /// finding's producing run.
+    pub const fn producer_policy(self) -> ReviewPolicy {
+        self.producer_policy
+    }
+
     /// Returns the referenced finding's exact authenticated producing pass.
     pub const fn producing_pass(self) -> ReviewPassRef {
         self.reference.pass()
     }
+}
+
+const fn referenced_finding_status_is_eligible(status: ReviewFindingStatus) -> bool {
+    matches!(
+        status,
+        ReviewFindingStatus::Open | ReviewFindingStatus::Accepted
+    )
+}
+
+fn finding_producer_authenticates(
+    reference: ReviewFindingRef,
+    producing_pass: &ReviewPassEvidence,
+    producing_run: ReviewRunEvidence,
+) -> bool {
+    producing_pass.reference() == reference.pass()
+        && producing_run.reference() == reference.run()
+        && producing_run.workflow() == ReviewWorkflowKind::ReadOnlyReview
+        && producing_pass.kind() == ReviewPassKind::ReadOnlyReview
+        && run_evidence_matches_pass(producing_run, producing_pass)
+        && matches!(
+            producing_pass.state(),
+            ReviewPassState::Succeeded {
+                result: Some(ReviewPassResult::ProducedFindings(findings)),
+                ..
+            } if findings.contains(reference)
+                && findings
+                    .findings()
+                    .iter()
+                    .all(|finding| finding.pass() == producing_pass.reference())
+        )
 }
 
 /// One workflow operation represented by a review run.
@@ -1240,6 +1281,14 @@ impl ReviewPassEvidence {
     /// projection while atomically deciding which exact result first binds an
     /// otherwise result-free terminal pass.
     pub fn project_result(&self, result: ReviewPassResult) -> Option<Self> {
+        if matches!(
+            &result,
+            ReviewPassResult::FindingEvent(event)
+                if referenced_finding_result(event)
+                    .is_some_and(|referenced| referenced.producer_policy() != self.policy)
+        ) {
+            return None;
+        }
         let state = match &self.state {
             ReviewPassState::Succeeded {
                 turn,
@@ -2478,12 +2527,8 @@ fn referenced_finding_result(
 fn finding_event_result_reference_is_compatible(event: &ReviewFindingEventResult) -> bool {
     referenced_finding_result(event).is_none_or(|referenced| {
         referenced.reference().finding() != event.finding().finding()
-            && referenced.reference().run() == event.finding().run()
-            && referenced.producing_pass() == event.finding().pass()
-            && matches!(
-                referenced.status(),
-                ReviewFindingStatus::Open | ReviewFindingStatus::Accepted
-            )
+            && referenced.reference().target() == event.finding().target()
+            && referenced_finding_status_is_eligible(referenced.status())
     })
 }
 
@@ -3507,6 +3552,104 @@ impl ReviewFinding {
     }
 }
 
+/// Validates the complete finding-reference graph loaded for one immutable
+/// target, rejecting missing roots and direct or transitive cycles.
+pub fn validate_complete_review_finding_reference_graph(
+    findings: &[ReviewFinding],
+) -> Result<(), ReviewFindingReferenceGraphError> {
+    let mut references = BTreeMap::new();
+    let Some(expected_target) = findings
+        .first()
+        .map(|finding| finding.proposal.reference.target())
+    else {
+        return Ok(());
+    };
+    for finding in findings {
+        let reference = finding.proposal.reference;
+        if expected_target != reference.target() {
+            return Err(ReviewFindingReferenceGraphError::ForeignTargetRoot {
+                expected: expected_target,
+                actual: reference.target(),
+            });
+        }
+        let referenced = finding.events.iter().find_map(|event| match &event.kind {
+            ReviewFindingEventKind::Duplicate { canonical } => Some(canonical.reference()),
+            ReviewFindingEventKind::Superseded { successor } => Some(successor.reference()),
+            ReviewFindingEventKind::Accepted
+            | ReviewFindingEventKind::Rejected { .. }
+            | ReviewFindingEventKind::Stale
+            | ReviewFindingEventKind::Posted { .. }
+            | ReviewFindingEventKind::Fixed
+            | ReviewFindingEventKind::BlockedWithReason { .. } => None,
+        });
+        if references.insert(reference, referenced).is_some() {
+            return Err(ReviewFindingReferenceGraphError::DuplicateFinding { reference });
+        }
+    }
+    for (&finding, referenced) in &references {
+        if let Some(referenced) = referenced
+            && !references.contains_key(referenced)
+        {
+            return Err(ReviewFindingReferenceGraphError::MissingReferencedFinding {
+                finding,
+                referenced: *referenced,
+            });
+        }
+    }
+
+    let mut completed = BTreeSet::new();
+    for root in references.keys().copied() {
+        let mut path = BTreeSet::new();
+        let mut current = root;
+        while !completed.contains(&current) {
+            path.insert(current);
+            let Some(Some(referenced)) = references.get(&current) else {
+                break;
+            };
+            if path.contains(referenced) {
+                return Err(ReviewFindingReferenceGraphError::Cycle {
+                    finding: current,
+                    referenced: *referenced,
+                });
+            }
+            current = *referenced;
+        }
+        completed.extend(path);
+    }
+    Ok(())
+}
+
+/// Why a complete reconstituted finding-reference graph is corrupt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReviewFindingReferenceGraphError {
+    /// One complete finding identity appeared more than once.
+    DuplicateFinding {
+        /// Repeated complete finding identity.
+        reference: ReviewFindingRef,
+    },
+    /// One supplied root belongs to another immutable target.
+    ForeignTargetRoot {
+        /// Target established by the first supplied root.
+        expected: ReviewTargetId,
+        /// Foreign target carried by the rejected root.
+        actual: ReviewTargetId,
+    },
+    /// A reference edge names a finding absent from the complete target graph.
+    MissingReferencedFinding {
+        /// Finding that owns the corrupt edge.
+        finding: ReviewFindingRef,
+        /// Referenced finding absent from the graph.
+        referenced: ReviewFindingRef,
+    },
+    /// One edge closes a direct or transitive reference cycle.
+    Cycle {
+        /// Finding that owns the cycle-closing edge.
+        finding: ReviewFindingRef,
+        /// Earlier finding reached again by that edge.
+        referenced: ReviewFindingRef,
+    },
+}
+
 fn validate_finding_reference(
     finding: &ReviewFinding,
     event: &ReviewFindingEvent,
@@ -3549,22 +3692,19 @@ fn validate_finding_reference(
                 finding.event_error(event.clone(), ReviewFindingTransitionFailure::SelfReference)
             );
         }
-        if referenced.reference().run() != proposal.reference.run() {
+        if referenced.reference().target() != proposal.reference.target() {
             return Err(finding.event_error(
                 event.clone(),
                 ReviewFindingTransitionFailure::ForeignReferencedFinding,
             ));
         }
-        if referenced.producing_pass() != proposal.reference.pass() {
+        if referenced.producer_policy() != proposal.producing_pass.policy() {
             return Err(finding.event_error(
                 event.clone(),
-                ReviewFindingTransitionFailure::ForeignReferencedFinding,
+                ReviewFindingTransitionFailure::ReferencedFindingPolicyMismatch,
             ));
         }
-        if !matches!(
-            referenced.status(),
-            ReviewFindingStatus::Open | ReviewFindingStatus::Accepted
-        ) {
+        if !referenced_finding_status_is_eligible(referenced.status()) {
             return Err(finding.event_error(
                 event.clone(),
                 ReviewFindingTransitionFailure::IneligibleReferencedFinding,
@@ -3715,8 +3855,11 @@ pub enum ReviewFindingTransitionFailure {
     BelowJudgmentThreshold,
     /// External publication is below the frozen publication threshold.
     BelowPublicationThreshold,
-    /// A duplicate or successor finding belongs to another run.
+    /// A duplicate or successor finding belongs to another target.
     ForeignReferencedFinding,
+    /// A duplicate or successor finding was produced under another frozen
+    /// policy.
+    ReferencedFindingPolicyMismatch,
     /// A duplicate or successor names a finding that cannot receive a reference.
     IneligibleReferencedFinding,
     /// A finding names itself as its canonical or successor finding.
@@ -4990,6 +5133,7 @@ mod tests {
         ReviewReferencedFindingEvidence {
             reference: finding_ref(value),
             status,
+            producer_policy: ReviewPolicy::version_one(),
         }
     }
 
@@ -5086,6 +5230,57 @@ mod tests {
         })
     }
 
+    fn finding_ref_for_producer(
+        target: ReviewTargetId,
+        producing_pass_seed: u128,
+    ) -> ReviewFindingRef {
+        ReviewFindingRef::new(
+            ReviewPassRef::new(
+                ReviewRunRef::new(target, run_id(PASS_RUN_NAMESPACE + producing_pass_seed)),
+                pass_id(producing_pass_seed),
+            ),
+            finding_id(20_000 + producing_pass_seed),
+        )
+    }
+
+    fn open_finding_with_producer(
+        reference: ReviewFindingRef,
+        policy: ReviewPolicy,
+    ) -> ReviewFinding {
+        let target = ReviewTarget::try_new(
+            reference.target(),
+            key("code-host"),
+            key("repository"),
+            ReviewTargetSubject::Commit,
+            key("head"),
+            Some(key("base")),
+            None,
+        )
+        .expect("fixture target has complete comparison evidence");
+        let producing_pass = ReviewPassEvidence::new(
+            reference.pass(),
+            ReviewPassKind::ReadOnlyReview,
+            policy,
+            ReviewPassState::Succeeded {
+                turn: turn_id(6),
+                output_frontier: frontier_id(8),
+                result: Some(ReviewPassResult::ProducedFindings(
+                    ReviewProducedFindings::try_new(vec![reference])
+                        .expect("fixture inventory is sealed and canonical"),
+                )),
+            },
+        );
+        let producing_run = pass_run_evidence(&producing_pass);
+        let proposal = ReviewFindingProposal::try_new(
+            reference,
+            producing_pass,
+            producing_run,
+            &target,
+            finding_content(Some(ReviewFindingDiffSide::Right)),
+        )
+        .expect("fixture producer authenticates the exact finding");
+        ReviewFinding::new(proposal)
+    }
     fn succeeded_review_pass() -> ReviewPass {
         let mut run = ReviewRun::new(
             run_ref(),
@@ -7476,6 +7671,7 @@ mod tests {
                 canonical: ReviewReferencedFindingEvidence {
                     reference: ReviewFindingRef::new(pass_ref(4), finding_id(10)),
                     status: ReviewFindingStatus::Open,
+                    producer_policy: ReviewPolicy::version_one(),
                 },
             },
         );
@@ -7669,50 +7865,31 @@ mod tests {
     #[test]
     fn inv040_referenced_finding_evidence_reconstitutes_only_admissible_status() {
         let reference = finding_ref(11);
+        let producing_pass = produced_findings_pass(
+            reference,
+            succeeded_pass(PRODUCING_PASS_SEED, ReviewPassKind::ReadOnlyReview),
+        );
+        let producing_run = pass_run_evidence(&producing_pass);
         let frozen = ReviewReferencedFindingEvidence::try_reconstitute(
             reference,
             ReviewFindingStatus::Accepted,
+            &producing_pass,
+            producing_run,
         )
         .expect("an accepted finding is admissible reference evidence");
 
         assert_eq!(frozen.reference(), reference);
         assert_eq!(frozen.status(), ReviewFindingStatus::Accepted);
+        assert_eq!(frozen.producer_policy(), producing_pass.policy());
         assert!(
             ReviewReferencedFindingEvidence::try_reconstitute(
                 reference,
                 ReviewFindingStatus::Posted,
+                &producing_pass,
+                producing_run,
             )
             .is_none(),
             "a terminal current status cannot be substituted for frozen evidence",
-        );
-    }
-
-    /// INV-040: a referenced finding must use the proposal run's exact one
-    /// producing pass.
-    #[test]
-    fn inv040_finding_history_rejects_cross_wired_reference_pass() {
-        let cross_wired = ReviewReferencedFindingEvidence {
-            reference: ReviewFindingRef::new(
-                ReviewPassRef::new(run_ref(), pass_id(REASSIGNED_PASS_SEED)),
-                finding_id(FOREIGN_FINDING_SEED),
-            ),
-            status: ReviewFindingStatus::Open,
-        };
-        let event = finding_event(
-            finding_ref(CANONICAL_FINDING_SEED),
-            ReviewEventOrdinal::one(),
-            succeeded_pass(ARBITRARY_DEDUPE_PASS_SEED, ReviewPassKind::Dedupe),
-            ReviewFindingEventKind::Duplicate {
-                canonical: cross_wired,
-            },
-        );
-        let error = ReviewFinding::new(proposal())
-            .apply(event)
-            .expect_err("one producing run cannot authenticate another pass");
-
-        assert_eq!(
-            error.failure(),
-            ReviewFindingTransitionFailure::ForeignReferencedFinding
         );
     }
 
@@ -9196,58 +9373,6 @@ mod tests {
         );
     }
 
-    /// INV-040: nested finding references in a pass result must preserve the
-    /// owning run, producing pass, distinct identity, and eligible status.
-    #[test]
-    fn inv040_pass_reconstitution_rejects_incompatible_nested_finding_reference() {
-        let finding = finding_ref(10);
-        let referenced = ReviewReferencedFindingEvidence {
-            reference: ReviewFindingRef::new(
-                ReviewPassRef::new(finding.run(), pass_id(99)),
-                finding_id(11),
-            ),
-            status: ReviewFindingStatus::Open,
-        };
-        let input = ReviewPassReconstitutionInput::new(
-            pass_ref(3),
-            ReviewPassKind::Dedupe,
-            run_ref(),
-            ReviewWorkflowKind::DedupeFindings,
-            session_id(4),
-            accepted_input_id(5),
-            ReviewPassAcceptedInputEvidence::new(
-                accepted_input_id(5),
-                session_id(4),
-                Some(turn_id(6)),
-            ),
-            ReviewPassState::Succeeded {
-                turn: turn_id(6),
-                output_frontier: frontier_id(8),
-                result: Some(ReviewPassResult::FindingEvent(
-                    ReviewFindingEventResult::new(
-                        finding,
-                        ReviewEventOrdinal::one(),
-                        ReviewFindingEventResultKind::Duplicate {
-                            canonical: referenced,
-                        },
-                    ),
-                )),
-            },
-            Some(ReviewPassTurnEvidence::new(
-                turn_id(6),
-                session_id(4),
-                accepted_input_id(5),
-                ReviewPassTurnOutcome::Completed,
-                Some(frontier_id(8)),
-            )),
-        );
-
-        assert_pass_reconstitution_rejects(
-            input,
-            ReviewPassReconstitutionFailure::IncompatibleResult,
-        );
-    }
-
     /// INV-040: a terminal pass may bind its exact result once.
     #[test]
     fn inv040_terminal_pass_binds_absent_result() {
@@ -10052,6 +10177,642 @@ mod tests {
             ReviewValueFailure::TooLong {
                 maximum_bytes: REVIEW_KEY_MAXIMUM_BYTES
             }
+        );
+    }
+
+    /// INV-040: duplicate admission preserves each finding's independent
+    /// producing run and pass when target and frozen policy are equal.
+    #[test]
+    fn inv040_finding_admits_authenticated_cross_run_reference() {
+        let target = target_id(CANONICAL_TARGET_SEED);
+        let subject_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
+        let canonical_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
+        let subject = open_finding_with_producer(subject_reference, ReviewPolicy::version_one());
+        let canonical =
+            open_finding_with_producer(canonical_reference, ReviewPolicy::version_one());
+        let canonical_evidence = ReviewReferencedFindingEvidence::try_from_finding(&canonical)
+            .expect("open canonical finding is eligible reference evidence");
+        let event = finding_event(
+            subject_reference,
+            ReviewEventOrdinal::one(),
+            succeeded_pass(ARBITRARY_DEDUPE_PASS_SEED, ReviewPassKind::Dedupe),
+            ReviewFindingEventKind::Duplicate {
+                canonical: canonical_evidence,
+            },
+        );
+
+        let duplicate = subject
+            .apply(event)
+            .expect("equal-target equal-policy cross-run reference is admitted");
+
+        assert_eq!(duplicate.status(), ReviewFindingStatus::Duplicate);
+        assert_eq!(
+            canonical_evidence.reference(),
+            canonical.proposal().reference(),
+            "referenced finding retains its independent ancestry",
+        );
+        assert_ne!(
+            duplicate.proposal().reference().run(),
+            canonical.proposal().reference().run(),
+            "cross-run admission must not reparent either finding",
+        );
+    }
+
+    /// INV-040: a cross-run reference cannot cross immutable target identity.
+    #[test]
+    fn inv040_finding_rejects_cross_target_reference() {
+        let subject_reference =
+            finding_ref_for_producer(target_id(CANONICAL_TARGET_SEED), PRODUCING_PASS_SEED);
+        let foreign_reference = finding_ref_for_producer(target_id(2), REASSIGNED_PASS_SEED);
+        let subject = open_finding_with_producer(subject_reference, ReviewPolicy::version_one());
+        let foreign = open_finding_with_producer(foreign_reference, ReviewPolicy::version_one());
+        let foreign_evidence = ReviewReferencedFindingEvidence::try_from_finding(&foreign)
+            .expect("foreign open finding still has authenticated producer evidence");
+        let event = finding_event(
+            subject_reference,
+            ReviewEventOrdinal::one(),
+            succeeded_pass(ARBITRARY_DEDUPE_PASS_SEED, ReviewPassKind::Dedupe),
+            ReviewFindingEventKind::Duplicate {
+                canonical: foreign_evidence,
+            },
+        );
+
+        let error = subject
+            .apply(event)
+            .expect_err("a reference cannot cross immutable target identity");
+
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::ForeignReferencedFinding,
+        );
+    }
+
+    /// INV-040: a cross-run reference cannot cross complete frozen policy.
+    #[test]
+    fn inv040_finding_rejects_cross_policy_reference() {
+        let target = target_id(CANONICAL_TARGET_SEED);
+        let subject_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
+        let foreign_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
+        let subject = open_finding_with_producer(subject_reference, ReviewPolicy::version_one());
+        let foreign = open_finding_with_producer(foreign_reference, unsupported_policy());
+        let foreign_evidence = ReviewReferencedFindingEvidence::try_from_finding(&foreign)
+            .expect("open finding retains its independently authenticated later policy");
+        let event = finding_event(
+            subject_reference,
+            ReviewEventOrdinal::one(),
+            succeeded_pass(ARBITRARY_DEDUPE_PASS_SEED, ReviewPassKind::Dedupe),
+            ReviewFindingEventKind::Duplicate {
+                canonical: foreign_evidence,
+            },
+        );
+
+        let error = subject
+            .apply(event)
+            .expect_err("a reference cannot cross complete frozen policy");
+
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::ReferencedFindingPolicyMismatch,
+        );
+    }
+
+    /// INV-040: pass-result projection independently rejects cross-policy
+    /// referenced evidence before finding-event admission.
+    #[test]
+    fn inv040_pass_result_projection_rejects_cross_policy_reference() {
+        let target = target_id(CANONICAL_TARGET_SEED);
+        let subject_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
+        let foreign_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
+        let foreign = open_finding_with_producer(foreign_reference, unsupported_policy());
+        let foreign_evidence = ReviewReferencedFindingEvidence::try_from_finding(&foreign)
+            .expect("open finding retains its independently authenticated later policy");
+        let result = ReviewPassResult::FindingEvent(ReviewFindingEventResult::new(
+            subject_reference,
+            ReviewEventOrdinal::one(),
+            ReviewFindingEventResultKind::Duplicate {
+                canonical: foreign_evidence,
+            },
+        ));
+        let event_pass = succeeded_pass(ARBITRARY_DEDUPE_PASS_SEED, ReviewPassKind::Dedupe);
+
+        assert!(
+            event_pass.project_result(result).is_none(),
+            "event-pass policy must equal referenced-producer policy",
+        );
+    }
+
+    /// INV-040: referenced-finding reconstitution authenticates every element
+    /// of target/run/pass/finding ancestry against the sealed producer.
+    #[test]
+    fn inv040_referenced_finding_reconstitution_rejects_cross_wired_ancestry() {
+        let target = target_id(CANONICAL_TARGET_SEED);
+        let canonical_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
+        let canonical =
+            open_finding_with_producer(canonical_reference, ReviewPolicy::version_one());
+        let producing_pass = canonical.proposal().producing_pass();
+        let producing_run = pass_run_evidence(producing_pass);
+        let foreign_target_reference = ReviewFindingRef::new(
+            ReviewPassRef::new(
+                ReviewRunRef::new(target_id(2), canonical_reference.run().run()),
+                canonical_reference.pass().pass(),
+            ),
+            canonical_reference.finding(),
+        );
+        let foreign_run_reference = ReviewFindingRef::new(
+            ReviewPassRef::new(
+                ReviewRunRef::new(target, run_id(99)),
+                canonical_reference.pass().pass(),
+            ),
+            canonical_reference.finding(),
+        );
+        let foreign_pass_reference = ReviewFindingRef::new(
+            ReviewPassRef::new(canonical_reference.run(), pass_id(99)),
+            canonical_reference.finding(),
+        );
+        let foreign_finding_reference =
+            ReviewFindingRef::new(canonical_reference.pass(), finding_id(99));
+
+        assert!(
+            ReviewReferencedFindingEvidence::try_reconstitute(
+                foreign_target_reference,
+                ReviewFindingStatus::Open,
+                producing_pass,
+                producing_run,
+            )
+            .is_none(),
+            "cross-wired target ancestry must fail closed",
+        );
+        assert!(
+            ReviewReferencedFindingEvidence::try_reconstitute(
+                foreign_run_reference,
+                ReviewFindingStatus::Open,
+                producing_pass,
+                producing_run,
+            )
+            .is_none(),
+            "cross-wired run ancestry must fail closed",
+        );
+        assert!(
+            ReviewReferencedFindingEvidence::try_reconstitute(
+                foreign_pass_reference,
+                ReviewFindingStatus::Open,
+                producing_pass,
+                producing_run,
+            )
+            .is_none(),
+            "cross-wired pass ancestry must fail closed",
+        );
+        assert!(
+            ReviewReferencedFindingEvidence::try_reconstitute(
+                foreign_finding_reference,
+                ReviewFindingStatus::Open,
+                producing_pass,
+                producing_run,
+            )
+            .is_none(),
+            "finding absent from the sealed inventory must fail closed",
+        );
+    }
+
+    /// INV-040: referenced-finding reconstitution rejects a producer inventory
+    /// containing an identity owned by another pass.
+    #[test]
+    fn inv040_referenced_finding_reconstitution_rejects_unsealed_inventory() {
+        let target = target_id(CANONICAL_TARGET_SEED);
+        let reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
+        let foreign_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
+        let producing_pass = ReviewPassEvidence::new(
+            reference.pass(),
+            ReviewPassKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Succeeded {
+                turn: turn_id(6),
+                output_frontier: frontier_id(8),
+                result: Some(ReviewPassResult::ProducedFindings(
+                    ReviewProducedFindings::try_new(vec![reference, foreign_reference])
+                        .expect("distinct references have canonical identity order"),
+                )),
+            },
+        );
+        let producing_run = pass_run_evidence(&producing_pass);
+
+        assert!(
+            ReviewReferencedFindingEvidence::try_reconstitute(
+                reference,
+                ReviewFindingStatus::Open,
+                &producing_pass,
+                producing_run,
+            )
+            .is_none(),
+            "producer inventory cannot include another pass's finding",
+        );
+    }
+
+    /// INV-040: a terminal subject cannot acquire a later duplicate edge even
+    /// to an otherwise eligible same-target same-policy finding.
+    #[test]
+    fn inv040_terminal_finding_cannot_acquire_reference() {
+        let target = target_id(CANONICAL_TARGET_SEED);
+        let subject_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
+        let canonical_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
+        let subject = open_finding_with_producer(subject_reference, ReviewPolicy::version_one())
+            .apply(finding_event(
+                subject_reference,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(ARBITRARY_JUDGMENT_PASS_SEED, ReviewPassKind::Judge),
+                ReviewFindingEventKind::Rejected {
+                    reason: text("not an issue"),
+                },
+            ))
+            .expect("judgment may reject the open finding");
+        let canonical =
+            open_finding_with_producer(canonical_reference, ReviewPolicy::version_one());
+        let canonical_evidence = ReviewReferencedFindingEvidence::try_from_finding(&canonical)
+            .expect("open canonical finding is eligible reference evidence");
+        let event = finding_event(
+            subject_reference,
+            ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+            succeeded_pass(ARBITRARY_DEDUPE_PASS_SEED, ReviewPassKind::Dedupe),
+            ReviewFindingEventKind::Duplicate {
+                canonical: canonical_evidence,
+            },
+        );
+
+        let error = subject
+            .apply(event)
+            .expect_err("terminal finding cannot acquire a reference edge");
+
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::InvalidTransition {
+                current: ReviewFindingStatus::Rejected,
+            },
+        );
+    }
+
+    /// INV-040: complete reconstitution rejects a direct two-finding cycle
+    /// even when each stored admission status was independently eligible.
+    #[test]
+    fn inv040_reconstituted_reference_graph_rejects_direct_cycle() {
+        let target = target_id(CANONICAL_TARGET_SEED);
+        let first_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
+        let second_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
+        let first_open = open_finding_with_producer(first_reference, ReviewPolicy::version_one());
+        let second_open = open_finding_with_producer(second_reference, ReviewPolicy::version_one());
+        let first_evidence = ReviewReferencedFindingEvidence::try_from_finding(&first_open)
+            .expect("first open finding is eligible reference evidence");
+        let second_evidence = ReviewReferencedFindingEvidence::try_from_finding(&second_open)
+            .expect("second open finding is eligible reference evidence");
+        let first = ReviewFinding::try_reconstitute(
+            first_open.proposal().clone(),
+            vec![finding_event(
+                first_reference,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(ARBITRARY_DEDUPE_PASS_SEED, ReviewPassKind::Dedupe),
+                ReviewFindingEventKind::Duplicate {
+                    canonical: second_evidence,
+                },
+            )],
+        )
+        .expect("individual frozen edge is locally valid");
+        let second = ReviewFinding::try_reconstitute(
+            second_open.proposal().clone(),
+            vec![finding_event(
+                second_reference,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(23, ReviewPassKind::Dedupe),
+                ReviewFindingEventKind::Duplicate {
+                    canonical: first_evidence,
+                },
+            )],
+        )
+        .expect("opposite frozen edge is locally valid");
+
+        let error = validate_complete_review_finding_reference_graph(&[first, second])
+            .expect_err("complete graph reconstitution must reject a direct cycle");
+
+        assert_eq!(
+            error,
+            ReviewFindingReferenceGraphError::Cycle {
+                finding: second_reference,
+                referenced: first_reference,
+            },
+        );
+    }
+
+    /// INV-040: complete reconstitution follows independent producer ancestry
+    /// across runs and rejects a transitive three-finding cycle.
+    #[test]
+    fn inv040_reconstituted_reference_graph_rejects_transitive_cycle() {
+        let target = target_id(CANONICAL_TARGET_SEED);
+        let first_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
+        let second_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
+        let third_reference = finding_ref_for_producer(target, 5);
+        let first_open = open_finding_with_producer(first_reference, ReviewPolicy::version_one());
+        let second_open = open_finding_with_producer(second_reference, ReviewPolicy::version_one());
+        let third_open = open_finding_with_producer(third_reference, ReviewPolicy::version_one());
+        let first_evidence = ReviewReferencedFindingEvidence::try_from_finding(&first_open)
+            .expect("first open finding is eligible reference evidence");
+        let second_evidence = ReviewReferencedFindingEvidence::try_from_finding(&second_open)
+            .expect("second open finding is eligible reference evidence");
+        let third_evidence = ReviewReferencedFindingEvidence::try_from_finding(&third_open)
+            .expect("third open finding is eligible reference evidence");
+        let first = ReviewFinding::try_reconstitute(
+            first_open.proposal().clone(),
+            vec![finding_event(
+                first_reference,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(ARBITRARY_DEDUPE_PASS_SEED, ReviewPassKind::Dedupe),
+                ReviewFindingEventKind::Duplicate {
+                    canonical: second_evidence,
+                },
+            )],
+        )
+        .expect("first frozen edge is locally valid");
+        let second = ReviewFinding::try_reconstitute(
+            second_open.proposal().clone(),
+            vec![finding_event(
+                second_reference,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(23, ReviewPassKind::Dedupe),
+                ReviewFindingEventKind::Duplicate {
+                    canonical: third_evidence,
+                },
+            )],
+        )
+        .expect("second frozen edge is locally valid");
+        let third = ReviewFinding::try_reconstitute(
+            third_open.proposal().clone(),
+            vec![finding_event(
+                third_reference,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(24, ReviewPassKind::Dedupe),
+                ReviewFindingEventKind::Duplicate {
+                    canonical: first_evidence,
+                },
+            )],
+        )
+        .expect("third frozen edge is locally valid");
+
+        let error = validate_complete_review_finding_reference_graph(&[first, second, third])
+            .expect_err("complete graph reconstitution must reject a transitive cycle");
+
+        assert_eq!(
+            error,
+            ReviewFindingReferenceGraphError::Cycle {
+                finding: third_reference,
+                referenced: first_reference,
+            },
+        );
+    }
+
+    /// INV-040: complete reconstitution rejects an edge whose independently
+    /// authenticated referenced root is absent from the supplied target graph.
+    #[test]
+    fn inv040_reconstituted_reference_graph_rejects_missing_root() {
+        let target = target_id(CANONICAL_TARGET_SEED);
+        let subject_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
+        let canonical_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
+        let subject_open =
+            open_finding_with_producer(subject_reference, ReviewPolicy::version_one());
+        let canonical =
+            open_finding_with_producer(canonical_reference, ReviewPolicy::version_one());
+        let canonical_evidence = ReviewReferencedFindingEvidence::try_from_finding(&canonical)
+            .expect("canonical open finding is eligible reference evidence");
+        let subject = ReviewFinding::try_reconstitute(
+            subject_open.proposal().clone(),
+            vec![finding_event(
+                subject_reference,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(ARBITRARY_DEDUPE_PASS_SEED, ReviewPassKind::Dedupe),
+                ReviewFindingEventKind::Duplicate {
+                    canonical: canonical_evidence,
+                },
+            )],
+        )
+        .expect("individual frozen edge is locally valid");
+
+        let error = validate_complete_review_finding_reference_graph(&[subject])
+            .expect_err("complete graph cannot omit a referenced root");
+
+        assert_eq!(
+            error,
+            ReviewFindingReferenceGraphError::MissingReferencedFinding {
+                finding: subject_reference,
+                referenced: canonical_reference,
+            },
+        );
+    }
+
+    /// INV-040: supersession admits the same authenticated cross-run boundary
+    /// as duplicate classification without reparenting either finding.
+    #[test]
+    fn inv040_finding_admits_authenticated_cross_run_supersession() {
+        let target = target_id(CANONICAL_TARGET_SEED);
+        let subject_reference = finding_ref_for_producer(target, PRODUCING_PASS_SEED);
+        let successor_reference = finding_ref_for_producer(target, REASSIGNED_PASS_SEED);
+        let subject = open_finding_with_producer(subject_reference, ReviewPolicy::version_one());
+        let successor =
+            open_finding_with_producer(successor_reference, ReviewPolicy::version_one());
+        let successor_evidence = ReviewReferencedFindingEvidence::try_from_finding(&successor)
+            .expect("open successor is eligible reference evidence");
+        let event = finding_event(
+            subject_reference,
+            ReviewEventOrdinal::one(),
+            succeeded_pass(ARBITRARY_DEDUPE_PASS_SEED, ReviewPassKind::Dedupe),
+            ReviewFindingEventKind::Superseded {
+                successor: successor_evidence,
+            },
+        );
+
+        let superseded = subject
+            .apply(event)
+            .expect("equal-target equal-policy cross-run supersession is admitted");
+
+        assert_eq!(superseded.status(), ReviewFindingStatus::Superseded);
+        assert_eq!(
+            successor_evidence.reference(),
+            successor.proposal().reference()
+        );
+        assert_ne!(
+            superseded.proposal().reference().pass(),
+            successor.proposal().reference().pass(),
+            "independent producer ancestry must be preserved",
+        );
+    }
+
+    /// INV-040: referenced-finding reconstitution rejects a producer whose
+    /// canonical operation is not successful read-only review.
+    #[test]
+    fn inv040_referenced_finding_reconstitution_rejects_incompatible_producer_kind() {
+        let reference =
+            finding_ref_for_producer(target_id(CANONICAL_TARGET_SEED), PRODUCING_PASS_SEED);
+        let inventory = ReviewProducedFindings::try_new(vec![reference])
+            .expect("fixture inventory is canonical");
+        let judge_pass = ReviewPassEvidence::new(
+            reference.pass(),
+            ReviewPassKind::Judge,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Succeeded {
+                turn: turn_id(6),
+                output_frontier: frontier_id(8),
+                result: Some(ReviewPassResult::ProducedFindings(inventory.clone())),
+            },
+        );
+        let review_pass = ReviewPassEvidence::new(
+            reference.pass(),
+            ReviewPassKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Succeeded {
+                turn: turn_id(6),
+                output_frontier: frontier_id(8),
+                result: Some(ReviewPassResult::ProducedFindings(inventory)),
+            },
+        );
+        let judge_run = ReviewRunEvidence::new(
+            reference.run(),
+            ReviewWorkflowKind::JudgeFindings,
+            ReviewPolicy::version_one(),
+            ReviewRunState::Succeeded {
+                concluding_pass: reference.pass(),
+            },
+        );
+
+        assert!(
+            ReviewReferencedFindingEvidence::try_reconstitute(
+                reference,
+                ReviewFindingStatus::Open,
+                &judge_pass,
+                judge_run,
+            )
+            .is_none(),
+            "judge pass cannot authenticate finding production",
+        );
+        assert!(
+            ReviewReferencedFindingEvidence::try_reconstitute(
+                reference,
+                ReviewFindingStatus::Open,
+                &review_pass,
+                judge_run,
+            )
+            .is_none(),
+            "judge workflow cannot authenticate finding production",
+        );
+    }
+
+    /// INV-040: referenced-finding reconstitution rejects incomplete or
+    /// contradictory producer terminal evidence.
+    #[test]
+    fn inv040_referenced_finding_reconstitution_rejects_incomplete_producer_outcome() {
+        let reference =
+            finding_ref_for_producer(target_id(CANONICAL_TARGET_SEED), PRODUCING_PASS_SEED);
+        let failed_pass = ReviewPassEvidence::new(
+            reference.pass(),
+            ReviewPassKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Failed { turn: turn_id(6) },
+        );
+        let unsealed_pass = ReviewPassEvidence::new(
+            reference.pass(),
+            ReviewPassKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Succeeded {
+                turn: turn_id(6),
+                output_frontier: frontier_id(8),
+                result: None,
+            },
+        );
+        let failed_run = pass_run_evidence(&failed_pass);
+        let unsealed_run = pass_run_evidence(&unsealed_pass);
+
+        assert!(
+            ReviewReferencedFindingEvidence::try_reconstitute(
+                reference,
+                ReviewFindingStatus::Open,
+                &failed_pass,
+                failed_run,
+            )
+            .is_none(),
+            "failed producer cannot authenticate immutable finding content",
+        );
+        assert!(
+            ReviewReferencedFindingEvidence::try_reconstitute(
+                reference,
+                ReviewFindingStatus::Open,
+                &unsealed_pass,
+                unsealed_run,
+            )
+            .is_none(),
+            "successful producer without sealed inventory must fail closed",
+        );
+    }
+
+    /// INV-040: referenced-finding reconstitution rejects a run that
+    /// contradicts its producer's complete frozen policy.
+    #[test]
+    fn inv040_referenced_finding_reconstitution_rejects_producer_policy_mismatch() {
+        let reference =
+            finding_ref_for_producer(target_id(CANONICAL_TARGET_SEED), PRODUCING_PASS_SEED);
+        let finding = open_finding_with_producer(reference, ReviewPolicy::version_one());
+        let producing_pass = finding.proposal().producing_pass();
+        let mismatched_run = ReviewRunEvidence::new(
+            reference.run(),
+            ReviewWorkflowKind::ReadOnlyReview,
+            unsupported_policy(),
+            ReviewRunState::Succeeded {
+                concluding_pass: reference.pass(),
+            },
+        );
+
+        assert!(
+            ReviewReferencedFindingEvidence::try_reconstitute(
+                reference,
+                ReviewFindingStatus::Open,
+                producing_pass,
+                mismatched_run,
+            )
+            .is_none(),
+            "producer pass and owning run must freeze one equal complete policy",
+        );
+    }
+
+    /// INV-040: a complete graph cannot substitute the same aggregate root
+    /// twice while claiming complete target coverage.
+    #[test]
+    fn inv040_reconstituted_reference_graph_rejects_duplicate_root() {
+        let reference =
+            finding_ref_for_producer(target_id(CANONICAL_TARGET_SEED), PRODUCING_PASS_SEED);
+        let finding = open_finding_with_producer(reference, ReviewPolicy::version_one());
+
+        let error = validate_complete_review_finding_reference_graph(&[finding.clone(), finding])
+            .expect_err("complete graph cannot repeat a finding root");
+
+        assert_eq!(
+            error,
+            ReviewFindingReferenceGraphError::DuplicateFinding { reference },
+        );
+    }
+
+    /// INV-040: a complete graph for one immutable target cannot include a
+    /// disconnected root from another target.
+    #[test]
+    fn inv040_reconstituted_reference_graph_rejects_foreign_target_root() {
+        let expected_target = target_id(CANONICAL_TARGET_SEED);
+        let foreign_target = target_id(2);
+        let expected_reference = finding_ref_for_producer(expected_target, PRODUCING_PASS_SEED);
+        let foreign_reference = finding_ref_for_producer(foreign_target, REASSIGNED_PASS_SEED);
+        let expected = open_finding_with_producer(expected_reference, ReviewPolicy::version_one());
+        let foreign = open_finding_with_producer(foreign_reference, ReviewPolicy::version_one());
+
+        let error = validate_complete_review_finding_reference_graph(&[expected, foreign])
+            .expect_err("complete target graph cannot mix immutable targets");
+
+        assert_eq!(
+            error,
+            ReviewFindingReferenceGraphError::ForeignTargetRoot {
+                expected: expected_target,
+                actual: foreign_target,
+            },
         );
     }
 }
