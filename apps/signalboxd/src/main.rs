@@ -444,12 +444,15 @@ const fn should_close_pool(outcome: &Result<ShutdownOutcome, HubRuntimeError>) -
 
 const fn database_close_failure_outcome(outcome: ShutdownOutcome) -> ShutdownOutcome {
     match outcome {
-        ShutdownOutcome::RuntimeDefect | ShutdownOutcome::RuntimeDefectAfterGraceWindow => outcome,
+        ShutdownOutcome::ExecutionFailed
+        | ShutdownOutcome::ExecutionFailedAfterGraceWindow
+        | ShutdownOutcome::RuntimeDefect
+        | ShutdownOutcome::RuntimeDefectAfterGraceWindow => outcome,
         _ => ShutdownOutcome::RuntimeFailed,
     }
 }
 
-/// Records database-close failure without displacing the initiating defect.
+/// Records database-close failure without displacing its initiating cause.
 ///
 /// `SingleHubGuardError` has a static sanitized Display that excludes SQLx
 /// detail, so database URLs, credentials, query text, and server prose stay out.
@@ -1826,10 +1829,14 @@ mod tests {
     }
 
     #[test]
-    fn database_close_failure_preserves_an_initiating_runtime_defect() {
+    fn database_close_failure_preserves_higher_signal_initiating_causes() {
         assert_eq!(
             database_close_failure_outcome(ShutdownOutcome::RuntimeDefect),
             ShutdownOutcome::RuntimeDefect
+        );
+        assert_eq!(
+            database_close_failure_outcome(ShutdownOutcome::ExecutionFailed),
+            ShutdownOutcome::ExecutionFailed
         );
     }
 
