@@ -21,7 +21,7 @@ workspace = true
 [dev-dependencies]
 divan = "0.1.21"
 expect-test = "1.5.1"
-iai-callgrind = "0.16.1"
+gungraun = "0.19.4"
 signalbox-expect-table = { path = "../expect-table" }
 
 [[bench]]

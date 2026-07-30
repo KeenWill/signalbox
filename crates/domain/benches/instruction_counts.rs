@@ -1,6 +1,6 @@
 mod targets;
 
-use iai_callgrind::{
+use gungraun::{
     Callgrind, CallgrindMetrics, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group,
 };
 use std::hint::black_box;
@@ -65,7 +65,7 @@ library_benchmark_group!(
 mod benchmark_runner {
     use super::{Callgrind, CallgrindMetrics, LibraryBenchmarkConfig, domain_microbenchmarks};
 
-    iai_callgrind::main!(
+    gungraun::main!(
         config = LibraryBenchmarkConfig::default()
             .tool(Callgrind::default().format([CallgrindMetrics::All]));
         library_benchmark_groups = domain_microbenchmarks

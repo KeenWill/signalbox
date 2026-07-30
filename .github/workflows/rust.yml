@@ -105,8 +105,8 @@ jobs:
         with:
           cache-on-failure: true
           key: domain-instruction-counts
-      - name: Install iai-callgrind runner
-        run: cargo install --locked --version '=0.16.1' iai-callgrind-runner
+      - name: Install Gungraun runner
+        run: cargo install --locked --version '=0.19.4' gungraun-runner
       - name: Report domain instruction counts and simulated cache behavior
         run: |
           benchmark_log="$RUNNER_TEMP/domain-instruction-counts.txt"

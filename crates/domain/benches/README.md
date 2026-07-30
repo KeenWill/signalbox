@@ -7,18 +7,18 @@ subprocess work inside a measured function.
 ## Run the suites
 
 Instruction counts and cache behavior use
-[`iai-callgrind`](https://iai-callgrind.github.io/iai-callgrind/). The harness
-runs Callgrind with cache simulation enabled so fixture setup is excluded from
-both the instruction and simulated-cache metrics. On Linux, install Valgrind and
-the matching runner, then run:
+[Gungraun](https://gungraun.github.io/gungraun/), the maintained continuation of
+`iai-callgrind`. The harness runs Callgrind with cache simulation enabled so
+fixture setup is excluded from both the instruction and simulated-cache metrics.
+On Linux, install Valgrind and the matching runner, then run:
 
 ```console
-cargo install --locked --version '=0.16.1' iai-callgrind-runner
+cargo install --locked --version '=0.19.4' gungraun-runner
 cargo bench -p signalbox-domain --bench instruction_counts
 ```
 
-The detailed profiles are written below `target/iai`. The Rust workflow runs
-this command and copies its complete terminal report into the GitHub job
+The detailed profiles are written below `target/gungraun`. The Rust workflow
+runs this command and copies its complete terminal report into the GitHub job
 summary. That job is explicitly report-only and allowed to fail. It has no
 limit, comparison threshold, or required status.
 
