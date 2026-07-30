@@ -618,22 +618,24 @@ The smoke then asserts only the protocol surfaces a version bump moves — the
 thread identifier reaching the exchange facts, the terminal usage counters, and
 the response envelope decoding as a completed or refused terminal outcome — and
 nothing about answer quality. The workflow reports on every pull request without
-a path filter. Its secretless eligibility job checks the complete pull request
-file list: no pin change is an immediate success; a fork changing
-`tooling/codex-cli/**` fails with a manual-dispatch instruction; the live job is
-admitted only for a changed same-repository head. GitHub independently withholds
-secrets from ordinary fork `pull_request` runs. A final always-running job folds
-the eligibility and conditional live results into the required check, so a
-skipped or failed required smoke cannot appear green. Manual dispatch remains
-available, and a path-filtered push to `main` reruns the smoke after merge.
+a path filter. GitHub independently withholds secrets from ordinary fork
+`pull_request` runs regardless of environment policy. Its secretless eligibility
+job then checks the complete pull request file list: no pin change is an
+immediate success; for a pin change it compares
+`github.event.pull_request.head.repo.full_name` with `github.repository`, fails
+a mismatch with a manual-dispatch instruction, and admits the live job only for
+a same-repository head. A final always-running job folds the eligibility and
+conditional live results into the required check, so a skipped or failed
+required smoke cannot appear green. Manual dispatch remains available, and a
+path-filtered push to `main` reruns the smoke after merge.
 
 The `codex-smoke` environment is configured for all branches because GitHub
 evaluates an environment used by `pull_request` against `GITHUB_REF`, which is
 the synthetic merge ref rather than the head branch. That setting admits fork
-and same-repository merge refs alike and is not a security boundary. The
-explicit same-repository gate and GitHub's independent fork-secret withholding
-are the fork boundary. The model dispatch still performs no version probe: this
-check lives in the smoke, never in the hot path.
+and same-repository merge refs alike and supplies no security boundary. Forks
+are excluded, in order, by GitHub's independent secret withholding and the
+explicit repository-name comparison above. The model dispatch still performs no
+version probe: this check lives in the smoke, never in the hot path.
 
 The smoke authenticates the CLI through its own non-interactive API-key login,
 piped from an environment-scoped secret into the CLI's credential store, which

@@ -11,14 +11,15 @@
 # process can read the CLI credential store under CODEX_HOME. The workflow
 # therefore trusts anyone with write access to this repository, the same trust
 # already required to push executable code to main. It does not trust fork
-# authors: the secretless gate rejects changed fork pull requests, and GitHub
-# independently withholds secrets from ordinary pull_request runs from forks.
+# authors. First, GitHub withholds secrets from ordinary fork pull_request runs
+# regardless of environment policy. Second, the secretless gate compares
+# github.event.pull_request.head.repo.full_name with github.repository and
+# rejects a changed fork before the credentialed job can start.
 #
 # The smoke remains bound to the codex-smoke environment, which is configured
 # for all branches so main, manual, and synthetic pull-request merge refs can
-# enter. That availability setting admits fork and same-repository refs alike;
-# it is not a security boundary. Fork exclusion comes only from the secretless
-# repository check and GitHub's independent fork-secret withholding above.
+# enter. That availability setting admits fork and same-repository refs alike
+# and supplies no security boundary; only the two defenses above exclude forks.
 #
 # The credential is referenced only in the authentication step, piped to the
 # CLI login command on stdin, and never echoed or passed in argv or a child
