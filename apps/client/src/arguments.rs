@@ -359,7 +359,9 @@ struct RecordReviewFindingArguments {
     #[arg(long, value_enum)]
     severity: ReviewSeverityArgument,
     #[arg(long, value_parser = review_confidence)]
-    confidence: CanonicalU64,
+    is_real_confidence: CanonicalU64,
+    #[arg(long, value_parser = review_confidence)]
+    severity_label_confidence: CanonicalU64,
     #[arg(long)]
     category: String,
     #[arg(long)]
@@ -1113,7 +1115,8 @@ pub(crate) fn parse(
                             ReviewSeverityArgument::High => ReviewSeverity::High,
                             ReviewSeverityArgument::Critical => ReviewSeverity::Critical,
                         },
-                        confidence: arguments.confidence,
+                        is_real_confidence: arguments.is_real_confidence,
+                        severity_label_confidence: arguments.severity_label_confidence,
                         category: arguments.category,
                         recommended_fix: arguments.recommended_fix,
                     },
@@ -1302,7 +1305,8 @@ mod tests {
     struct ReviewFindingArgumentFixture {
         line_start: &'static str,
         line_end: &'static str,
-        confidence: &'static str,
+        is_real_confidence: &'static str,
+        severity_label_confidence: &'static str,
     }
 
     fn review_finding_arguments(fixture: ReviewFindingArgumentFixture) -> Vec<OsString> {
@@ -1335,8 +1339,10 @@ mod tests {
             "fixture body",
             "--severity",
             "high",
-            "--confidence",
-            fixture.confidence,
+            "--is-real-confidence",
+            fixture.is_real_confidence,
+            "--severity-label-confidence",
+            fixture.severity_label_confidence,
             "--category",
             "correctness",
         ]
@@ -1350,28 +1356,41 @@ mod tests {
         let zero_line = parse(review_finding_arguments(ReviewFindingArgumentFixture {
             line_start: "0",
             line_end: "1",
-            confidence: "9000",
+            is_real_confidence: "9000",
+            severity_label_confidence: "8500",
         }));
         let oversized_line = parse(review_finding_arguments(ReviewFindingArgumentFixture {
             line_start: "1",
             line_end: "4294967296",
-            confidence: "9000",
+            is_real_confidence: "9000",
+            severity_label_confidence: "8500",
         }));
         let reversed_line = parse(review_finding_arguments(ReviewFindingArgumentFixture {
             line_start: "9",
             line_end: "7",
-            confidence: "9000",
+            is_real_confidence: "9000",
+            severity_label_confidence: "8500",
         }));
-        let oversized_confidence = parse(review_finding_arguments(ReviewFindingArgumentFixture {
-            line_start: "1",
-            line_end: "1",
-            confidence: "10001",
-        }));
+        let oversized_is_real_confidence =
+            parse(review_finding_arguments(ReviewFindingArgumentFixture {
+                line_start: "1",
+                line_end: "1",
+                is_real_confidence: "10001",
+                severity_label_confidence: "8500",
+            }));
+        let oversized_severity_label_confidence =
+            parse(review_finding_arguments(ReviewFindingArgumentFixture {
+                line_start: "1",
+                line_end: "1",
+                is_real_confidence: "9000",
+                severity_label_confidence: "10001",
+            }));
 
         assert!(zero_line.is_err());
         assert!(oversized_line.is_err());
         assert!(reversed_line.is_err());
-        assert!(oversized_confidence.is_err());
+        assert!(oversized_is_real_confidence.is_err());
+        assert!(oversized_severity_label_confidence.is_err());
     }
 
     #[test]
