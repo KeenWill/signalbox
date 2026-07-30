@@ -8,7 +8,7 @@ use std::{
         Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use signalbox_application::{
@@ -480,6 +480,7 @@ struct PointConfig {
     pool_size: u32,
     server_max_connections: u32,
     concurrency: usize,
+    warmup_duration: Duration,
     duration: Duration,
     available_parallelism: usize,
 }
@@ -557,7 +558,7 @@ async fn run_point(
 
     start_barrier.wait().await;
     tokio::select! {
-        () = tokio::time::sleep(WARMUP_DURATION) => {}
+        () = tokio::time::sleep(config.warmup_duration) => {}
         worker = workers.join_next() => {
             let worker_error = match worker {
                 Some(Ok(Err(worker_error))) => worker_error,
@@ -598,7 +599,7 @@ async fn run_point(
         scenario: config.scenario,
         fsync: config.fsync,
         concurrency: config.concurrency,
-        warmup_duration: WARMUP_DURATION,
+        warmup_duration: config.warmup_duration,
         offered_duration: config.duration,
         elapsed,
         completed_during_offered_load,
@@ -607,6 +608,36 @@ async fn run_point(
         available_parallelism: config.available_parallelism,
         latencies,
     })
+}
+
+fn randomized_warmup_duration(offered_duration: Duration) -> HarnessResult<Duration> {
+    let since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|clock_error| {
+            error(format!(
+                "system clock is before the Unix epoch: {clock_error}"
+            ))
+        })?;
+    let offered_nanos = offered_duration.as_nanos();
+    if offered_nanos == 0 {
+        return Err(error("offered duration must be positive"));
+    }
+    let jitter_nanos = since_epoch.as_nanos() % offered_nanos;
+    let jitter_seconds =
+        u64::try_from(jitter_nanos / 1_000_000_000).map_err(|conversion_error| {
+            error(format!(
+                "warmup jitter seconds are unrepresentable: {conversion_error}"
+            ))
+        })?;
+    let jitter_subseconds =
+        u32::try_from(jitter_nanos % 1_000_000_000).map_err(|conversion_error| {
+            error(format!(
+                "warmup jitter nanoseconds are unrepresentable: {conversion_error}"
+            ))
+        })?;
+    WARMUP_DURATION
+        .checked_add(Duration::new(jitter_seconds, jitter_subseconds))
+        .ok_or_else(|| error("randomized warmup duration exceeds the platform timer range"))
 }
 
 async fn perform_operation_with_timeout(
@@ -999,7 +1030,7 @@ fn print_result_header() {
 
 fn print_result(result: &PointResult) {
     println!(
-        "| {} | postgres:{} | {} | {} | {} | {} | {} | {:.0} | {:.0} | {:.3} | {} | {} | {:.2} | {} | {} | {} |",
+        "| {} | postgres:{} | {} | {} | {} | {} | {} | {:.3} | {:.0} | {:.3} | {} | {} | {:.2} | {} | {} | {} |",
         result.scenario.label(),
         POSTGRES_IMAGE_TAG,
         result.available_parallelism,
@@ -1039,6 +1070,7 @@ async fn main() -> HarnessResult<()> {
     for fsync in config.fsync_modes.iter().copied() {
         for scenario in config.scenarios.iter().copied() {
             for concurrency in config.concurrencies.iter().copied() {
+                let warmup_duration = randomized_warmup_duration(config.duration)?;
                 database_sequence = database_sequence
                     .checked_add(1)
                     .ok_or_else(|| error("benchmark database sequence exhausted"))?;
@@ -1050,11 +1082,11 @@ async fn main() -> HarnessResult<()> {
                 let environment =
                     PostgresEnvironment::start(fsync, config.server_max_connections).await?;
                 eprintln!(
-                    "running scenario={} fsync={} concurrency={} warmup={}s duration={}s pool={}",
+                    "running scenario={} fsync={} concurrency={} warmup={:.3}s duration={}s pool={}",
                     scenario.label(),
                     fsync.label(),
                     concurrency,
-                    WARMUP_DURATION.as_secs(),
+                    warmup_duration.as_secs_f64(),
                     config.duration.as_secs(),
                     config.pool_size
                 );
@@ -1068,6 +1100,7 @@ async fn main() -> HarnessResult<()> {
                         pool_size: config.pool_size,
                         server_max_connections: config.server_max_connections,
                         concurrency,
+                        warmup_duration,
                         duration: config.duration,
                         available_parallelism,
                     },

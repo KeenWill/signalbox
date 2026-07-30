@@ -2,14 +2,16 @@
 
 This on-demand Tokio harness measures the saturation curve of PostgreSQL
 persistence work. It is not a latency microbenchmark: each curve point keeps a
-fixed number of operations circulating across an independent five-second
+fixed number of operations circulating across an independent randomized
 wall-clock warmup and the start of a fixed offered-load duration, then drains
-the operations already started. The measurement boundary is not triggered by an
-operation completion, avoiding phase-lock with slow operations. The harness
-reports operations completed during the offered-load window per offered-load
-second. The final drain is excluded from throughput but retained in the
-uncensored p50, p95, and p99 operation latency samples. Percentiles use the
-empirical nearest-rank convention.
+the operations already started. Each warmup is five seconds plus a fresh jitter
+smaller than the offered-load duration. The measurement boundary is neither
+triggered by an operation completion nor fixed at one phase relative to worker
+startup, avoiding phase-lock with slow operations. The harness reports
+operations completed during the offered-load window per offered-load second.
+The final drain is excluded from throughput but retained in the uncensored p50,
+p95, and p99 operation latency samples. Percentiles use the empirical
+nearest-rank convention.
 
 Run the complete sweep in the Cargo bench profile:
 
