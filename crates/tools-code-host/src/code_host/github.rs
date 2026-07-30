@@ -1965,6 +1965,11 @@ mod tests {
     const FILE_PATCH_MOVED_REVISION: &str = "3333333333333333333333333333333333333333";
     const FILE_PATCH_SERVER_TIMEOUT: Duration = Duration::from_secs(5);
 
+    struct FilePatchRevisionTransition {
+        before: ChangeRequestDiffRevision,
+        after: ChangeRequestDiffRevision,
+    }
+
     fn repository() -> CodeHostRepository {
         CodeHostRepository::try_new(String::from("owner/repository"))
             .expect("fixture repository is admitted")
@@ -2063,16 +2068,17 @@ mod tests {
     /// returned as evidence from any single revision.
     #[tokio::test]
     async fn file_patch_fails_closed_when_head_moves_during_pagination() {
-        let before_revision = ChangeRequestDiffRevision {
-            base: String::from(FILE_PATCH_BASE_REVISION),
-            head: String::from(FILE_PATCH_HEAD_REVISION),
+        let revision_transition = FilePatchRevisionTransition {
+            before: ChangeRequestDiffRevision {
+                base: String::from(FILE_PATCH_BASE_REVISION),
+                head: String::from(FILE_PATCH_HEAD_REVISION),
+            },
+            after: ChangeRequestDiffRevision {
+                base: String::from(FILE_PATCH_BASE_REVISION),
+                head: String::from(FILE_PATCH_MOVED_REVISION),
+            },
         };
-        let after_revision = ChangeRequestDiffRevision {
-            base: String::from(FILE_PATCH_BASE_REVISION),
-            head: String::from(FILE_PATCH_MOVED_REVISION),
-        };
-        let (failure, requests) =
-            file_patch_revision_change_failure(before_revision, after_revision).await;
+        let (failure, requests) = file_patch_revision_change_failure(revision_transition).await;
 
         assert_file_patch_revision_change(failure, requests);
     }
@@ -2081,23 +2087,23 @@ mod tests {
     /// revision moves during the search.
     #[tokio::test]
     async fn file_patch_fails_closed_when_base_moves_without_head() {
-        let before_revision = ChangeRequestDiffRevision {
-            base: String::from(FILE_PATCH_BASE_REVISION),
-            head: String::from(FILE_PATCH_HEAD_REVISION),
+        let revision_transition = FilePatchRevisionTransition {
+            before: ChangeRequestDiffRevision {
+                base: String::from(FILE_PATCH_BASE_REVISION),
+                head: String::from(FILE_PATCH_HEAD_REVISION),
+            },
+            after: ChangeRequestDiffRevision {
+                base: String::from(FILE_PATCH_MOVED_REVISION),
+                head: String::from(FILE_PATCH_HEAD_REVISION),
+            },
         };
-        let after_revision = ChangeRequestDiffRevision {
-            base: String::from(FILE_PATCH_MOVED_REVISION),
-            head: String::from(FILE_PATCH_HEAD_REVISION),
-        };
-        let (failure, requests) =
-            file_patch_revision_change_failure(before_revision, after_revision).await;
+        let (failure, requests) = file_patch_revision_change_failure(revision_transition).await;
 
         assert_file_patch_revision_change(failure, requests);
     }
 
     async fn file_patch_revision_change_failure(
-        before_revision: ChangeRequestDiffRevision,
-        after_revision: ChangeRequestDiffRevision,
+        revision_transition: FilePatchRevisionTransition,
     ) -> (CodeHostTransportFailure, [String; 4]) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -2107,8 +2113,7 @@ mod tests {
             .expect("listener address is available");
         let server = tokio::spawn(serve_changed_file_patch_revision(
             listener,
-            before_revision,
-            after_revision,
+            revision_transition,
         ));
         let mut transport = GitHubCodeHostTransport::try_new().expect("fixed transport constructs");
         transport.rest_base =
@@ -2167,10 +2172,9 @@ mod tests {
 
     async fn serve_changed_file_patch_revision(
         listener: tokio::net::TcpListener,
-        before_revision: ChangeRequestDiffRevision,
-        after_revision: ChangeRequestDiffRevision,
+        revision_transition: FilePatchRevisionTransition,
     ) -> [String; 4] {
-        let initial_revision = change_request_revision_value(&before_revision);
+        let initial_revision = change_request_revision_value(&revision_transition.before);
         let target_page = serde_json::Value::Array(vec![changed_file_value(String::from(
             FILE_PATCH_TARGET_PATH,
         ))]);
@@ -2184,7 +2188,7 @@ mod tests {
         .await;
         let target_page_request =
             serve_json_response(&listener, &target_page.to_string(), None).await;
-        let final_revision = change_request_revision_value(&after_revision);
+        let final_revision = change_request_revision_value(&revision_transition.after);
         let final_request = serve_json_response(&listener, &final_revision.to_string(), None).await;
         [
             initial_request,
