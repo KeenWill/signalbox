@@ -387,9 +387,10 @@ comparison revision.
 After a validated external-context-import result is durable, the service calls
 its session-backed pass port concurrently once for every configured concern.
 Each work item carries the immutable attempt, imported-context digest, and one
-exact concern specification. Successful members must name the same target and
-equal frozen policy. `ReviewConcernWork` carries no repair or publication handle
-and no other member's uncommitted output.
+exact concern specification. Successful members must report the same target,
+equal frozen policy, and exact resolved concern-template digest from their own
+runner evidence. `ReviewConcernWork` carries no repair or publication handle and
+no other member's uncommitted output.
 
 The attempt durably records the complete expected concern inventory before any
 member starts. Judgment is eligible only after every expected member has
@@ -520,9 +521,12 @@ The result is invalid unless every accepted finding meets
 available to the judge but never filters a finding. The orchestrator seals this
 complete plan before admitting its per-finding judgment and deduplication events
 through the existing single-effect pass primitives in canonical finding order.
-Until every planned event is durably admitted, repair and publication remain
-ineligible; a crash resumes the plan rather than asking a model for a different
-partial judgment.
+An `Applied` result carries the canonical finding event, its independently
+loaded pass and run evidence, and the exact judgment-template digest. The
+service validates the exact planned disposition and committed pass result before
+recording the durable effect receipt. Until every planned event is durably
+admitted, repair and publication remain ineligible; a crash resumes the plan
+rather than asking a model for a different partial judgment.
 
 Duplicate and superseded events may reference a finding produced by another run
 only within one immutable target and one equal complete frozen policy. Each
@@ -557,13 +561,15 @@ change is needed to authenticate a same-target, same-policy reference.
 ### Repair, publication, import, and escalation
 
 Finding-repair work contains the exact accepted finding inventory only after
-every sealed judgment effect is durably applied. `Fixed` findings leave the
-publication set; a failed or cancelled repair leaves its finding surviving. The
-service records the exact terminal outcome inventory before advancing. A blocked
-repair returns a typed `RepairIncomplete` attempt outcome and prevents all
-publication for that attempt. Resuming a blocked repair after reconciliation is
-committed but unimplemented; no present application-store operation replaces
-that sealed outcome.
+every sealed judgment effect is durably applied. A `Fixed` member carries the
+canonical fixed event, independently loaded Fix pass and run evidence, and exact
+repair-template digest. Only evidence that commits the exact fixed event may
+remove a finding from the publication set; a failed or cancelled repair leaves
+its finding surviving. The service records the exact terminal outcome inventory
+before advancing. A blocked repair returns a typed `RepairIncomplete` attempt
+outcome and prevents all publication for that attempt. Resuming a blocked repair
+after reconciliation is committed but unimplemented; no present
+application-store operation replaces that sealed outcome.
 
 External-publication work contains the exact canonical surviving inventory and
 uses the existing reservation-then-attachment pass boundary. A `Published`

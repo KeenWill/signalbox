@@ -5,10 +5,11 @@ use std::future::Future;
 use std::sync::Arc;
 
 use signalbox_domain::{
-    ReviewFinding, ReviewFindingEventResultKind, ReviewFindingExternalLinkRef, ReviewFindingId,
-    ReviewFindingRef, ReviewFindingStatus, ReviewKey, ReviewPassEvidence, ReviewPassKind,
-    ReviewPassRef, ReviewPassResult, ReviewPassState, ReviewPolicy, ReviewRunEvidence,
-    ReviewRunState, ReviewTargetId, ReviewText, ReviewWorkflowKind,
+    ReviewFinding, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResultKind,
+    ReviewFindingExternalLinkRef, ReviewFindingId, ReviewFindingRef, ReviewFindingStatus,
+    ReviewKey, ReviewPassEvidence, ReviewPassKind, ReviewPassRef, ReviewPassResult,
+    ReviewPassState, ReviewPolicy, ReviewRunEvidence, ReviewRunState, ReviewTargetId, ReviewText,
+    ReviewWorkflowKind,
 };
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -312,6 +313,7 @@ fn validate_import(
 pub struct ReviewConcernSuccess {
     producer: ReviewPassEvidence,
     run: ReviewRunEvidence,
+    template_digest: ReviewTemplateDigest,
     findings: Vec<ReviewFinding>,
 }
 
@@ -320,11 +322,13 @@ impl ReviewConcernSuccess {
     pub fn new(
         producer: ReviewPassEvidence,
         run: ReviewRunEvidence,
+        template_digest: ReviewTemplateDigest,
         findings: Vec<ReviewFinding>,
     ) -> Self {
         Self {
             producer,
             run,
+            template_digest,
             findings,
         }
     }
@@ -342,6 +346,11 @@ impl ReviewConcernSuccess {
     /// Returns the canonical producing-run evidence.
     pub const fn run_evidence(&self) -> ReviewRunEvidence {
         self.run
+    }
+
+    /// Returns the exact concern-template digest reported by the runner.
+    pub const fn template_digest(&self) -> ReviewTemplateDigest {
+        self.template_digest
     }
 
     /// Borrows all typed findings in canonical identity order.
@@ -485,6 +494,11 @@ pub enum ReviewFanoutBarrierFailure {
         /// Concern with cross-wired policy.
         concern: ReviewKey,
     },
+    /// A successful producer reports a different resolved concern template.
+    ForeignProducerTemplate {
+        /// Concern with cross-wired template evidence.
+        concern: ReviewKey,
+    },
     /// A finding is not open or does not belong to its claimed producer.
     InvalidSealedFinding {
         /// Concern carrying the invalid member.
@@ -546,6 +560,11 @@ fn complete_fanout(
         }
         if success.producer.policy() != attempt.policy || success.run.policy() != attempt.policy {
             return Err(ReviewFanoutBarrierFailure::ForeignProducerPolicy {
+                concern: expected_member.key.clone(),
+            });
+        }
+        if success.template_digest != expected_member.template_digest {
+            return Err(ReviewFanoutBarrierFailure::ForeignProducerTemplate {
                 concern: expected_member.key.clone(),
             });
         }
@@ -911,13 +930,228 @@ impl ReviewJudgmentEffectWork {
     }
 }
 
+/// Canonical evidence for one durably admitted judgment effect.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewJudgmentEffectSuccess {
+    event: ReviewFindingEvent,
+    template_digest: ReviewTemplateDigest,
+}
+
+impl ReviewJudgmentEffectSuccess {
+    /// Binds the exact admitted finding event to its resolved judgment template.
+    pub const fn new(event: ReviewFindingEvent, template_digest: ReviewTemplateDigest) -> Self {
+        Self {
+            event,
+            template_digest,
+        }
+    }
+
+    /// Borrows the canonical admitted finding event and its pass and run evidence.
+    pub const fn event(&self) -> &ReviewFindingEvent {
+        &self.event
+    }
+
+    /// Returns the exact resolved judgment template.
+    pub const fn template_digest(&self) -> ReviewTemplateDigest {
+        self.template_digest
+    }
+}
+
 /// Terminal outcome of applying one planned finding effect.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewJudgmentEffectOutcome {
-    Applied,
+    /// The exact planned event was durably admitted.
+    Applied(Box<ReviewJudgmentEffectSuccess>),
     Failed,
     Blocked,
     Cancelled,
+}
+
+/// Why a claimed applied judgment effect does not authenticate its exact event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReviewJudgmentEffectEvidenceFailure {
+    /// The event, pass, or run belongs to another immutable target.
+    ForeignTarget,
+    /// The event pass or run carries another frozen policy.
+    ForeignPolicy,
+    /// The effect used a different resolved judgment template.
+    ForeignTemplate,
+    /// The event does not exactly implement the sealed plan member.
+    IncompatibleEvent,
+    /// The pass is not the canonical succeeded judgment or deduplication pass.
+    IncompatiblePass,
+    /// The run does not canonically conclude with the event pass.
+    IncompatibleRun,
+}
+
+fn validate_judgment_effect(
+    attempt: &ReviewOrchestrationAttempt,
+    member: &ReviewJudgmentPlanMember,
+    success: &ReviewJudgmentEffectSuccess,
+) -> Result<(), ReviewJudgmentEffectEvidenceFailure> {
+    let event = success.event();
+    let pass = event.pass_evidence();
+    let run = event.run_evidence();
+    if event.finding().target() != attempt.target
+        || event.pass().target() != attempt.target
+        || run.reference().target() != attempt.target
+    {
+        return Err(ReviewJudgmentEffectEvidenceFailure::ForeignTarget);
+    }
+    if pass.policy() != attempt.policy || run.policy() != attempt.policy {
+        return Err(ReviewJudgmentEffectEvidenceFailure::ForeignPolicy);
+    }
+    if success.template_digest() != attempt.stage_templates.judgment {
+        return Err(ReviewJudgmentEffectEvidenceFailure::ForeignTemplate);
+    }
+    if event.finding() != member.finding {
+        return Err(ReviewJudgmentEffectEvidenceFailure::IncompatibleEvent);
+    }
+    if !event_matches_planned_disposition(event.kind(), &member.disposition) {
+        return Err(ReviewJudgmentEffectEvidenceFailure::IncompatibleEvent);
+    }
+    let (expected_pass, expected_workflow) = match member.disposition {
+        ReviewPlannedDisposition::Accepted
+        | ReviewPlannedDisposition::Rejected { .. }
+        | ReviewPlannedDisposition::Stale => {
+            (ReviewPassKind::Judge, ReviewWorkflowKind::JudgeFindings)
+        }
+        ReviewPlannedDisposition::Duplicate { .. }
+        | ReviewPlannedDisposition::Superseded { .. } => {
+            (ReviewPassKind::Dedupe, ReviewWorkflowKind::DedupeFindings)
+        }
+    };
+    if event.pass() != pass.reference()
+        || pass.kind() != expected_pass
+        || !pass_commits_exact_event(pass, event)
+    {
+        return Err(ReviewJudgmentEffectEvidenceFailure::IncompatiblePass);
+    }
+    if run.reference() != event.pass().run()
+        || run.workflow() != expected_workflow
+        || run.state()
+            != (ReviewRunState::Succeeded {
+                concluding_pass: event.pass(),
+            })
+    {
+        return Err(ReviewJudgmentEffectEvidenceFailure::IncompatibleRun);
+    }
+    Ok(())
+}
+
+fn event_matches_planned_disposition(
+    event: &ReviewFindingEventKind,
+    disposition: &ReviewPlannedDisposition,
+) -> bool {
+    match (event, disposition) {
+        (ReviewFindingEventKind::Accepted, ReviewPlannedDisposition::Accepted)
+        | (ReviewFindingEventKind::Stale, ReviewPlannedDisposition::Stale) => true,
+        (
+            ReviewFindingEventKind::Rejected { reason: actual },
+            ReviewPlannedDisposition::Rejected { reason: expected },
+        ) => actual == expected,
+        (
+            ReviewFindingEventKind::Duplicate { canonical: actual },
+            ReviewPlannedDisposition::Duplicate {
+                canonical: expected,
+            },
+        ) => actual.reference() == *expected,
+        (
+            ReviewFindingEventKind::Superseded { successor: actual },
+            ReviewPlannedDisposition::Superseded {
+                successor: expected,
+            },
+        ) => actual.reference() == *expected,
+        (
+            ReviewFindingEventKind::Accepted
+            | ReviewFindingEventKind::Rejected { .. }
+            | ReviewFindingEventKind::Duplicate { .. }
+            | ReviewFindingEventKind::Superseded { .. }
+            | ReviewFindingEventKind::Stale
+            | ReviewFindingEventKind::Posted { .. }
+            | ReviewFindingEventKind::Fixed
+            | ReviewFindingEventKind::BlockedWithReason { .. },
+            ReviewPlannedDisposition::Accepted
+            | ReviewPlannedDisposition::Rejected { .. }
+            | ReviewPlannedDisposition::Duplicate { .. }
+            | ReviewPlannedDisposition::Superseded { .. }
+            | ReviewPlannedDisposition::Stale,
+        ) => false,
+    }
+}
+
+fn pass_commits_exact_event(pass: &ReviewPassEvidence, event: &ReviewFindingEvent) -> bool {
+    matches!(
+        pass.state(),
+        ReviewPassState::Succeeded {
+            result: Some(ReviewPassResult::FindingEvent(result)),
+            ..
+        } if result.finding() == event.finding()
+            && result.ordinal() == event.ordinal()
+            && event_kind_matches_result(event.kind(), result.kind())
+    )
+}
+
+fn event_kind_matches_result(
+    event: &ReviewFindingEventKind,
+    result: &ReviewFindingEventResultKind,
+) -> bool {
+    match (event, result) {
+        (ReviewFindingEventKind::Accepted, ReviewFindingEventResultKind::Accepted)
+        | (ReviewFindingEventKind::Stale, ReviewFindingEventResultKind::Stale)
+        | (ReviewFindingEventKind::Fixed, ReviewFindingEventResultKind::Fixed) => true,
+        (
+            ReviewFindingEventKind::Rejected { reason: actual },
+            ReviewFindingEventResultKind::Rejected { reason: expected },
+        ) => actual == expected,
+        (
+            ReviewFindingEventKind::Duplicate { canonical: actual },
+            ReviewFindingEventResultKind::Duplicate {
+                canonical: expected,
+            },
+        ) => actual == expected,
+        (
+            ReviewFindingEventKind::Superseded { successor: actual },
+            ReviewFindingEventResultKind::Superseded {
+                successor: expected,
+            },
+        ) => actual == expected,
+        (
+            ReviewFindingEventKind::Posted { link: actual },
+            ReviewFindingEventResultKind::Posted { link: expected },
+        ) => actual.link() == *expected,
+        (
+            ReviewFindingEventKind::BlockedWithReason {
+                reason: actual_reason,
+                link: actual_link,
+            },
+            ReviewFindingEventResultKind::BlockedWithReason {
+                reason: expected_reason,
+                link: expected_link,
+            },
+        ) => {
+            actual_reason == expected_reason
+                && actual_link.as_ref().map(|link| link.link()) == *expected_link
+        }
+        (
+            ReviewFindingEventKind::Accepted
+            | ReviewFindingEventKind::Rejected { .. }
+            | ReviewFindingEventKind::Duplicate { .. }
+            | ReviewFindingEventKind::Superseded { .. }
+            | ReviewFindingEventKind::Stale
+            | ReviewFindingEventKind::Posted { .. }
+            | ReviewFindingEventKind::Fixed
+            | ReviewFindingEventKind::BlockedWithReason { .. },
+            ReviewFindingEventResultKind::Accepted
+            | ReviewFindingEventResultKind::Rejected { .. }
+            | ReviewFindingEventResultKind::Duplicate { .. }
+            | ReviewFindingEventResultKind::Superseded { .. }
+            | ReviewFindingEventResultKind::Stale
+            | ReviewFindingEventResultKind::Posted { .. }
+            | ReviewFindingEventResultKind::Fixed
+            | ReviewFindingEventResultKind::BlockedWithReason { .. },
+        ) => false,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -926,22 +1160,53 @@ struct AppliedJudgmentPlan {
     plan: ReviewJudgmentPlan,
 }
 
+/// Canonical evidence for one successfully fixed finding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewRepairSuccess {
+    event: ReviewFindingEvent,
+    template_digest: ReviewTemplateDigest,
+}
+
+impl ReviewRepairSuccess {
+    /// Binds the exact fixed event to its resolved repair template.
+    pub const fn new(event: ReviewFindingEvent, template_digest: ReviewTemplateDigest) -> Self {
+        Self {
+            event,
+            template_digest,
+        }
+    }
+
+    /// Returns the exact fixed finding.
+    pub const fn finding(&self) -> ReviewFindingRef {
+        self.event.finding()
+    }
+
+    /// Borrows the canonical fixed event and its pass and run evidence.
+    pub const fn event(&self) -> &ReviewFindingEvent {
+        &self.event
+    }
+
+    /// Returns the exact resolved repair template.
+    pub const fn template_digest(&self) -> ReviewTemplateDigest {
+        self.template_digest
+    }
+}
+
 /// One terminal finding-repair pass outcome.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewRepairMemberOutcome {
-    Fixed(ReviewFindingRef),
+    /// The finding was fixed with canonical admitted event evidence.
+    Fixed(Box<ReviewRepairSuccess>),
     Failed(ReviewFindingRef),
     Cancelled(ReviewFindingRef),
     Blocked(ReviewFindingRef),
 }
 
 impl ReviewRepairMemberOutcome {
-    const fn finding(self) -> ReviewFindingRef {
+    const fn finding(&self) -> ReviewFindingRef {
         match self {
-            Self::Fixed(finding)
-            | Self::Failed(finding)
-            | Self::Cancelled(finding)
-            | Self::Blocked(finding) => finding,
+            Self::Fixed(success) => success.finding(),
+            Self::Failed(finding) | Self::Cancelled(finding) | Self::Blocked(finding) => *finding,
         }
     }
 }
@@ -1054,6 +1319,18 @@ impl ReviewPublicationWork {
 pub enum ReviewTerminalBarrierFailure {
     /// Terminal outcomes do not name the exact input inventory in order.
     InexactFindingInventory,
+    /// Fixed evidence belongs to another immutable target.
+    ForeignRepairTarget,
+    /// Fixed pass or run carries another frozen policy.
+    ForeignRepairPolicy,
+    /// Repair used a different resolved template.
+    ForeignRepairTemplate,
+    /// Repair pass is not the exact canonical succeeded fix pass.
+    IncompatibleRepairPass,
+    /// Repair run does not canonically conclude with its fix pass.
+    IncompatibleRepairRun,
+    /// Fix pass result does not commit the exact fixed finding event.
+    IncompatibleRepairEvent,
     /// Publication evidence belongs to another immutable target.
     ForeignPublicationTarget,
     /// Publication pass or run carries another frozen policy.
@@ -1084,6 +1361,46 @@ enum CompletedRepairStage {
     Complete(Box<CompleteRepairBarrier>),
 }
 
+fn validate_repair_success(
+    attempt: &ReviewOrchestrationAttempt,
+    success: &ReviewRepairSuccess,
+) -> Result<(), ReviewTerminalBarrierFailure> {
+    let event = success.event();
+    let pass = event.pass_evidence();
+    let run = event.run_evidence();
+    if event.finding().target() != attempt.target
+        || event.pass().target() != attempt.target
+        || run.reference().target() != attempt.target
+    {
+        return Err(ReviewTerminalBarrierFailure::ForeignRepairTarget);
+    }
+    if pass.policy() != attempt.policy || run.policy() != attempt.policy {
+        return Err(ReviewTerminalBarrierFailure::ForeignRepairPolicy);
+    }
+    if success.template_digest() != attempt.stage_templates.repair {
+        return Err(ReviewTerminalBarrierFailure::ForeignRepairTemplate);
+    }
+    if !matches!(event.kind(), ReviewFindingEventKind::Fixed) {
+        return Err(ReviewTerminalBarrierFailure::IncompatibleRepairEvent);
+    }
+    if event.pass() != pass.reference()
+        || pass.kind() != ReviewPassKind::Fix
+        || !pass_commits_exact_event(pass, event)
+    {
+        return Err(ReviewTerminalBarrierFailure::IncompatibleRepairPass);
+    }
+    if run.reference() != event.pass().run()
+        || run.workflow() != ReviewWorkflowKind::FixFindings
+        || run.state()
+            != (ReviewRunState::Succeeded {
+                concluding_pass: event.pass(),
+            })
+    {
+        return Err(ReviewTerminalBarrierFailure::IncompatibleRepairRun);
+    }
+    Ok(())
+}
+
 fn complete_repairs(
     attempt: &ReviewOrchestrationAttempt,
     plan: &ReviewJudgmentPlan,
@@ -1093,6 +1410,11 @@ fn complete_repairs(
     let actual: Vec<_> = outcomes.iter().map(|outcome| outcome.finding()).collect();
     if actual != expected {
         return Err(ReviewTerminalBarrierFailure::InexactFindingInventory);
+    }
+    for outcome in &outcomes {
+        if let ReviewRepairMemberOutcome::Fixed(success) = outcome {
+            validate_repair_success(attempt, success)?;
+        }
     }
     if outcomes
         .iter()
@@ -1326,6 +1648,7 @@ pub enum ReviewOrchestrationServiceError<StoreError, RunnerError> {
     ConcernTaskTerminated,
     DurableConflict,
     InvalidJudgmentPlan(ReviewJudgmentPlanFailure),
+    InvalidJudgmentEffectEvidence(ReviewJudgmentEffectEvidenceFailure),
     InvalidAppliedEffects,
     InvalidTerminalBarrier(ReviewTerminalBarrierFailure),
 }
@@ -1532,9 +1855,11 @@ where
                 })
                 .await
                 .map_err(ReviewOrchestrationServiceError::Runner)?;
-            if outcome != ReviewJudgmentEffectOutcome::Applied {
+            let ReviewJudgmentEffectOutcome::Applied(success) = &outcome else {
                 return Ok(ReviewOrchestrationOutcome::JudgmentIncomplete { effect, outcome });
-            }
+            };
+            validate_judgment_effect(&attempt, member, success)
+                .map_err(ReviewOrchestrationServiceError::InvalidJudgmentEffectEvidence)?;
             ensure_sealed(
                 self.store
                     .record_applied_judgment_effect(effect)
@@ -1786,7 +2111,12 @@ mod tests {
                     })
                 } else {
                     Ok(ReviewConcernOutcome::Succeeded(Box::new(
-                        ReviewConcernSuccess::new(pass, run, Vec::new()),
+                        ReviewConcernSuccess::new(
+                            pass,
+                            run,
+                            work.concern.template_digest,
+                            Vec::new(),
+                        ),
                     )))
                 }
             }
@@ -1818,7 +2148,7 @@ mod tests {
             &self,
             _work: ReviewJudgmentEffectWork,
         ) -> Result<ReviewJudgmentEffectOutcome, Self::Error> {
-            Ok(ReviewJudgmentEffectOutcome::Applied)
+            Ok(ReviewJudgmentEffectOutcome::Failed)
         }
 
         async fn repair(
@@ -2063,6 +2393,34 @@ mod tests {
     }
 
     #[test]
+    fn concern_success_rejects_a_runner_reported_foreign_template() {
+        let immutable_attempt = attempt();
+        let expected_concern = immutable_attempt.concerns()[0].key().clone();
+        let foreign = successful_empty_concern_claim(
+            &immutable_attempt,
+            0,
+            100,
+            ReviewTemplateDigest::new([99; 32]),
+        );
+        let canonical = successful_empty_concern_claim(
+            &immutable_attempt,
+            1,
+            200,
+            immutable_attempt.concerns()[1].template_digest(),
+        );
+
+        let error = complete_fanout(&immutable_attempt, vec![foreign, canonical])
+            .expect_err("runner-reported foreign template must fail closed");
+
+        assert_eq!(
+            error,
+            ReviewFanoutBarrierFailure::ForeignProducerTemplate {
+                concern: expected_concern
+            }
+        );
+    }
+
+    #[test]
     fn direct_reference_cycle_is_rejected_before_plan_sealing() {
         let first = finding_ref(100);
         let second = finding_ref(200);
@@ -2134,6 +2492,223 @@ mod tests {
             error,
             ReviewJudgmentPlanFailure::ReferencedFindingTerminalBeforeAdmission { finding: second }
         );
+    }
+
+    #[test]
+    fn canonical_judgment_effect_authenticates_before_receipt() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let member = ReviewJudgmentPlanMember::new(finding, ReviewPlannedDisposition::Accepted);
+        let success = accepted_judgment_success(
+            &immutable_attempt,
+            finding,
+            500,
+            immutable_attempt.stage_templates().judgment(),
+        );
+
+        let result = validate_judgment_effect(&immutable_attempt, &member, &success);
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn judgment_effect_rejects_a_cross_wired_run() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let member = ReviewJudgmentPlanMember::new(finding, ReviewPlannedDisposition::Accepted);
+        let success = accepted_judgment_success(
+            &immutable_attempt,
+            finding,
+            500,
+            immutable_attempt.stage_templates().judgment(),
+        );
+        let (_, foreign_run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            600,
+            ReviewPassKind::Judge,
+            ReviewWorkflowKind::JudgeFindings,
+            None,
+        );
+        let event = ReviewFindingEvent::new(
+            success.event().finding(),
+            success.event().ordinal(),
+            success.event().pass(),
+            success.event().pass_evidence().clone(),
+            foreign_run,
+            ReviewFindingEventKind::Accepted,
+        );
+        let cross_wired =
+            ReviewJudgmentEffectSuccess::new(event, immutable_attempt.stage_templates().judgment());
+
+        let error = validate_judgment_effect(&immutable_attempt, &member, &cross_wired)
+            .expect_err("cross-wired judgment run must fail closed");
+
+        assert_eq!(error, ReviewJudgmentEffectEvidenceFailure::IncompatibleRun);
+    }
+
+    #[test]
+    fn judgment_effect_rejects_a_different_planned_disposition() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let member = ReviewJudgmentPlanMember::new(finding, ReviewPlannedDisposition::Stale);
+        let success = accepted_judgment_success(
+            &immutable_attempt,
+            finding,
+            500,
+            immutable_attempt.stage_templates().judgment(),
+        );
+
+        let error = validate_judgment_effect(&immutable_attempt, &member, &success)
+            .expect_err("different planned disposition must fail closed");
+
+        assert_eq!(
+            error,
+            ReviewJudgmentEffectEvidenceFailure::IncompatibleEvent
+        );
+    }
+
+    #[test]
+    fn judgment_effect_rejects_a_pass_without_the_exact_event_result() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let member = ReviewJudgmentPlanMember::new(finding, ReviewPlannedDisposition::Accepted);
+        let ordinal = ReviewEventOrdinal::try_new(1).expect("event ordinal is positive");
+        let (pass, run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            500,
+            ReviewPassKind::Judge,
+            ReviewWorkflowKind::JudgeFindings,
+            None,
+        );
+        let event = ReviewFindingEvent::new(
+            finding,
+            ordinal,
+            pass.reference(),
+            pass,
+            run,
+            ReviewFindingEventKind::Accepted,
+        );
+        let success =
+            ReviewJudgmentEffectSuccess::new(event, immutable_attempt.stage_templates().judgment());
+
+        let error = validate_judgment_effect(&immutable_attempt, &member, &success)
+            .expect_err("pass without exact judgment event must fail closed");
+
+        assert_eq!(error, ReviewJudgmentEffectEvidenceFailure::IncompatiblePass);
+    }
+
+    #[test]
+    fn canonical_fixed_repair_event_removes_the_finding() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let plan = accepted_plan(&immutable_attempt, finding);
+        let success = fixed_repair_success(
+            &immutable_attempt,
+            finding,
+            500,
+            immutable_attempt.stage_templates().repair(),
+        );
+        let outcomes = vec![ReviewRepairMemberOutcome::Fixed(Box::new(success))];
+
+        let stage = complete_repairs(&immutable_attempt, &plan, outcomes)
+            .expect("canonical fixed evidence forms a repair barrier");
+
+        assert_eq!(
+            stage,
+            CompletedRepairStage::Complete(Box::new(CompleteRepairBarrier {
+                attempt: immutable_attempt,
+                surviving: Vec::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn fixed_repair_rejects_a_foreign_template() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let plan = accepted_plan(&immutable_attempt, finding);
+        let success = fixed_repair_success(
+            &immutable_attempt,
+            finding,
+            500,
+            ReviewTemplateDigest::new([99; 32]),
+        );
+        let outcomes = vec![ReviewRepairMemberOutcome::Fixed(Box::new(success))];
+
+        let error = complete_repairs(&immutable_attempt, &plan, outcomes)
+            .expect_err("foreign repair template must fail closed");
+
+        assert_eq!(error, ReviewTerminalBarrierFailure::ForeignRepairTemplate);
+    }
+
+    #[test]
+    fn fixed_repair_rejects_a_cross_wired_run() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let plan = accepted_plan(&immutable_attempt, finding);
+        let success = fixed_repair_success(
+            &immutable_attempt,
+            finding,
+            500,
+            immutable_attempt.stage_templates().repair(),
+        );
+        let (_, foreign_run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            600,
+            ReviewPassKind::Fix,
+            ReviewWorkflowKind::FixFindings,
+            None,
+        );
+        let event = ReviewFindingEvent::new(
+            success.event().finding(),
+            success.event().ordinal(),
+            success.event().pass(),
+            success.event().pass_evidence().clone(),
+            foreign_run,
+            ReviewFindingEventKind::Fixed,
+        );
+        let cross_wired =
+            ReviewRepairSuccess::new(event, immutable_attempt.stage_templates().repair());
+        let outcomes = vec![ReviewRepairMemberOutcome::Fixed(Box::new(cross_wired))];
+
+        let error = complete_repairs(&immutable_attempt, &plan, outcomes)
+            .expect_err("cross-wired repair run must fail closed");
+
+        assert_eq!(error, ReviewTerminalBarrierFailure::IncompatibleRepairRun);
+    }
+
+    #[test]
+    fn fixed_repair_rejects_a_pass_without_the_exact_event_result() {
+        let immutable_attempt = attempt();
+        let finding = finding_ref(100);
+        let plan = accepted_plan(&immutable_attempt, finding);
+        let ordinal = ReviewEventOrdinal::try_new(2).expect("event ordinal is positive");
+        let (pass, run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            500,
+            ReviewPassKind::Fix,
+            ReviewWorkflowKind::FixFindings,
+            None,
+        );
+        let event = ReviewFindingEvent::new(
+            finding,
+            ordinal,
+            pass.reference(),
+            pass,
+            run,
+            ReviewFindingEventKind::Fixed,
+        );
+        let success = ReviewRepairSuccess::new(event, immutable_attempt.stage_templates().repair());
+        let outcomes = vec![ReviewRepairMemberOutcome::Fixed(Box::new(success))];
+
+        let error = complete_repairs(&immutable_attempt, &plan, outcomes)
+            .expect_err("pass without exact fixed event must fail closed");
+
+        assert_eq!(error, ReviewTerminalBarrierFailure::IncompatibleRepairPass);
     }
 
     #[test]
@@ -2475,6 +3050,114 @@ mod tests {
             ],
         )
         .expect("fixture attempt is valid")
+    }
+
+    fn successful_empty_concern_claim(
+        immutable_attempt: &ReviewOrchestrationAttempt,
+        concern_index: usize,
+        seed: u128,
+        reported_template: ReviewTemplateDigest,
+    ) -> ReviewConcernClaim {
+        let concern = immutable_attempt.concerns()[concern_index].clone();
+        let (pass, run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            seed,
+            ReviewPassKind::ReadOnlyReview,
+            ReviewWorkflowKind::ReadOnlyReview,
+            Some(ReviewPassResult::ProducedFindings(
+                ReviewProducedFindings::try_new(Vec::new()).expect("empty inventory is canonical"),
+            )),
+        );
+        ReviewConcernClaim::new(
+            concern.key().clone(),
+            concern.template_digest(),
+            ReviewConcernOutcome::Succeeded(Box::new(ReviewConcernSuccess::new(
+                pass,
+                run,
+                reported_template,
+                Vec::new(),
+            ))),
+        )
+    }
+
+    fn accepted_judgment_success(
+        immutable_attempt: &ReviewOrchestrationAttempt,
+        finding: ReviewFindingRef,
+        seed: u128,
+        template_digest: ReviewTemplateDigest,
+    ) -> ReviewJudgmentEffectSuccess {
+        let ordinal = ReviewEventOrdinal::try_new(1).expect("event ordinal is positive");
+        let result =
+            ReviewFindingEventResult::new(finding, ordinal, ReviewFindingEventResultKind::Accepted);
+        let (pass, run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            seed,
+            ReviewPassKind::Judge,
+            ReviewWorkflowKind::JudgeFindings,
+            Some(ReviewPassResult::FindingEvent(result)),
+        );
+        let event = ReviewFindingEvent::new(
+            finding,
+            ordinal,
+            pass.reference(),
+            pass,
+            run,
+            ReviewFindingEventKind::Accepted,
+        );
+        ReviewJudgmentEffectSuccess::new(event, template_digest)
+    }
+
+    fn fixed_repair_success(
+        immutable_attempt: &ReviewOrchestrationAttempt,
+        finding: ReviewFindingRef,
+        seed: u128,
+        template_digest: ReviewTemplateDigest,
+    ) -> ReviewRepairSuccess {
+        let ordinal = ReviewEventOrdinal::try_new(2).expect("event ordinal is positive");
+        let result =
+            ReviewFindingEventResult::new(finding, ordinal, ReviewFindingEventResultKind::Fixed);
+        let (pass, run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            seed,
+            ReviewPassKind::Fix,
+            ReviewWorkflowKind::FixFindings,
+            Some(ReviewPassResult::FindingEvent(result)),
+        );
+        let event = ReviewFindingEvent::new(
+            finding,
+            ordinal,
+            pass.reference(),
+            pass,
+            run,
+            ReviewFindingEventKind::Fixed,
+        );
+        ReviewRepairSuccess::new(event, template_digest)
+    }
+
+    fn accepted_plan(
+        immutable_attempt: &ReviewOrchestrationAttempt,
+        finding: ReviewFindingRef,
+    ) -> ReviewJudgmentPlan {
+        let (pass, run) = succeeded_evidence(
+            immutable_attempt.target(),
+            immutable_attempt.policy(),
+            40,
+            ReviewPassKind::Judge,
+            ReviewWorkflowKind::JudgeFindings,
+            None,
+        );
+        ReviewJudgmentPlan::new(
+            pass,
+            run,
+            immutable_attempt.stage_templates().judgment(),
+            vec![ReviewJudgmentPlanMember::new(
+                finding,
+                ReviewPlannedDisposition::Accepted,
+            )],
+        )
     }
 
     fn publication_success(

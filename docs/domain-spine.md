@@ -5210,9 +5210,10 @@ impl ReviewConcernSuccess {
     pub fn new(
         producer: ReviewPassEvidence,
         run: ReviewRunEvidence,
+        template_digest: ReviewTemplateDigest,
         findings: Vec<ReviewFinding>,
     ) -> Self;
-    // accessors: producer(), producer_evidence(), run_evidence(), findings()
+    // accessors: producer(), producer_evidence(), run_evidence(), template_digest(), findings()
 }
 pub enum ReviewConcernOutcome {
     Succeeded(Box<ReviewConcernSuccess>),
@@ -5242,6 +5243,7 @@ pub enum ReviewFanoutBarrierFailure {
     MemberIncomplete { concern: ReviewKey },
     ForeignProducerTarget { concern: ReviewKey },
     ForeignProducerPolicy { concern: ReviewKey },
+    ForeignProducerTemplate { concern: ReviewKey },
     InvalidSealedFinding {
         concern: ReviewKey,
         finding: ReviewFindingRef,
@@ -5298,14 +5300,38 @@ pub struct ReviewJudgmentEffectWork { /* private; produced by service */ }
 impl ReviewJudgmentEffectWork {
     // accessors: id(), attempt(), member()
 }
+pub struct ReviewJudgmentEffectSuccess { /* private; event + template */ }
+impl ReviewJudgmentEffectSuccess {
+    pub const fn new(
+        event: ReviewFindingEvent,
+        template_digest: ReviewTemplateDigest,
+    ) -> Self;
+    // accessors: event(), template_digest()
+}
 pub enum ReviewJudgmentEffectOutcome {
-    Applied,
+    Applied(Box<ReviewJudgmentEffectSuccess>),
     Failed,
     Blocked,
     Cancelled,
 }
+pub enum ReviewJudgmentEffectEvidenceFailure {
+    ForeignTarget,
+    ForeignPolicy,
+    ForeignTemplate,
+    IncompatibleEvent,
+    IncompatiblePass,
+    IncompatibleRun,
+}
+pub struct ReviewRepairSuccess { /* private; fixed event + template */ }
+impl ReviewRepairSuccess {
+    pub const fn new(
+        event: ReviewFindingEvent,
+        template_digest: ReviewTemplateDigest,
+    ) -> Self;
+    // accessors: finding(), event(), template_digest()
+}
 pub enum ReviewRepairMemberOutcome {
-    Fixed(ReviewFindingRef),
+    Fixed(Box<ReviewRepairSuccess>),
     Failed(ReviewFindingRef),
     Cancelled(ReviewFindingRef),
     Blocked(ReviewFindingRef),
@@ -5335,6 +5361,12 @@ impl ReviewPublicationWork {
 }
 pub enum ReviewTerminalBarrierFailure {
     InexactFindingInventory,
+    ForeignRepairTarget,
+    ForeignRepairPolicy,
+    ForeignRepairTemplate,
+    IncompatibleRepairPass,
+    IncompatibleRepairRun,
+    IncompatibleRepairEvent,
     ForeignPublicationTarget,
     ForeignPublicationPolicy,
     ForeignPublicationTemplate,
@@ -5413,6 +5445,7 @@ pub enum ReviewOrchestrationServiceError<StoreError, RunnerError> {
     ConcernTaskTerminated,
     DurableConflict,
     InvalidJudgmentPlan(ReviewJudgmentPlanFailure),
+    InvalidJudgmentEffectEvidence(ReviewJudgmentEffectEvidenceFailure),
     InvalidAppliedEffects,
     InvalidTerminalBarrier(ReviewTerminalBarrierFailure),
 }
@@ -7432,7 +7465,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop                             | 23 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 5 (incl. 1 trait)    |
-| application: review_orchestration                  | 33 (incl. 2 traits)  |
+| application: review_orchestration                  | 36 (incl. 2 traits)  |
 | application: review_workflow                       | 8 (incl. 2 traits)   |
 | application: session_metadata                      | 12 (incl. 4 traits)  |
 | application: scheduler                             | 12 (incl. 4 traits)  |
@@ -7441,4 +7474,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **188**              |
+| **signalbox-application total**                    | **191**              |
