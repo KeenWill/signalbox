@@ -16,13 +16,14 @@ use signalbox_application::{
     ToolExecutionService, ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor,
     UuidV7ModelCallExecutionIdGenerator, UuidV7ToolLoopIdGenerator,
 };
-use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, SessionId};
+use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, SessionId, TurnId};
 use signalbox_persistence::model_execution::{
     ModelCallRepositoryError, PostgresModelCallRepository,
 };
 use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError};
 use tokio::sync::watch;
 
+use tracing::Instrument;
 mod configuration;
 mod context_guard;
 mod daemon_tools;
@@ -393,9 +394,17 @@ pub enum ActivatedTurnPassError<ActivationError, ExecutionError> {
     /// The authoritative activation transaction failed.
     Activation(ActivationError),
     /// A transaction, capability, or provider stage failed after activation.
-    Execution(ExecutionError),
+    Execution {
+        /// Selected turn, absent when active-turn recovery failed before selection.
+        turn: Option<TurnId>,
+        /// Typed application failure.
+        source: ExecutionError,
+    },
     /// The transaction returned an activation for another hinted session.
-    ActivationSessionMismatch,
+    ActivationSessionMismatch {
+        /// Turn selected by the mismatched activation.
+        turn: TurnId,
+    },
 }
 
 impl<ActivationError, ExecutionError> fmt::Display
@@ -407,8 +416,10 @@ where
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Activation(error) => write!(formatter, "turn activation failed: {error}"),
-            Self::Execution(error) => write!(formatter, "activated turn execution failed: {error}"),
-            Self::ActivationSessionMismatch => {
+            Self::Execution { source, .. } => {
+                write!(formatter, "activated turn execution failed: {source}")
+            }
+            Self::ActivationSessionMismatch { .. } => {
                 formatter.write_str("turn activation returned a different session")
             }
         }
@@ -432,10 +443,18 @@ where
     fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass {
         match self {
             Self::Activation(error) => error.operator_failure_class(),
-            Self::Execution(error) => error.operator_failure_class(),
-            Self::ActivationSessionMismatch => {
+            Self::Execution { source, .. } => source.operator_failure_class(),
+            Self::ActivationSessionMismatch { .. } => {
                 signalbox_application::OperatorFailureClass::CallerOrHubBug
             }
+        }
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::Activation(error) => error.operator_failure_cause_code(),
+            Self::Execution { source, .. } => source.operator_failure_cause_code(),
+            Self::ActivationSessionMismatch { .. } => "activation_session_mismatch",
         }
     }
 }
@@ -475,6 +494,22 @@ where
     Execution::Error: Send + 'static,
 {
     type Error = ActivatedTurnPassError<Transaction::Error, Execution::Error>;
+    fn failure_stage(error: &Self::Error) -> &'static str {
+        match error {
+            ActivatedTurnPassError::Activation(_) => "activation",
+            ActivatedTurnPassError::Execution { turn: None, .. } => "active_turn_recovery",
+            ActivatedTurnPassError::Execution { turn: Some(_), .. } => "execution",
+            ActivatedTurnPassError::ActivationSessionMismatch { .. } => "activation_correlation",
+        }
+    }
+
+    fn failure_turn(error: &Self::Error) -> Option<TurnId> {
+        match error {
+            ActivatedTurnPassError::Activation(_) => None,
+            ActivatedTurnPassError::Execution { turn, .. } => *turn,
+            ActivatedTurnPassError::ActivationSessionMismatch { turn } => Some(*turn),
+        }
+    }
 
     fn run(
         &mut self,
@@ -486,7 +521,7 @@ where
             execution
                 .resume_active(session)
                 .await
-                .map_err(ActivatedTurnPassError::Execution)?;
+                .map_err(|source| ActivatedTurnPassError::Execution { turn: None, source })?;
             let outcome = match activation.await {
                 Ok(outcome) => outcome,
                 Err(error) => {
@@ -497,17 +532,35 @@ where
             match outcome {
                 StartEligibleTurnOutcome::NoEligibleTurn => Ok(()),
                 StartEligibleTurnOutcome::Activated(activated) => {
+                    let turn = activated.turn();
                     if !activation_session_matches(&execution, session, activated.session()) {
-                        return Err(ActivatedTurnPassError::ActivationSessionMismatch);
+                        return Err(ActivatedTurnPassError::ActivationSessionMismatch { turn });
                     }
                     execution
                         .execute(activated)
+                        .instrument(turn_work_span(session, turn))
                         .await
-                        .map_err(ActivatedTurnPassError::Execution)
+                        .map_err(|source| ActivatedTurnPassError::Execution {
+                            turn: Some(turn),
+                            source,
+                        })
                 }
             }
         }
     }
+}
+/// Creates one turn child span beneath the scheduler's session span.
+///
+/// The hierarchy follows one selected turn through orchestration and keeps
+/// stable names and fields for a future OpenTelemetry layer. Both values are
+/// daemon-minted identities; no conversation content or adapter prose enters
+/// this span.
+fn turn_work_span(session: SessionId, turn: TurnId) -> tracing::Span {
+    tracing::info_span!(
+        "turn_work",
+        session_id = %session.as_uuid(),
+        turn_id = %turn.as_uuid(),
+    )
 }
 
 /// Reports one classified failure whose durable commit outcome is unknown, so

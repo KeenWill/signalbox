@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use signalbox_domain::SessionId;
+use signalbox_domain::{SessionId, TurnId};
 use tokio::{
     pin, select,
     sync::mpsc::{
@@ -25,6 +25,7 @@ use tokio::{
     task::{Id, JoinError, JoinSet},
     time::{self, Instant, Interval, MissedTickBehavior},
 };
+use tracing::Instrument;
 
 use crate::{
     ClassifyOperatorFailure, StartEligibleTurnIdGenerator, StartEligibleTurnService,
@@ -145,6 +146,20 @@ pub trait EligibilityWorkSource {
 pub trait EligibilityPass {
     /// Adapter-specific failure from the authoritative pass.
     type Error;
+
+    /// Returns the closed stage label for one failed pass.
+    ///
+    /// Implementations override this when their error retains a narrower
+    /// application stage. The returned token must never contain adapter prose
+    /// or caller content because the scheduler emits it as operator telemetry.
+    fn failure_stage(_error: &Self::Error) -> &'static str {
+        "eligibility_pass"
+    }
+
+    /// Returns the affected turn when the pass had selected one before failing.
+    fn failure_turn(_error: &Self::Error) -> Option<TurnId> {
+        None
+    }
 
     /// Revalidates durable state and applies at most one guarded transition.
     fn run(
@@ -488,7 +503,7 @@ where
                     () = &mut shutdown => break,
                     completed = passes.join_next_with_id() => {
                         if let Some(completed) = completed
-                            && let Some(session) = observe_pass_completion(
+                            && let Some(session) = observe_pass_completion::<Pass>(
                                 completed,
                                 &mut task_sessions,
                                 &mut in_flight_sessions,
@@ -518,7 +533,8 @@ where
                     () = &mut shutdown => break,
                     () = ready(()) => {
                         if in_flight_sessions.insert(session) {
-                            let task = passes.spawn(self.pass.run(session));
+                            let task = passes
+                                .spawn(self.pass.run(session).instrument(session_work_span(session)));
                             task_sessions.insert(task.id(), session);
                         } else {
                             pending_reruns.insert(session);
@@ -543,7 +559,7 @@ where
                         if !task_sessions.is_empty() =>
                     {
                         if let Some(completed) = completed
-                            && let Some(session) = observe_pass_completion(
+                            && let Some(session) = observe_pass_completion::<Pass>(
                                 completed,
                                 &mut task_sessions,
                                 &mut in_flight_sessions,
@@ -564,7 +580,11 @@ where
             match hint {
                 Ok(session) => {
                     if in_flight_sessions.insert(session) {
-                        let task = passes.spawn(self.pass.run(session));
+                        let task = passes.spawn(
+                            self.pass
+                                .run(session)
+                                .instrument(session_work_span(session)),
+                        );
                         task_sessions.insert(task.id(), session);
                     } else {
                         pending_reruns.insert(session);
@@ -575,19 +595,25 @@ where
         }
 
         while let Some(completed) = passes.join_next_with_id().await {
-            observe_pass_completion(completed, &mut task_sessions, &mut in_flight_sessions);
+            observe_pass_completion::<Pass>(completed, &mut task_sessions, &mut in_flight_sessions);
         }
         SchedulerLoopExit::Shutdown
     }
 }
 
-fn observe_pass_completion<PassError>(
-    completed: Result<(Id, Result<(), PassError>), JoinError>,
+/// Retires one pass's scheduler correlation and records classified failure.
+///
+/// Session and optional turn are daemon-minted identities; failure class,
+/// cause, and stage are closed typed tokens. The pass error itself is never
+/// formatted, so adapter prose and caller content cannot enter any event here.
+fn observe_pass_completion<Pass>(
+    completed: Result<(Id, Result<(), Pass::Error>), JoinError>,
     task_sessions: &mut HashMap<Id, SessionId>,
     in_flight_sessions: &mut HashSet<SessionId>,
 ) -> Option<SessionId>
 where
-    PassError: ClassifyOperatorFailure,
+    Pass: EligibilityPass,
+    Pass::Error: ClassifyOperatorFailure,
 {
     let task = match &completed {
         Ok((task, _)) => *task,
@@ -606,9 +632,15 @@ where
         Ok((_, Ok(()))) => {}
         Ok((_, Err(error))) => {
             let failure_class = error.operator_failure_class();
+            let cause_code = error.operator_failure_cause_code();
+            let stage = Pass::failure_stage(&error);
+            let turn = Pass::failure_turn(&error);
             tracing::error!(
                 ?failure_class,
+                cause_code,
+                stage,
                 session_id = %session.as_uuid(),
+                turn_id = ?turn.map(TurnId::into_uuid),
                 "authoritative eligibility pass failed; \
                  a later nudge or sweep will retry"
             );
@@ -616,6 +648,8 @@ where
         Err(_) => {
             tracing::error!(
                 failure_class = ?crate::OperatorFailureClass::CallerOrHubBug,
+                cause_code = "eligibility_pass_task_terminated",
+                stage = "task",
                 session_id = %session.as_uuid(),
                 "authoritative eligibility pass task terminated unexpectedly; \
                  a later nudge or sweep will retry"
@@ -625,13 +659,32 @@ where
     Some(session)
 }
 
+/// Creates the root of one session's scheduler work.
+///
+/// The stable span name and daemon-minted session identifier let a future
+/// OpenTelemetry layer preserve the same hierarchy without reshaping events.
+/// No caller content or adapter-provided prose enters the span.
+fn session_work_span(session: SessionId) -> tracing::Span {
+    tracing::info_span!(
+        "session_work",
+        session_id = %session.as_uuid(),
+    )
+}
+
+/// Records one reconciliation-sweep failure before the interval retry.
+///
+/// The event admits only the shared class and static typed cause token; it has
+/// no session payload and never formats the underlying repository error.
 fn log_sweep_failure<Error>(error: &Error)
 where
     Error: ClassifyOperatorFailure,
 {
     let failure_class = error.operator_failure_class();
+    let cause_code = error.operator_failure_cause_code();
     tracing::error!(
         ?failure_class,
+        cause_code,
+        stage = "reconciliation_sweep",
         "eligibility reconciliation sweep failed; the next interval will retry"
     );
 }

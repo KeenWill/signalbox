@@ -5555,12 +5555,12 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
     let first_attempt = pass.run(session).await;
     assert!(matches!(
         first_attempt,
-        Err(ContextGuardedTurnPassError::ContextStillExceeded)
+        Err(ContextGuardedTurnPassError::ContextStillExceeded(_))
     ));
     let second_attempt = pass.run(session).await;
     assert!(matches!(
         second_attempt,
-        Err(ContextGuardedTurnPassError::ContextStillExceeded)
+        Err(ContextGuardedTurnPassError::ContextStillExceeded(_))
     ));
     assert!(!fatal_execution.is_triggered());
     assert_eq!(ordinary_probe.counted_operations().len(), 3);
@@ -5687,9 +5687,10 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
 
     assert!(matches!(
         outcome,
-        Err(ContextGuardedTurnPassError::Count(
-            CommitAmbiguousCountFailure
-        ))
+        Err(ContextGuardedTurnPassError::Count {
+            source: CommitAmbiguousCountFailure,
+            ..
+        })
     ));
     assert!(fatal_execution.is_triggered());
 

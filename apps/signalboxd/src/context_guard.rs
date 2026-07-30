@@ -8,7 +8,7 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputTurnActivationIdentities, ContextFrontierId, ModelCallId,
-    SemanticTranscriptEntryId, SessionId, TurnAttemptId,
+    SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
 };
 use signalbox_model_provider_runtime::{ContextCompactionModel, RuntimeModelCatalog};
 use signalbox_persistence::{
@@ -23,30 +23,61 @@ use crate::{
     ActivatedTurnExecution, HubModelConfiguration, process_runtime::compact_automatically,
     report_ambiguous_commit,
 };
+use tracing::Instrument;
 
 /// Exact-guard failure before activation or during the resulting execution.
 #[derive(Debug)]
 pub enum ContextGuardedTurnPassError<CountError, ExecutionError> {
     /// Read-only activation preview or exact guarded commit failed.
-    Activation(StartEligibleTurnRepositoryError),
+    Activation {
+        /// Selected turn, absent when preview failed before selection.
+        turn: Option<TurnId>,
+        /// Typed repository failure.
+        source: StartEligibleTurnRepositoryError,
+    },
     /// Prospective ordinary-call reconstitution failed.
-    Operation(ModelCallRepositoryError),
+    Operation {
+        /// Selected turn.
+        turn: TurnId,
+        /// Typed model-call repository failure.
+        source: ModelCallRepositoryError,
+    },
     /// Canonical frontier rendering failed.
-    Render(signalbox_application::ModelFrontierRenderingError),
+    Render {
+        /// Selected turn.
+        turn: TurnId,
+        /// Typed frontier-rendering failure.
+        source: signalbox_application::ModelFrontierRenderingError,
+    },
     /// Provider-native exact counting failed.
-    Count(CountError),
+    Count {
+        /// Selected turn.
+        turn: TurnId,
+        /// Typed provider-counting failure.
+        source: CountError,
+    },
     /// A never-cancelled production count unexpectedly reported cancellation.
-    CountCancelled,
+    CountCancelled(TurnId),
     /// The prospective target was absent from the immutable runtime catalog.
-    ContextWindowUnavailable,
+    ContextWindowUnavailable(TurnId),
     /// One automatic compaction still could not make the prospective input fit.
-    ContextStillExceeded,
+    ContextStillExceeded(TurnId),
     /// The shared append-only compaction lifecycle failed.
-    Compaction(OperatorFailureClass),
+    Compaction {
+        /// Selected turn.
+        turn: TurnId,
+        /// Classified compaction failure.
+        failure_class: OperatorFailureClass,
+    },
     /// Execution after exact guarded activation failed.
-    Execution(ExecutionError),
+    Execution {
+        /// Selected turn, absent when active-turn recovery failed before selection.
+        turn: Option<TurnId>,
+        /// Typed execution failure.
+        source: ExecutionError,
+    },
     /// The guarded commit returned an activation for another session.
-    ActivationSessionMismatch,
+    ActivationSessionMismatch(TurnId),
 }
 
 impl<CountError, ExecutionError> fmt::Display
@@ -72,17 +103,32 @@ where
 {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
-            Self::Activation(error) => error.operator_failure_class(),
-            Self::Operation(error) => error.operator_failure_class(),
-            Self::Render(_) | Self::CountCancelled | Self::ActivationSessionMismatch => {
+            Self::Activation { source, .. } => source.operator_failure_class(),
+            Self::Operation { source, .. } => source.operator_failure_class(),
+            Self::Render { .. } | Self::CountCancelled(_) | Self::ActivationSessionMismatch(_) => {
                 OperatorFailureClass::FailClosedCorruption
             }
-            Self::Count(error) => error.operator_failure_class(),
-            Self::ContextWindowUnavailable | Self::ContextStillExceeded => {
+            Self::Count { source, .. } => source.operator_failure_class(),
+            Self::ContextWindowUnavailable(_) | Self::ContextStillExceeded(_) => {
                 OperatorFailureClass::CallerOrHubBug
             }
-            Self::Compaction(failure_class) => *failure_class,
-            Self::Execution(error) => error.operator_failure_class(),
+            Self::Compaction { failure_class, .. } => *failure_class,
+            Self::Execution { source, .. } => source.operator_failure_class(),
+        }
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::Activation { .. } => "turn_activation_repository",
+            Self::Operation { .. } => "model_call_repository",
+            Self::Render { .. } => "model_frontier_rendering",
+            Self::Count { source, .. } => source.operator_failure_cause_code(),
+            Self::CountCancelled(_) => "model_input_count_cancelled",
+            Self::ContextWindowUnavailable(_) => "context_window_unavailable",
+            Self::ContextStillExceeded(_) => "context_window_exceeded",
+            Self::Compaction { .. } => "context_compaction",
+            Self::Execution { source, .. } => source.operator_failure_cause_code(),
+            Self::ActivationSessionMismatch(_) => "activation_session_mismatch",
         }
     }
 }
@@ -165,6 +211,37 @@ where
 {
     type Error = ContextGuardedTurnPassError<Counter::Error, Execution::Error>;
 
+    fn failure_stage(error: &Self::Error) -> &'static str {
+        match error {
+            ContextGuardedTurnPassError::Activation { turn: None, .. } => "activation_preview",
+            ContextGuardedTurnPassError::Activation { turn: Some(_), .. } => "activation_commit",
+            ContextGuardedTurnPassError::Operation { .. } => "model_operation",
+            ContextGuardedTurnPassError::Render { .. } => "frontier_rendering",
+            ContextGuardedTurnPassError::Count { .. } => "input_token_count",
+            ContextGuardedTurnPassError::CountCancelled(_) => "input_token_count",
+            ContextGuardedTurnPassError::ContextWindowUnavailable(_) => "context_window",
+            ContextGuardedTurnPassError::ContextStillExceeded(_) => "context_window",
+            ContextGuardedTurnPassError::Compaction { .. } => "context_compaction",
+            ContextGuardedTurnPassError::Execution { turn: None, .. } => "active_turn_recovery",
+            ContextGuardedTurnPassError::Execution { turn: Some(_), .. } => "execution",
+            ContextGuardedTurnPassError::ActivationSessionMismatch(_) => "activation_correlation",
+        }
+    }
+    fn failure_turn(error: &Self::Error) -> Option<TurnId> {
+        match error {
+            ContextGuardedTurnPassError::Activation { turn, .. }
+            | ContextGuardedTurnPassError::Execution { turn, .. } => *turn,
+            ContextGuardedTurnPassError::Operation { turn, .. }
+            | ContextGuardedTurnPassError::Render { turn, .. }
+            | ContextGuardedTurnPassError::Count { turn, .. }
+            | ContextGuardedTurnPassError::Compaction { turn, .. } => Some(*turn),
+            ContextGuardedTurnPassError::CountCancelled(turn)
+            | ContextGuardedTurnPassError::ContextWindowUnavailable(turn)
+            | ContextGuardedTurnPassError::ContextStillExceeded(turn)
+            | ContextGuardedTurnPassError::ActivationSessionMismatch(turn) => Some(*turn),
+        }
+    }
+
     fn run(
         &mut self,
         session: SessionId,
@@ -182,7 +259,7 @@ where
             execution
                 .resume_active(session)
                 .await
-                .map_err(ContextGuardedTurnPassError::Execution)?;
+                .map_err(|source| ContextGuardedTurnPassError::Execution { turn: None, source })?;
             let outcome: Result<
                 (),
                 ContextGuardedTurnPassError<Counter::Error, Execution::Error>,
@@ -194,8 +271,9 @@ where
                         Ok(Some(preview)) => preview,
                         Ok(None) => return Ok(()),
                         Err(StartEligibleTurnRepositoryError::IdentityCollision(_)) => continue,
-                        Err(error) => return Err(ContextGuardedTurnPassError::Activation(error)),
+                        Err(source) => return Err(ContextGuardedTurnPassError::Activation { turn: None, source }),
                     };
+                    let turn = preview.prepared().turn().turn();
                     let call = ModelCallId::from_uuid(uuid::Uuid::now_v7());
                     let prospective = match model_calls
                         .preview_activation_operation(preview.prepared(), call)
@@ -203,33 +281,32 @@ where
                     {
                         Ok(prospective) => prospective,
                         Err(ModelCallRepositoryError::IdentityCollision(_)) => continue,
-                        Err(error) => return Err(ContextGuardedTurnPassError::Operation(error)),
+                        Err(source) => return Err(ContextGuardedTurnPassError::Operation { turn, source }),
                     };
                     let operation = prospective
                         .render(tools.definitions())
-                        .map_err(ContextGuardedTurnPassError::Render)?;
+                        .map_err(|source| ContextGuardedTurnPassError::Render { turn, source })?;
                     let target = operation.request().call().target();
                     let model = runtime_models
                         .resolve(target)
-                        .ok_or(ContextGuardedTurnPassError::ContextWindowUnavailable)?;
+                        .ok_or(ContextGuardedTurnPassError::ContextWindowUnavailable(turn))?;
                     let input_tokens = match counter
                         .count_input_tokens(operation, std::future::pending())
                         .await
-                        .map_err(ContextGuardedTurnPassError::Count)?
+                        .map_err(|source| ContextGuardedTurnPassError::Count { turn, source })?
                     {
                         ModelCallInputTokenCount::Counted(count) => count,
                         ModelCallInputTokenCount::Cancelled => {
-                            return Err(ContextGuardedTurnPassError::CountCancelled);
+                            return Err(ContextGuardedTurnPassError::CountCancelled(turn));
                         }
                     };
                     let requested_tokens = input_tokens
                         .checked_add(u64::from(model.max_output_tokens()))
-                        .ok_or(ContextGuardedTurnPassError::ContextStillExceeded)?;
+                        .ok_or(ContextGuardedTurnPassError::ContextStillExceeded(turn))?;
                     if requested_tokens > u64::from(model.context_window_tokens()) {
                         if compacted {
-                            return Err(ContextGuardedTurnPassError::ContextStillExceeded);
+                            return Err(ContextGuardedTurnPassError::ContextStillExceeded(turn));
                         }
-                        let turn = preview.prepared().turn().turn();
                         match compact_automatically(
                             model_calls.pool(),
                             &model_configuration,
@@ -242,12 +319,13 @@ where
                         {
                             Ok(_) => {}
                             Err(crate::process_runtime::AutomaticContextCompactionError::AlreadyAttempted) => {
-                                return Err(ContextGuardedTurnPassError::ContextStillExceeded);
+                                return Err(ContextGuardedTurnPassError::ContextStillExceeded(turn));
                             }
                             Err(error) => {
-                                return Err(ContextGuardedTurnPassError::Compaction(
-                                    error.operator_failure_class(),
-                                ));
+                                return Err(ContextGuardedTurnPassError::Compaction {
+                                    turn,
+                                    failure_class: error.operator_failure_class(),
+                                });
                             }
                         }
                         compacted = true;
@@ -258,23 +336,25 @@ where
                         .await
                         .map_err(|error| match error {
                             CommitActivationPreviewError::Activation(error) => {
-                                ContextGuardedTurnPassError::Activation(error)
+                                ContextGuardedTurnPassError::Activation { turn: Some(turn), source: error }
                             }
                             CommitActivationPreviewError::ModelCall(error) => {
-                                ContextGuardedTurnPassError::Operation(error)
+                                ContextGuardedTurnPassError::Operation { turn, source: error }
                             }
                         })?;
                     match committed {
                         CommitActivationPreviewOutcome::Stale => continue,
                         CommitActivationPreviewOutcome::Activated(activated) => {
+                            report_guarded_turn_activation(activated.session(), activated.turn());
                             if activated.session() != session {
                                 execution.report_post_activation_failure();
-                                return Err(ContextGuardedTurnPassError::ActivationSessionMismatch);
+                                return Err(ContextGuardedTurnPassError::ActivationSessionMismatch(turn));
                             }
                             return execution
                                 .execute(activated)
+                                .instrument(guarded_turn_span(session, turn))
                                 .await
-                                .map_err(ContextGuardedTurnPassError::Execution);
+                                .map_err(|source| ContextGuardedTurnPassError::Execution { turn: Some(turn), source });
                         }
                     }
                 }
@@ -304,10 +384,37 @@ fn report_guarded_ambiguity<CountError, Execution>(
     CountError: ClassifyOperatorFailure,
     Execution: ActivatedTurnExecution,
 {
-    if matches!(error, ContextGuardedTurnPassError::Execution(_)) {
+    if matches!(error, ContextGuardedTurnPassError::Execution { .. }) {
         return;
     }
     report_ambiguous_commit(execution, error);
+}
+
+/// Creates the selected turn's child span under scheduler session work.
+///
+/// Stable span and field names preserve the hierarchy for a future exporter.
+/// Only daemon-minted aggregate identities are recorded; no model, prompt, or
+/// tool content enters the span.
+fn guarded_turn_span(session: SessionId, turn: TurnId) -> tracing::Span {
+    tracing::info_span!(
+        "turn_work",
+        session_id = %session.as_uuid(),
+        turn_id = %turn.as_uuid(),
+    )
+}
+
+/// Records activation from the production counted-preview commit path.
+///
+/// The generic start-eligible-turn service records its own committed outcome,
+/// but this exact-counting composition commits through the persistence preview
+/// boundary directly. The two daemon-minted identities are the complete event;
+/// no accepted input, prompt, model content, or adapter prose is recorded.
+fn report_guarded_turn_activation(session: SessionId, turn: TurnId) {
+    tracing::info!(
+        session_id = %session.as_uuid(),
+        turn_id = %turn.as_uuid(),
+        "turn activated"
+    );
 }
 
 fn activation_identities() -> AcceptedInputTurnActivationIdentities {
@@ -327,7 +434,7 @@ mod tests {
     };
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
-    use signalbox_domain::ActivatedAcceptedInputTurn;
+    use signalbox_domain::{ActivatedAcceptedInputTurn, TurnId};
     use signalbox_persistence::{
         context_compaction::ContextCompactionRepositoryError,
         start_eligible_turn::StartEligibleTurnRepositoryError,
@@ -385,24 +492,32 @@ mod tests {
         FatalExecutionSupervisor::new(NoopExecution)
     }
 
+    fn turn() -> TurnId {
+        TurnId::from_uuid(uuid::Uuid::from_u128(1))
+    }
+
     /// The exact lost-acknowledgement failure the activation repository reports
     /// when a guarded counted commit cannot be proven.
     fn ambiguous_activation() -> GuardedFailure {
-        ContextGuardedTurnPassError::Activation(StartEligibleTurnRepositoryError::Database {
-            source: sqlx::Error::PoolClosed,
-            commit_ambiguous: true,
-        })
+        ContextGuardedTurnPassError::Activation {
+            turn: Some(turn()),
+            source: StartEligibleTurnRepositoryError::Database {
+                source: sqlx::Error::PoolClosed,
+                commit_ambiguous: true,
+            },
+        }
     }
 
     /// The exact failure automatic compaction preparation reports when its own
     /// durable prepare cannot be proven committed.
     fn ambiguous_compaction() -> GuardedFailure {
-        ContextGuardedTurnPassError::Compaction(
-            AutomaticContextCompactionError::Repository(
+        ContextGuardedTurnPassError::Compaction {
+            turn: turn(),
+            failure_class: AutomaticContextCompactionError::Repository(
                 ContextCompactionRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
             )
             .operator_failure_class(),
-        )
+        }
     }
 
     /// S03 / INV-034: the production guarded pass replaced the activated pass,
@@ -435,11 +550,13 @@ mod tests {
     fn s03_inv034_activation_failure_before_the_commit_boundary_reports_nothing() {
         let (execution, signal) = supervised();
 
-        let error: GuardedFailure =
-            ContextGuardedTurnPassError::Activation(StartEligibleTurnRepositoryError::Database {
+        let error: GuardedFailure = ContextGuardedTurnPassError::Activation {
+            turn: None,
+            source: StartEligibleTurnRepositoryError::Database {
                 source: sqlx::Error::PoolClosed,
                 commit_ambiguous: false,
-            });
+            },
+        };
 
         report_guarded_ambiguity(&execution, &error);
 
@@ -452,7 +569,10 @@ mod tests {
     fn s03_inv034_execution_failure_keeps_its_own_supervision_rule() {
         let (execution, signal) = supervised();
 
-        let error: GuardedFailure = ContextGuardedTurnPassError::Execution(CommitAmbiguousFailure);
+        let error: GuardedFailure = ContextGuardedTurnPassError::Execution {
+            turn: Some(turn()),
+            source: CommitAmbiguousFailure,
+        };
 
         report_guarded_ambiguity(&execution, &error);
 

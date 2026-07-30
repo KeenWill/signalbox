@@ -598,6 +598,16 @@ fn diagnostic_model_identity(reported: &str) -> String {
     bounded
 }
 
+/// Aggregate identities admitted to model-call operator telemetry.
+///
+/// All three values are daemon-minted and contain no model or user content.
+#[derive(Clone, Copy)]
+struct ModelCallTelemetry {
+    session: SessionId,
+    turn: TurnId,
+    call: ModelCallId,
+}
+
 #[derive(Clone, Copy)]
 struct PreparedBinding {
     session: SessionId,
@@ -936,9 +946,14 @@ where
         let credential =
             CredentialReference::new(operation.credential_reference().as_str().to_owned());
         let correlation = call.id();
+        let telemetry = ModelCallTelemetry {
+            session: request.session(),
+            turn: request.turn(),
+            call: correlation,
+        };
         let definition = self.models.resolve(call.target()).ok_or_else(|| {
             fail_closed(
-                correlation,
+                telemetry,
                 RuntimeModelCallProviderError::UnconfiguredTarget,
                 None,
             )
@@ -960,7 +975,7 @@ where
                 let schema =
                     decode_checked_raw_json(definition.input_schema().as_str()).map_err(|_| {
                         fail_closed(
-                            correlation,
+                            telemetry,
                             RuntimeModelCallProviderError::InvalidToolSchema,
                             None,
                         )
@@ -1002,28 +1017,24 @@ where
             PreparationOutcome::Cancelled {
                 correlation: returned,
             } => {
-                require_correlation(correlation, returned)?;
+                require_correlation(telemetry, returned)?;
                 Ok(ModelCallCapabilityPreparation::Cancelled)
             }
             PreparationOutcome::Failed {
                 correlation: returned,
                 failure,
             } => {
-                require_correlation(correlation, returned)?;
-                tracing::warn!(
-                    cause_code = preparation_failure_cause(&failure).as_str(),
-                    model_call_id = %correlation.as_uuid(),
-                    "model runtime reported a trustworthy capability-preparation failure"
-                );
+                require_correlation(telemetry, returned)?;
+                report_preparation_failure(telemetry, &failure);
                 Ok(ModelCallCapabilityPreparation::KnownFailure)
             }
             PreparationOutcome::Defect {
                 correlation: returned,
                 ..
             } => {
-                require_correlation(correlation, returned)?;
+                require_correlation(telemetry, returned)?;
                 Err(fail_closed(
-                    correlation,
+                    telemetry,
                     RuntimeModelCallProviderError::PreparationDefect,
                     None,
                 ))
@@ -1043,9 +1054,14 @@ where
         Cancellation: Future<Output = ()> + Send + 'static,
     {
         let correlation = authorized.call().id();
+        let telemetry = ModelCallTelemetry {
+            session: authorized.session(),
+            turn: authorized.turn(),
+            call: correlation,
+        };
         if !capability.binding.matches(&authorized) {
             return Err(fail_closed(
-                correlation,
+                telemetry,
                 RuntimeModelCallProviderError::AuthorizationMismatch,
                 None,
             ));
@@ -1070,10 +1086,10 @@ where
                 CancellationSignal::when(cancellation),
             )
             .await;
-        require_correlation(correlation, report.correlation)?;
+        require_correlation(telemetry, report.correlation)?;
         if observations.correlation_mismatch {
             return Err(fail_closed(
-                correlation,
+                telemetry,
                 RuntimeModelCallProviderError::ObservationCorrelationMismatch,
                 None,
             ));
@@ -1085,9 +1101,9 @@ where
             &capability.resolved_target,
         )
         .map_err(|failure| {
-            fail_closed(correlation, failure.error, failure.served_target.as_deref())
+            fail_closed(telemetry, failure.error, failure.served_target.as_deref())
         })?;
-        report_classified_outcome(correlation, &classified);
+        report_classified_outcome(telemetry, &classified);
         let correlation = authorized.observation_correlation();
         Ok(match classified.cause {
             ModelCallCauseCode::ProviderError(kind) => correlation
@@ -1097,14 +1113,30 @@ where
     }
 }
 
+/// Records typed preparation evidence at the provider orchestration boundary.
+///
+/// Adapter implementations remain telemetry-free: this layer consumes their
+/// typed outcome and admits only a closed cause token plus daemon-minted
+/// identities. Provider prose, credentials, and conversation content are never
+/// formatted or inspected for this event.
+fn report_preparation_failure(telemetry: ModelCallTelemetry, failure: &PreparationFailure) {
+    tracing::warn!(
+        cause_code = preparation_failure_cause(failure).as_str(),
+        session_id = %telemetry.session.as_uuid(),
+        turn_id = %telemetry.turn.as_uuid(),
+        model_call_id = %telemetry.call.as_uuid(),
+        "model runtime reported a trustworthy capability-preparation failure"
+    );
+}
+
 /// Records one fail-closed bridge outcome for operators and returns it.
 ///
-/// Sanitized by construction: the correlation identity, the stable cause
-/// token, and — for a substitution — the bounded provider identity that
-/// actually served are the only fields, so no provider text, response body,
-/// credential material, or user content can reach telemetry (INV-035).
+/// Sanitized by construction: daemon-minted session, turn, and call identities,
+/// the stable cause token, and — for a substitution — the bounded provider
+/// identity that actually served are the only fields, so no provider text,
+/// response body, credential material, or user content reaches telemetry.
 fn fail_closed(
-    correlation: ModelCallId,
+    telemetry: ModelCallTelemetry,
     error: RuntimeModelCallProviderError,
     served_target: Option<&str>,
 ) -> RuntimeModelCallProviderError {
@@ -1112,14 +1144,18 @@ fn fail_closed(
         Some(served_target) => tracing::error!(
             failure_class = ?error.operator_failure_class(),
             cause_code = error.cause_code().as_str(),
-            model_call_id = %correlation.as_uuid(),
+            session_id = %telemetry.session.as_uuid(),
+            turn_id = %telemetry.turn.as_uuid(),
+            model_call_id = %telemetry.call.as_uuid(),
             served_provider_target = served_target,
             "model call failed closed at the runtime bridge"
         ),
         None => tracing::error!(
             failure_class = ?error.operator_failure_class(),
             cause_code = error.cause_code().as_str(),
-            model_call_id = %correlation.as_uuid(),
+            session_id = %telemetry.session.as_uuid(),
+            turn_id = %telemetry.turn.as_uuid(),
+            model_call_id = %telemetry.call.as_uuid(),
             "model call failed closed at the runtime bridge"
         ),
     }
@@ -1127,10 +1163,16 @@ fn fail_closed(
 }
 
 /// Records one classified terminal outcome for operators.
-fn report_classified_outcome(correlation: ModelCallId, classified: &TerminalClassification) {
+///
+/// The admitted fields are daemon-minted session, turn, and call identities,
+/// closed cause tokens, and the already-bounded concrete target; provider
+/// response text, credential material, and conversation content stay absent.
+fn report_classified_outcome(telemetry: ModelCallTelemetry, classified: &TerminalClassification) {
     if let Some(concrete_target) = &classified.concrete_target {
         tracing::info!(
-            model_call_id = %correlation.as_uuid(),
+            session_id = %telemetry.session.as_uuid(),
+            turn_id = %telemetry.turn.as_uuid(),
+            model_call_id = %telemetry.call.as_uuid(),
             concrete_provider_target = concrete_target.as_str(),
             "provider served the configured target in its concrete dated form"
         );
@@ -1140,14 +1182,18 @@ fn report_classified_outcome(correlation: ModelCallId, classified: &TerminalClas
         | ModelCallTerminalObservation::CompletedWithTools { .. } => {
             tracing::debug!(
                 cause_code = classified.cause.as_str(),
-                model_call_id = %correlation.as_uuid(),
+                session_id = %telemetry.session.as_uuid(),
+                turn_id = %telemetry.turn.as_uuid(),
+                model_call_id = %telemetry.call.as_uuid(),
                 "model call completed"
             );
         }
         _ => {
             tracing::warn!(
                 cause_code = classified.cause.as_str(),
-                model_call_id = %correlation.as_uuid(),
+                session_id = %telemetry.session.as_uuid(),
+                turn_id = %telemetry.turn.as_uuid(),
+                model_call_id = %telemetry.call.as_uuid(),
                 "model call produced no assistant material"
             );
         }
@@ -1299,14 +1345,14 @@ fn decode_checked_raw_json(
 /// A correlation mismatch is a fail-closed bridge defect like any other, so
 /// it is recorded through [`fail_closed`] rather than returned silently.
 fn require_correlation(
-    expected: ModelCallId,
+    telemetry: ModelCallTelemetry,
     returned: ModelCallId,
 ) -> Result<(), RuntimeModelCallProviderError> {
-    if expected == returned {
+    if telemetry.call == returned {
         Ok(())
     } else {
         Err(fail_closed(
-            expected,
+            telemetry,
             RuntimeModelCallProviderError::CorrelationMismatch,
             None,
         ))

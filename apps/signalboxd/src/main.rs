@@ -10,6 +10,7 @@
 use std::{
     env,
     ffi::OsString,
+    fmt,
     future::Future,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -29,7 +30,9 @@ use signalbox_model_provider_runtime::{
     ContextCompactionModel, RuntimeContextCompactionModel, RuntimeModelCallProvider,
 };
 use signalbox_model_runtime::CredentialReference;
-use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
+use signalbox_model_runtime_anthropic::{
+    AnthropicConfig, AnthropicConstructionError, AnthropicRuntime,
+};
 use signalbox_persistence::{
     conversation_import::backfill_imported_conversation_display_titles, migrate,
     model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
@@ -37,10 +40,11 @@ use signalbox_persistence::{
 };
 use signalboxd::{
     ANTHROPIC_CREDENTIAL_REFERENCE, CODE_HOST_CREDENTIAL_REFERENCE, ContextGuardedTurnPass,
-    DaemonTools, FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError,
-    FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration, LocalProcessListener,
+    DaemonTools, DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
+    FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
+    HubModelConfigurationError, LocalProcessListener, LocalSocketError,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
-    SessionTemplateConfiguration, SystemCurrentTimeClock,
+    SessionTemplateConfiguration, SessionTemplateConfigurationError, SystemCurrentTimeClock,
 };
 use tokio::{
     pin, select,
@@ -51,9 +55,11 @@ use tokio::{
 
 const GRACEFUL_SHUTDOWN_WINDOW: Duration = Duration::from_secs(30);
 const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
+const DATABASE_URL_ENVIRONMENT: &str = "DATABASE_URL";
 const TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_TEMPLATE_CONFIG_FILE";
 const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
 const GITHUB_TOKEN_FILE_ENVIRONMENT: &str = "GITHUB_TOKEN_FILE";
+const LOG_FILTER_ENVIRONMENT: &str = "RUST_LOG";
 const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
 const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -102,6 +108,36 @@ impl HubRuntimeError {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequiredSettingFailure {
+    Missing,
+    NotUnicode,
+    Empty,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HubConfigurationError {
+    setting: &'static str,
+    failure: RequiredSettingFailure,
+}
+
+impl HubConfigurationError {
+    const fn new(setting: &'static str, failure: RequiredSettingFailure) -> Self {
+        Self { setting, failure }
+    }
+}
+
+impl fmt::Display for HubConfigurationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let failure = match self.failure {
+            RequiredSettingFailure::Missing => "is missing",
+            RequiredSettingFailure::NotUnicode => "is not valid Unicode",
+            RequiredSettingFailure::Empty => "is empty",
+        };
+        write!(formatter, "required setting {} {failure}", self.setting)
+    }
+}
+
 struct HubConfiguration {
     database_url: String,
     model_configuration_file: PathBuf,
@@ -112,9 +148,9 @@ struct HubConfiguration {
 }
 
 impl HubConfiguration {
-    fn from_environment() -> Result<Self, HubRuntimeError> {
+    fn from_environment() -> Result<Self, HubConfigurationError> {
         Self::from_values(
-            env::var_os("DATABASE_URL"),
+            env::var_os(DATABASE_URL_ENVIRONMENT),
             env::var_os(MODEL_CONFIGURATION_FILE_ENVIRONMENT),
             env::var_os(TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT),
             env::var_os(ANTHROPIC_API_KEY_FILE_ENVIRONMENT),
@@ -130,19 +166,40 @@ impl HubConfiguration {
         anthropic_api_key_file: Option<OsString>,
         github_token_file: Option<OsString>,
         process_socket_path: Option<OsString>,
-    ) -> Result<Self, HubRuntimeError> {
+    ) -> Result<Self, HubConfigurationError> {
         let database_url = database_url
-            .ok_or_else(|| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?
+            .ok_or_else(|| {
+                HubConfigurationError::new(
+                    DATABASE_URL_ENVIRONMENT,
+                    RequiredSettingFailure::Missing,
+                )
+            })?
             .into_string()
-            .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
+            .map_err(|_| {
+                HubConfigurationError::new(
+                    DATABASE_URL_ENVIRONMENT,
+                    RequiredSettingFailure::NotUnicode,
+                )
+            })?;
         if database_url.is_empty() {
-            return Err(HubRuntimeError::infrastructure(RuntimePhase::Configuration));
+            return Err(HubConfigurationError::new(
+                DATABASE_URL_ENVIRONMENT,
+                RequiredSettingFailure::Empty,
+            ));
         }
-        let model_configuration_file = required_path(model_configuration_file)?;
-        let template_configuration_file = required_path(template_configuration_file)?;
-        let anthropic_api_key_file = required_path(anthropic_api_key_file)?;
-        let github_token_file = required_path(github_token_file)?;
-        let process_socket_path = required_path(process_socket_path)?;
+        let model_configuration_file = required_path(
+            MODEL_CONFIGURATION_FILE_ENVIRONMENT,
+            model_configuration_file,
+        )?;
+        let template_configuration_file = required_path(
+            TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
+            template_configuration_file,
+        )?;
+        let anthropic_api_key_file =
+            required_path(ANTHROPIC_API_KEY_FILE_ENVIRONMENT, anthropic_api_key_file)?;
+        let github_token_file = required_path(GITHUB_TOKEN_FILE_ENVIRONMENT, github_token_file)?;
+        let process_socket_path =
+            required_path(PROCESS_SOCKET_PATH_ENVIRONMENT, process_socket_path)?;
 
         Ok(Self {
             database_url,
@@ -179,14 +236,98 @@ impl HubConfiguration {
     }
 }
 
-fn required_path(value: Option<OsString>) -> Result<PathBuf, HubRuntimeError> {
-    let value =
-        value.ok_or_else(|| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
+fn required_path(
+    setting: &'static str,
+    value: Option<OsString>,
+) -> Result<PathBuf, HubConfigurationError> {
+    let value = value
+        .ok_or_else(|| HubConfigurationError::new(setting, RequiredSettingFailure::Missing))?;
     if value.is_empty() {
-        Err(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
+        Err(HubConfigurationError::new(
+            setting,
+            RequiredSettingFailure::Empty,
+        ))
     } else {
         Ok(PathBuf::from(value))
     }
+}
+
+/// Closed startup causes admitted to operator telemetry.
+///
+/// Every variant wraps a Display implementation audited to omit paths,
+/// credentials, configuration content, provider prose, and user content.
+enum SanitizedStartupCause<'a> {
+    Configuration(&'a HubConfigurationError),
+    ModelConfiguration(&'a HubModelConfigurationError),
+    TemplateConfiguration(&'a SessionTemplateConfigurationError),
+    Database(&'a FencedHubDatabaseError),
+    Tools(&'a DaemonToolsConstructionError),
+    Socket(&'a LocalSocketError),
+    Static(&'static str),
+}
+
+impl fmt::Display for SanitizedStartupCause<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Configuration(error) => error.fmt(formatter),
+            Self::ModelConfiguration(error) => error.fmt(formatter),
+            Self::TemplateConfiguration(error) => error.fmt(formatter),
+            Self::Database(error) => error.fmt(formatter),
+            Self::Tools(error) => error.fmt(formatter),
+            Self::Socket(error) => error.fmt(formatter),
+            Self::Static(cause) => formatter.write_str(cause),
+        }
+    }
+}
+
+/// Records one startup cause at the point typed evidence is erased.
+///
+/// `SanitizedStartupCause` is a closed admission boundary, so the emitted
+/// cause cannot include configuration values, paths, credentials, or content.
+fn erase_startup_cause(phase: RuntimePhase, cause: SanitizedStartupCause<'_>) -> HubRuntimeError {
+    let error = HubRuntimeError::infrastructure(phase);
+    tracing::error!(
+        ?phase,
+        failure_class = ?error.failure_class,
+        cause = %cause,
+        "daemon startup construction failed"
+    );
+    error
+}
+
+/// Converts Anthropic construction evidence to a closed classification.
+///
+/// The adapter's dynamic parser/client detail is deliberately excluded because
+/// an adapter-owned string is not admitted to operator telemetry.
+const fn anthropic_construction_cause(error: &AnthropicConstructionError) -> &'static str {
+    match error {
+        AnthropicConstructionError::InvalidBaseUrl { .. } => "anthropic_invalid_base_url",
+        AnthropicConstructionError::InvalidVersion => "anthropic_invalid_version",
+        AnthropicConstructionError::InvalidExchangeTimeout => "anthropic_invalid_timeout",
+        AnthropicConstructionError::InvalidSseRecordLimit => "anthropic_invalid_record_limit",
+        AnthropicConstructionError::ClientConstruction { .. } => "anthropic_client_construction",
+    }
+}
+
+/// Records startup-scan failure evidence before reducing it to runtime status.
+///
+/// The cause is a closed application token and the optional session/turn are
+/// daemon-minted identities; repository detail and transcript content stay out.
+fn erase_startup_scan_cause(
+    failure_class: OperatorFailureClass,
+    cause_code: &'static str,
+    session: Option<SessionId>,
+    turn: Option<TurnId>,
+) -> HubRuntimeError {
+    tracing::error!(
+        phase = ?RuntimePhase::StartupScan,
+        ?failure_class,
+        cause_code,
+        session_id = ?session.map(SessionId::into_uuid),
+        turn_id = ?turn.map(TurnId::into_uuid),
+        "daemon startup scan failed"
+    );
+    HubRuntimeError::startup_scan(failure_class, session, turn)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -305,12 +446,32 @@ async fn wait_for_guard_loss(database: &mut FencedHubDatabase) {
     }
 }
 
+/// Records a fatal local-process runtime error before supervision erases it.
+///
+/// `ProcessRuntimeError::Display` is deliberately content-free across all
+/// thirteen variants: it names only the failed runtime stage and never renders
+/// nested I/O, wire, database, socket, credential, or request detail.
+fn report_process_runtime_failure(error: &ProcessRuntimeError) {
+    tracing::error!(
+        phase = ?RuntimePhase::Runtime,
+        failure_class = ?OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        },
+        cause = %error,
+        "local process runtime failed"
+    );
+}
+
 fn runtime_task_completed_cleanly(completed: Result<RuntimeTaskExit, JoinError>) -> bool {
-    matches!(
-        completed,
+    match completed {
         Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
-            | Ok(RuntimeTaskExit::Process(Ok(())))
-    )
+        | Ok(RuntimeTaskExit::Process(Ok(()))) => true,
+        Ok(RuntimeTaskExit::Process(Err(error))) => {
+            report_process_runtime_failure(&error);
+            false
+        }
+        Err(_) => false,
+    }
 }
 
 const fn completed_runtime_outcome(
@@ -364,15 +525,30 @@ async fn shutdown_requested() -> bool {
 }
 
 async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
-    let configuration = HubConfiguration::from_environment()?;
+    let configuration = HubConfiguration::from_environment().map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Configuration(&error),
+        )
+    })?;
     let model_configuration = HubModelConfiguration::read(configuration.model_configuration_file())
-        .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
+        .map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::ModelConfiguration(&error),
+            )
+        })?;
     let template_configuration = SessionTemplateConfiguration::read(
         configuration.template_configuration_file(),
         || env::var_os("HOME").map(PathBuf::from),
         &model_configuration,
     )
-    .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
+    .map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::TemplateConfiguration(&error),
+        )
+    })?;
     let credential_access = FileCredentialAccess::new(
         configuration.anthropic_api_key_file(),
         CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
@@ -384,12 +560,27 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
         CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE),
     );
     let compaction_anthropic =
-        AnthropicRuntime::new(AnthropicConfig::new(), credential_access.clone())
-            .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
-    let anthropic = AnthropicRuntime::new(AnthropicConfig::new(), credential_access)
-        .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
-    let code_host_transport = GitHubCodeHostTransport::try_new()
-        .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
+        AnthropicRuntime::new(AnthropicConfig::new(), credential_access.clone()).map_err(
+            |error| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static(anthropic_construction_cause(&error)),
+                )
+            },
+        )?;
+    let anthropic =
+        AnthropicRuntime::new(AnthropicConfig::new(), credential_access).map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static(anthropic_construction_cause(&error)),
+            )
+        })?;
+    let code_host_transport = GitHubCodeHostTransport::try_new().map_err(|_| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static("github_transport_construction_failed"),
+        )
+    })?;
     let runtime_models = model_configuration.runtime_model_catalog();
     let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
         RuntimeContextCompactionModel::new(compaction_anthropic, runtime_models.clone()),
@@ -400,7 +591,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let mut database = FencedHubDatabase::connect_production(configuration.database_url())
         .await
         .map_err(|error| {
-            let phase = match error {
+            let phase = match &error {
                 FencedHubDatabaseError::InitializeFence(_) => RuntimePhase::Migration,
                 FencedHubDatabaseError::ParseOptions(_)
                 | FencedHubDatabaseError::ConnectBootstrap(_)
@@ -408,7 +599,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
                 | FencedHubDatabaseError::AdvanceFence(_)
                 | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
             };
-            HubRuntimeError::infrastructure(phase)
+            erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
         })?;
     let pool = database.pool().clone();
     let (tool_catalog, tool_executor) = match DaemonTools::try_new_production(
@@ -419,9 +610,13 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
         model_configuration.web_fetch_egress_policy(),
     ) {
         Ok(tools) => tools.into_parts(),
-        Err(_) => {
+        Err(error) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Tools(&error),
+            );
             let _ = database.close().await;
-            return Err(HubRuntimeError::infrastructure(RuntimePhase::Configuration));
+            return Err(failure);
         }
     };
 
@@ -429,13 +624,21 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let scan_pool = pool.clone();
     let startup = migrate_scan_then_schedule(
         async move {
-            migrate(&migration_pool)
-                .await
-                .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Migration))?;
+            migrate(&migration_pool).await.map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::Migration,
+                    SanitizedStartupCause::Static("database_migration_failed"),
+                )
+            })?;
             let resolved_display_titles =
                 backfill_imported_conversation_display_titles(&migration_pool)
                     .await
-                    .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Migration))?;
+                    .map_err(|_| {
+                        erase_startup_cause(
+                            RuntimePhase::Migration,
+                            SanitizedStartupCause::Static("imported_title_backfill_failed"),
+                        )
+                    })?;
             tracing::info!(
                 phase = ?RuntimePhase::Migration,
                 resolved_display_titles,
@@ -449,11 +652,11 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
                 PostgresStartupScanRepository::new(scan_pool),
             );
             let outcome = scan.execute().await.map_err(|error| {
-                HubRuntimeError::startup_scan(
-                    error.operator_failure_class(),
-                    error.session(),
-                    error.repository_error().corruption_turn(),
-                )
+                let failure_class = error.operator_failure_class();
+                let cause_code = error.operator_failure_cause_code();
+                let session = error.session();
+                let turn = error.repository_error().corruption_turn();
+                erase_startup_scan_cause(failure_class, cause_code, session, turn)
             })?;
             tracing::info!(
                 phase = ?RuntimePhase::StartupScan,
@@ -481,9 +684,13 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
 
     let listener = match LocalProcessListener::bind(configuration.process_socket_path()) {
         Ok(listener) => listener,
-        Err(_) => {
+        Err(error) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::SocketBinding,
+                SanitizedStartupCause::Socket(&error),
+            );
             let _ = database.close().await;
-            return Err(HubRuntimeError::infrastructure(RuntimePhase::SocketBinding));
+            return Err(failure);
         }
     };
     tracing::info!(
@@ -572,8 +779,11 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             () = &mut guard_loss => RuntimeStopCause::GuardLost,
             completed = runtime_tasks.join_next() => {
                 match completed {
-                    Some(Ok(RuntimeTaskExit::Process(result))) => {
-                        drop(result);
+                    Some(Ok(RuntimeTaskExit::Process(Err(error)))) => {
+                        report_process_runtime_failure(&error);
+                        RuntimeStopCause::ProcessRuntimeFailed
+                    }
+                    Some(Ok(RuntimeTaskExit::Process(Ok(())))) => {
                         RuntimeStopCause::ProcessRuntimeFailed
                     }
                     Some(Ok(RuntimeTaskExit::Scheduler(_))) | Some(Err(_)) | None => {
@@ -632,11 +842,41 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     Ok(outcome)
 }
 
+/// Builds the operator-selected directive without exposing rejected input.
+///
+/// Absence preserves the existing INFO default; any valid directive can make
+/// DEBUG sites reachable, while invalid input falls back closed to INFO.
+fn operator_filter(value: Option<&str>) -> (tracing_subscriber::EnvFilter, bool) {
+    match value {
+        None => (tracing_subscriber::EnvFilter::new("info"), false),
+        Some(value) => match tracing_subscriber::EnvFilter::try_new(value) {
+            Ok(filter) => (filter, false),
+            Err(_) => (tracing_subscriber::EnvFilter::new("info"), true),
+        },
+    }
+}
+
+/// Installs compact operator telemetry with a configurable level directive.
+///
+/// The filter value itself is never logged: it may contain deployment-specific
+/// target names. Rejection records only the public setting name.
 fn install_tracing_subscriber() {
+    let configured = env::var(LOG_FILTER_ENVIRONMENT);
+    let (filter, rejected) = match configured.as_deref() {
+        Ok(value) => operator_filter(Some(value)),
+        Err(env::VarError::NotPresent) => operator_filter(None),
+        Err(env::VarError::NotUnicode(_)) => (tracing_subscriber::EnvFilter::new("info"), true),
+    };
     tracing_subscriber::fmt()
         .compact()
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(filter)
         .init();
+    if rejected {
+        tracing::warn!(
+            setting = LOG_FILTER_ENVIRONMENT,
+            "invalid tracing filter rejected; using INFO default"
+        );
+    }
 }
 
 #[tokio::main]
@@ -731,6 +971,7 @@ mod tests {
         collections::VecDeque,
         ffi::OsString,
         future::{Future, pending, ready},
+        io::{self, Write},
         rc::Rc,
         sync::{Arc, Mutex},
         time::Duration,
@@ -745,10 +986,119 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        HubConfiguration, HubRuntimeError, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
-        SchedulerStopCause, ShutdownOutcome, completed_runtime_outcome, migrate_scan_then_schedule,
-        run_scheduler_until_shutdown, should_close_pool,
+        AnthropicConstructionError, DATABASE_URL_ENVIRONMENT, GITHUB_TOKEN_FILE_ENVIRONMENT,
+        HubConfiguration, HubConfigurationError, HubRuntimeError,
+        MODEL_CONFIGURATION_FILE_ENVIRONMENT, PROCESS_SOCKET_PATH_ENVIRONMENT,
+        RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
+        SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
+        TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
+        completed_runtime_outcome, erase_startup_cause, migrate_scan_then_schedule,
+        operator_filter, run_scheduler_until_shutdown, should_close_pool,
     };
+
+    #[derive(Clone, Default)]
+    struct CapturedOutput(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedOutput {
+        fn text(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .expect("captured telemetry lock is available")
+                    .clone(),
+            )
+            .expect("captured telemetry is UTF-8")
+        }
+    }
+
+    impl Write for CapturedOutput {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            let mut bytes = self.0.lock().expect("captured telemetry lock is available");
+            bytes.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedOutput {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_startup_cause(cause: SanitizedStartupCause<'_>) -> String {
+        let output = CapturedOutput::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(output.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = erase_startup_cause(RuntimePhase::Configuration, cause);
+        });
+        output.text()
+    }
+
+    fn synthetic_adapter_detail() -> &'static str {
+        "synthetic-credential-and-prompt-content"
+    }
+
+    fn expected_configuration_cause() -> &'static str {
+        "required setting DATABASE_URL is missing"
+    }
+
+    fn expected_anthropic_cause() -> &'static str {
+        "anthropic_invalid_base_url"
+    }
+
+    fn default_filter_directive() -> &'static str {
+        "info"
+    }
+
+    fn debug_filter_directive() -> &'static str {
+        "debug"
+    }
+
+    fn invalid_filter_directive() -> &'static str {
+        "not a valid directive ["
+    }
+
+    #[test]
+    fn startup_failure_cause_reaches_operator_log() {
+        let error =
+            HubConfigurationError::new(DATABASE_URL_ENVIRONMENT, RequiredSettingFailure::Missing);
+        let encoded = capture_startup_cause(SanitizedStartupCause::Configuration(&error));
+        assert!(encoded.contains(expected_configuration_cause()));
+    }
+
+    #[test]
+    fn startup_failure_omits_dynamic_adapter_detail() {
+        let error = AnthropicConstructionError::InvalidBaseUrl {
+            detail: synthetic_adapter_detail().to_owned(),
+        };
+        let cause_code = anthropic_construction_cause(&error);
+        let encoded = capture_startup_cause(SanitizedStartupCause::Static(cause_code));
+        assert!(encoded.contains(expected_anthropic_cause()));
+        assert!(!encoded.contains(synthetic_adapter_detail()));
+    }
+
+    #[test]
+    fn tracing_filter_defaults_to_info_and_admits_debug() {
+        let (default_filter, default_rejected) = operator_filter(None);
+        let (debug_filter, debug_rejected) = operator_filter(Some(debug_filter_directive()));
+        let (invalid_filter, invalid_rejected) = operator_filter(Some(invalid_filter_directive()));
+        assert_eq!(default_filter.to_string(), default_filter_directive());
+        assert!(!default_rejected);
+        assert_eq!(debug_filter.to_string(), debug_filter_directive());
+        assert!(!debug_rejected);
+        assert_eq!(invalid_filter.to_string(), default_filter_directive());
+        assert!(invalid_rejected);
+    }
 
     #[tokio::test]
     async fn adr0044_migration_precedes_scan_and_scheduling() {
@@ -819,7 +1169,10 @@ mod tests {
                 Some(OsString::from("/tmp/signalbox.sock")),
             )
             .err(),
-            Some(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
+            Some(HubConfigurationError::new(
+                DATABASE_URL_ENVIRONMENT,
+                RequiredSettingFailure::Missing,
+            ))
         );
         assert_eq!(
             HubConfiguration::from_values(
@@ -831,7 +1184,10 @@ mod tests {
                 Some(OsString::from("/tmp/signalbox.sock")),
             )
             .err(),
-            Some(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
+            Some(HubConfigurationError::new(
+                MODEL_CONFIGURATION_FILE_ENVIRONMENT,
+                RequiredSettingFailure::Empty,
+            ))
         );
         assert_eq!(
             HubConfiguration::from_values(
@@ -843,7 +1199,10 @@ mod tests {
                 Some(OsString::from("/tmp/signalbox.sock")),
             )
             .err(),
-            Some(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
+            Some(HubConfigurationError::new(
+                TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
+                RequiredSettingFailure::Missing,
+            ))
         );
         assert_eq!(
             HubConfiguration::from_values(
@@ -855,7 +1214,10 @@ mod tests {
                 Some(OsString::from("/tmp/signalbox.sock")),
             )
             .err(),
-            Some(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
+            Some(HubConfigurationError::new(
+                GITHUB_TOKEN_FILE_ENVIRONMENT,
+                RequiredSettingFailure::Missing,
+            ))
         );
         assert_eq!(
             HubConfiguration::from_values(
@@ -867,7 +1229,10 @@ mod tests {
                 None,
             )
             .err(),
-            Some(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
+            Some(HubConfigurationError::new(
+                PROCESS_SOCKET_PATH_ENVIRONMENT,
+                RequiredSettingFailure::Missing,
+            ))
         );
 
         let configuration = HubConfiguration::from_values(

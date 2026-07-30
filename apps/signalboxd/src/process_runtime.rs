@@ -18,15 +18,15 @@ use signalbox_application::{
     CreateSessionService, DecideToolRequestService, EligibilityNudge, ImportConversationError,
     ImportConversationOutcome, ImportConversationService, ImportedConversationConverter,
     InProcessEligibilityNudge, InProcessToolDispatchGate, ListConversationsService,
-    ListSessionMetadataService, LoadSessionMetadataService, PromptMemberStatement,
-    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
-    ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
-    ReviewWorkflowCommand, ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult,
-    ReviewWorkflowCommandService, ReviewWorkflowOperation, ReviewWorkflowOperationKind,
-    SessionMetadataListItem, SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, SubmitInputTransaction, UuidV7CreateSessionFromImportedFrontierIdGenerator,
-    UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
-    UuidV7ToolLoopIdGenerator,
+    ListSessionMetadataService, LoadSessionMetadataService, OperatorFailureClass,
+    PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
+    ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
+    ReplaceSessionMetadataService, ReviewWorkflowCommand, ReviewWorkflowCommandOutcome,
+    ReviewWorkflowCommandResult, ReviewWorkflowCommandService, ReviewWorkflowOperation,
+    ReviewWorkflowOperationKind, SessionMetadataListItem, SessionMetadataListQuery,
+    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, SubmitInputTransaction,
+    UuidV7CreateSessionFromImportedFrontierIdGenerator, UuidV7ImportedConversationIdGenerator,
+    UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
@@ -2892,7 +2892,11 @@ where
         writer,
         version,
         request_id,
-        ProtocolError::without_detail(ErrorCode::Internal),
+        internal_protocol_error(
+            None,
+            OperatorFailureClass::FailClosedCorruption,
+            "review_workflow_projection_corruption",
+        ),
     )
     .await
 }
@@ -3029,7 +3033,11 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                internal_protocol_error(
+                    None,
+                    OperatorFailureClass::FailClosedCorruption,
+                    "conversation_import_integrity_failure",
+                ),
             )
             .await
         }
@@ -3186,7 +3194,11 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                internal_protocol_error(
+                    None,
+                    OperatorFailureClass::FailClosedCorruption,
+                    "imported_session_lookup_integrity_failure",
+                ),
             )
             .await;
         }
@@ -3232,7 +3244,11 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                internal_protocol_error(
+                    None,
+                    OperatorFailureClass::FailClosedCorruption,
+                    "imported_conversation_corruption",
+                ),
             )
             .await;
         }
@@ -3344,7 +3360,11 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                internal_protocol_error(
+                    None,
+                    OperatorFailureClass::FailClosedCorruption,
+                    "imported_session_creation_integrity_failure",
+                ),
             )
             .await
         }
@@ -3401,6 +3421,7 @@ where
                 writer,
                 version,
                 request_id,
+                session,
                 services.recovery_reporter.as_ref(),
                 error,
             )
@@ -3439,12 +3460,19 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                internal_protocol_error(
+                    Some(session.into_uuid()),
+                    OperatorFailureClass::FailClosedCorruption,
+                    "session_defaults_version_missing",
+                ),
             )
             .await;
         }
         Err(error) => {
-            return write_context_compaction_read_error(writer, version, request_id, error).await;
+            return write_context_compaction_read_error(
+                writer, version, request_id, session, error,
+            )
+            .await;
         }
     };
     let selection = match defaults.defaults().model() {
@@ -3549,6 +3577,7 @@ where
                     writer,
                     version,
                     request_id,
+                    session,
                     services.recovery_reporter.as_ref(),
                     error,
                 )
@@ -3576,6 +3605,7 @@ where
             writer,
             version,
             request_id,
+            session,
             services.recovery_reporter.as_ref(),
             error,
         )
@@ -3601,6 +3631,7 @@ where
                     writer,
                     version,
                     request_id,
+                    session,
                     services.recovery_reporter.as_ref(),
                     repository_error,
                 )
@@ -3634,6 +3665,7 @@ where
                 writer,
                 version,
                 request_id,
+                session,
                 services.recovery_reporter.as_ref(),
                 error,
             )
@@ -4261,12 +4293,20 @@ where
                     writer,
                     version,
                     request_id,
+                    prepared.session(),
                     recovery_reporter,
                     repository_error,
                 )
                 .await;
             }
-            write_context_compaction_read_error(writer, version, request_id, error).await
+            write_context_compaction_read_error(
+                writer,
+                version,
+                request_id,
+                prepared.session(),
+                error,
+            )
+            .await
         }
         ContextCompactionRangeLoadError::Integrity => {
             if let Err(repository_error) = fail_context_compaction_until_resolved(
@@ -4280,6 +4320,7 @@ where
                     writer,
                     version,
                     request_id,
+                    prepared.session(),
                     recovery_reporter,
                     repository_error,
                 )
@@ -4289,7 +4330,11 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                internal_protocol_error(
+                    Some(prepared.session().into_uuid()),
+                    OperatorFailureClass::FailClosedCorruption,
+                    "context_compaction_range_corruption",
+                ),
             )
             .await
         }
@@ -4339,6 +4384,7 @@ async fn write_context_compaction_repository_error<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
+    session: SessionId,
     recovery_reporter: Option<&FatalRecoveryReporter>,
     error: ContextCompactionRepositoryError,
 ) -> Result<(), ProcessConnectionError>
@@ -4350,15 +4396,18 @@ where
     {
         reporter.report_recovery_required();
     }
+    let failure_class = error.operator_failure_class();
     let response = match error {
         ContextCompactionRepositoryError::Database(_) => ProtocolError::mutation_unavailable(false),
         ContextCompactionRepositoryError::CommitAmbiguous(_) => {
             ProtocolError::mutation_unavailable(true)
         }
         ContextCompactionRepositoryError::IdentityCollision
-        | ContextCompactionRepositoryError::Corruption(_) => {
-            ProtocolError::without_detail(ErrorCode::Internal)
-        }
+        | ContextCompactionRepositoryError::Corruption(_) => internal_protocol_error(
+            Some(session.into_uuid()),
+            failure_class,
+            "context_compaction_repository_integrity_failure",
+        ),
     };
     write_error(writer, version, request_id, response).await
 }
@@ -4367,6 +4416,7 @@ async fn write_context_compaction_read_error<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
+    session: SessionId,
     error: ProcessReadError,
 ) -> Result<(), ProcessConnectionError>
 where
@@ -4374,7 +4424,11 @@ where
 {
     let response = match error {
         ProcessReadError::Database(_) => ProtocolError::mutation_unavailable(false),
-        ProcessReadError::Corruption(_) => ProtocolError::without_detail(ErrorCode::Internal),
+        ProcessReadError::Corruption(_) => internal_protocol_error(
+            Some(session.into_uuid()),
+            OperatorFailureClass::FailClosedCorruption,
+            "context_compaction_read_corruption",
+        ),
     };
     write_error(writer, version, request_id, response).await
 }
@@ -4421,7 +4475,11 @@ fn imported_position_out_of_range(
     // bound. A loaded aggregate that contradicts that is corrupt, and the
     // closed wire shape has no way to state the contradiction.
     if last_position == 0 || requested_position.value() <= last_position {
-        return ProtocolError::without_detail(ErrorCode::Internal);
+        return internal_protocol_error(
+            None,
+            OperatorFailureClass::FailClosedCorruption,
+            "imported_frontier_range_corruption",
+        );
     }
     ProtocolError::rejected(RejectionDetail::ImportedFrontierPositionOutOfRange {
         imported_conversation_id,
@@ -4476,7 +4534,11 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                internal_protocol_error(
+                    None,
+                    OperatorFailureClass::FailClosedCorruption,
+                    "imported_conversation_corruption",
+                ),
             )
             .await;
         }
@@ -4734,7 +4796,11 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                internal_protocol_error(
+                    None,
+                    OperatorFailureClass::FailClosedCorruption,
+                    "template_session_creation_corruption",
+                ),
             )
             .await;
         }
@@ -4871,7 +4937,11 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                internal_protocol_error(
+                    None,
+                    OperatorFailureClass::FailClosedCorruption,
+                    "session_creation_integrity_failure",
+                ),
             )
             .await
         }
@@ -4898,7 +4968,7 @@ where
     let mut spool = match spool_result {
         Ok(spool) => spool,
         Err(SessionListSpoolError::Read(error)) => {
-            return write_process_read_error(writer, version, request_id, error).await;
+            return write_process_read_error(writer, version, request_id, None, error).await;
         }
         Err(SessionListSpoolError::Spool(error)) => {
             return write_snapshot_spool_error(writer, version, request_id, error).await;
@@ -5121,7 +5191,8 @@ where
     let mut spool = match spool_result {
         Ok(spool) => spool,
         Err(MetadataPageSpoolError::Read(error)) => {
-            return write_session_metadata_read_error(writer, version, request_id, error).await;
+            return write_session_metadata_read_error(writer, version, request_id, None, error)
+                .await;
         }
         Err(MetadataPageSpoolError::Spool(error)) => {
             return write_snapshot_spool_error(writer, version, request_id, error).await;
@@ -5431,17 +5502,17 @@ async fn write_conversation_listing_read_error<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    let code = match error {
-        ConversationListingRepositoryError::Database(_) => ErrorCode::Unavailable,
-        ConversationListingRepositoryError::Corruption(_) => ErrorCode::Internal,
+    let response = match error {
+        ConversationListingRepositoryError::Database(_) => {
+            ProtocolError::without_detail(ErrorCode::Unavailable)
+        }
+        ConversationListingRepositoryError::Corruption(_) => internal_protocol_error(
+            None,
+            OperatorFailureClass::FailClosedCorruption,
+            "conversation_listing_corruption",
+        ),
     };
-    write_error(
-        writer,
-        version,
-        request_id,
-        ProtocolError::without_detail(code),
-    )
-    .await
+    write_error(writer, version, request_id, response).await
 }
 
 async fn handle_read_session_metadata<Writer>(
@@ -5483,7 +5554,10 @@ where
             )
             .await
         }
-        Err(error) => write_session_metadata_read_error(writer, version, request_id, error).await,
+        Err(error) => {
+            write_session_metadata_read_error(writer, version, request_id, Some(session_id), error)
+                .await
+        }
     }
 }
 
@@ -5558,7 +5632,9 @@ where
             )
             .await
         }
-        Err(error) => write_process_read_error(writer, version, request_id, error).await,
+        Err(error) => {
+            write_process_read_error(writer, version, request_id, Some(session_id), error).await
+        }
     }
 }
 
@@ -5675,7 +5751,11 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                internal_protocol_error(
+                    Some(session_id.into_uuid()),
+                    OperatorFailureClass::FailClosedCorruption,
+                    "session_metadata_integrity_failure",
+                ),
             )
             .await
         }
@@ -5778,7 +5858,11 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                internal_protocol_error(
+                    Some(session_id.into_uuid()),
+                    OperatorFailureClass::FailClosedCorruption,
+                    "session_defaults_corruption",
+                ),
             )
             .await;
         }
@@ -5851,7 +5935,11 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                internal_protocol_error(
+                    Some(session_id.into_uuid()),
+                    OperatorFailureClass::CallerOrHubBug,
+                    "system_prompt_member_missing",
+                ),
             )
             .await
         }
@@ -5883,7 +5971,11 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::Internal),
+                internal_protocol_error(
+                    Some(session_id.into_uuid()),
+                    OperatorFailureClass::FailClosedCorruption,
+                    "session_defaults_integrity_failure",
+                ),
             )
             .await
         }
@@ -5910,24 +6002,29 @@ async fn write_session_metadata_read_error<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
+    session_id: Option<CanonicalUuid>,
     error: SessionMetadataRepositoryError,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
-    let code = match error {
+    let response = match error {
         SessionMetadataRepositoryError::Database(_)
-        | SessionMetadataRepositoryError::CommitAmbiguous(_) => ErrorCode::Unavailable,
-        SessionMetadataRepositoryError::DifferentCommandKind { .. }
-        | SessionMetadataRepositoryError::Corruption(_) => ErrorCode::Internal,
+        | SessionMetadataRepositoryError::CommitAmbiguous(_) => {
+            ProtocolError::without_detail(ErrorCode::Unavailable)
+        }
+        SessionMetadataRepositoryError::DifferentCommandKind { .. } => internal_protocol_error(
+            session_id.map(CanonicalUuid::into_uuid),
+            OperatorFailureClass::CallerOrHubBug,
+            "session_metadata_command_kind_mismatch",
+        ),
+        SessionMetadataRepositoryError::Corruption(_) => internal_protocol_error(
+            session_id.map(CanonicalUuid::into_uuid),
+            OperatorFailureClass::FailClosedCorruption,
+            "session_metadata_corruption",
+        ),
     };
-    write_error(
-        writer,
-        version,
-        request_id,
-        ProtocolError::without_detail(code),
-    )
-    .await
+    write_error(writer, version, request_id, response).await
 }
 
 #[derive(Debug)]
@@ -6110,7 +6207,10 @@ where
         Ok(Some(_)) | Err(SubmitInputRepositoryError::DifferentCommandKind { .. }) => true,
         Ok(None) => false,
         Err(error) => {
-            return write_submit_input_repository_error(writer, version, request_id, error).await;
+            return write_submit_input_repository_error(
+                writer, version, request_id, session_id, error,
+            )
+            .await;
         }
     };
     let Some(expected_version) =
@@ -6170,14 +6270,21 @@ where
                     }
                     Err(error) => {
                         return write_submit_input_repository_error(
-                            writer, version, request_id, error,
+                            writer, version, request_id, session_id, error,
                         )
                         .await;
                     }
                 }
             }
             Err(error) => {
-                return write_process_read_error(writer, version, request_id, error).await;
+                return write_process_read_error(
+                    writer,
+                    version,
+                    request_id,
+                    Some(session_id),
+                    error,
+                )
+                .await;
             }
         }
     }
@@ -6383,7 +6490,10 @@ where
             )
             .await
         }
-        Err(error) => write_submit_input_repository_error(writer, version, request_id, error).await,
+        Err(error) => {
+            write_submit_input_repository_error(writer, version, request_id, session_id, error)
+                .await
+        }
     }
 }
 
@@ -6391,11 +6501,13 @@ async fn write_submit_input_repository_error<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
+    session_id: CanonicalUuid,
     error: SubmitInputRepositoryError,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
+    let (failure_class, cause_code) = submit_input_operator_evidence(&error);
     let protocol_error = match error {
         SubmitInputRepositoryError::Database(_) => ProtocolError::mutation_unavailable(false),
         SubmitInputRepositoryError::CommitAmbiguous(_) => ProtocolError::mutation_unavailable(true),
@@ -6404,15 +6516,55 @@ where
                 commit_ambiguous,
                 ..
             } => ProtocolError::mutation_unavailable(*commit_ambiguous),
-            _ => ProtocolError::without_detail(ErrorCode::Internal),
+            _ => internal_protocol_error(Some(session_id.into_uuid()), failure_class, cause_code),
         },
         SubmitInputRepositoryError::DifferentCommandKind { .. }
         | SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. }
         | SubmitInputRepositoryError::Corruption(_) => {
-            ProtocolError::without_detail(ErrorCode::Internal)
+            internal_protocol_error(Some(session_id.into_uuid()), failure_class, cause_code)
         }
     };
     write_error(writer, version, request_id, protocol_error).await
+}
+
+/// Classifies submit-input failures before the wire match consumes them.
+///
+/// Every cause is a closed static token and nested model-execution errors
+/// contribute only their four-class typed evidence; database, command, input,
+/// and model content never enter the returned telemetry fields.
+fn submit_input_operator_evidence(
+    error: &SubmitInputRepositoryError,
+) -> (OperatorFailureClass, &'static str) {
+    match error {
+        SubmitInputRepositoryError::Database(_) => (
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            "submit_input_database",
+        ),
+        SubmitInputRepositoryError::CommitAmbiguous(_) => (
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            },
+            "submit_input_commit_ambiguous",
+        ),
+        SubmitInputRepositoryError::DifferentCommandKind { .. } => (
+            OperatorFailureClass::CallerOrHubBug,
+            "submit_input_command_kind_mismatch",
+        ),
+        SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. } => (
+            OperatorFailureClass::IdentityCollision,
+            "submit_input_identity_collision",
+        ),
+        SubmitInputRepositoryError::Corruption(_) => (
+            OperatorFailureClass::FailClosedCorruption,
+            "submit_input_corruption",
+        ),
+        SubmitInputRepositoryError::ModelExecution(source) => (
+            source.operator_failure_class(),
+            "model_execution_integrity_failure",
+        ),
+    }
 }
 
 /// Records one owner tool decision through the canonical decision command.
@@ -6475,7 +6627,7 @@ where
         Ok(Some(_)) | Err(ToolLoopRepositoryError::DifferentCommandKind) => true,
         Ok(None) => false,
         Err(error) => {
-            return write_tool_loop_error(writer, version, request_id, error).await;
+            return write_tool_loop_error(writer, version, request_id, session_id, error).await;
         }
     };
     if !command_is_claimed {
@@ -6510,12 +6662,22 @@ where
                         .await;
                     }
                     Err(error) => {
-                        return write_tool_loop_error(writer, version, request_id, error).await;
+                        return write_tool_loop_error(
+                            writer, version, request_id, session_id, error,
+                        )
+                        .await;
                     }
                 }
             }
             Err(error) => {
-                return write_process_read_error(writer, version, request_id, error).await;
+                return write_process_read_error(
+                    writer,
+                    version,
+                    request_id,
+                    Some(session_id),
+                    error,
+                )
+                .await;
             }
         }
     }
@@ -6560,7 +6722,7 @@ where
                 write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
             }
         },
-        Err(error) => write_tool_loop_error(writer, version, request_id, error).await,
+        Err(error) => write_tool_loop_error(writer, version, request_id, session_id, error).await,
     }
 }
 
@@ -6585,11 +6747,13 @@ async fn write_tool_loop_error<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
+    session_id: CanonicalUuid,
     error: ToolLoopRepositoryError,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
+    let failure_class = error.operator_failure_class();
     let protocol_error = match error {
         ToolLoopRepositoryError::Database {
             commit_ambiguous, ..
@@ -6603,9 +6767,11 @@ where
         }
         ToolLoopRepositoryError::IdentityCollision
         | ToolLoopRepositoryError::Corruption(_)
-        | ToolLoopRepositoryError::InvalidTransition(_) => {
-            ProtocolError::without_detail(ErrorCode::Internal)
-        }
+        | ToolLoopRepositoryError::InvalidTransition(_) => internal_protocol_error(
+            Some(session_id.into_uuid()),
+            failure_class,
+            "tool_loop_integrity_failure",
+        ),
     };
     write_error(writer, version, request_id, protocol_error).await
 }
@@ -6650,7 +6816,8 @@ where
             .await;
         }
         Err(TranscriptSpoolError::Read(error)) => {
-            return write_process_read_error(writer, version, request_id, error).await;
+            return write_process_read_error(writer, version, request_id, Some(session_id), error)
+                .await;
         }
         Err(TranscriptSpoolError::Spool(error)) => {
             return write_snapshot_spool_error(writer, version, request_id, error).await;
@@ -6710,7 +6877,7 @@ where
         Err(TranscriptSpoolError::Read(error)) => {
             return run_until_shutdown(
                 &mut shutdown,
-                write_process_read_error(writer, version, request_id, error),
+                write_process_read_error(writer, version, request_id, Some(session_id), error),
             )
             .await
             .unwrap_or(Ok(()));
@@ -7760,22 +7927,42 @@ async fn write_process_read_error<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
+    session_id: Option<CanonicalUuid>,
     error: ProcessReadError,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
-    let code = match error {
-        ProcessReadError::Database(_) => ErrorCode::Unavailable,
-        ProcessReadError::Corruption(_) => ErrorCode::Internal,
+    let response = match error {
+        ProcessReadError::Database(_) => ProtocolError::without_detail(ErrorCode::Unavailable),
+        ProcessReadError::Corruption(_) => internal_protocol_error(
+            session_id.map(CanonicalUuid::into_uuid),
+            OperatorFailureClass::FailClosedCorruption,
+            "process_read_corruption",
+        ),
     };
-    write_error(
-        writer,
-        version,
-        request_id,
-        ProtocolError::without_detail(code),
-    )
-    .await
+    write_error(writer, version, request_id, response).await
+}
+
+/// Records a fail-closed Internal response before returning its wire shape.
+///
+/// Every Internal construction routes through this function, making the
+/// daemon's own corruption/defect signal visible even when the client receives
+/// only a generic message. The fields are limited to a daemon-minted session
+/// identity, a closed failure class, and a static cause code; request content,
+/// credentials, tool arguments, and nested adapter/database prose are absent.
+fn internal_protocol_error(
+    session_id: Option<uuid::Uuid>,
+    failure_class: OperatorFailureClass,
+    cause_code: &'static str,
+) -> ProtocolError {
+    tracing::error!(
+        ?failure_class,
+        cause_code,
+        ?session_id,
+        "request failed an internal integrity check"
+    );
+    ProtocolError::without_detail(ErrorCode::Internal)
 }
 
 async fn write_error<Writer>(
@@ -8866,6 +9053,10 @@ mod tests {
         Ok(())
     }
 
+    fn compaction_session() -> SessionId {
+        SessionId::from_uuid(Uuid::from_u128(1))
+    }
+
     /// S03 / INV-034: an explicit compaction whose commit outcome cannot be
     /// decided raises the same fatal recovery signal its automatic sibling
     /// raises through the scheduler pass, and still answers the client with the
@@ -8887,6 +9078,7 @@ mod tests {
             &mut writer,
             ProtocolVersion::One,
             RequestId::try_new(11)?,
+            compaction_session(),
             Some(&reporter),
             ContextCompactionRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
         )
@@ -8920,6 +9112,7 @@ mod tests {
             &mut writer,
             ProtocolVersion::One,
             RequestId::try_new(12)?,
+            compaction_session(),
             Some(&reporter),
             ContextCompactionRepositoryError::Database(sqlx::Error::PoolClosed),
         )

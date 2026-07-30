@@ -122,7 +122,9 @@ where
             self.ids.next_initial_attempt_id(),
         );
 
-        self.transaction.handle(session, identities).await
+        let outcome = self.transaction.handle(session, identities).await?;
+        report_turn_activation(&outcome);
+        Ok(outcome)
     }
 
     /// Starts one pass while retaining the stateful identity generator.
@@ -145,8 +147,28 @@ where
             self.ids.next_initial_attempt_id(),
         );
         let mut transaction = self.transaction.clone();
-        async move { transaction.handle(session, identities).await }
+        async move {
+            let outcome = transaction.handle(session, identities).await?;
+            report_turn_activation(&outcome);
+            Ok(outcome)
+        }
     }
+}
+
+/// Records the durable boundary where queued work becomes an active turn.
+///
+/// This event separates an idle scheduler from one that has committed work and
+/// is about to dispatch it. Sanitized by construction: the only fields are
+/// daemon-minted aggregate identities, never input or configuration content.
+fn report_turn_activation(outcome: &StartEligibleTurnOutcome) {
+    let StartEligibleTurnOutcome::Activated(activated) = outcome else {
+        return;
+    };
+    tracing::info!(
+        session_id = %activated.session().as_uuid(),
+        turn_id = %activated.turn().as_uuid(),
+        "turn activated"
+    );
 }
 
 #[cfg(test)]
