@@ -425,10 +425,7 @@ pub enum ActivatedTurnPassError<ActivationError, ExecutionError> {
         source: ExecutionError,
     },
     /// The transaction returned an activation for another hinted session.
-    ActivationSessionMismatch {
-        /// Turn selected by the mismatched activation.
-        turn: TurnId,
-    },
+    ActivationSessionMismatch,
 }
 
 impl<ActivationError, ExecutionError> fmt::Display
@@ -443,7 +440,7 @@ where
             Self::Execution { source, .. } => {
                 write!(formatter, "activated turn execution failed: {source}")
             }
-            Self::ActivationSessionMismatch { .. } => {
+            Self::ActivationSessionMismatch => {
                 formatter.write_str("turn activation returned a different session")
             }
         }
@@ -468,7 +465,7 @@ where
         match self {
             Self::Activation(error) => error.operator_failure_class(),
             Self::Execution { source, .. } => source.operator_failure_class(),
-            Self::ActivationSessionMismatch { .. } => {
+            Self::ActivationSessionMismatch => {
                 signalbox_application::OperatorFailureClass::CallerOrHubBug
             }
         }
@@ -478,7 +475,7 @@ where
         match self {
             Self::Activation(error) => error.operator_failure_cause_code(),
             Self::Execution { source, .. } => source.operator_failure_cause_code(),
-            Self::ActivationSessionMismatch { .. } => "activation_session_mismatch",
+            Self::ActivationSessionMismatch => "activation_session_mismatch",
         }
     }
 }
@@ -523,7 +520,7 @@ where
             ActivatedTurnPassError::Activation(_) => "activation",
             ActivatedTurnPassError::Execution { turn: None, .. } => "active_turn_recovery",
             ActivatedTurnPassError::Execution { turn: Some(_), .. } => "execution",
-            ActivatedTurnPassError::ActivationSessionMismatch { .. } => "activation_correlation",
+            ActivatedTurnPassError::ActivationSessionMismatch => "activation_correlation",
         }
     }
 
@@ -531,7 +528,7 @@ where
         match error {
             ActivatedTurnPassError::Activation(_) => None,
             ActivatedTurnPassError::Execution { turn, .. } => *turn,
-            ActivatedTurnPassError::ActivationSessionMismatch { turn } => Some(*turn),
+            ActivatedTurnPassError::ActivationSessionMismatch => None,
         }
     }
 
@@ -560,7 +557,7 @@ where
                 StartEligibleTurnOutcome::Activated(activated) => {
                     let turn = activated.turn();
                     if !activation_session_matches(&execution, session, activated.session()) {
-                        return Err(ActivatedTurnPassError::ActivationSessionMismatch { turn });
+                        return Err(ActivatedTurnPassError::ActivationSessionMismatch);
                     }
                     execution
                         .execute(activated)
@@ -1145,8 +1142,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ActivatedTurnExecution, ActivatedTurnPass, FatalExecutionSignal, FatalExecutionSupervisor,
-        activation_session_matches, reconcile_retained_once, supervise_execution,
+        ActivatedTurnExecution, ActivatedTurnPass, ActivatedTurnPassError, FatalExecutionSignal,
+        FatalExecutionSupervisor, activation_session_matches, reconcile_retained_once,
+        supervise_execution,
     };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1486,6 +1484,19 @@ mod tests {
             SessionId::from_uuid(Uuid::from_u128(2)),
         ));
         assert!(signal.is_triggered());
+    }
+
+    #[test]
+    fn activation_session_mismatch_omits_the_foreign_turn() {
+        let error =
+            ActivatedTurnPassError::<ExecutionFailure, ExecutionFailure>::ActivationSessionMismatch;
+
+        assert_eq!(
+            <ActivatedTurnPass<AdvancingIds, RecordingTransaction, NoopExecution> as EligibilityPass>::failure_turn(
+                &error
+            ),
+            None
+        );
     }
 
     #[tokio::test]

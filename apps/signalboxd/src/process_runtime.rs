@@ -4530,15 +4530,16 @@ where
             .await;
         }
         Err(
-            ImportedConversationRepositoryError::IdentityCollision(_)
-            | ImportedConversationRepositoryError::Corruption(_),
+            error @ (ImportedConversationRepositoryError::IdentityCollision(_)
+            | ImportedConversationRepositoryError::Corruption(_)),
         ) => {
+            let diagnostic = imported_conversation_internal_diagnostic(&error);
             drop(snapshot_permit);
             return write_error(
                 writer,
                 version,
                 request_id,
-                internal_protocol_error(None, InternalDiagnostic::ImportedConversationCorruption),
+                internal_protocol_error(None, diagnostic),
             )
             .await;
         }
@@ -8121,9 +8122,11 @@ impl InternalDiagnostic {
             Self::ImportedConversationCorruption => "imported_conversation_corruption",
             Self::SessionDefaultsVersionMissing => "session_defaults_version_missing",
             Self::ContextCompactionRangeCorruption => "context_compaction_range_corruption",
-            Self::ContextCompactionIdentityCollision
-            | Self::ContextCompactionRepositoryCorruption => {
-                "context_compaction_repository_integrity_failure"
+            Self::ContextCompactionIdentityCollision => {
+                "context_compaction_repository_identity_collision"
+            }
+            Self::ContextCompactionRepositoryCorruption => {
+                "context_compaction_repository_corruption"
             }
             Self::ContextCompactionReadCorruption => "context_compaction_read_corruption",
             Self::ImportedFrontierRangeCorruption => "imported_frontier_range_corruption",
@@ -8147,9 +8150,9 @@ impl InternalDiagnostic {
             Self::SubmitInputIdentityCollision => "submit_input_identity_collision",
             Self::SubmitInputCorruption => "submit_input_corruption",
             Self::ModelExecutionIntegrityFailure(_) => "model_execution_integrity_failure",
-            Self::ToolLoopIdentityCollision
-            | Self::ToolLoopCorruption
-            | Self::ToolLoopInvalidTransition => "tool_loop_integrity_failure",
+            Self::ToolLoopIdentityCollision => "tool_loop_identity_collision",
+            Self::ToolLoopCorruption => "tool_loop_corruption",
+            Self::ToolLoopInvalidTransition => "tool_loop_invalid_transition",
             Self::ProcessReadCorruption => "process_read_corruption",
         }
     }
@@ -9021,7 +9024,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ContextCompactionRangeLoadError, INBOUND_READ_AHEAD_BYTES, IncomingLine,
+        ContextCompactionRangeLoadError, INBOUND_READ_AHEAD_BYTES,
+        ImportedConversationIdentityCollision, ImportedConversationRepositoryError, IncomingLine,
         InternalDiagnostic, MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES,
         MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES,
         MAX_SUBMITTED_INPUT_BYTES, OperationalImportError, ProcessConnectionError,
@@ -9031,7 +9035,8 @@ mod tests {
         acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
         acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
         admitted_user_content, canonical_review_request_digest, consume_snapshot_queued_update,
-        context_compaction_failure_disposition, execute_import, inspect_connection_completion,
+        context_compaction_failure_disposition, execute_import,
+        imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, read_frame_line, replacement_model_is_admitted,
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, wire_model_call_state, wire_tool_decision, wire_turn_state,
@@ -9111,14 +9116,48 @@ mod tests {
     fn internal_diagnostic_uses_canonical_session_and_typed_labels() {
         let session_id = Uuid::from_u128(1);
         let diagnostic = InternalDiagnostic::SessionMetadataCorruption;
-        let expected_class = diagnostic.failure_class();
-        let expected_cause = diagnostic.cause_code();
         let encoded = capture_internal_diagnostic(session_id, diagnostic);
 
         assert!(encoded.contains(&format!("session_id={session_id}")));
-        assert!(encoded.contains(&format!("{expected_class:?}")));
-        assert!(encoded.contains(&format!(r#"cause_code="{expected_cause}""#)));
+        assert!(encoded.contains("failure_class=FailClosedCorruption"));
+        assert!(encoded.contains(r#"cause_code="session_metadata_corruption""#));
         assert!(!encoded.contains("Some("));
+    }
+
+    #[test]
+    fn internal_diagnostic_preserves_distinct_integrity_causes() {
+        assert_eq!(
+            InternalDiagnostic::ContextCompactionIdentityCollision.cause_code(),
+            "context_compaction_repository_identity_collision"
+        );
+        assert_eq!(
+            InternalDiagnostic::ContextCompactionRepositoryCorruption.cause_code(),
+            "context_compaction_repository_corruption"
+        );
+        assert_eq!(
+            InternalDiagnostic::ToolLoopIdentityCollision.cause_code(),
+            "tool_loop_identity_collision"
+        );
+        assert_eq!(
+            InternalDiagnostic::ToolLoopCorruption.cause_code(),
+            "tool_loop_corruption"
+        );
+        assert_eq!(
+            InternalDiagnostic::ToolLoopInvalidTransition.cause_code(),
+            "tool_loop_invalid_transition"
+        );
+    }
+
+    #[test]
+    fn imported_conversation_identity_collision_keeps_its_diagnostic() {
+        let error = ImportedConversationRepositoryError::IdentityCollision(
+            ImportedConversationIdentityCollision::Conversation,
+        );
+
+        assert_eq!(
+            imported_conversation_internal_diagnostic(&error),
+            InternalDiagnostic::ImportedConversationIdentityCollision
+        );
     }
 
     #[test]

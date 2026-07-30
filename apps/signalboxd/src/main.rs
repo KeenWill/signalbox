@@ -391,6 +391,19 @@ impl RuntimeTaskCompletion {
     }
 }
 
+const fn combine_runtime_stop_cause(
+    cause: RuntimeStopCause,
+    completion: RuntimeTaskCompletion,
+) -> RuntimeStopCause {
+    match (cause, completion) {
+        (RuntimeStopCause::RuntimeDefect, _) | (_, RuntimeTaskCompletion::Defect) => {
+            RuntimeStopCause::RuntimeDefect
+        }
+        (_, RuntimeTaskCompletion::Failed) => RuntimeStopCause::ProcessRuntimeFailed,
+        (cause, RuntimeTaskCompletion::Clean) => cause,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeTaskDefect {
     SchedulerCompletedBeforeShutdown,
@@ -945,15 +958,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
                 runtime_tasks.abort_all();
                 while runtime_tasks.join_next().await.is_some() {}
             } else {
-                match components_clean {
-                    RuntimeTaskCompletion::Clean => {}
-                    RuntimeTaskCompletion::Failed => {
-                        cause = RuntimeStopCause::ProcessRuntimeFailed;
-                    }
-                    RuntimeTaskCompletion::Defect => {
-                        cause = RuntimeStopCause::RuntimeDefect;
-                    }
-                }
+                cause = combine_runtime_stop_cause(cause, components_clean);
             }
             completed_runtime_outcome(cause, drain)
         }
@@ -1187,9 +1192,10 @@ mod tests {
         HubConfiguration, HubConfigurationError, HubRuntimeError,
         MODEL_CONFIGURATION_FILE_ENVIRONMENT, OperatorFilterDisposition,
         PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RequiredSettingFailure,
-        RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, SanitizedStartupCause,
-        SchedulerStopCause, ShutdownOutcome, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
-        anthropic_construction_cause, completed_runtime_outcome, erase_startup_cause,
+        RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
+        SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
+        TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
+        combine_runtime_stop_cause, completed_runtime_outcome, erase_startup_cause,
         migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
         run_scheduler_until_shutdown, should_close_pool,
     };
@@ -1736,6 +1742,28 @@ mod tests {
         assert!(should_close_pool(&Err(HubRuntimeError::infrastructure(
             RuntimePhase::Migration
         ))));
+    }
+
+    #[test]
+    fn runtime_defect_outweighs_an_ordinary_drain_failure() {
+        assert_eq!(
+            combine_runtime_stop_cause(
+                RuntimeStopCause::RuntimeDefect,
+                RuntimeTaskCompletion::Failed
+            ),
+            RuntimeStopCause::RuntimeDefect
+        );
+        assert_eq!(
+            combine_runtime_stop_cause(RuntimeStopCause::Requested, RuntimeTaskCompletion::Failed),
+            RuntimeStopCause::ProcessRuntimeFailed
+        );
+        assert_eq!(
+            combine_runtime_stop_cause(
+                RuntimeStopCause::ProcessRuntimeFailed,
+                RuntimeTaskCompletion::Defect
+            ),
+            RuntimeStopCause::RuntimeDefect
+        );
     }
 
     #[test]
