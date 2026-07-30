@@ -44,7 +44,8 @@ use signalboxd::{
     FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
     HubModelConfigurationError, LocalProcessListener, LocalSocketError,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
-    SessionTemplateConfiguration, SessionTemplateConfigurationError, SystemCurrentTimeClock,
+    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
+    SystemCurrentTimeClock,
 };
 use tokio::{
     pin, select,
@@ -436,6 +437,29 @@ const fn should_close_pool(outcome: &Result<ShutdownOutcome, HubRuntimeError>) -
             | ShutdownOutcome::RuntimeDefect)
             | Err(_)
     )
+}
+
+const fn database_close_failure_outcome(outcome: ShutdownOutcome) -> ShutdownOutcome {
+    match outcome {
+        ShutdownOutcome::RuntimeDefect | ShutdownOutcome::RuntimeDefectAfterGraceWindow => outcome,
+        _ => ShutdownOutcome::RuntimeFailed,
+    }
+}
+
+/// Records database-close failure without displacing the initiating defect.
+///
+/// `SingleHubGuardError` has a static sanitized Display that excludes SQLx
+/// detail, so database URLs, credentials, query text, and server prose stay out.
+fn report_database_close_failure(error: &SingleHubGuardError) {
+    let failure_class = OperatorFailureClass::Infrastructure {
+        commit_ambiguous: false,
+    };
+    tracing::error!(
+        phase = ?RuntimePhase::Runtime,
+        ?failure_class,
+        cause = %error,
+        "daemon database close failed"
+    );
 }
 
 async fn migrate_scan_then_schedule<Migration, Scan, Schedule, Runtime, Output>(
@@ -879,7 +903,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     });
     tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
 
-    let outcome = {
+    let mut outcome = {
         let guard_loss = wait_for_guard_loss(&mut database);
         pin!(guard_loss);
         let mut cause = select! {
@@ -971,8 +995,11 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     // returning control to process exit.
     if outcome == ShutdownOutcome::GuardLost {
         let _ = database.close().await;
-    } else if should_close_pool(&Ok(outcome)) && database.close().await.is_err() {
-        return Ok(ShutdownOutcome::RuntimeFailed);
+    } else if should_close_pool(&Ok(outcome))
+        && let Err(error) = database.close().await
+    {
+        report_database_close_failure(&error);
+        outcome = database_close_failure_outcome(outcome);
     }
     Ok(outcome)
 }
@@ -1185,6 +1212,7 @@ mod tests {
     };
     use signalbox_domain::{SessionId, TurnId};
     use tokio::sync::oneshot;
+    use tracing_subscriber::prelude::*;
     use uuid::Uuid;
 
     use super::{
@@ -1193,11 +1221,12 @@ mod tests {
         MODEL_CONFIGURATION_FILE_ENVIRONMENT, OperatorFilterDisposition,
         PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RequiredSettingFailure,
         RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
-        SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
+        SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome, SingleHubGuardError,
         TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
-        combine_runtime_stop_cause, completed_runtime_outcome, erase_startup_cause,
-        migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
-        run_scheduler_until_shutdown, should_close_pool,
+        combine_runtime_stop_cause, completed_runtime_outcome, database_close_failure_outcome,
+        erase_startup_cause, migrate_scan_then_schedule, operator_filter,
+        process_runtime_failure_class, report_database_close_failure, run_scheduler_until_shutdown,
+        should_close_pool,
     };
 
     #[derive(Clone, Default)]
@@ -1244,6 +1273,19 @@ mod tests {
             .finish();
         tracing::subscriber::with_default(subscriber, || {
             let _ = erase_startup_cause(RuntimePhase::Configuration, cause);
+        });
+        output.text()
+    }
+
+    fn capture_database_close_failure(error: &SingleHubGuardError) -> String {
+        let output = CapturedOutput::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(output.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            report_database_close_failure(error);
         });
         output.text()
     }
@@ -1304,10 +1346,20 @@ mod tests {
         assert_eq!(default_disposition, OperatorFilterDisposition::Accepted);
         assert_eq!(empty_filter.to_string(), "info");
         assert_eq!(empty_disposition, OperatorFilterDisposition::Accepted);
-        assert_eq!(
-            debug_filter.to_string(),
-            "signalbox_model_provider_runtime=debug,signalbox_application=debug,signalboxd=debug,info"
-        );
+        let debug_subscriber = tracing_subscriber::registry().with(debug_filter);
+        tracing::subscriber::with_default(debug_subscriber, || {
+            assert!(tracing::enabled!(target: "signalboxd", tracing::Level::DEBUG));
+            assert!(tracing::enabled!(
+                target: "signalbox_application",
+                tracing::Level::DEBUG
+            ));
+            assert!(tracing::enabled!(
+                target: "signalbox_model_provider_runtime",
+                tracing::Level::DEBUG
+            ));
+            assert!(!tracing::enabled!(target: "hyper", tracing::Level::DEBUG));
+            assert!(tracing::enabled!(target: "hyper", tracing::Level::INFO));
+        });
         assert_eq!(debug_disposition, OperatorFilterDisposition::Accepted);
         assert_eq!(external_filter.to_string(), "info");
         assert_eq!(external_disposition, OperatorFilterDisposition::Rejected);
@@ -1742,6 +1794,32 @@ mod tests {
         assert!(should_close_pool(&Err(HubRuntimeError::infrastructure(
             RuntimePhase::Migration
         ))));
+    }
+
+    #[test]
+    fn database_close_failure_preserves_an_initiating_runtime_defect() {
+        assert_eq!(
+            database_close_failure_outcome(ShutdownOutcome::RuntimeDefect),
+            ShutdownOutcome::RuntimeDefect
+        );
+    }
+
+    #[test]
+    fn ordinary_database_close_failure_remains_a_runtime_failure() {
+        assert_eq!(
+            database_close_failure_outcome(ShutdownOutcome::Clean),
+            ShutdownOutcome::RuntimeFailed
+        );
+    }
+
+    #[test]
+    fn database_close_failure_omits_dynamic_sqlx_detail() {
+        let dynamic_detail = "synthetic-database-url-and-credential";
+        let error = SingleHubGuardError::Close(sqlx::Error::Protocol(dynamic_detail.to_owned()));
+        let encoded = capture_database_close_failure(&error);
+
+        assert!(encoded.contains(&error.to_string()));
+        assert!(!encoded.contains(dynamic_detail));
     }
 
     #[test]

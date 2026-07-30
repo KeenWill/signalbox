@@ -3024,7 +3024,7 @@ where
             )
             .await
         }
-        Err(OperationalImportError::Internal) => {
+        Err(OperationalImportError::IntegrityFailure) => {
             write_error(
                 writer,
                 version,
@@ -3036,6 +3036,18 @@ where
             )
             .await
         }
+        Err(OperationalImportError::WorkerTerminated) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(
+                    None,
+                    InternalDiagnostic::ConversationImportWorkerTerminated,
+                ),
+            )
+            .await
+        }
     }
 }
 
@@ -3043,7 +3055,8 @@ where
 enum OperationalImportError {
     InvalidSource,
     Database,
-    Internal,
+    IntegrityFailure,
+    WorkerTerminated,
 }
 
 async fn execute_import<Converter>(
@@ -3079,13 +3092,13 @@ where
                 | ImportConversationError::ConverterEntryIdentitySequenceMismatch
                 | ImportConversationError::StoreSourceDigestMismatch { .. }
                 | ImportConversationError::StoreInsertedIdentityMismatch { .. } => {
-                    OperationalImportError::Internal
+                    OperationalImportError::IntegrityFailure
                 }
             })
         })
     })
     .await
-    .map_err(|_| OperationalImportError::Internal)?
+    .map_err(|_| OperationalImportError::WorkerTerminated)?
 }
 
 fn domain_imported_relationship(
@@ -8013,6 +8026,7 @@ where
 enum InternalDiagnostic {
     ReviewWorkflowProjectionCorruption,
     ConversationImportIntegrityFailure,
+    ConversationImportWorkerTerminated,
     ImportedSessionDatabase,
     ImportedSessionCommitAmbiguous,
     ImportedSessionCommandKindMismatch,
@@ -8070,7 +8084,8 @@ impl InternalDiagnostic {
             | Self::SessionDefaultsCommitAmbiguous => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: true,
             },
-            Self::ImportedSessionCommandKindMismatch
+            Self::ConversationImportWorkerTerminated
+            | Self::ImportedSessionCommandKindMismatch
             | Self::ImportedSessionPreparation
             | Self::SessionCreationPreparation
             | Self::SessionCreationCommandKindMismatch
@@ -8109,6 +8124,7 @@ impl InternalDiagnostic {
         match self {
             Self::ReviewWorkflowProjectionCorruption => "review_workflow_projection_corruption",
             Self::ConversationImportIntegrityFailure => "conversation_import_integrity_failure",
+            Self::ConversationImportWorkerTerminated => "conversation_import_worker_terminated",
             Self::ImportedSessionDatabase => "imported_session_database",
             Self::ImportedSessionCommitAmbiguous => "imported_session_commit_ambiguous",
             Self::ImportedSessionCommandKindMismatch => "imported_session_command_kind_mismatch",
@@ -9933,6 +9949,54 @@ context_window_tokens = 200000
         assert_eq!(outcome, Err(OperationalImportError::InvalidSource));
         assert_ne!(conversion_worker, async_worker);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn import_worker_termination_remains_distinct_from_integrity_failure()
+    -> Result<(), Box<dyn Error>> {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
+
+        let outcome = execute_import(PanickingConverter, Vec::new(), pool).await;
+
+        assert_eq!(outcome, Err(OperationalImportError::WorkerTerminated));
+        Ok(())
+    }
+
+    #[test]
+    fn import_worker_termination_has_exact_operator_diagnostic() {
+        let diagnostic = InternalDiagnostic::ConversationImportWorkerTerminated;
+
+        assert_eq!(
+            diagnostic.failure_class(),
+            signalbox_application::OperatorFailureClass::CallerOrHubBug
+        );
+        assert_eq!(
+            diagnostic.cause_code(),
+            "conversation_import_worker_terminated"
+        );
+    }
+
+    struct PanickingConverter;
+
+    impl ImportedConversationConverter for PanickingConverter {
+        type Error = io::Error;
+
+        fn format(&self) -> ImportedConversationFormat {
+            ImportedConversationFormat::CodexRolloutJsonlV1
+        }
+
+        fn convert<NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            _source: &[u8],
+            _next_entry_id: NextEntryId,
+        ) -> Result<ImportedConversation, Self::Error>
+        where
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+        {
+            panic!("synthetic import worker panic")
+        }
     }
 
     struct ThreadReportingRejectConverter(mpsc::SyncSender<thread::ThreadId>);
