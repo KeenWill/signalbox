@@ -319,13 +319,12 @@ Representation rules, all enforced in the schema:
   offered lease identity and positive generation. Composite foreign keys bind
   that arm to its typed authorization, release, or offered-lease record and to
   the same runner; a unique constraint permits only one retained failure for an
-  exact operation correlation. The release arm admits only
-  `workspace_cleanup_failed`; the provisioning arm admits only
-  `credential_unavailable`, `repository_unavailable`, `sandbox_unavailable`, or
-  `workspace_conflict`; and the lease-offer arm admits those four plus
-  `lease_admission_refused`. Every other category/arm pair is rejected. Code,
-  message, payload, aggregate detail size, JSON member-name grammar, container
-  cardinality, and depth carry the exact checks owned by
+  exact operation correlation. Each arm admits exactly the category/correlation
+  pairs owned by
+  [runner protocol](runner-protocol.md#local-transport-and-connection-protocol);
+  every other pair is rejected. Code, message, payload, aggregate detail size,
+  JSON member-name grammar, container cardinality, and depth carry the exact
+  checks owned by
   [runner protocol](runner-protocol.md#local-transport-and-connection-protocol);
   none is stored in a generic payload column or normalized on admission. The
   record and its JSON text reject update, delete, and truncate.

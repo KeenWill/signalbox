@@ -654,18 +654,21 @@ workspace-manifest identity; or offered lease identity, generation. Each
 identity, integer, and manifest identity uses its runner-protocol canonical wire
 bytes; comparison is unsigned lexicographic-byte order, and a shorter value
 precedes a longer value when one is a prefix. No absent field or field from
-another arm participates. A leak key compares runner-identity canonical bytes
-and then locator UTF-8 bytes under that same byte order. The closed cursor
-object is therefore either `operation_failure { runner_id, correlation }` or
-`workspace_leak { runner_id, locator }` and exactly reproduces the last emitted
-evidence key. The daemon fetches at most `page_size + 1` checked evidence rows,
-using the extra row only to determine `next_after`; it never materializes the
-retained history. Each page is authoritative for the read that produced it.
-Concurrent durable additions that sort at or before a cursor need not appear in
-that traversal, so a caller that needs a fresh observation starts again with a
-null cursor. Why: operation-failure evidence is append-only and therefore
-unbounded; a singular unpaged status read would eventually make durable
-diagnostics unreadable or require unbounded memory.
+another arm participates. A leak key compares runner-identity canonical bytes,
+then the complete runner-protocol fact tuple: locator, kind, digest, optional
+session, optional placement revision, under that tuple's exact order. The closed
+cursor object is therefore either `operation_failure { runner_id, correlation }`
+or
+`workspace_leak { runner_id, locator, kind, digest, session_id, placement_revision }`
+and exactly reproduces the last emitted evidence key, including null optional
+members. The daemon fetches at most `page_size + 1` checked evidence rows, using
+the extra row only to determine `next_after`; it never materializes the retained
+history. Each page is authoritative for the read that produced it. Concurrent
+durable additions that sort at or before a cursor need not appear in that
+traversal, so a caller that needs a fresh observation starts again with a null
+cursor. Why: operation-failure evidence is append-only and therefore unbounded;
+a singular unpaged status read would eventually make durable diagnostics
+unreadable or require unbounded memory.
 
 Followers additionally admit
 `provider_text_delta { session_id, turn_id, model_call_id, part_index, content }`

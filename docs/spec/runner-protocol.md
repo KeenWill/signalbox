@@ -250,16 +250,22 @@ operation — provisioning authorization, release, or lease offer before
 `lease_claim` — and two layers. The first is one closed daemon-actionable
 category: `credential_unavailable`, `repository_unavailable`,
 `sandbox_unavailable`, `workspace_conflict`, `workspace_cleanup_failed`, or
-`lease_admission_refused`. `workspace_cleanup_failed` is the release-specific
-member: a journaled release whose rename or deletion keeps failing reports it
-rather than retaining its journal forever, and `operation_failure_recorded` for
-that exact release correlation resolves the release as refused, retiring both
-journals — the failure and the release — and freeing the runner's single
-workspace-operation slot. It is therefore the one acknowledgement other than
-`workspace_release_recorded` that retires a release, and no single release
-correlation ever draws both, because a release either completed or was refused.
-A release whose owning connection becomes durably lost draws neither and is
-retired as unowned instead
+`lease_admission_refused`. Category admissibility is total with the correlation:
+a provisioning authorization admits `credential_unavailable`,
+`repository_unavailable`, `sandbox_unavailable`, or `workspace_conflict`; a
+release admits only `workspace_cleanup_failed`; and a lease offer admits the
+four provisioning categories plus `lease_admission_refused`. Every other pair is
+a malformed frame: the runner rejects it while constructing the frame and never
+spools it, and the daemon rejects it before durable admission.
+`workspace_cleanup_failed` is therefore the release-specific member: a journaled
+release whose rename or deletion keeps failing reports it rather than retaining
+its journal forever, and `operation_failure_recorded` for that exact release
+correlation resolves the release as refused, retiring both journals — the
+failure and the release — and freeing the runner's single workspace-operation
+slot. It is the one acknowledgement other than `workspace_release_recorded` that
+retires a release, and no single release correlation ever draws both, because a
+release either completed or was refused. A release whose owning connection
+becomes durably lost draws neither and is retired as unowned instead
 ([workspace provisioning and recovery](#workspace-provisioning-and-recovery)).
 Why: `workspace_release_recorded` follows a completed deletion and can never be
 produced for a release whose deletion failed, so admitting only that frame as a
@@ -325,13 +331,18 @@ admissible; heartbeats remain admissible throughout. A report is named by the
 lowercase SHA-256 digest of its complete canonical sorted fact sequence and has
 pages numbered from one. Each nonfinal page carries exactly 64 facts and each
 final page carries zero through 64; even an empty report sends final page one.
-Facts are sorted by their bounded runner-root-relative locator — relative to the
-runner state root and not to any repository, so a workspace-free private root,
-staging, and trash are all nameable — and contain only `unknown_manifest`,
-`retired_present`, `manifest_conflict`, `cleanup_failed`, or `unreconciled`, the
-locator, lowercase SHA-256 manifest-or-entry digest, and nullable session and
-placement revision when independently parseable. The locator carries no absolute
-host path, matching the projection in
+Each fact contains only `unknown_manifest`, `retired_present`,
+`manifest_conflict`, `cleanup_failed`, or `unreconciled`, a bounded
+runner-root-relative locator, a lowercase SHA-256 manifest-or-entry digest, and
+nullable session and placement revision when independently parseable. Facts are
+sorted by the complete tuple locator, kind, digest, optional session, optional
+placement revision. Locator and digest compare as unsigned lexicographic UTF-8
+bytes, with the shorter value first when one is a prefix; kind order is the
+closed order just listed; and each optional value compares by its ordinary
+canonical presence-byte encoding followed, when present, by its canonical wire
+bytes. The locator is relative to the runner state root and not to any
+repository, so a workspace-free private root, staging, and trash are all
+nameable. It carries no absolute host path, matching the projection in
 [process protocol](process-protocol.md#client-requests). Each page carries the
 prior page digest, null only on page one, so equal replay is exact and omission
 or reordering fails closed. The runner journals the report and current page

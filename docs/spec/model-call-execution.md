@@ -213,13 +213,16 @@ availability.
 The snapshot is a function of the session's actual composition, not of the
 compiled registry. A declaration whose arguments, paths, or working directory
 are defined relative to a session repository is included only for a session that
-has a repository worktree, and a declaration requiring a credential profile is
-included only for a session that was granted one — and, when that requirement
-comes from a repository entry rather than from the session's own workspace, only
-when the current advertisement pairs some repository key with exactly the
-granted profile; a session composed without a workspace therefore advertises
-exactly the tools that can execute in it and no placement combination is
-rejected merely for being workspace-free
+has a repository worktree. A declaration whose session capability itself
+requires a credential profile is included only for a session that was granted
+one. When a remote declaration's credential requirement comes from a repository
+entry instead, preparation includes it only when the current advertisement pairs
+some repository key with an optional credential-profile name equal to the
+session's optional selection: absence equals absence and means anonymous access,
+while a present name must equal the exact grant. No absent/present pair matches,
+and absence never selects a credential. A session composed without a workspace
+therefore advertises exactly the tools that can execute in it and no placement
+combination is rejected merely for being workspace-free
 ([runner protocol and placement](runner-protocol.md#session-composition) owns
 the composition axes, and
 [tool-loop](tool-loop.md#registry-placement-and-effect-metadata) owns which
