@@ -14,11 +14,13 @@ runner-protocol batch reconstitution through PR #260
 (`agent/runner-protocol-domain`). Template-derived blanket creation was verified
 through PR #311 (`agent/session-templates-spec`), and the exact-origin
 `web_fetch` egress policy and complete bounded file-patch lookup through PR #330
-(`agent/audit-verified-fixes`). The runner executable stack rooted at this
-foundation proposal extends the same laws to the runner locus. This page owns
-logical tool requests, approval policy and decisions, physical tool attempts,
-result admission, intra-turn continuation, crash classification, the compiled
-registry, and the daemon-local catalog. Turn and attempt lifecycle law lives in
+(`agent/audit-verified-fixes`). The exact-revision repository-read extension is
+verified through PR #348 (`agent/repository-read-tools`). The runner executable
+stack rooted at this foundation proposal extends the same laws to the runner
+locus. This page owns logical tool requests, approval policy and decisions,
+physical tool attempts, result admission, intra-turn continuation, crash
+classification, the compiled registry, and the daemon-local catalog. Turn and
+attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
 model-call staging and provider translation in
@@ -831,10 +833,11 @@ tools:
   mechanics remain owned by
   [sessions-and-transcript](sessions-and-transcript.md#session-metadata-and-list-projection).
 
-The Tier 1 catalog adds fourteen GitHub change-request tools. Every operation is
-`ExternalEffect` because GitHub observes its authenticated request. The ten
+The code-host catalog contains sixteen GitHub tools. Every operation is
+`ExternalEffect` because GitHub observes its authenticated request. The twelve
 read-only declarations — `change_request_summary`,
 `change_request_changed_files`, `change_request_file_patch`,
+`repository_read_file`, `repository_list_directory`,
 `change_request_checks_status`, `change_request_review_threads`,
 `change_request_ci_job_log`, `change_request_convergence_state`,
 `change_request_stack_state`, `change_request_thread_inventory`, and
@@ -860,6 +863,25 @@ The declarations and compact result objects are:
   semantic detail `requested changed file was not found in the change request`;
   it is not presented as a host rejection. A next-page signal beyond page 30
   violates the bounded response contract and fails closed.
+- `repository_read_file` accepts `repository`, one repository-relative `path`,
+  and a required exact lowercase 40-hex commit `revision`; it never defaults to
+  a branch head. An optional `line_range` has positive one-based `start` and
+  inclusive `end` members with `start` no greater than `end`. A content outcome
+  returns at most 64 KiB of exact UTF-8 text together with source and returned
+  byte counts, requested and returned line bounds, returned line count,
+  final-line completeness, and `truncated`. `path_not_found`,
+  `revision_not_found`, `not_a_file` with the observed repository-object type,
+  and `binary_file` with source bytes are separate non-content outcomes; every
+  file outcome carries `truncated`.
+- `repository_list_directory` accepts `repository`, one repository-relative
+  directory `path`, and the same required exact commit `revision`. An entries
+  outcome retains at most 100 immediate children with path, repository-object
+  type, and optional source byte size, plus observed and returned entry counts
+  and `truncated`. Reaching the contents endpoint's 1,000-entry ceiling is
+  explicitly incomplete even when GitHub supplies no continuation signal.
+  `path_not_found`, `revision_not_found`, and `not_a_directory` with the
+  observed repository-object type remain distinct outcomes, each carrying
+  `truncated`.
 - `change_request_checks_status` accepts `repository` and one exact lowercase
   40-hex `revision`; it returns that revision and the first page of at most 100
   check runs, each with id, name, status, optional conclusion, and URL, plus
@@ -964,12 +986,21 @@ page as complete.
 The production adapter uses fixed GitHub REST and GraphQL endpoints. It disables
 ambient proxies, automatic redirects, protocol retries, and idle reuse; uses
 rustls with a TLS 1.2 floor; sends the fixed GitHub REST version `2026-03-10`;
-applies a 30-second whole-exchange timeout; and retains at most 512 KiB from any
-JSON response. The authenticated job-log endpoint is the sole redirect-shaped
-exchange: after exactly one 302 response, the adapter validates its bounded
-HTTPS location, resolves and pins a wholly public destination set, and performs
-one credential-free download with redirect following still disabled. Credential
-delivery and redaction are owned by
+applies a 30-second whole-exchange timeout; and retains at most 512 KiB from an
+ordinary JSON response. The exact-revision contents lookup admits at most 8 MiB
+of JSON ingress before projecting the shared result bound. Both repository tools
+pin the contents request with the required exact commit `ref`; a file read pins
+its second request to the immutable blob identity returned by that lookup rather
+than re-reading a moving reference. A contents 404 triggers one probe of the
+exact Git commit identity: a recognized commit becomes `path_not_found`, an
+unrecognized commit becomes `revision_not_found`, and any other host rejection
+or physical request failure remains failed execution rather than absence. Both
+requests in a file read and both requests in an absence classification share one
+aggregate 30-second transaction deadline. The authenticated job-log endpoint is
+the sole redirect-shaped exchange: after exactly one 302 response, the adapter
+validates its bounded HTTPS location, resolves and pins a wholly public
+destination set, and performs one credential-free download with redirect
+following still disabled. Credential delivery and redaction are owned by
 [configuration-and-credentials](configuration-and-credentials.md).
 
 A missing or unusable credential and a definitive client rejection produce only
@@ -986,7 +1017,7 @@ detail.
 
 The merged catalog sorts declarations by checked tool name and rejects
 duplicates during construction. Its executor dispatches only those same four
-preexisting names and the fourteen code-host names; disagreement between the
+preexisting names and the sixteen code-host names; disagreement between the
 advertised catalog and executor is classified as a daemon defect.
 
 ## Persistence boundaries
