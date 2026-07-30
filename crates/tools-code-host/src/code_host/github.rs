@@ -14,6 +14,7 @@ use signalbox_tools_basic::{
     PublicDestinationClientError, has_more_response_bytes, public_destination_client,
 };
 
+use super::arguments::valid_revision;
 use super::result::absolute_https_url;
 use super::review_slog::{
     ReviewerActivity, author_class, authorized_association, disposition_class, finding_title,
@@ -306,6 +307,35 @@ impl GitHubCodeHostTransport {
         arguments: super::FilePatchArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        let initial_head_revision = self
+            .change_request_head_revision(arguments.repository(), arguments.number(), credential)
+            .await?;
+        let outcome = self.find_file_patch(arguments.clone(), credential).await;
+        match &outcome {
+            Ok(_) | Err(CodeHostTransportFailure::NotFound) => {}
+            Err(
+                CodeHostTransportFailure::InvalidCredential
+                | CodeHostTransportFailure::Rejected
+                | CodeHostTransportFailure::InvalidResponse
+                | CodeHostTransportFailure::ResponseTooLarge
+                | CodeHostTransportFailure::HeadRevisionChanged
+                | CodeHostTransportFailure::DispatchUnknown,
+            ) => return outcome,
+        }
+        let current_head_revision = self
+            .change_request_head_revision(arguments.repository(), arguments.number(), credential)
+            .await?;
+        if initial_head_revision != current_head_revision {
+            return Err(CodeHostTransportFailure::HeadRevisionChanged);
+        }
+        outcome
+    }
+
+    async fn find_file_patch(
+        &self,
+        arguments: super::FilePatchArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
         for page in 1..=MAX_CHANGED_FILE_PAGES {
             let page_text = page.to_string();
             let url = self.repository_url(
@@ -331,6 +361,20 @@ impl GitHubCodeHostTransport {
             }
         }
         Err(CodeHostTransportFailure::InvalidResponse)
+    }
+
+    async fn change_request_head_revision(
+        &self,
+        repository: &super::CodeHostRepository,
+        number: CodeHostChangeRequestNumber,
+        credential: &CredentialValue,
+    ) -> Result<String, CodeHostTransportFailure> {
+        let url = self.repository_url(repository, &["pulls", &number.get().to_string()], None)?;
+        let response = self
+            .send_authenticated(Method::GET, url, None, credential)
+            .await?;
+        let value = self.json_response(response, StatusCode::OK).await?;
+        parse_change_request_head_revision(&value, number)
     }
 
     async fn checks_status(
@@ -1158,6 +1202,7 @@ impl GitHubCodeHostTransport {
                 | CodeHostTransportFailure::NotFound => failure,
                 CodeHostTransportFailure::InvalidResponse
                 | CodeHostTransportFailure::ResponseTooLarge
+                | CodeHostTransportFailure::HeadRevisionChanged
                 | CodeHostTransportFailure::DispatchUnknown => {
                     CodeHostTransportFailure::DispatchUnknown
                 }
@@ -1808,6 +1853,25 @@ fn required_string(
         .ok_or(CodeHostTransportFailure::InvalidResponse)
 }
 
+fn parse_change_request_head_revision(
+    value: &serde_json::Value,
+    expected_number: CodeHostChangeRequestNumber,
+) -> Result<String, CodeHostTransportFailure> {
+    let object = required_object(value)?;
+    let number: u32 = required_u64(object, "number")?
+        .try_into()
+        .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+    if number != expected_number.get() {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    let head = required_object(required(object, "head")?)?;
+    let revision = required_string(head, "sha")?;
+    if !valid_revision(&revision) {
+        return Err(CodeHostTransportFailure::InvalidResponse);
+    }
+    Ok(revision)
+}
+
 fn optional_string(
     object: &serde_json::Map<String, serde_json::Value>,
     member: &str,
@@ -1880,6 +1944,11 @@ mod tests {
     use crate::{
         CodeHostRepository, ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus,
     };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const FILE_PATCH_REPOSITORY: &str = "owner/repository";
+    const FILE_PATCH_NUMBER: u32 = 17;
+    const FILE_PATCH_TARGET_PATH: &str = "src/target.rs";
 
     fn repository() -> CodeHostRepository {
         CodeHostRepository::try_new(String::from("owner/repository"))
@@ -1973,6 +2042,124 @@ mod tests {
                 .map(|index| changed_file_value(format!("generated/file-{index}.rs")))
                 .collect(),
         )
+    }
+
+    /// A paginated patch assembled while the pull-request head moves is not
+    /// returned as evidence from any single revision.
+    #[tokio::test]
+    async fn file_patch_fails_closed_when_head_moves_during_pagination() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener binds");
+        let address = listener
+            .local_addr()
+            .expect("listener address is available");
+        let server = tokio::spawn(serve_moved_head_file_patch(listener));
+        let mut transport = GitHubCodeHostTransport::try_new().expect("fixed transport constructs");
+        transport.rest_base =
+            Url::parse(&format!("http://{address}/")).expect("loopback REST base is valid");
+        let arguments = moved_head_file_patch_arguments();
+        let credential = CredentialValue::new(b"synthetic-test-token".to_vec());
+
+        let failure = transport
+            .file_patch_transaction(arguments, &credential)
+            .await
+            .expect_err("a moved head cannot yield revision-consistent patch evidence");
+        let requests = server.await.expect("loopback server task completes");
+
+        assert_eq!(failure, CodeHostTransportFailure::HeadRevisionChanged);
+        assert_eq!(
+            crate::code_host::transport_failure_class(
+                crate::code_host::CodeHostToolKind::FilePatch,
+                failure,
+            ),
+            Some(crate::code_host::OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
+            })
+        );
+        assert_eq!(requests, moved_head_file_patch_requests());
+    }
+
+    fn moved_head_file_patch_arguments() -> crate::FilePatchArguments {
+        serde_json::from_value(serde_json::json!({
+            "repository": FILE_PATCH_REPOSITORY,
+            "number": FILE_PATCH_NUMBER,
+            "path": FILE_PATCH_TARGET_PATH,
+        }))
+        .expect("fixture file-patch arguments decode")
+    }
+
+    fn moved_head_file_patch_requests() -> [String; 4] {
+        let prefix = format!("/repos/{FILE_PATCH_REPOSITORY}/pulls/{FILE_PATCH_NUMBER}");
+        [
+            format!("GET {prefix} HTTP/1.1"),
+            format!("GET {prefix}/files?per_page=100&page=1 HTTP/1.1"),
+            format!("GET {prefix}/files?per_page=100&page=2 HTTP/1.1"),
+            format!("GET {prefix} HTTP/1.1"),
+        ]
+    }
+
+    async fn serve_moved_head_file_patch(listener: tokio::net::TcpListener) -> [String; 4] {
+        const INITIAL_HEAD: &str = "1111111111111111111111111111111111111111";
+        const MOVED_HEAD: &str = "2222222222222222222222222222222222222222";
+        let initial_head = serde_json::json!({
+            "number": FILE_PATCH_NUMBER,
+            "head": {"sha": INITIAL_HEAD},
+        });
+        let target_page = serde_json::Value::Array(vec![changed_file_value(String::from(
+            FILE_PATCH_TARGET_PATH,
+        ))]);
+        let initial_request = serve_json_response(&listener, &initial_head.to_string(), None).await;
+        let first_page_request = serve_json_response(
+            &listener,
+            &first_changed_file_page().to_string(),
+            Some(r#"<http://fixture.invalid/page/2>; rel="next""#),
+        )
+        .await;
+        let target_page_request =
+            serve_json_response(&listener, &target_page.to_string(), None).await;
+        let moved_head = serde_json::json!({
+            "number": FILE_PATCH_NUMBER,
+            "head": {"sha": MOVED_HEAD},
+        });
+        let final_request = serve_json_response(&listener, &moved_head.to_string(), None).await;
+        [
+            initial_request,
+            first_page_request,
+            target_page_request,
+            final_request,
+        ]
+    }
+
+    async fn serve_json_response(
+        listener: &tokio::net::TcpListener,
+        body: &str,
+        link: Option<&str>,
+    ) -> String {
+        let (mut stream, _) = listener.accept().await.expect("one request connects");
+        let mut request = vec![0_u8; 4096];
+        let length = stream
+            .read(&mut request)
+            .await
+            .expect("request is readable");
+        let link_header = link
+            .map(|value| format!("Link: {value}\r\n"))
+            .unwrap_or_default();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{link_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("JSON response is writable");
+        String::from_utf8_lossy(&request[..length])
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
     }
 
     /// A requested patch beyond GitHub's first hundred changed files remains

@@ -1613,7 +1613,7 @@ final class SessionSynchronizationTests: XCTestCase {
     _ = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.queuedTurn()
+        message: try SynchronizationFixture.completedTurn()
       )
     )
     _ = transport.send(
@@ -1639,6 +1639,87 @@ final class SessionSynchronizationTests: XCTestCase {
       .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
     )
     XCTAssertEqual(transport.machine.diagnostics.first?.kind, .protocolViolation)
+  }
+
+  func testTurnAfterModelCallUsageStartsFailsFrameOrderClosed() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.completedTurn()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallUsage()
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.secondQueuedTurn()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testModelCallBoundaryRequiresEveryExposedTerminalIdentity() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.completedTurn()
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testQueuedTurnCannotOwnModelCallUsage() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.queuedTurn()
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallUsage()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
   }
 
   func testZeroModelCallSnapshotRequiresExplicitBoundary() throws {
@@ -1673,7 +1754,7 @@ final class SessionSynchronizationTests: XCTestCase {
     _ = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.queuedTurn()
+        message: try SynchronizationFixture.completedTurn()
       )
     )
     _ = transport.send(
@@ -1845,10 +1926,13 @@ private enum SynchronizationFixture {
   static let session = "11111111-1111-4111-8111-111111111111"
   static let turn = "22222222-2222-4222-8222-222222222222"
   static let acceptedInput = "33333333-3333-4333-8333-333333333333"
+  static let secondTurn = "99999999-9999-4999-8999-999999999999"
+  static let secondAcceptedInput = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
   static let earlierModelCall = "44444444-4444-4444-8444-444444444444"
   static let modelCall = "55555555-5555-4555-8555-555555555555"
   static let entry = "66666666-6666-4666-8666-666666666666"
   static let frontier = "77777777-7777-4777-8777-777777777777"
+  static let attempt = "88888888-8888-4888-8888-888888888888"
   static let oversizedDiagnosticKind = String(
     repeating: "x",
     count: SignalboxSessionSynchronizationMachine.maximumRetainedDiagnosticMessageUTF8Bytes + 1
@@ -2294,6 +2378,41 @@ private enum SynchronizationFixture {
           "type":"queued",
           "accepted_input_id":"\(acceptedInput)",
           "content":"fixture owner input"
+        }
+      }
+      """
+    )
+  }
+
+  static func secondQueuedTurn() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(secondTurn)",
+        "acceptance_position":"2",
+        "state":{
+          "type":"queued",
+          "accepted_input_id":"\(secondAcceptedInput)",
+          "content":"fixture second owner input"
+        }
+      }
+      """
+    )
+  }
+
+  static func completedTurn() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"completed",
+          "terminal_frontier_id":"\(frontier)",
+          "terminal_attempt_id":"\(attempt)",
+          "terminal_model_call_id":"\(modelCall)"
         }
       }
       """

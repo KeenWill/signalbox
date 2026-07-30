@@ -1347,10 +1347,23 @@ public struct SignalboxFailedTerminalModelCall: Decodable, Equatable, Sendable {
   public let cause: SignalboxFailedModelCallCause?
 
   public init(from decoder: Decoder) throws {
-    try SignalboxUntaggedPayload(from: decoder).rejectUnadmittedFields(
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
       ["model_call_id", "disposition", "cause"],
       decoder: decoder
     )
+    // The wire contract uses omission for an unclassified failure. Accepting
+    // explicit null here would erase the distinction before callers can reject
+    // the malformed known frame.
+    guard payload.payload["cause"] != .null else {
+      throw DecodingError.valueNotFound(
+        SignalboxFailedModelCallCause.self,
+        .init(
+          codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("cause")],
+          debugDescription: "A provider-failure cause must be absent or a closed token."
+        )
+      )
+    }
     modelCallID = try decoder.decode("model_call_id")
     disposition = try decoder.decode("disposition")
     cause = try decoder.decodeIfPresent("cause")

@@ -395,6 +395,8 @@ pub enum CodeHostTransportFailure {
     InvalidResponse,
     /// Response bytes exceeded the fixed operation cap.
     ResponseTooLarge,
+    /// A multi-request read observed the change-request head move.
+    HeadRevisionChanged,
     /// Transport loss left physical dispatch unknown.
     DispatchUnknown,
 }
@@ -586,7 +588,10 @@ where
                 if let Some(class) = transport_failure_class(kind, failure) {
                     return Err(CodeHostExecutorError { class });
                 }
-                let detail = match transport_failure_detail(failure) {
+                let Some(detail) = transport_failure_detail(failure) else {
+                    return Err(caller_bug());
+                };
+                let detail = match detail {
                     KnownFailureDetail::CredentialUnavailable => {
                         self.credential_unavailable_detail.clone()
                     }
@@ -637,14 +642,17 @@ enum KnownFailureDetail {
 /// deployment fact the operator can act on, so they read as a credential
 /// failure rather than as something the code host decided; the code host never
 /// saw the request.
-const fn transport_failure_detail(failure: CodeHostTransportFailure) -> KnownFailureDetail {
+const fn transport_failure_detail(failure: CodeHostTransportFailure) -> Option<KnownFailureDetail> {
     match failure {
-        CodeHostTransportFailure::InvalidCredential => KnownFailureDetail::CredentialUnavailable,
-        CodeHostTransportFailure::NotFound => KnownFailureDetail::ChangedFileNotFound,
+        CodeHostTransportFailure::InvalidCredential => {
+            Some(KnownFailureDetail::CredentialUnavailable)
+        }
+        CodeHostTransportFailure::NotFound => Some(KnownFailureDetail::ChangedFileNotFound),
         CodeHostTransportFailure::Rejected
         | CodeHostTransportFailure::InvalidResponse
-        | CodeHostTransportFailure::ResponseTooLarge
-        | CodeHostTransportFailure::DispatchUnknown => KnownFailureDetail::CodeHostRejected,
+        | CodeHostTransportFailure::ResponseTooLarge => Some(KnownFailureDetail::CodeHostRejected),
+        CodeHostTransportFailure::HeadRevisionChanged
+        | CodeHostTransportFailure::DispatchUnknown => None,
     }
 }
 
@@ -663,6 +671,7 @@ const fn transport_failure_class(
         }
         CodeHostTransportFailure::InvalidResponse
         | CodeHostTransportFailure::ResponseTooLarge
+        | CodeHostTransportFailure::HeadRevisionChanged
         | CodeHostTransportFailure::DispatchUnknown => Some(OperatorFailureClass::Infrastructure {
             commit_ambiguous: kind.mutates(),
         }),
@@ -1567,7 +1576,7 @@ mod tests {
     fn invalid_credential_presents_the_credential_detail() {
         assert_eq!(
             transport_failure_detail(CodeHostTransportFailure::InvalidCredential),
-            KnownFailureDetail::CredentialUnavailable
+            Some(KnownFailureDetail::CredentialUnavailable)
         );
     }
 
@@ -1577,7 +1586,7 @@ mod tests {
     fn rejected_request_presents_the_code_host_detail() {
         assert_eq!(
             transport_failure_detail(CodeHostTransportFailure::Rejected),
-            KnownFailureDetail::CodeHostRejected
+            Some(KnownFailureDetail::CodeHostRejected)
         );
     }
 
@@ -1587,7 +1596,7 @@ mod tests {
     fn missing_changed_file_presents_the_not_found_detail() {
         assert_eq!(
             transport_failure_detail(CodeHostTransportFailure::NotFound),
-            KnownFailureDetail::ChangedFileNotFound
+            Some(KnownFailureDetail::ChangedFileNotFound)
         );
     }
 
@@ -1597,7 +1606,7 @@ mod tests {
     fn invalid_response_presents_the_code_host_detail() {
         assert_eq!(
             transport_failure_detail(CodeHostTransportFailure::InvalidResponse),
-            KnownFailureDetail::CodeHostRejected
+            Some(KnownFailureDetail::CodeHostRejected)
         );
     }
 
