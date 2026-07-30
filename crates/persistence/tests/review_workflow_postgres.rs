@@ -1550,13 +1550,17 @@ async fn inv040_event_head_retains_configured_workflow_schema() -> Result<(), Bo
     )
     .fetch_one(&pool)
     .await?;
-    let trigger_path_is_pinned: bool = sqlx::query_scalar(
-        "SELECT $2 = ANY(function.proconfig)
+    let transition_paths_are_pinned: bool = sqlx::query_scalar(
+        "SELECT count(*) = 2
+                AND bool_and($2 = ANY(function.proconfig))
            FROM pg_proc AS function
            JOIN pg_namespace AS namespace
              ON namespace.oid = function.pronamespace
           WHERE namespace.nspname = $1
-            AND function.proname = 'advance_review_finding_event_head'",
+            AND function.proname IN (
+                'authenticate_review_finding_event_head',
+                'advance_review_finding_event_head'
+            )",
     )
     .bind(WORKFLOW_SCHEMA)
     .bind(PINNED_SEARCH_PATH)
@@ -1565,7 +1569,7 @@ async fn inv040_event_head_retains_configured_workflow_schema() -> Result<(), Bo
 
     assert_eq!(current_schema, WORKFLOW_SCHEMA);
     assert_eq!(head_schema, WORKFLOW_SCHEMA);
-    assert!(trigger_path_is_pinned);
+    assert!(transition_paths_are_pinned);
     Ok(())
 }
 
@@ -3171,6 +3175,215 @@ async fn inv040_finding_load_rejects_mismatched_event_head() -> Result<(), Box<d
     Ok(())
 }
 
+/// INV-040: a relational caller cannot forge an event head and then append a
+/// later event while omitting the event that supposedly established the head.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_schema_rejects_forged_head_with_gapped_history() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let fix_pass = insert_fixture_pass(&fixture, 0x8d1, ReviewPassKind::Fix).await;
+    let evidence = succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass, fix_pass]).await;
+    let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x8d2)));
+    let review_evidence = pass_with_produced_findings(vec![finding_ref], evidence[0].clone());
+    let open = finding(finding_ref, review_evidence, &fixture.target_snapshot);
+    fixture.store.insert_finding(&open).await?;
+
+    let attack: Result<(), sqlx::Error> = async {
+        let mut transaction = pool.begin().await?;
+        sqlx::query(
+            "UPDATE review_finding_event_head
+                SET event_ordinal = 1,
+                    status = 'accepted',
+                    event_pass_kind = 'judge',
+                    external_link_id = NULL
+              WHERE finding_id = $1",
+        )
+        .bind(finding_ref.finding().into_uuid())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE review_pass
+                SET result_kind = 'finding_event',
+                    result_finding_id = $2,
+                    result_finding_run_id = $3,
+                    result_finding_pass_id = $4,
+                    result_event_ordinal = 2,
+                    result_event_kind = 'fixed'
+              WHERE pass_id = $1",
+        )
+        .bind(fix_pass.pass().into_uuid())
+        .bind(finding_ref.finding().into_uuid())
+        .bind(finding_ref.run().run().into_uuid())
+        .bind(finding_ref.pass().pass().into_uuid())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO review_finding_event
+                (finding_id, event_ordinal, finding_run_id, target_id,
+                 event_pass_id, event_pass_run_id, event_kind, reason,
+                 referenced_finding_id, referenced_finding_run_id,
+                 referenced_finding_target_id, referenced_finding_pass_id,
+                 referenced_finding_status, external_link_id,
+                 external_link_association_kind)
+             VALUES (
+                 $1, 2, $2, $3, $4, $5, 'fixed', NULL,
+                 NULL, NULL, NULL, NULL, NULL, NULL, NULL
+             )",
+        )
+        .bind(finding_ref.finding().into_uuid())
+        .bind(finding_ref.run().run().into_uuid())
+        .bind(finding_ref.target().into_uuid())
+        .bind(fix_pass.pass().into_uuid())
+        .bind(fix_pass.run().run().into_uuid())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await
+    }
+    .await;
+
+    let error = attack.expect_err("a head cannot advance without its exact durable event");
+    assert_sqlstate(&error, "23514");
+    assert_eq!(
+        fixture.store.load_finding(finding_ref.finding()).await?,
+        Some(open)
+    );
+    Ok(())
+}
+
+/// INV-040 / INV-041: a non-posting attachment associated with a finding waits
+/// for a concurrent finding transition before loading the aggregate projection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_inv041_attachment_load_waits_for_finding_transition() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let judge_pass = insert_fixture_pass(&fixture, 0x8e1, ReviewPassKind::Judge).await;
+    let fix_pass = insert_fixture_pass(&fixture, 0x8e2, ReviewPassKind::Fix).await;
+    let attaching_pass =
+        insert_fixture_pass(&fixture, 0x8e3, ReviewPassKind::ImportExternalContext).await;
+    let evidence = succeed_fixture_passes(
+        &pool,
+        &fixture.store,
+        &[fixture.pass, judge_pass, fix_pass, attaching_pass],
+    )
+    .await;
+    let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x8e4)));
+    let review_evidence = pass_with_produced_findings(vec![finding_ref], evidence[0].clone());
+    let open = finding(finding_ref, review_evidence, &fixture.target_snapshot);
+    fixture.store.insert_finding(&open).await?;
+    let accepted_event = finding_event(
+        finding_ref,
+        ReviewEventOrdinal::one(),
+        evidence[1].clone(),
+        ReviewFindingEventKind::Accepted,
+    );
+    let accepted = open
+        .apply(accepted_event.clone())
+        .expect("judge accepts the open finding");
+    fixture
+        .store
+        .append_finding_event(finding_ref.finding(), accepted_event)
+        .await?;
+    let fixed_event = finding_event(
+        finding_ref,
+        ReviewEventOrdinal::try_new(2).expect("second ordinal is valid"),
+        evidence[2].clone(),
+        ReviewFindingEventKind::Fixed,
+    );
+    let fixed = accepted
+        .apply(fixed_event.clone())
+        .expect("fix pass closes the accepted finding");
+
+    let link = ReviewExternalLinkId::from_uuid(uuid(0x8e5));
+    let reservation = ReviewExternalLink::try_reserve(
+        link,
+        ReviewExternalLinkAssociation::Finding(finding_ref),
+        key("example-code-host"),
+        ReviewExternalObjectKind::Commit,
+        &fixture.target_snapshot,
+    )
+    .expect("reservation matches the finding target");
+    fixture
+        .store
+        .reserve_external_link(reservation.clone())
+        .await?;
+    let attachment = attachment(link, evidence[3].clone(), key("commit-8e5"));
+    let expected_link = reservation
+        .attach(attachment.clone())
+        .expect("same-target pass may attach");
+
+    let mut transitioning = pool.begin().await?;
+    sqlx::query(
+        "SELECT finding_id
+           FROM review_finding
+          WHERE finding_id = ANY($1::uuid[])
+          ORDER BY finding_id
+          FOR NO KEY UPDATE",
+    )
+    .bind(vec![finding_ref.finding().into_uuid()])
+    .fetch_all(&mut *transitioning)
+    .await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET result_kind = 'finding_event',
+                result_finding_id = $2,
+                result_finding_run_id = $3,
+                result_finding_pass_id = $4,
+                result_event_ordinal = $5,
+                result_event_kind = 'fixed'
+          WHERE pass_id = $1",
+    )
+    .bind(fixed_event.pass().pass().into_uuid())
+    .bind(fixed_event.finding().finding().into_uuid())
+    .bind(fixed_event.finding().run().run().into_uuid())
+    .bind(fixed_event.finding().pass().pass().into_uuid())
+    .bind(i64::from(fixed_event.ordinal().get()))
+    .execute(&mut *transitioning)
+    .await?;
+
+    let attaching_store = fixture.store.clone();
+    let attaching =
+        tokio::spawn(async move { attaching_store.attach_external_link(link, attachment).await });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "attachment waits for the associated finding transition lock"
+    );
+    sqlx::query(
+        "INSERT INTO review_finding_event
+            (finding_id, event_ordinal, finding_run_id, target_id,
+             event_pass_id, event_pass_run_id, event_kind, reason,
+             referenced_finding_id, referenced_finding_run_id,
+             referenced_finding_target_id, referenced_finding_pass_id,
+             referenced_finding_status, external_link_id,
+             external_link_association_kind)
+         VALUES (
+             $1, $2, $3, $4, $5, $6, 'fixed', NULL,
+             NULL, NULL, NULL, NULL, NULL, NULL, NULL
+         )",
+    )
+    .bind(fixed_event.finding().finding().into_uuid())
+    .bind(i64::from(fixed_event.ordinal().get()))
+    .bind(fixed_event.finding().run().run().into_uuid())
+    .bind(fixed_event.finding().target().into_uuid())
+    .bind(fixed_event.pass().pass().into_uuid())
+    .bind(fixed_event.pass().run().run().into_uuid())
+    .execute(&mut *transitioning)
+    .await?;
+    transitioning.commit().await?;
+
+    assert_eq!(
+        attaching.await.expect("attachment task remains live")?,
+        Some(expected_link)
+    );
+    assert_eq!(
+        fixture.store.load_finding(finding_ref.finding()).await?,
+        Some(fixed)
+    );
+    Ok(())
+}
+
 /// INV-040: a direct event insert that waits behind its uncommitted predecessor
 /// authenticates the post-wait head and admits the next ordinal.
 #[tokio::test(flavor = "multi_thread")]
@@ -3976,7 +4189,8 @@ async fn inv040_loader_rejects_transitive_cross_run_reference_cycle() -> Result<
     sqlx::query(
         "ALTER TABLE review_finding_event
          DISABLE TRIGGER review_finding_event_sequence_is_guarded,
-         DISABLE TRIGGER review_finding_event_transition_head_is_guarded",
+         DISABLE TRIGGER review_finding_event_transition_head_is_guarded,
+         DISABLE TRIGGER review_finding_event_transition_head_is_advanced",
     )
     .execute(&pool)
     .await?;
@@ -4047,7 +4261,8 @@ async fn inv040_loader_rejects_transitive_cross_run_reference_cycle() -> Result<
     sqlx::query(
         "ALTER TABLE review_finding_event
          ENABLE TRIGGER review_finding_event_sequence_is_guarded,
-         ENABLE TRIGGER review_finding_event_transition_head_is_guarded",
+         ENABLE TRIGGER review_finding_event_transition_head_is_guarded,
+         ENABLE TRIGGER review_finding_event_transition_head_is_advanced",
     )
     .execute(&pool)
     .await?;

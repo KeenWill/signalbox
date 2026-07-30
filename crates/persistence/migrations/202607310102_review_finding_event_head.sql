@@ -155,8 +155,23 @@ BEGIN
             COALESCE(OLD.event_ordinal, 0) + 1
        OR NEW.status = 'open'
        OR NEW.event_pass_kind IS NULL
+       OR NOT EXISTS (
+           SELECT 1
+             FROM review_finding_event AS event
+             JOIN review_pass AS event_pass
+               ON event_pass.pass_id = event.event_pass_id
+              AND event_pass.run_id = event.event_pass_run_id
+              AND event_pass.target_id = event.target_id
+            WHERE event.finding_id = NEW.finding_id
+              AND event.event_ordinal = NEW.event_ordinal
+              AND event.event_kind = NEW.status
+              AND event_pass.pass_kind = NEW.event_pass_kind
+              AND event.external_link_id
+                    IS NOT DISTINCT FROM NEW.external_link_id
+       )
     THEN
-        RAISE EXCEPTION 'review finding event head must advance exactly once'
+        RAISE EXCEPTION
+            'review finding event head must advance to its exact durable event'
             USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
@@ -168,7 +183,7 @@ BEFORE INSERT OR UPDATE OR DELETE ON review_finding_event_head
 FOR EACH ROW
 EXECUTE FUNCTION guard_review_finding_event_head_change();
 
-CREATE FUNCTION advance_review_finding_event_head()
+CREATE FUNCTION authenticate_review_finding_event_head()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -179,7 +194,6 @@ DECLARE
     subject_pass_kind text;
     subject_external_link uuid;
     referenced_status text;
-    new_event_pass_kind text;
 BEGIN
     FOR locked_head IN
         SELECT head.finding_id,
@@ -282,6 +296,26 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
+    RETURN NEW;
+END;
+$$;
+
+-- This trigger intentionally sorts after
+-- review_finding_event_sequence_is_guarded. The existing trigger locks
+-- immutable finding roots first; the transition-head lock then follows one
+-- global root-to-head order for store and direct relational admission alike.
+CREATE TRIGGER review_finding_event_transition_head_is_guarded
+BEFORE INSERT ON review_finding_event
+FOR EACH ROW
+EXECUTE FUNCTION authenticate_review_finding_event_head();
+
+CREATE FUNCTION advance_review_finding_event_head()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    new_event_pass_kind text;
+BEGIN
     SELECT pass_kind INTO new_event_pass_kind
       FROM review_pass
      WHERE pass_id = NEW.event_pass_id
@@ -298,16 +332,12 @@ BEGIN
            event_pass_kind = new_event_pass_kind,
            external_link_id = NEW.external_link_id
      WHERE finding_id = NEW.finding_id;
-    RETURN NEW;
+    RETURN NULL;
 END;
 $$;
 
--- This trigger intentionally sorts after
--- review_finding_event_sequence_is_guarded. The existing trigger locks
--- immutable finding roots first; the transition-head lock then follows one
--- global root-to-head order for store and direct relational admission alike.
-CREATE TRIGGER review_finding_event_transition_head_is_guarded
-BEFORE INSERT ON review_finding_event
+CREATE TRIGGER review_finding_event_transition_head_is_advanced
+AFTER INSERT ON review_finding_event
 FOR EACH ROW
 EXECUTE FUNCTION advance_review_finding_event_head();
 
@@ -770,6 +800,11 @@ BEGIN
                          FROM review_finding_event AS latest
                         WHERE latest.finding_id = checked_finding
                    )
+                   AND head.event_ordinal = (
+                       SELECT count(*)
+                         FROM review_finding_event AS existing
+                        WHERE existing.finding_id = checked_finding
+                   )
                )
            )
     )
@@ -832,6 +867,12 @@ BEGIN
     );
     EXECUTE pg_catalog.format(
         'ALTER FUNCTION %I.guard_review_finding_event_head_change() '
+        'SET search_path TO %I, pg_catalog, pg_temp',
+        workflow_schema,
+        workflow_schema
+    );
+    EXECUTE pg_catalog.format(
+        'ALTER FUNCTION %I.authenticate_review_finding_event_head() '
         'SET search_path TO %I, pg_catalog, pg_temp',
         workflow_schema,
         workflow_schema

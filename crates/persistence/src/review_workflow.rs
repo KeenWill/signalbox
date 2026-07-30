@@ -1216,10 +1216,17 @@ impl ReviewWorkflowStore {
             _ => None,
         }
         .transpose()?;
-        if let Some(event) = posted_event.as_ref() {
-            let finding = vec![event.finding().finding().into_uuid()];
+        let transition_finding = posted_event
+            .as_ref()
+            .map(|event| event.finding().finding())
+            .or_else(|| match next.association() {
+                ReviewExternalLinkAssociation::Finding(reference) => Some(reference.finding()),
+                ReviewExternalLinkAssociation::Run(_)
+                | ReviewExternalLinkAssociation::Target(_) => None,
+            });
+        if let Some(finding) = transition_finding {
             sqlx::query(crate::lock_inventory::REVIEW_FINDINGS_TRANSITION)
-                .bind(&finding)
+                .bind(vec![finding.into_uuid()])
                 .fetch_all(&mut *transaction)
                 .await?;
         }
