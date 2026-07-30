@@ -30,12 +30,25 @@ use signalbox_domain::{
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
     SessionInputPosition, SteeringBinding, SteeringContinuationRoundReconstitutionInput,
-    SteeringReclassificationReason, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputPreparationFailure, SubmitInputReconstitutionFailure,
-    SubmitInputReconstitutionInput, SubmitInputRejectedResult, SubmitInputResult,
-    SubmitInputTerminalSourceReconstitutionInput, SubmitInputTurnOriginReconstitutionInput,
-    TerminalAttemptEndReconstitutionInput, ToolRequestId, TranscriptAncestry, TurnAttemptId,
-    TurnId, UnstoppedAttemptDisposition, UserContent,
+    SteeringReclassificationReason, SubmitInput,
+    SubmitInputAppliedPendingSteeringReconstitutionInput, SubmitInputAppliedResult,
+    SubmitInputAppliedTurnOriginReconstitutionInput, SubmitInputDirectTurnOriginConstructionInput,
+    SubmitInputInterruptedModelCallReconciliationConstructionInput, SubmitInputPreparationFailure,
+    SubmitInputReclassifiedTurnOriginConstructionInput, SubmitInputReconstitutionFailure,
+    SubmitInputReconstitutionInput,
+    SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput,
+    SubmitInputRejectedActiveTurnMismatchReconstitutionInput,
+    SubmitInputRejectedActiveTurnPresentReconstitutionInput,
+    SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput,
+    SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput,
+    SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
+    SubmitInputRejectedNoActiveTurnReconstitutionInput, SubmitInputRejectedResult,
+    SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
+    SubmitInputRejectedSessionNotFoundReconstitutionInput,
+    SubmitInputRejectedUnknownModelAliasReconstitutionInput, SubmitInputResult,
+    SubmitInputTerminalSourceConstructionInput, SubmitInputTerminalSourceReconstitutionInput,
+    SubmitInputTurnOriginReconstitutionInput, TerminalAttemptEndReconstitutionInput, ToolRequestId,
+    TranscriptAncestry, TurnAttemptId, TurnId, UnstoppedAttemptDisposition, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -518,7 +531,8 @@ impl SubmitInputRepository {
                 | CommandKind::ReplaceSessionDefaults
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::DecideToolRequest
-                | CommandKind::ReviewWorkflow,
+                | CommandKind::ReviewWorkflow
+                | CommandKind::CompactSession,
             ) => Err(Self::wrong_kind(command_id)),
         }
     }
@@ -603,7 +617,8 @@ where
             | CommandKind::ReplaceSessionDefaults
             | CommandKind::ReplaceSessionMetadata
             | CommandKind::DecideToolRequest
-            | CommandKind::ReviewWorkflow,
+            | CommandKind::ReviewWorkflow
+            | CommandKind::CompactSession,
         ) => {
             return Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
@@ -638,7 +653,8 @@ where
                 | CommandKind::ReplaceSessionDefaults
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::DecideToolRequest
-                | CommandKind::ReviewWorkflow,
+                | CommandKind::ReviewWorkflow
+                | CommandKind::CompactSession,
             ) => Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
             )),
@@ -4883,15 +4899,17 @@ pub(crate) async fn load_turn_origin_graph(
                     );
                 }
                 SubmitInputTurnOriginReconstitutionInput::new(
-                    receipt,
-                    AcceptedInputLifecycle::new(
-                        link.accepted_input,
-                        AcceptedInputDisposition::OriginOf(turn_id_from_uuid(ready.1)),
-                    ),
-                    link.accepted_input,
-                    session_id_from_uuid(ready.0),
-                    turn_id_from_uuid(ready.1),
-                    link.queue_order,
+                    SubmitInputDirectTurnOriginConstructionInput {
+                        receipt,
+                        lifecycle: AcceptedInputLifecycle::new(
+                            link.accepted_input,
+                            AcceptedInputDisposition::OriginOf(turn_id_from_uuid(ready.1)),
+                        ),
+                        queue_accepted_input: link.accepted_input,
+                        queue_session: session_id_from_uuid(ready.0),
+                        queue_turn: turn_id_from_uuid(ready.1),
+                        queue_order: link.queue_order,
+                    },
                 )
             }
             StoredTurnOriginKind::Reclassified {
@@ -4923,11 +4941,15 @@ pub(crate) async fn load_turn_origin_graph(
                     | StoredTerminalTurnDisposition::Refused
                     | StoredTerminalTurnDisposition::Failed => {
                         SubmitInputTerminalSourceReconstitutionInput::new(
-                            source_origin.clone(),
-                            source_turn,
-                            source_disposition.unstopped_domain().ok_or(
-                                SubmitInputCorruption::Inconsistent("terminal source disposition"),
-                            )?,
+                            SubmitInputTerminalSourceConstructionInput {
+                                origin: source_origin.clone(),
+                                turn: source_turn,
+                                disposition: source_disposition.unstopped_domain().ok_or(
+                                    SubmitInputCorruption::Inconsistent(
+                                        "terminal source disposition",
+                                    ),
+                                )?,
+                            },
                         )
                     }
                     StoredTerminalTurnDisposition::Cancelled { interrupt_command } => {
@@ -4959,15 +4981,17 @@ pub(crate) async fn load_turn_origin_graph(
                             .into());
                         };
                         SubmitInputTerminalSourceReconstitutionInput::new(
-                            source_origin.clone(),
-                            source_turn,
-                            signalbox_domain::TurnDisposition::Cancelled {
-                                cause: interrupt_origin
-                                    .applied_interrupt()
-                                    .ok_or(SubmitInputCorruption::Inconsistent(
-                                        "cancelled source interrupt authority",
-                                    ))?
-                                    .proof(),
+                            SubmitInputTerminalSourceConstructionInput {
+                                origin: source_origin.clone(),
+                                turn: source_turn,
+                                disposition: signalbox_domain::TurnDisposition::Cancelled {
+                                    cause: interrupt_origin
+                                        .applied_interrupt()
+                                        .ok_or(SubmitInputCorruption::Inconsistent(
+                                            "cancelled source interrupt authority",
+                                        ))?
+                                        .proof(),
+                                },
                             },
                         )
                     }
@@ -5005,32 +5029,36 @@ pub(crate) async fn load_turn_origin_graph(
                         };
                         SubmitInputTerminalSourceReconstitutionInput::
                             interrupted_model_call_reconciliation(
-                                source_origin.clone(),
-                                source_turn,
-                                ambiguous_call,
-                                interrupt_origin
-                                    .applied_interrupt()
-                                    .ok_or(SubmitInputCorruption::Inconsistent(
-                                        "reconciliation source interrupt authority",
-                                    ))?
-                                    .proof(),
+                                SubmitInputInterruptedModelCallReconciliationConstructionInput {
+                                    origin: source_origin.clone(),
+                                    turn: source_turn,
+                                    ambiguous_call,
+                                    interrupt: interrupt_origin
+                                        .applied_interrupt()
+                                        .ok_or(SubmitInputCorruption::Inconsistent(
+                                            "reconciliation source interrupt authority",
+                                        ))?
+                                        .proof(),
+                                },
                             )
                     }
                 };
                 SubmitInputTurnOriginReconstitutionInput::reclassified(
-                    receipt,
-                    AcceptedInputLifecycle::new(
-                        link.accepted_input,
-                        AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
-                            turn: turn_id_from_uuid(ready.1),
-                            reason: SteeringReclassificationReason::NoSafePointBeforeTerminal,
-                        },
-                    ),
-                    link.accepted_input,
-                    session_id_from_uuid(ready.0),
-                    turn_id_from_uuid(ready.1),
-                    link.queue_order,
-                    source_terminal,
+                    SubmitInputReclassifiedTurnOriginConstructionInput {
+                        receipt,
+                        lifecycle: AcceptedInputLifecycle::new(
+                            link.accepted_input,
+                            AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
+                                turn: turn_id_from_uuid(ready.1),
+                                reason: SteeringReclassificationReason::NoSafePointBeforeTerminal,
+                            },
+                        ),
+                        queue_accepted_input: link.accepted_input,
+                        queue_session: session_id_from_uuid(ready.0),
+                        queue_turn: turn_id_from_uuid(ready.1),
+                        queue_order: link.queue_order,
+                        source_terminal,
+                    },
                 )
             }
         };
@@ -5297,27 +5325,29 @@ fn decode_applied_turn_origin(
     )?;
 
     Ok(SubmitInputReconstitutionInput::applied_turn_origin(
-        command,
-        stored_actor,
-        result_session,
-        result_accepted_input,
-        result_turn,
-        predecessor_origin,
-        accepting_command,
-        accepted_input,
-        accepted_session,
-        accepted_content,
-        accepted_delivery,
-        accepted_position,
-        AcceptedInputDisposition::OriginOf(accepted_origin_turn),
-        queued_session,
-        queued_turn,
-        queue_order,
-        defaults_session,
-        defaults_version,
-        defaults,
-        stored_requested_model,
-        stored_frozen_model,
+        SubmitInputAppliedTurnOriginReconstitutionInput {
+            command,
+            stored_actor,
+            result_session,
+            result_accepted_input,
+            result_turn,
+            predecessor_origin,
+            accepted_command: accepting_command,
+            accepted_input,
+            accepted_session,
+            accepted_content,
+            accepted_delivery,
+            accepted_position,
+            accepted_disposition: AcceptedInputDisposition::OriginOf(accepted_origin_turn),
+            queue_session: queued_session,
+            queue_turn: queued_turn,
+            queue_order,
+            defaults_session,
+            defaults_version,
+            defaults,
+            stored_requested_model,
+            stored_frozen_model,
+        },
     ))
 }
 
@@ -5353,18 +5383,20 @@ fn decode_applied_pending_steering(
     let accepted_position = decode_position(row, "accepted_position")?;
 
     Ok(SubmitInputReconstitutionInput::applied_pending_steering(
-        command,
-        stored_actor,
-        result_session,
-        result_accepted_input,
-        result_source_turn,
-        source_turn_origin,
-        accepting_command,
-        accepted_input,
-        accepted_session,
-        accepted_content,
-        accepted_delivery,
-        accepted_position,
+        SubmitInputAppliedPendingSteeringReconstitutionInput {
+            command,
+            stored_actor,
+            result_session,
+            result_accepted_input,
+            result_source_turn,
+            source_turn_origin,
+            accepted_command: accepting_command,
+            accepted_input,
+            accepted_session,
+            accepted_content,
+            accepted_delivery,
+            accepted_position,
+        },
     ))
 }
 
@@ -5408,9 +5440,11 @@ fn decode_rejected(
                 "session-not-found result fields",
             )?;
             Ok(SubmitInputReconstitutionInput::rejected_session_not_found(
-                command,
-                stored_actor,
-                result_session,
+                SubmitInputRejectedSessionNotFoundReconstitutionInput {
+                    command,
+                    stored_actor,
+                    result_session,
+                },
             ))
         }
         "no_active_turn" => {
@@ -5426,12 +5460,14 @@ fn decode_rejected(
                 );
             }
             Ok(SubmitInputReconstitutionInput::rejected_no_active_turn(
-                command,
-                stored_actor,
-                result_session,
-                turn_id_from_uuid(expected_turn.ok_or(SubmitInputCorruption::Missing(
-                    "result_expected_active_turn_id",
-                ))?),
+                SubmitInputRejectedNoActiveTurnReconstitutionInput {
+                    command,
+                    stored_actor,
+                    result_session,
+                    result_expected_active_turn: turn_id_from_uuid(expected_turn.ok_or(
+                        SubmitInputCorruption::Missing("result_expected_active_turn_id"),
+                    )?),
+                },
             ))
         }
         "active_turn_present" => {
@@ -5449,14 +5485,16 @@ fn decode_rejected(
             }
             Ok(
                 SubmitInputReconstitutionInput::rejected_active_turn_present(
-                    command,
-                    stored_actor,
-                    result_session,
-                    turn_id_from_uuid(actual_turn.ok_or(SubmitInputCorruption::Missing(
-                        "result_actual_active_turn_id",
-                    ))?),
-                    active_turn_origin
-                        .ok_or(SubmitInputCorruption::Missing("active turn origin"))?,
+                    SubmitInputRejectedActiveTurnPresentReconstitutionInput {
+                        command,
+                        stored_actor,
+                        result_session,
+                        result_active_turn: turn_id_from_uuid(actual_turn.ok_or(
+                            SubmitInputCorruption::Missing("result_actual_active_turn_id"),
+                        )?),
+                        active_turn_origin: active_turn_origin
+                            .ok_or(SubmitInputCorruption::Missing("active turn origin"))?,
+                    },
                 ),
             )
         }
@@ -5474,17 +5512,19 @@ fn decode_rejected(
             }
             Ok(
                 SubmitInputReconstitutionInput::rejected_active_turn_mismatch(
-                    command,
-                    stored_actor,
-                    result_session,
-                    turn_id_from_uuid(expected_turn.ok_or(SubmitInputCorruption::Missing(
-                        "result_expected_active_turn_id",
-                    ))?),
-                    turn_id_from_uuid(actual_turn.ok_or(SubmitInputCorruption::Missing(
-                        "result_actual_active_turn_id",
-                    ))?),
-                    active_turn_origin
-                        .ok_or(SubmitInputCorruption::Missing("actual turn origin"))?,
+                    SubmitInputRejectedActiveTurnMismatchReconstitutionInput {
+                        command,
+                        stored_actor,
+                        result_session,
+                        result_expected_active_turn: turn_id_from_uuid(expected_turn.ok_or(
+                            SubmitInputCorruption::Missing("result_expected_active_turn_id"),
+                        )?),
+                        result_actual_active_turn: turn_id_from_uuid(actual_turn.ok_or(
+                            SubmitInputCorruption::Missing("result_actual_active_turn_id"),
+                        )?),
+                        actual_turn_origin: active_turn_origin
+                            .ok_or(SubmitInputCorruption::Missing("actual turn origin"))?,
+                    },
                 ),
             )
         }
@@ -5501,24 +5541,26 @@ fn decode_rejected(
             }
             Ok(
                 SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
-                    command,
-                    stored_actor,
-                    result_session,
-                    decode_optional_defaults_version(
-                        expected_defaults,
-                        "result_expected_defaults_version",
-                    )?
-                    .ok_or(SubmitInputCorruption::Missing(
-                        "result_expected_defaults_version",
-                    ))?,
-                    decode_optional_defaults_version(
-                        current_defaults,
-                        "result_current_defaults_version",
-                    )?
-                    .ok_or(SubmitInputCorruption::Missing(
-                        "result_current_defaults_version",
-                    ))?,
-                    active_turn_origin,
+                    SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput {
+                        command,
+                        stored_actor,
+                        result_session,
+                        result_expected: decode_optional_defaults_version(
+                            expected_defaults,
+                            "result_expected_defaults_version",
+                        )?
+                        .ok_or(SubmitInputCorruption::Missing(
+                            "result_expected_defaults_version",
+                        ))?,
+                        result_current: decode_optional_defaults_version(
+                            current_defaults,
+                            "result_current_defaults_version",
+                        )?
+                        .ok_or(SubmitInputCorruption::Missing(
+                            "result_current_defaults_version",
+                        ))?,
+                        active_turn_origin,
+                    },
                 ),
             )
         }
@@ -5556,17 +5598,19 @@ fn decode_rejected(
             }
             Ok(
                 SubmitInputReconstitutionInput::rejected_unknown_model_alias(
-                    command,
-                    stored_actor,
-                    result_session,
-                    ModelAlias::from_uuid(
-                        unknown_alias
-                            .ok_or(SubmitInputCorruption::Missing("result_unknown_alias_id"))?,
-                    ),
-                    defaults_session,
-                    defaults_version,
-                    defaults,
-                    active_turn_origin,
+                    SubmitInputRejectedUnknownModelAliasReconstitutionInput {
+                        command,
+                        stored_actor,
+                        result_session,
+                        result_alias: ModelAlias::from_uuid(
+                            unknown_alias
+                                .ok_or(SubmitInputCorruption::Missing("result_unknown_alias_id"))?,
+                        ),
+                        defaults_session,
+                        defaults_version,
+                        defaults,
+                        active_turn_origin,
+                    },
                 ),
             )
         }
@@ -5585,12 +5629,17 @@ fn decode_rejected(
             }
             Ok(
                 SubmitInputReconstitutionInput::rejected_acceptance_position_exhausted(
-                    command,
-                    stored_actor,
-                    result_session,
-                    decode_optional_position(last_position, "result_last_position")?
+                    SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput {
+                        command,
+                        stored_actor,
+                        result_session,
+                        result_last_position: decode_optional_position(
+                            last_position,
+                            "result_last_position",
+                        )?
                         .ok_or(SubmitInputCorruption::Missing("result_last_position"))?,
-                    active_turn_origin,
+                        active_turn_origin,
+                    },
                 ),
             )
         }
@@ -5626,13 +5675,15 @@ fn decode_rejected(
             }
             Ok(
                 SubmitInputReconstitutionInput::rejected_safe_point_unavailable_while_stopping(
-                    command,
-                    stored_actor,
-                    result_session,
-                    active_turn,
-                    active_turn_origin
-                        .ok_or(SubmitInputCorruption::Missing("active turn origin"))?,
-                    interrupt,
+                    SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput {
+                        command,
+                        stored_actor,
+                        result_session,
+                        result_active_turn: active_turn,
+                        active_turn_origin: active_turn_origin
+                            .ok_or(SubmitInputCorruption::Missing("active turn origin"))?,
+                        existing_interrupt: interrupt,
+                    },
                 ),
             )
         }
@@ -5663,14 +5714,16 @@ fn decode_rejected(
             ))?;
             Ok(
                 SubmitInputReconstitutionInput::rejected_interrupt_already_applied(
-                    command,
-                    stored_actor,
-                    result_session,
-                    active_turn,
-                    stored_command,
-                    active_turn_origin
-                        .ok_or(SubmitInputCorruption::Missing("active turn origin"))?,
-                    interrupt,
+                    SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput {
+                        command,
+                        stored_actor,
+                        result_session,
+                        result_active_turn: active_turn,
+                        result_existing_command: stored_command,
+                        active_turn_origin: active_turn_origin
+                            .ok_or(SubmitInputCorruption::Missing("active turn origin"))?,
+                        existing_interrupt: interrupt,
+                    },
                 ),
             )
         }
@@ -5690,14 +5743,18 @@ fn decode_rejected(
             let active_turn = turn_id_from_uuid(actual_turn.ok_or(
                 SubmitInputCorruption::Missing("result_actual_active_turn_id"),
             )?);
-            Ok(
-                SubmitInputReconstitutionInput::rejected_interrupt_unavailable_while_awaiting_approval(
+            let input =
+                SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput {
                     command,
                     stored_actor,
                     result_session,
-                    active_turn,
-                    active_turn_origin
+                    result_active_turn: active_turn,
+                    active_turn_origin: active_turn_origin
                         .ok_or(SubmitInputCorruption::Missing("active turn origin"))?,
+                };
+            Ok(
+                SubmitInputReconstitutionInput::rejected_interrupt_unavailable_while_awaiting_approval(
+                    input,
                 ),
             )
         }

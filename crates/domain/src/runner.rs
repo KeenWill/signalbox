@@ -25,36 +25,67 @@ const EXACT_VALUE_MAX_BYTES: usize = 4_096;
 /// Why runner domain input or stored facts fail closed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunnerDomainError {
+    /// The supplied text is empty.
     Empty,
+    /// The supplied text contains a null byte.
     ContainsNull,
+    /// The supplied text exceeds its byte limit.
     TooLong,
+    /// The supplied portable name has invalid syntax.
     InvalidName,
+    /// The tool input schema is not a normalized JSON object.
     InvalidToolInputSchema,
+    /// A capability class appears more than once.
     DuplicateCapabilityClass(RunnerCapabilityClass),
+    /// A tool name appears more than once.
     DuplicateTool(ToolName),
+    /// A credential profile appears more than once.
     DuplicateProfile(CredentialProfileName),
+    /// A workspace capability appears more than once.
     DuplicateWorkspaceCapability(WorkspaceCapability),
+    /// A credential profile names a tool absent from the catalog.
     UndeclaredProfileTool(ToolName),
+    /// An idempotent tool is incorrectly admissible on the daemon.
     UnsupportedDaemonIdempotency(ToolName),
+    /// The runner enrollment has been revoked.
     EnrollmentRevoked,
+    /// The enrollment or catalog does not allow the capability class.
     CapabilityClassNotAllowed(RunnerCapabilityClass),
+    /// The runner advertised a tool absent from the catalog.
     ToolUndeclared(ToolName),
+    /// The runner does not satisfy the tool placement policy.
     ToolLocusNotAllowed(ToolName),
+    /// The runner advertised a credential profile absent from the catalog.
     CredentialProfileUndeclared(CredentialProfileName),
+    /// The runner advertised a workspace capability absent from the catalog.
     WorkspaceCapabilityNotAllowed(WorkspaceCapability),
+    /// The requested transition is invalid from the current state.
     InvalidState,
+    /// Supplied facts do not correlate with the authoritative aggregate.
     CorrelationMismatch,
+    /// A positive generation has no representable successor.
     GenerationExhausted,
+    /// A retry reused an existing physical attempt identity.
     AttemptIdentityReuse,
+    /// The selected runner does not satisfy the placement request.
     SelectorMismatch,
+    /// The requested credential profile is unavailable on the selected runner.
     CredentialProfileUnavailable,
+    /// The supplied working directory differs from the pinned directory.
     WorkingDirectoryMismatch,
+    /// The selected runner lacks the required workspace capability.
     WorkspaceCapabilityUnavailable,
+    /// The provisioned workspace does not match the placement request.
     WorkspaceMismatch,
+    /// A required tool is unavailable on the selected runner.
     ToolUnavailable,
+    /// The credential grant has been revoked.
     GrantRevoked,
+    /// The runner registration is no longer the current revision.
     RegistrationChanged,
+    /// Another registration preparation already holds the enrollment fence.
     RegistrationInProgress,
+    /// Independently stored facts disagree during reconstitution.
     CorruptStoredFacts,
 }
 
@@ -99,10 +130,12 @@ fn validate_exact(value: String) -> Result<String, RunnerDomainError> {
 pub struct RunnerCapabilityClass(String);
 
 impl RunnerCapabilityClass {
+    /// Validates and constructs a portable runner capability class.
     pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
         validate_name(value).map(Self)
     }
 
+    /// Returns the validated capability class text.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -113,10 +146,12 @@ impl RunnerCapabilityClass {
 pub struct CredentialProfileName(String);
 
 impl CredentialProfileName {
+    /// Validates and constructs a portable credential profile name.
     pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
         validate_name(value).map(Self)
     }
 
+    /// Returns the validated credential profile name.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -127,10 +162,12 @@ impl CredentialProfileName {
 pub struct RunnerWorkingDirectory(String);
 
 impl RunnerWorkingDirectory {
+    /// Validates and constructs exact runner working-directory text.
     pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
         validate_exact(value).map(Self)
     }
 
+    /// Returns the exact runner working-directory text.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -141,10 +178,12 @@ impl RunnerWorkingDirectory {
 pub struct WorkspaceRepositoryKey(String);
 
 impl WorkspaceRepositoryKey {
+    /// Validates and constructs an exact workspace repository key.
     pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
         validate_exact(value).map(Self)
     }
 
+    /// Returns the exact workspace repository key.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -153,31 +192,47 @@ impl WorkspaceRepositoryKey {
 /// Class-or-identity runner targeting.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum RunnerSelector {
+    /// Selects one exact runner identity.
     Identity(RunnerId),
+    /// Selects any runner advertising the required capability class.
     CapabilityClass(RunnerCapabilityClass),
 }
 
 /// Static nonempty admissible placement for one tool.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ToolAdmissibleLoci {
+    /// Allows execution only in the daemon.
     DaemonOnly,
-    RunnerOnly { selector: RunnerSelector },
-    DaemonOrRunner { selector: RunnerSelector },
+    /// Allows execution only on a runner satisfying the selector.
+    RunnerOnly {
+        /// The selector a runner must satisfy.
+        selector: RunnerSelector,
+    },
+    /// Allows daemon execution or runner execution satisfying the selector.
+    DaemonOrRunner {
+        /// The selector a runner must satisfy.
+        selector: RunnerSelector,
+    },
 }
 
 /// Required effect class for runner-admissible tool declarations.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum RunnerToolEffectClass {
+    /// The tool performs no externally observable effect.
     Pure,
+    /// Repetition does not compound the tool's externally visible effect.
     Idempotent,
+    /// The runner tool effect may not be safe to repeat.
     SideEffecting,
 }
 
 impl ToolAdmissibleLoci {
+    /// Reports whether the declaration admits daemon execution.
     pub const fn allows_daemon(&self) -> bool {
         matches!(self, Self::DaemonOnly | Self::DaemonOrRunner { .. })
     }
 
+    /// Returns the required runner selector when runner execution is admissible.
     pub const fn runner_selector(&self) -> Option<&RunnerSelector> {
         match self {
             Self::DaemonOnly => None,
@@ -197,6 +252,7 @@ pub struct RunnerToolDeclaration {
 }
 
 impl RunnerToolDeclaration {
+    /// Constructs one complete daemon-owned runner tool declaration.
     pub const fn new(
         name: ToolName,
         model: RunnerToolModelDefinition,
@@ -213,22 +269,27 @@ impl RunnerToolDeclaration {
         }
     }
 
+    /// Returns the declared name.
     pub const fn name(&self) -> &ToolName {
         &self.name
     }
 
+    /// Returns the model-facing tool definition.
     pub const fn model(&self) -> &RunnerToolModelDefinition {
         &self.model
     }
 
+    /// Returns the default tool permission.
     pub const fn permission(&self) -> ToolPermissionDefault {
         self.permission
     }
 
+    /// Returns the runner tool effect class.
     pub const fn effect(&self) -> RunnerToolEffectClass {
         self.effect
     }
 
+    /// Returns the admissible execution loci.
     pub const fn loci(&self) -> &ToolAdmissibleLoci {
         &self.loci
     }
@@ -242,6 +303,7 @@ pub struct RunnerToolModelDefinition {
 }
 
 impl RunnerToolModelDefinition {
+    /// Validates a tool description and normalized JSON object input schema.
     pub fn try_new(description: String, input_schema: String) -> Result<Self, RunnerDomainError> {
         let description = validate_exact(description)?;
         let input_schema = NormalizedToolArguments::try_from_provider_text(input_schema)
@@ -256,10 +318,12 @@ impl RunnerToolModelDefinition {
         })
     }
 
+    /// Returns the model-facing tool description.
     pub fn description(&self) -> &str {
         &self.description
     }
 
+    /// Returns the normalized JSON object input schema.
     pub const fn input_schema(&self) -> &NormalizedToolArguments {
         &self.input_schema
     }
@@ -268,7 +332,9 @@ impl RunnerToolModelDefinition {
 /// Approval posture for an exact tool/profile pair.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CredentialToolApproval {
+    /// The profile permits automatic approval for the tool.
     Automatic,
+    /// The session policy must decide approval for the tool.
     SessionPolicy,
 }
 
@@ -280,6 +346,7 @@ pub struct CredentialProfilePolicy {
 }
 
 impl CredentialProfilePolicy {
+    /// Constructs a profile policy while rejecting duplicate tool approvals.
     pub fn try_new(
         name: CredentialProfileName,
         approvals: impl IntoIterator<Item = (ToolName, CredentialToolApproval)>,
@@ -296,10 +363,12 @@ impl CredentialProfilePolicy {
         })
     }
 
+    /// Returns the declared name.
     pub const fn name(&self) -> &CredentialProfileName {
         &self.name
     }
 
+    /// Returns the explicit approval posture or the session-policy default for the tool.
     pub fn approval_for(&self, tool: &ToolName) -> CredentialToolApproval {
         self.approvals
             .get(tool)
@@ -307,6 +376,7 @@ impl CredentialProfilePolicy {
             .unwrap_or(CredentialToolApproval::SessionPolicy)
     }
 
+    /// Iterates the explicit tool approval overrides.
     pub fn approvals(&self) -> impl Iterator<Item = (&ToolName, CredentialToolApproval)> {
         self.approvals
             .iter()
@@ -317,6 +387,7 @@ impl CredentialProfilePolicy {
 /// Closed workspace capabilities advertised by runners.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum WorkspaceCapability {
+    /// The runner can provision one repository worktree per session.
     WorktreePerSession,
 }
 
@@ -330,6 +401,7 @@ pub struct RunnerCatalog {
 }
 
 impl RunnerCatalog {
+    /// Validates and constructs the complete daemon-authoritative runner catalog.
     pub fn try_new(
         classes: impl IntoIterator<Item = RunnerCapabilityClass>,
         tools: impl IntoIterator<Item = RunnerToolDeclaration>,
@@ -400,6 +472,7 @@ pub struct RunnerAdvertisement {
 }
 
 impl RunnerAdvertisement {
+    /// Collects one availability-only runner advertisement.
     pub fn new(
         classes: impl IntoIterator<Item = RunnerCapabilityClass>,
         tools: impl IntoIterator<Item = ToolName>,
@@ -418,7 +491,9 @@ impl RunnerAdvertisement {
 /// Active or terminally revoked logical enrollment.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RunnerEnrollmentState {
+    /// The enrollment may register runner availability.
     Active,
+    /// The enrollment is terminally unable to register.
     Revoked,
 }
 
@@ -450,6 +525,7 @@ impl PartialEq for RunnerEnrollment {
 impl Eq for RunnerEnrollment {}
 
 impl RunnerEnrollment {
+    /// Creates an active logical enrollment with no issued registration revision.
     pub fn new(
         enrollment: RunnerEnrollmentId,
         runner: RunnerId,
@@ -468,22 +544,27 @@ impl RunnerEnrollment {
         }
     }
 
+    /// Returns the logical enrollment identity.
     pub const fn enrollment(&self) -> RunnerEnrollmentId {
         self.enrollment
     }
 
+    /// Returns the runner identity.
     pub const fn runner(&self) -> RunnerId {
         self.runner
     }
 
+    /// Returns the runner authentication reference.
     pub const fn authentication(&self) -> RunnerAuthenticationId {
         self.authentication
     }
 
+    /// Returns the current domain state.
     pub const fn state(&self) -> RunnerEnrollmentState {
         self.state
     }
 
+    /// Iterates the capability classes this enrollment permits.
     pub fn allowed_classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass> {
         self.allowed_classes.iter()
     }
@@ -494,11 +575,13 @@ impl RunnerEnrollment {
         RunnerGeneration::try_from_u64(self.registration_revision.load(Ordering::Acquire))
     }
 
+    /// Transitions the value to its terminal revoked state.
     pub fn revoke(mut self) -> Result<Self, RunnerDomainError> {
         self.revoke_in_place()?;
         Ok(self)
     }
 
+    /// Revokes the enrollment while preserving its shared registration fences.
     pub fn revoke_in_place(&mut self) -> Result<(), RunnerDomainError> {
         if self.state != RunnerEnrollmentState::Active {
             return Err(RunnerDomainError::InvalidState);
@@ -508,6 +591,7 @@ impl RunnerEnrollment {
         Ok(())
     }
 
+    /// Validates and atomically commits one runner advertisement.
     pub fn register(
         &self,
         advertisement: RunnerAdvertisement,
@@ -516,6 +600,7 @@ impl RunnerEnrollment {
         self.prepare_registration(advertisement, catalog)?.commit()
     }
 
+    /// Validates an advertisement and reserves its next registration revision.
     pub fn prepare_registration(
         &self,
         advertisement: RunnerAdvertisement,
@@ -632,6 +717,7 @@ impl RunnerEnrollment {
         Ok(())
     }
 
+    /// Reconstitutes an enrollment after cross-checking independently stored facts.
     pub fn reconstitute(
         input: RunnerEnrollmentReconstitutionInput,
     ) -> Result<Self, RunnerDomainError> {
@@ -683,10 +769,12 @@ pub struct PreparedRunnerRegistration {
 }
 
 impl PreparedRunnerRegistration {
+    /// Returns the validated registration awaiting commit.
     pub const fn registration(&self) -> &ValidatedRunnerRegistration {
         &self.registration
     }
 
+    /// Commits the reserved registration revision and releases its preparation fence.
     pub fn commit(self) -> Result<ValidatedRunnerRegistration, RunnerDomainError> {
         let Self {
             expected_revision,
@@ -716,17 +804,29 @@ impl PreparedRunnerRegistration {
 /// Complete independently stored enrollment facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerEnrollmentReconstitutionInput {
+    /// The logical enrollment identity.
     pub enrollment: RunnerEnrollmentId,
+    /// The independently recorded enrollment used to cross-check the projection.
     pub recorded_enrollment: RunnerEnrollmentId,
+    /// The runner bound to this enrollment.
     pub runner: RunnerId,
+    /// The independently recorded runner used to cross-check the projection.
     pub recorded_runner: RunnerId,
+    /// The runner authentication reference.
     pub authentication: RunnerAuthenticationId,
+    /// The independently recorded authentication used to cross-check the projection.
     pub recorded_authentication: RunnerAuthenticationId,
+    /// The capability classes permitted or advertised by the enrollment.
     pub allowed_classes: BTreeSet<RunnerCapabilityClass>,
+    /// The independently recorded allowed classes used to cross-check the projection.
     pub recorded_allowed_classes: BTreeSet<RunnerCapabilityClass>,
+    /// The last registration revision issued by the enrollment, if any.
     pub registration_revision: Option<RunnerGeneration>,
+    /// The independently recorded registration revision used to cross-check the projection.
     pub recorded_registration_revision: Option<RunnerGeneration>,
+    /// The stored domain state.
     pub state: RunnerEnrollmentState,
+    /// The independently recorded state used to cross-check the projection.
     pub recorded_state: RunnerEnrollmentState,
 }
 
@@ -761,18 +861,22 @@ impl PartialEq for ValidatedRunnerRegistration {
 impl Eq for ValidatedRunnerRegistration {}
 
 impl ValidatedRunnerRegistration {
+    /// Returns the logical enrollment identity.
     pub const fn enrollment(&self) -> RunnerEnrollmentId {
         self.enrollment
     }
 
+    /// Returns the runner identity.
     pub const fn runner(&self) -> RunnerId {
         self.runner
     }
 
+    /// Returns the runner authentication reference.
     pub const fn authentication(&self) -> RunnerAuthenticationId {
         self.authentication
     }
 
+    /// Returns this registration revision.
     pub const fn revision(&self) -> RunnerGeneration {
         self.revision
     }
@@ -782,6 +886,7 @@ impl ValidatedRunnerRegistration {
             && self.current_revision.load(Ordering::Acquire) == self.revision.get()
     }
 
+    /// Reports whether this registration satisfies the runner selector.
     pub fn satisfies(&self, selector: &RunnerSelector) -> bool {
         match selector {
             RunnerSelector::Identity(runner) => self.runner == *runner,
@@ -789,38 +894,47 @@ impl ValidatedRunnerRegistration {
         }
     }
 
+    /// Returns the complete declaration for a registered tool.
     pub fn tool(&self, tool: &ToolName) -> Option<&RunnerToolDeclaration> {
         self.tools.get(tool)
     }
 
+    /// Returns the declared credential profile policy when present.
     pub fn profile(&self, profile: &CredentialProfileName) -> Option<&CredentialProfilePolicy> {
         self.profiles.get(profile)
     }
 
+    /// Reports whether the runner advertised the workspace capability.
     pub fn supports_workspace(&self, capability: WorkspaceCapability) -> bool {
         self.workspaces.contains(&capability)
     }
 
+    /// Iterates the registered tool names.
     pub fn tool_names(&self) -> impl Iterator<Item = &ToolName> {
         self.tools.keys()
     }
 
+    /// Iterates the registered capability classes.
     pub fn classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass> {
         self.classes.iter()
     }
 
+    /// Iterates the complete tool set.
     pub fn tools(&self) -> impl Iterator<Item = &RunnerToolDeclaration> {
         self.tools.values()
     }
 
+    /// Iterates the registered credential profile policies.
     pub fn profiles(&self) -> impl Iterator<Item = &CredentialProfilePolicy> {
         self.profiles.values()
     }
 
+    /// Iterates the advertised workspace capabilities.
     pub fn workspaces(&self) -> impl Iterator<Item = WorkspaceCapability> + '_ {
         self.workspaces.iter().copied()
     }
 
+    /// Reconstitutes validated availability against the enrollment and current catalog.
     pub fn reconstitute(
         enrollment: &RunnerEnrollment,
         catalog: &RunnerCatalog,
@@ -884,13 +998,21 @@ impl ValidatedRunnerRegistration {
 /// Complete validated-registration facts loaded from canonical storage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedRunnerRegistrationReconstitutionInput {
+    /// The logical enrollment identity.
     pub enrollment: RunnerEnrollmentId,
+    /// The stored registration revision.
     pub revision: RunnerGeneration,
+    /// The runner advertised by the stored registration.
     pub runner: RunnerId,
+    /// The runner authentication reference.
     pub authentication: RunnerAuthenticationId,
+    /// The exact advertised capability classes.
     pub classes: BTreeSet<RunnerCapabilityClass>,
+    /// The exact tools advertised by the stored registration.
     pub tools: Vec<RunnerToolDeclaration>,
+    /// The exact advertised credential profile policies.
     pub profiles: Vec<CredentialProfilePolicy>,
+    /// The exact advertised workspace capabilities.
     pub workspaces: BTreeSet<WorkspaceCapability>,
 }
 
@@ -899,10 +1021,12 @@ pub struct ValidatedRunnerRegistrationReconstitutionInput {
 pub struct RunnerGeneration(NonZeroU64);
 
 impl RunnerGeneration {
+    /// Returns the first positive runner generation.
     pub const fn one() -> Self {
         Self(NonZeroU64::MIN)
     }
 
+    /// Converts a nonzero integer into a runner generation.
     pub const fn try_from_u64(value: u64) -> Option<Self> {
         match NonZeroU64::new(value) {
             Some(value) => Some(Self(value)),
@@ -910,10 +1034,12 @@ impl RunnerGeneration {
         }
     }
 
+    /// Returns the positive generation as an integer.
     pub const fn get(self) -> u64 {
         self.0.get()
     }
 
+    /// Returns the next generation when the integer range permits it.
     pub const fn checked_next(self) -> Option<Self> {
         match self.get().checked_add(1) {
             Some(value) => match NonZeroU64::new(value) {
@@ -928,17 +1054,24 @@ impl RunnerGeneration {
 /// Exact lease claim/result fence.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RunnerLeaseCorrelation {
+    /// The logical runner lease identity assigned to the offer or correlation.
     pub lease: RunnerLeaseId,
+    /// The runner assigned this lease.
     pub runner: RunnerId,
+    /// The exact tool name.
     pub tool: ToolName,
+    /// The exact tool-attempt dispatch correlation.
     pub dispatch: ToolAttemptDispatchCorrelation,
+    /// The lease fence generation.
     pub generation: RunnerGeneration,
 }
 
 /// Complete caller-supplied identities for one initial lease offer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerLeaseOfferRequest {
+    /// The logical runner lease identity assigned to the offer or correlation.
     pub lease: RunnerLeaseId,
+    /// The exact tool name.
     pub tool: ToolName,
 }
 
@@ -999,6 +1132,7 @@ impl RunnerToolAttemptAuthorization {
         })
     }
 
+    /// Returns the approved tool name bound to this authorization.
     pub const fn tool(&self) -> &ToolName {
         self.approved.request().name()
     }
@@ -1017,11 +1151,17 @@ impl RunnerToolAttemptAuthorization {
 /// Runner lease stage independent of a streaming connection.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RunnerLeaseState {
+    /// The lease was offered but has not been claimed.
     Offered,
+    /// The runner claimed the lease and may have executed it.
     Claimed,
+    /// The claimed lease completed successfully.
     Completed,
+    /// The lease was lost with proof that execution authority was never issued.
     LostUnclaimed,
+    /// The offered lease was lost without proof that execution was impossible.
     LostExecutionPossible,
+    /// The claimed lease was lost before a completion result arrived.
     LostClaimed,
 }
 
@@ -1040,6 +1180,7 @@ pub struct RunnerLeaseNoExecutionProof {
 }
 
 impl RunnerLeaseNoExecutionProof {
+    /// Returns the complete lease claim and result fence.
     pub const fn correlation(&self) -> &RunnerLeaseCorrelation {
         &self.correlation
     }
@@ -1072,6 +1213,7 @@ impl RunnerLease {
         }
     }
 
+    /// Returns the complete lease claim and result fence.
     pub fn correlation(&self) -> RunnerLeaseCorrelation {
         RunnerLeaseCorrelation {
             lease: self.lease,
@@ -1082,38 +1224,47 @@ impl RunnerLease {
         }
     }
 
+    /// Returns the lease lifecycle state.
     pub const fn state(&self) -> RunnerLeaseState {
         self.state
     }
 
+    /// Returns the lease fence generation.
     pub const fn generation(&self) -> RunnerGeneration {
         self.generation
     }
 
+    /// Returns the physical tool-attempt identity.
     pub const fn attempt(&self) -> ToolAttemptId {
         self.dispatch.attempt()
     }
 
+    /// Returns the tool leased for runner execution.
     pub const fn tool(&self) -> &ToolName {
         &self.tool
     }
 
+    /// Returns the runner-bound credential authorization when required.
     pub const fn credential_authorization(&self) -> Option<&CredentialDispatchAuthorization> {
         self.credential_authorization.as_ref()
     }
 
+    /// Returns the owning session identity.
     pub const fn session(&self) -> SessionId {
         self.dispatch.session()
     }
 
+    /// Returns the runner identity.
     pub const fn runner(&self) -> RunnerId {
         self.runner
     }
 
+    /// Returns the runner tool effect class.
     pub const fn effect(&self) -> RunnerToolEffectClass {
         self.effect
     }
 
+    /// Claims the offered lease under the exact supplied correlation fence.
     pub fn claim(mut self, correlation: RunnerLeaseCorrelation) -> Result<Self, RunnerDomainError> {
         if self.state != RunnerLeaseState::Offered {
             return Err(RunnerDomainError::InvalidState);
@@ -1125,6 +1276,7 @@ impl RunnerLease {
         Ok(self)
     }
 
+    /// Completes the claimed lease under the exact supplied correlation fence.
     pub fn complete(
         mut self,
         correlation: RunnerLeaseCorrelation,
@@ -1139,6 +1291,7 @@ impl RunnerLease {
         Ok(self)
     }
 
+    /// Classifies loss when runner execution may have occurred.
     pub fn lose(mut self) -> Result<RunnerLeaseLoss, RunnerDomainError> {
         if !matches!(
             self.state,
@@ -1151,9 +1304,10 @@ impl RunnerLease {
             RunnerLeaseState::Claimed => RunnerLeaseState::LostClaimed,
             _ => return Err(RunnerDomainError::InvalidState),
         };
-        self.into_loss_consequence(None, false)
+        self.into_loss_consequence(None, RunnerLeaseRetryPreparation::Available)
     }
 
+    /// Classifies loss using proof that execution authority was never issued.
     pub fn lose_unclaimed(
         mut self,
         proof: &RunnerLeaseNoExecutionProof,
@@ -1165,13 +1319,13 @@ impl RunnerLease {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
         self.state = RunnerLeaseState::LostUnclaimed;
-        self.into_loss_consequence(Some(proof.clone()), false)
+        self.into_loss_consequence(Some(proof.clone()), RunnerLeaseRetryPreparation::Available)
     }
 
     fn into_loss_consequence(
         self,
         no_execution: Option<RunnerLeaseNoExecutionProof>,
-        retry_prepared: bool,
+        retry_preparation: RunnerLeaseRetryPreparation,
     ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
         let claimed = match (self.state, no_execution.is_some()) {
             (RunnerLeaseState::LostUnclaimed, true) => false,
@@ -1198,13 +1352,14 @@ impl RunnerLease {
                     source,
                     generation,
                     claimed_attempt,
-                    preparation: RunnerRetryPreparationGuard::new(retry_prepared),
+                    preparation: RunnerRetryPreparationGuard::new(retry_preparation),
                 }),
                 no_execution,
             },
         })
     }
 
+    /// Reconstitutes a lease after checking its independent fence facts and registration.
     pub fn reconstitute(
         input: RunnerLeaseReconstitutionInput,
         registration: &ValidatedRunnerRegistration,
@@ -1239,27 +1394,28 @@ impl RunnerLease {
             || !credential_matches
             || !declaration_matches
             || lease.state != input.recorded_state
-            || input.retry_prepared != input.recorded_retry_prepared
         {
             return Err(RunnerDomainError::CorruptStoredFacts);
         }
         Ok(lease)
     }
 
+    /// Reconstitutes a lost lease and its retry consequence.
     pub fn reconstitute_loss(
         input: RunnerLeaseReconstitutionInput,
         registration: &ValidatedRunnerRegistration,
         no_execution: Option<RunnerLeaseCorrelation>,
     ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
-        let retry_prepared = input.retry_prepared;
+        let retry_preparation = input.retry_preparation;
         Self::reconstitute(input, registration)?
-            .into_reconstituted_loss(no_execution, retry_prepared)
+            .into_reconstituted_loss(no_execution, retry_preparation)
     }
 
+    /// Restores the checked loss consequence for an already reconstituted lease.
     pub fn into_reconstituted_loss(
         self,
         no_execution: Option<RunnerLeaseCorrelation>,
-        retry_prepared: bool,
+        retry_preparation: RunnerLeaseRetryPreparation,
     ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
         let proof_matches = no_execution
             .as_ref()
@@ -1272,7 +1428,7 @@ impl RunnerLease {
                 false,
             ) => self.into_loss_consequence(
                 no_execution.map(|correlation| RunnerLeaseNoExecutionProof { correlation }),
-                retry_prepared,
+                retry_preparation,
             ),
             _ => Err(RunnerDomainError::InvalidState),
         }
@@ -1292,21 +1448,43 @@ struct ValidatedRunnerLeaseOffer {
 /// Complete lease projection plus independently stored fence facts.
 #[derive(Debug, Eq, PartialEq)]
 pub struct RunnerLeaseReconstitutionInput {
+    /// The logical runner lease identity assigned to the offer or correlation.
     pub lease: RunnerLeaseId,
+    /// The exact tool-attempt dispatch correlation.
     pub dispatch: ToolAttemptDispatchCorrelation,
+    /// The runner recorded as the lease owner.
     pub runner: RunnerId,
+    /// The exact tool name.
     pub tool: ToolName,
+    /// The runner tool effect class checked against the registration.
     pub effect: RunnerToolEffectClass,
+    /// The runner-bound credential authorization, when required.
     pub credential_authorization: Option<CredentialDispatchAuthorization>,
+    /// The lease fence generation.
     pub generation: RunnerGeneration,
+    /// The stored domain state.
     pub state: RunnerLeaseState,
+    /// The independently recorded correlation used to cross-check the projection.
     pub recorded_correlation: RunnerLeaseCorrelation,
+    /// The independently recorded session used to cross-check the projection.
     pub recorded_session: SessionId,
+    /// The independently recorded effect used to cross-check the projection.
     pub recorded_effect: RunnerToolEffectClass,
+    /// The independently recorded credential authorization used to cross-check the projection.
     pub recorded_credential_authorization: Option<CredentialDispatchAuthorization>,
+    /// The independently recorded state used to cross-check the projection.
     pub recorded_state: RunnerLeaseState,
-    pub retry_prepared: bool,
-    pub recorded_retry_prepared: bool,
+    /// Whether the single-use retry preparation remains available.
+    pub retry_preparation: RunnerLeaseRetryPreparation,
+}
+
+/// Whether a lost lease's single-use retry preparation remains available.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RunnerLeaseRetryPreparation {
+    /// No retry successor has been prepared from this lost lease.
+    Available,
+    /// The lost lease has already prepared its one permitted retry successor.
+    Prepared,
 }
 
 /// Typed consequence of lease loss. Construction is sealed to checked `RunnerLease` transitions.
@@ -1336,6 +1514,7 @@ enum RunnerLeaseLossKind {
 }
 
 impl RunnerLeaseLoss {
+    /// Returns the lease snapshot classified as lost.
     pub const fn lost(&self) -> &RunnerLease {
         match &self.kind {
             RunnerLeaseLossKind::RetryPermitted { lost, .. }
@@ -1343,6 +1522,7 @@ impl RunnerLeaseLoss {
         }
     }
 
+    /// Returns retry authority when the loss classification permits retry.
     pub const fn retry(&self) -> Option<&RunnerLeaseRetryAuthority> {
         match &self.kind {
             RunnerLeaseLossKind::RetryPermitted { retry, .. } => Some(retry),
@@ -1350,6 +1530,7 @@ impl RunnerLeaseLoss {
         }
     }
 
+    /// Returns the attempt requiring crash classification for a side-effecting loss.
     pub const fn crash_attempt(&self) -> Option<ToolAttemptId> {
         match &self.kind {
             RunnerLeaseLossKind::RetryPermitted { .. } => None,
@@ -1359,6 +1540,7 @@ impl RunnerLeaseLoss {
         }
     }
 
+    /// Returns proof that the unclaimed lease never issued execution authority.
     pub const fn no_execution_proof(&self) -> Option<&RunnerLeaseNoExecutionProof> {
         match &self.kind {
             RunnerLeaseLossKind::RetryPermitted { no_execution, .. } => no_execution.as_ref(),
@@ -1382,10 +1564,12 @@ pub struct RunnerUnclaimedAttemptReauthorization {
 }
 
 impl RunnerUnclaimedAttemptReauthorization {
+    /// Returns the checked successor tool batch.
     pub const fn batch(&self) -> &ToolBatch {
         &self.batch
     }
 
+    /// Consumes the checked result into its correlated parts.
     pub fn into_parts(self) -> (ToolBatch, RunnerToolAttemptAuthorization) {
         (self.batch, self.authorization)
     }
@@ -1401,22 +1585,27 @@ pub struct RunnerClaimedAttemptReplacement {
 }
 
 impl RunnerClaimedAttemptReplacement {
+    /// Returns the checked successor tool batch.
     pub const fn batch(&self) -> &ToolBatch {
         &self.batch
     }
 
+    /// Returns the physical attempt retired by a claimed retry.
     pub const fn retired(&self) -> &EndedToolAttempt {
         &self.retired
     }
 
+    /// Returns the lost lease correlation that authorized replacement.
     pub const fn source(&self) -> &RunnerLeaseCorrelation {
         &self.source
     }
 
+    /// Returns the fresh replacement attempt correlation.
     pub const fn replacement(&self) -> ToolAttemptDispatchCorrelation {
         self.authorization.authorized.correlation()
     }
 
+    /// Consumes the checked result into its correlated parts.
     pub fn into_parts(self) -> (ToolBatch, EndedToolAttempt, RunnerToolAttemptAuthorization) {
         (self.batch, self.retired, self.authorization)
     }
@@ -1427,8 +1616,11 @@ impl RunnerClaimedAttemptReplacement {
 struct RunnerRetryPreparationGuard(AtomicBool);
 
 impl RunnerRetryPreparationGuard {
-    const fn new(prepared: bool) -> Self {
-        Self(AtomicBool::new(prepared))
+    const fn new(preparation: RunnerLeaseRetryPreparation) -> Self {
+        Self(AtomicBool::new(matches!(
+            preparation,
+            RunnerLeaseRetryPreparation::Prepared
+        )))
     }
 
     fn claim(&self) -> bool {
@@ -1438,6 +1630,7 @@ impl RunnerRetryPreparationGuard {
     }
 }
 
+/// Single-use retry authority derived from one checked lost lease.
 #[derive(Debug)]
 pub struct RunnerLeaseRetryAuthority {
     source: RunnerLeaseRetrySource,
@@ -1458,6 +1651,7 @@ impl PartialEq for RunnerLeaseRetryAuthority {
 impl Eq for RunnerLeaseRetryAuthority {}
 
 impl RunnerLeaseRetryAuthority {
+    /// Returns the retry or lease generation.
     pub const fn generation(&self) -> RunnerGeneration {
         self.generation
     }
@@ -1572,59 +1766,86 @@ impl RunnerLeaseRetrySource {
 /// Working-directory selection at placement.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum WorkingDirectorySelection {
+    /// Uses the selected runner default working directory.
     RunnerDefault,
+    /// Requires the exact supplied runner working directory.
     Exact(RunnerWorkingDirectory),
 }
 
 /// Workspace requirement at placement.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum WorkspaceRequirement {
+    /// Requires no runner-provisioned workspace.
     None,
-    RepositoryWorktree { repository: WorkspaceRepositoryKey },
+    /// Requires a per-session worktree for the repository key.
+    RepositoryWorktree {
+        /// The repository for which the runner must provision a worktree.
+        repository: WorkspaceRepositoryKey,
+    },
 }
 
 /// Runner-owned workspace; the runner field is also cleanup ownership.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProvisionedWorkspace {
+    /// The owning session identity.
     pub session: SessionId,
+    /// The runner responsible for workspace cleanup.
     pub runner: RunnerId,
+    /// The runner-interpreted repository key.
     pub repository: WorkspaceRepositoryKey,
+    /// The runner-interpreted working directory.
     pub working_directory: RunnerWorkingDirectory,
 }
 
 /// Complete requested placement axes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionRunnerPlacementRequest {
+    /// The runner selector that placement must satisfy.
     pub selector: RunnerSelector,
+    /// The runner-interpreted working directory.
     pub working_directory: WorkingDirectorySelection,
+    /// The requested runner-local credential profile, if any.
     pub credential_profile: Option<CredentialProfileName>,
+    /// The workspace capability the placement must provide.
     pub workspace: WorkspaceRequirement,
 }
 
 /// Last credential-grant identity carried by a pinned placement lineage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RunnerCredentialGrantLineage {
+    /// The runner that issued the retained credential grant.
     pub runner: RunnerId,
+    /// The retained credential grant revision.
     pub revision: RunnerGeneration,
 }
 
 /// Complete exact pinned facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PinnedRunnerPlacement {
+    /// The runner pinned to the session.
     pub runner: RunnerId,
+    /// The runner-interpreted working directory.
     pub working_directory: RunnerWorkingDirectory,
+    /// The pinned runner-local credential profile, if any.
     pub credential_profile: Option<CredentialProfileName>,
+    /// The last credential grant lineage retained by the placement, if any.
     pub grant_lineage: Option<RunnerCredentialGrantLineage>,
+    /// The complete tool set admitted by the pin.
     pub tools: BTreeSet<ToolName>,
+    /// The registered tools whose locus requires runner execution.
     pub runner_required_tools: BTreeSet<ToolName>,
+    /// The workspace provisioned for the pin, if any.
     pub workspace: Option<ProvisionedWorkspace>,
 }
 
 /// Session affinity lifecycle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionRunnerPlacementState {
+    /// No runner has been pinned for the session.
     Unpinned,
+    /// The session is pinned to the contained runner facts.
     Pinned(PinnedRunnerPlacement),
+    /// The pinned runner is lost and awaits explicit replacement.
     RunnerLost(PinnedRunnerPlacement),
 }
 
@@ -1638,6 +1859,7 @@ pub struct SessionRunnerPlacement {
 }
 
 impl SessionRunnerPlacement {
+    /// Creates an unpinned placement for the session request.
     pub const fn new(session: SessionId, request: SessionRunnerPlacementRequest) -> Self {
         Self {
             session,
@@ -1647,22 +1869,27 @@ impl SessionRunnerPlacement {
         }
     }
 
+    /// Returns the session placement lifecycle state.
     pub const fn state(&self) -> &SessionRunnerPlacementState {
         &self.state
     }
 
+    /// Returns the session placement revision.
     pub const fn revision(&self) -> RunnerGeneration {
         self.revision
     }
 
+    /// Returns the owning session identity.
     pub const fn session(&self) -> SessionId {
         self.session
     }
 
+    /// Returns the complete placement request.
     pub const fn request(&self) -> &SessionRunnerPlacementRequest {
         &self.request
     }
 
+    /// Pins the selected runner and emits its first fenced lease offer.
     pub fn pin_and_offer_lease(
         mut self,
         enrollment: &RunnerEnrollment,
@@ -1708,6 +1935,7 @@ impl SessionRunnerPlacement {
         })
     }
 
+    /// Offers a new fenced lease from the existing pinned placement.
     pub fn offer_lease(
         &self,
         enrollment: &RunnerEnrollment,
@@ -1739,6 +1967,7 @@ impl SessionRunnerPlacement {
         }))
     }
 
+    /// Offers the checked retry generation for a compatible lost lease.
     pub fn offer_retry(
         &self,
         enrollment: &RunnerEnrollment,
@@ -1793,6 +2022,7 @@ impl SessionRunnerPlacement {
         }))
     }
 
+    /// Marks the currently pinned runner as lost.
     pub fn mark_runner_lost(mut self) -> Result<Self, RunnerDomainError> {
         let SessionRunnerPlacementState::Pinned(pinned) = self.state else {
             return Err(RunnerDomainError::InvalidState);
@@ -1801,6 +2031,7 @@ impl SessionRunnerPlacement {
         Ok(self)
     }
 
+    /// Marks the runner lost when its current registration no longer supports the pin.
     pub fn reconcile_registration(
         mut self,
         registration: &ValidatedRunnerRegistration,
@@ -1824,6 +2055,7 @@ impl SessionRunnerPlacement {
         Ok(self)
     }
 
+    /// Replaces a lost runner while preserving explicit placement and grant changes.
     pub fn replace_lost_runner(
         self,
         request: SessionRunnerPlacementRequest,
@@ -1872,6 +2104,7 @@ impl SessionRunnerPlacement {
         })
     }
 
+    /// Replaces the pinned credential profile and advances the placement revision.
     pub fn replace_credential_profile(
         self,
         grant: CredentialProfileGrant,
@@ -1933,6 +2166,7 @@ impl SessionRunnerPlacement {
         })
     }
 
+    /// Reconstitutes placement state against registration and retained grant lineage.
     pub fn reconstitute(
         input: SessionRunnerPlacementReconstitutionInput,
         expected_session: SessionId,
@@ -2000,9 +2234,13 @@ impl SessionRunnerPlacement {
 /// Complete placement facts loaded from one canonical durable revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionRunnerPlacementReconstitutionInput {
+    /// The owning session identity.
     pub session: SessionId,
+    /// The stored placement revision.
     pub revision: RunnerGeneration,
+    /// The complete placement request.
     pub request: SessionRunnerPlacementRequest,
+    /// The stored domain state.
     pub state: SessionRunnerPlacementState,
 }
 
@@ -2187,44 +2425,63 @@ fn validate_placement(
 /// Successful first pin with its optional runner-bound credential grant.
 #[derive(Debug, Eq, PartialEq)]
 pub struct SessionRunnerPin {
+    /// The resulting session runner placement.
     pub placement: SessionRunnerPlacement,
+    /// The resulting credential grant, when the selection requires one.
     pub grant: Option<CredentialProfileGrant>,
+    /// The initial lease emitted by the pin.
     pub lease: RunnerLease,
 }
 
 /// Successful explicit placement replacement.
 #[derive(Debug, Eq, PartialEq)]
 pub struct RunnerPlacementReplacement {
+    /// The resulting session runner placement.
     pub placement: SessionRunnerPlacement,
+    /// The complete before-and-after change facts.
     pub change: RunnerPlacementChange,
+    /// The resulting credential grant, when the selection requires one.
     pub grant: Option<CredentialProfileGrant>,
+    /// The complete credential grant change, when replacement changed one.
     pub grant_change: Option<RunnerCredentialGrantChange>,
 }
 
-/// Complete before-and-after facts for frontier injection.
+/// Complete before-and-after facts for runner placement replacement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerPlacementChange {
+    /// The owning session identity.
     pub session: SessionId,
+    /// The placement or grant revision before replacement.
     pub prior_revision: RunnerGeneration,
+    /// The placement or grant revision after replacement.
     pub replacement_revision: RunnerGeneration,
+    /// The placement request before replacement.
     pub before_request: SessionRunnerPlacementRequest,
+    /// The placement request after replacement.
     pub after_request: SessionRunnerPlacementRequest,
+    /// The pinned placement before replacement.
     pub before: PinnedRunnerPlacement,
+    /// The pinned placement after replacement.
     pub after: PinnedRunnerPlacement,
 }
 
 /// One explicit profile/grant replacement bound to pinned placement.
 #[derive(Debug, Eq, PartialEq)]
 pub struct CredentialProfilePlacementReplacement {
+    /// The resulting session runner placement.
     pub placement: SessionRunnerPlacement,
+    /// The complete placement change accompanying the grant replacement.
     pub placement_change: RunnerPlacementChange,
+    /// The replacement credential grant and its change facts.
     pub grant: CredentialProfileGrantReplacement,
 }
 
 /// Active or terminally revoked credential grant.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CredentialProfileGrantState {
+    /// The credential profile grant may authorize tool dispatch.
     Active,
+    /// The credential profile grant is terminally revoked.
     Revoked,
 }
 
@@ -2260,14 +2517,17 @@ impl CredentialProfileGrant {
             && self.matches_binding(session, runner, profile)
     }
 
+    /// Returns the credential grant lifecycle state.
     pub const fn state(&self) -> CredentialProfileGrantState {
         self.state
     }
 
+    /// Returns the credential grant revision.
     pub const fn revision(&self) -> RunnerGeneration {
         self.revision
     }
 
+    /// Returns the exact runner and revision that issued the grant.
     pub const fn lineage(&self) -> RunnerCredentialGrantLineage {
         RunnerCredentialGrantLineage {
             runner: self.runner,
@@ -2275,22 +2535,27 @@ impl CredentialProfileGrant {
         }
     }
 
+    /// Returns the runner-local profile named by this grant.
     pub const fn profile(&self) -> &CredentialProfileName {
         &self.profile
     }
 
+    /// Returns the owning session identity.
     pub const fn session(&self) -> SessionId {
         self.session
     }
 
+    /// Returns the runner identity.
     pub const fn runner(&self) -> RunnerId {
         self.runner
     }
 
+    /// Iterates the tools authorized by this grant.
     pub fn tools(&self) -> impl Iterator<Item = &ToolName> {
         self.tools.iter()
     }
 
+    /// Iterates the explicit tool approval overrides.
     pub fn approvals(&self) -> impl Iterator<Item = (&ToolName, CredentialToolApproval)> {
         self.approvals
             .iter()
@@ -2374,6 +2639,7 @@ impl CredentialProfileGrant {
         })
     }
 
+    /// Transitions the value to its terminal revoked state.
     pub fn revoke(mut self) -> Result<Self, RunnerDomainError> {
         if self.state != CredentialProfileGrantState::Active {
             return Err(RunnerDomainError::InvalidState);
@@ -2382,6 +2648,7 @@ impl CredentialProfileGrant {
         Ok(self)
     }
 
+    /// Reconstitutes a credential grant against its expected session and registration.
     pub fn reconstitute(
         input: CredentialProfileGrantReconstitutionInput,
         expected_session: SessionId,
@@ -2409,19 +2676,28 @@ impl CredentialProfileGrant {
 /// Complete credential-grant facts loaded from canonical storage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialProfileGrantReconstitutionInput {
+    /// The owning session identity.
     pub session: SessionId,
+    /// The runner that issued the stored grant.
     pub runner: RunnerId,
+    /// The stored credential grant revision.
     pub revision: RunnerGeneration,
+    /// The runner-local credential profile name.
     pub profile: CredentialProfileName,
+    /// The exact tools authorized by the stored grant.
     pub tools: BTreeSet<ToolName>,
+    /// The exact per-tool approval postures.
     pub approvals: BTreeMap<ToolName, CredentialToolApproval>,
+    /// The stored domain state.
     pub state: CredentialProfileGrantState,
 }
 
 /// Complete before-and-after credential-grant facts from runner replacement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerCredentialGrantChange {
+    /// The complete credential grant before replacement, if one existed.
     pub before: Option<CredentialProfileGrantReconstitutionInput>,
+    /// The complete credential grant after replacement, if one exists.
     pub after: Option<CredentialProfileGrantReconstitutionInput>,
 }
 
@@ -2543,30 +2819,45 @@ fn build_grant(
 /// Exact future-dispatch authority resolved from a tool/profile pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialDispatchAuthorization {
+    /// The owning session identity.
     pub session: SessionId,
+    /// The runner authorized to execute the dispatch.
     pub runner: RunnerId,
+    /// The credential grant revision authorizing dispatch.
     pub grant_revision: RunnerGeneration,
+    /// The runner-local credential profile name.
     pub profile: CredentialProfileName,
+    /// The exact tool name.
     pub tool: ToolName,
+    /// The approval posture applied to the tool dispatch.
     pub approval: CredentialToolApproval,
 }
 
 /// Successful forward-only credential grant replacement.
 #[derive(Debug, Eq, PartialEq)]
 pub struct CredentialProfileGrantReplacement {
+    /// The resulting credential grant, when the selection requires one.
     pub grant: CredentialProfileGrant,
+    /// The complete before-and-after change facts.
     pub change: CredentialProfileChange,
 }
 
-/// Complete before-and-after profile/tool facts for frontier injection.
+/// Complete before-and-after profile and tool facts for grant replacement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialProfileChange {
+    /// The owning session identity.
     pub session: SessionId,
+    /// The placement or grant revision before replacement.
     pub prior_revision: RunnerGeneration,
+    /// The placement or grant revision after replacement.
     pub replacement_revision: RunnerGeneration,
+    /// The credential profile before replacement.
     pub before_profile: CredentialProfileName,
+    /// The credential profile after replacement.
     pub after_profile: CredentialProfileName,
+    /// The granted tool set before replacement.
     pub before_tools: BTreeSet<ToolName>,
+    /// The granted tool set after replacement.
     pub after_tools: BTreeSet<ToolName>,
 }
 
@@ -3076,8 +3367,7 @@ mod tests {
             recorded_effect: lease.effect,
             recorded_credential_authorization: lease.credential_authorization.clone(),
             recorded_state: lease.state,
-            retry_prepared: false,
-            recorded_retry_prepared: false,
+            retry_preparation: RunnerLeaseRetryPreparation::Available,
         }
     }
 
@@ -3096,8 +3386,7 @@ mod tests {
             recorded_effect: lease.effect,
             recorded_credential_authorization: lease.credential_authorization.clone(),
             recorded_state: lease.state,
-            retry_prepared: false,
-            recorded_retry_prepared: false,
+            retry_preparation: RunnerLeaseRetryPreparation::Available,
         }
     }
 
@@ -5395,8 +5684,7 @@ mod tests {
             .lose()
             .expect("an execution-possible pure lease carries retry authority");
         let mut input = borrowed_lease_reconstitution_input(loss.lost());
-        input.retry_prepared = true;
-        input.recorded_retry_prepared = true;
+        input.retry_preparation = RunnerLeaseRetryPreparation::Prepared;
         let restored = RunnerLease::reconstitute_loss(input, &registration, None)
             .expect("the durable consumed preparation state reconstitutes");
 

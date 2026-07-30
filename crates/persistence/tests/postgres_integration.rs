@@ -1,3 +1,5 @@
+//! Feature-gated PostgreSQL coverage for migrations, durable invariants, and repository composition.
+
 #![allow(
     clippy::expect_used,
     clippy::panic,
@@ -440,6 +442,61 @@ async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, Stri
         .await?;
 
     Ok((container, pool, database_url))
+}
+
+async fn insert_pending_compact_command(
+    pool: &PgPool,
+    command: Uuid,
+    session: Uuid,
+    model_call: Uuid,
+    source_frontier: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(session)
+    .bind(source_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_compaction_model_call
+            (model_call_id, session_id, direct_model_selection_id,
+             resolved_provider_model_identity_id, source_frontier_id,
+             credential_reference, state_kind)
+         VALUES ($1, $2, $3, $4, $5, 'fixture-compaction-profile', 'prepared')",
+    )
+    .bind(model_call)
+    .bind(session)
+    .bind(Uuid::from_u128(0xc041))
+    .bind(Uuid::from_u128(0xc042))
+    .bind(source_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'compact_session', 1, transaction_timestamp())",
+    )
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO compact_session_command
+            (command_id, command_kind, storage_version, session_id,
+             requested_through_position, automatic_for_turn_id,
+             result_kind, model_call_id)
+         VALUES ($1, 'compact_session', 1, $2, NULL, NULL, 'pending', $3)",
+    )
+    .bind(command)
+    .bind(session)
+    .bind(model_call)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
 }
 
 async fn insert_origin_frontier(
@@ -10640,6 +10697,49 @@ async fn s33_inv008_inv015_inv046_mid_session_model_switch_is_forward_only()
             SubmitInputCorruption::Inconsistent("semantic entry payload")
         ))
     ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn compact_session_command_id_reuse_is_a_client_conflict() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = Uuid::from_u128(0xc051);
+    let command = Uuid::from_u128(0xc052);
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xc053, 0xc051, direct(0xc054)))
+        .await?;
+    insert_pending_compact_command(
+        &pool,
+        command,
+        session,
+        Uuid::from_u128(0xc055),
+        Uuid::from_u128(0xc056),
+    )
+    .await?;
+    let input = start_input(
+        0xc052,
+        0xc051,
+        "compact command identity reuse",
+        1,
+        ModelSelectionOverride::UseSessionDefault,
+    );
+
+    assert_eq!(
+        SubmitInputRepository::new(pool.clone())
+            .handle(
+                input.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xc057)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xc058))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::ConflictingReuse {
+            command_id: input.command_id(),
+        }
+    );
 
     pool.close().await;
     drop(container);

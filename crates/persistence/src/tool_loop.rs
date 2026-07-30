@@ -34,6 +34,7 @@ use crate::{
     command_registry::{
         self, CommandKind, DECIDE_TOOL_REQUEST_KIND, RegistryCorruption, RegistryInspectionError,
     },
+    commit_failure_is_ambiguous,
     mapping::{
         dangerous_tool_auto_approval_from_str, durable_command_id_from_uuid,
         durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
@@ -274,7 +275,8 @@ impl PostgresToolLoopRepository {
                 | CommandKind::ReplaceSessionDefaults
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::SubmitInput
-                | CommandKind::ReviewWorkflow,
+                | CommandKind::ReviewWorkflow
+                | CommandKind::CompactSession,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }
     }
@@ -2725,14 +2727,5 @@ async fn finish_commit<T>(
             transaction.rollback().await?;
             Err(error)
         }
-    }
-}
-
-fn commit_failure_is_ambiguous(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(database) => {
-            matches!(database.code().as_deref(), Some("08007" | "40003"))
-        }
-        _ => true,
     }
 }

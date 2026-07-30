@@ -178,8 +178,11 @@ enum CliTerminal {
     Failed(String),
     /// A stream-level `error` event was recorded. The pinned CLI still
     /// closes the failed turn with a `turn.failed` lifecycle echo — the
-    /// sequencing the gated compatibility smoke observed live — so exactly
-    /// that one trailer is still admissible.
+    /// sequencing the `error_then_turn_failed` fixture records — so exactly
+    /// that one trailer is still admissible. Any other continuation, including
+    /// the run of reconnect notices the CLI emits as further `error` events
+    /// when its transport cannot be established, fails closed as an
+    /// unrecognized provider error.
     Unrecoverable(String),
 }
 

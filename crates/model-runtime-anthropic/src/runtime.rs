@@ -1,27 +1,28 @@
 //! The adapter runtime: one operation, at most one HTTP interaction.
 
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Waker};
-
 use futures_util::StreamExt;
-use futures_util::future::{Either, select};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Url};
 
 use signalbox_model_runtime::{
-    AssistantPart, BoundaryLossEvidence, CancellationSignal, CompletionFinish, DeliveryMode,
-    ExchangeFacts, FinishReason, InputTokenCountOutcome, LossCause, ModelInputTokenCounter,
-    ModelOperation, ModelRuntime, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
-    PreparationDefect, PreparationFailure, PreparationOutcome, ProvenUnsentEvidence,
-    ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderReportedModel,
-    ProviderRequestId, SseFraming, StreamInterruption, TerminalEvidence, TerminalReport,
-    TokenUsage, ToolCallId, ToolCallProposal, ToolName, TransportFacts, UnsentCause,
+    BoundaryLossEvidence, CancellationSignal, CredentialRedactingSink, DeliveryMode, ExchangeFacts,
+    InputTokenCountOutcome, LossCause,
+    MAX_BUFFERED_PROVIDER_RESPONSE_BYTES as MAX_BUFFERED_RESPONSE_BYTES,
+    MAX_STREAMED_PROVIDER_RESPONSE_BYTES as MAX_STREAMED_RESPONSE_BYTES, ModelInputTokenCounter,
+    ModelOperation, ModelRuntime, NativeErrorFacts, ObservationFact, ObservationSink,
+    PreparationDefect, PreparationFailure, PreparationOutcome, ProviderErrorEvidence,
+    ProviderErrorKind, ProviderRequestId, ResponsePrefixBudget as PrefixBudget, SseFraming,
+    StreamInterruption, TerminalEvidence, TerminalReport, TokenUsage, UnsentCause,
+    boundary_loss_evidence as exchange_loss, emit_provider_observation as emit,
+    pre_exchange_loss_evidence as pre_exchange_loss, proven_unsent_evidence as proven_unsent,
+    provider_response_body_too_large as response_body_too_large,
+    provider_response_prefix_len as streamed_response_prefix_len,
+    serialize_provider_request as serialize_request, transport_facts_from_error as transport_facts,
     validate_provider_json_nesting,
 };
 
-use signalbox_model_runtime::{CredentialAccess, CredentialValue};
+use signalbox_model_runtime::{CredentialAccess, CredentialValue, redact_evidence};
 
 use crate::config::AnthropicConfig;
 use crate::response::decode_buffered_response;
@@ -29,11 +30,6 @@ use crate::status::{classify_error, classify_error_status};
 use crate::stream::{StreamDecoder, StreamStep};
 use crate::translate::build_request;
 use crate::wire::{CountTokensRequest, CountTokensResponse, ErrorEnvelope};
-
-/// A response body is provider-controlled input. Keep complete buffered
-/// responses bounded independently of the requested output-token ceiling.
-const MAX_BUFFERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_STREAMED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// The Anthropic Messages adapter.
 ///
@@ -312,7 +308,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         // cancellation signal so a blocked credential read cannot hold a
         // cancelled operation.
         let resolve = self.credentials.resolve(&operation.credential_reference);
-        let api_key = match with_cancellation(cancellation, resolve).await {
+        let api_key = match cancellation.run_until_cancelled(resolve).await {
             None => return PreparationOutcome::Cancelled { correlation },
             Some(Err(error)) => {
                 return PreparationOutcome::Failed {
@@ -377,7 +373,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         } = transport;
         emit(correlation, sink, ObservationFact::SendCommenced);
         let send = client.execute(request);
-        let response = match with_cancellation(cancellation, send).await {
+        let response = match cancellation.run_until_cancelled(send).await {
             None => return pre_exchange_loss(LossCause::CancellationRequested),
             Some(Err(error)) => return classify_send_error(&error),
             Some(Ok(response)) => response,
@@ -468,7 +464,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         let mut body = response.bytes_stream();
         let mut streamed_bytes = 0usize;
         loop {
-            let chunk = match with_cancellation(cancellation, body.next()).await {
+            let chunk = match cancellation.run_until_cancelled(body.next()).await {
                 None => return decoder.cancelled(),
                 Some(chunk) => chunk,
             };
@@ -512,12 +508,6 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
     }
 }
 
-fn serialize_request(value: &impl serde::Serialize) -> Result<Vec<u8>, PreparationDefect> {
-    serde_json::to_vec(value).map_err(|error| PreparationDefect::SerializationFailed {
-        detail: error.to_string(),
-    })
-}
-
 fn build_http_request(
     builder: reqwest::RequestBuilder,
 ) -> Result<reqwest::Request, PreparationDefect> {
@@ -526,23 +516,6 @@ fn build_http_request(
         .map_err(|error| PreparationDefect::RequestConstructionFailed {
             detail: error.to_string(),
         })
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PrefixBudget {
-    Accepted { len: usize },
-    Overflowed { accepted_len: usize },
-}
-
-fn streamed_response_prefix_len(current: usize, chunk: usize) -> PrefixBudget {
-    let remaining = MAX_STREAMED_RESPONSE_BYTES.saturating_sub(current);
-    if chunk > remaining {
-        PrefixBudget::Overflowed {
-            accepted_len: remaining,
-        }
-    } else {
-        PrefixBudget::Accepted { len: chunk }
-    }
 }
 
 fn process_streamed_chunk<C: Clone>(
@@ -567,7 +540,7 @@ fn process_streamed_chunk<C: Clone>(
     // data.
     let outcome = framing.push(&bytes[..accepted]);
     for (index, record) in outcome.records.into_iter().enumerate() {
-        if index > 0 && already_fired(cancellation) {
+        if index > 0 && cancellation.is_cancelled() {
             return Some(decoder.cancelled());
         }
         match decoder.apply(&record, correlation, sink) {
@@ -603,11 +576,9 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             Ok(body) => body,
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
         };
-        let credential = match with_cancellation(
-            &mut cancellation,
-            self.credentials.resolve(&operation.credential_reference),
-        )
-        .await
+        let credential = match cancellation
+            .run_until_cancelled(self.credentials.resolve(&operation.credential_reference))
+            .await
         {
             None => return InputTokenCountOutcome::Cancelled { correlation },
             Some(Err(_)) => return InputTokenCountOutcome::Failed { correlation },
@@ -627,12 +598,14 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             Ok(request) => request,
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
         };
-        let response =
-            match with_cancellation(&mut cancellation, self.client.execute(request)).await {
-                None => return InputTokenCountOutcome::Cancelled { correlation },
-                Some(Err(_)) => return InputTokenCountOutcome::Failed { correlation },
-                Some(Ok(response)) => response,
-            };
+        let response = match cancellation
+            .run_until_cancelled(self.client.execute(request))
+            .await
+        {
+            None => return InputTokenCountOutcome::Cancelled { correlation },
+            Some(Err(_)) => return InputTokenCountOutcome::Failed { correlation },
+            Some(Ok(response)) => response,
+        };
         if !response.status().is_success() {
             let _ = collect_response_body(response, &mut cancellation).await;
             return InputTokenCountOutcome::Failed { correlation };
@@ -678,13 +651,13 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for AnthropicR
             correlation,
             credential,
         } = prepared;
-        if already_fired(&mut cancellation) {
+        if cancellation.is_cancelled() {
             return TerminalReport {
                 correlation,
                 evidence: proven_unsent(UnsentCause::CancelledBeforeSend),
             };
         }
-        let mut redacting_sink = RedactingObservationSink::new(sink, &credential);
+        let mut redacting_sink = CredentialRedactingSink::new(sink, &credential);
         let evidence = self
             .exchange(
                 transport,
@@ -789,7 +762,7 @@ async fn collect_response_body(
     let mut body = response.bytes_stream();
     let mut collected = Vec::new();
     loop {
-        match with_cancellation(cancellation, body.next()).await {
+        match cancellation.run_until_cancelled(body.next()).await {
             None => return None,
             Some(None) => return Some(Ok(collected)),
             Some(Some(Err(error))) => return Some(Err(classify_body_error(&error))),
@@ -804,41 +777,6 @@ async fn collect_response_body(
             }
         }
     }
-}
-
-fn response_body_too_large() -> LossCause {
-    LossCause::ResponseBodyLost(TransportFacts::new(format!(
-        "response body exceeded the {MAX_BUFFERED_RESPONSE_BYTES}-byte adapter limit"
-    )))
-}
-
-fn emit<C: Clone>(
-    correlation: &C,
-    sink: &mut (dyn ObservationSink<C> + Send),
-    fact: ObservationFact,
-) {
-    sink.observe(Observation {
-        correlation: correlation.clone(),
-        fact,
-    });
-}
-
-fn proven_unsent(cause: UnsentCause) -> TerminalEvidence {
-    TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence { cause })
-}
-
-fn pre_exchange_loss(cause: LossCause) -> TerminalEvidence {
-    exchange_loss(cause, ExchangeFacts::default())
-}
-
-fn exchange_loss(cause: LossCause, exchange: ExchangeFacts) -> TerminalEvidence {
-    TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
-        cause,
-        exchange,
-        reported_model: None,
-        finish_reported: None,
-        usage: TokenUsage::unreported(),
-    })
 }
 
 /// Classifies a send-phase transport failure per the full-request-send
@@ -857,19 +795,6 @@ fn classify_send_error(error: &reqwest::Error) -> TerminalEvidence {
     } else {
         pre_exchange_loss(LossCause::TransportFailed(transport_facts(error)))
     }
-}
-
-/// Renders the transport error with its source chain, as retained evidence
-/// only; classification never reads this text.
-fn transport_facts(error: &reqwest::Error) -> TransportFacts {
-    let mut detail = error.to_string();
-    let mut source = std::error::Error::source(error);
-    while let Some(cause) = source {
-        detail.push_str(": ");
-        detail.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    TransportFacts::new(detail)
 }
 
 /// Classifies a body-phase read failure: a caller-configured deadline keeps
@@ -892,42 +817,6 @@ fn request_id_from(headers: &HeaderMap) -> Option<ProviderRequestId> {
         .map(ProviderRequestId::new)
 }
 
-fn truncated(text: String) -> String {
-    const LIMIT: usize = 2048;
-    if text.len() <= LIMIT {
-        return text;
-    }
-    let mut end = LIMIT;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{} … [truncated]", &text[..end])
-}
-
-/// True when the cancellation signal has already fired, checked without
-/// blocking.
-fn already_fired(cancellation: &mut CancellationSignal) -> bool {
-    let mut context = Context::from_waker(Waker::noop());
-    Pin::new(cancellation).poll(&mut context).is_ready()
-}
-
-/// Runs `work` unless the cancellation signal fires while it is pending.
-///
-/// The work future is polled first, so provider evidence that is already
-/// available wins a same-poll race against cancellation: a ready definitive
-/// response is never discarded in favor of ambiguous cancellation loss (the
-/// definitive-response precedence in `docs/spec/model-call-execution.md`).
-async fn with_cancellation<F: Future>(
-    cancellation: &mut CancellationSignal,
-    work: F,
-) -> Option<F::Output> {
-    let work = std::pin::pin!(work);
-    match select(work, cancellation).await {
-        Either::Left((output, _)) => Some(output),
-        Either::Right(((), _)) => None,
-    }
-}
-
 /// The credential as a sensitivity-marked header value, or `None` when its
 /// bytes cannot form one. The value never appears in errors or logs.
 fn sensitive_header(api_key: &CredentialValue) -> Option<HeaderValue> {
@@ -939,621 +828,19 @@ fn sensitive_header(api_key: &CredentialValue) -> Option<HeaderValue> {
     Some(header)
 }
 
-struct RedactingObservationSink<'a, C> {
-    inner: &'a mut (dyn ObservationSink<C> + Send),
-    credential: &'a str,
-    pending_stream_text: Option<PendingStreamText<C>>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum StreamField {
-    Text,
-    Thinking,
-}
-
-struct PendingStreamText<C> {
-    field: StreamField,
-    index: u32,
-    correlation: C,
-    text: String,
-}
-
-impl<'a, C: Clone> RedactingObservationSink<'a, C> {
-    fn new(
-        inner: &'a mut (dyn ObservationSink<C> + Send),
-        credential: &'a CredentialValue,
-    ) -> Self {
-        Self {
-            inner,
-            credential: std::str::from_utf8(credential.expose_bytes()).unwrap_or_default(),
-            pending_stream_text: None,
-        }
-    }
-
-    fn flush(&mut self) {
-        if let Some(pending) = self.pending_stream_text.take() {
-            self.emit_stream_text(
-                pending.field,
-                pending.index,
-                pending.correlation,
-                // The pending bytes are exactly a credential prefix. Once a
-                // non-delta fact must cross the boundary, retaining stream
-                // ordering and retaining those bytes are incompatible; fail
-                // closed by replacing the possible secret prefix.
-                "[redacted]".to_string(),
-            );
-        }
-    }
-
-    fn emit_stream_text(&mut self, field: StreamField, index: u32, correlation: C, text: String) {
-        if text.is_empty() {
-            return;
-        }
-        let fact = match field {
-            StreamField::Text => ObservationFact::TextDelta { index, text },
-            StreamField::Thinking => ObservationFact::ThinkingDelta { index, text },
-        };
-        self.inner.observe(Observation { correlation, fact });
-    }
-
-    fn redact_stream_delta(
-        &mut self,
-        field: StreamField,
-        index: u32,
-        correlation: C,
-        text: String,
-    ) {
-        if self
-            .pending_stream_text
-            .as_ref()
-            .is_some_and(|pending| pending.field != field || pending.index != index)
-        {
-            self.flush();
-        }
-        let mut combined = self
-            .pending_stream_text
-            .take()
-            .map_or_else(String::new, |pending| pending.text);
-        combined.push_str(&text);
-        let (emitted, pending) =
-            redact_complete_credentials_and_hold_prefix(combined, self.credential);
-        self.emit_stream_text(field, index, correlation.clone(), emitted);
-        if !pending.is_empty() {
-            self.pending_stream_text = Some(PendingStreamText {
-                field,
-                index,
-                correlation,
-                text: pending,
-            });
-        }
-    }
-}
-
-impl<C: Clone> ObservationSink<C> for RedactingObservationSink<'_, C> {
-    fn observe(&mut self, observation: Observation<C>) {
-        match observation.fact {
-            ObservationFact::TextDelta { index, text } => {
-                self.redact_stream_delta(StreamField::Text, index, observation.correlation, text)
-            }
-            ObservationFact::ThinkingDelta { index, text } => self.redact_stream_delta(
-                StreamField::Thinking,
-                index,
-                observation.correlation,
-                text,
-            ),
-            ObservationFact::ToolArgumentsDelta { index, fragment } => {
-                self.flush();
-                self.inner.observe(Observation {
-                    correlation: observation.correlation,
-                    fact: ObservationFact::ToolArgumentsDelta {
-                        index,
-                        fragment: redact_json(fragment, self.credential),
-                    },
-                });
-            }
-            ObservationFact::ToolCallProposed(proposal) => {
-                self.flush();
-                self.inner.observe(Observation {
-                    correlation: observation.correlation,
-                    fact: ObservationFact::ToolCallProposed(redact_proposal(
-                        proposal,
-                        self.credential,
-                    )),
-                });
-            }
-            fact => {
-                self.flush();
-                self.inner.observe(Observation {
-                    correlation: observation.correlation,
-                    fact: redact_observation_fact(fact, self.credential),
-                });
-            }
-        }
-    }
-}
-
-fn redact_text(text: String, credential: &str) -> String {
-    if credential.is_empty() {
-        text
-    } else {
-        text.replace(credential, "[redacted]")
-    }
-}
-
-/// Redacts complete credentials and fails closed on a trailing credential
-/// prefix. Final content parts are independently persisted values, so a prefix
-/// may not leave one part and be completed by the next.
-fn redact_bounded_text(text: String, credential: &str) -> String {
-    let (mut redacted, pending) = redact_complete_credentials_and_hold_prefix(text, credential);
-    if !pending.is_empty() {
-        redacted.push_str("[redacted]");
-    }
-    redacted
-}
-
-fn redact_native_message(text: String, credential: &str) -> String {
-    const TRUNCATION_SUFFIX: &str = " … [truncated]";
-    if let Some(body) = text.strip_suffix(TRUNCATION_SUFFIX) {
-        let mut redacted = redact_native_body(body.to_string(), credential);
-        redacted.push_str(TRUNCATION_SUFFIX);
-        redacted
-    } else {
-        truncated(redact_native_body(text, credential))
-    }
-}
-
-fn redact_native_body(text: String, credential: &str) -> String {
-    if serde_json::value::RawValue::from_string(text.clone()).is_ok() {
-        redact_json(text, credential)
-    } else {
-        redact_bounded_text(text, credential)
-    }
-}
-
-/// Redacts a complete credential and any trailing prefix of it. Provider
-/// chunk boundaries are arbitrary: removing a credential prefix at the end
-/// of every emitted delta prevents a later delta from completing the secret
-/// without delaying synchronous observation delivery.
-fn redact_complete_credentials_and_hold_prefix(
-    mut text: String,
-    credential: &str,
-) -> (String, String) {
-    if credential.is_empty() {
-        return (text, String::new());
-    }
-    // Only the tail after the last complete, non-overlapping match can become
-    // a credential when the next provider chunk arrives. A proper suffix that
-    // starts inside an already-complete match must be redacted with that match,
-    // not retained and emitted later.
-    let unmatched_tail_start = text
-        .match_indices(credential)
-        .last()
-        .map_or(0, |(start, matched)| start + matched.len());
-    let unmatched_tail = &text[unmatched_tail_start..];
-    let longest_prefix = (1..credential.len())
-        .rev()
-        .filter(|length| credential.is_char_boundary(*length))
-        .find(|length| unmatched_tail.ends_with(&credential[..*length]));
-    let split = longest_prefix.map_or(text.len(), |length| text.len() - length);
-    let pending = text.split_off(split);
-    (text.replace(credential, "[redacted]"), pending)
-}
-
-fn redact_exchange(mut exchange: ExchangeFacts, credential: &str) -> ExchangeFacts {
-    exchange.provider_request_id = exchange.provider_request_id.map(|request_id| {
-        ProviderRequestId::new(redact_text(request_id.as_str().to_string(), credential))
-    });
-    exchange
-}
-
-fn redact_reported_model(model: ProviderReportedModel, credential: &str) -> ProviderReportedModel {
-    ProviderReportedModel::new(redact_text(model.as_str().to_string(), credential))
-}
-
-fn redact_finish(finish: FinishReason, credential: &str) -> FinishReason {
-    match finish {
-        FinishReason::StopSequence { sequence } => FinishReason::StopSequence {
-            sequence: sequence.map(|value| redact_text(value, credential)),
-        },
-        FinishReason::Unrecognized { provider_token } => FinishReason::Unrecognized {
-            provider_token: redact_text(provider_token, credential),
-        },
-        finish => finish,
-    }
-}
-
-fn redact_completion_finish(finish: CompletionFinish, credential: &str) -> CompletionFinish {
-    match finish {
-        CompletionFinish::StopSequence { sequence } => CompletionFinish::StopSequence {
-            sequence: sequence.map(|value| redact_text(value, credential)),
-        },
-        CompletionFinish::Unrecognized { provider_token } => CompletionFinish::Unrecognized {
-            provider_token: redact_text(provider_token, credential),
-        },
-        finish => finish,
-    }
-}
-
-fn redact_proposal(mut proposal: ToolCallProposal, credential: &str) -> ToolCallProposal {
-    proposal.id = ToolCallId::new(redact_text(proposal.id.as_str().to_string(), credential));
-    proposal.name = ToolName::new(redact_text(proposal.name.as_str().to_string(), credential));
-    proposal.arguments_json = redact_json(proposal.arguments_json, credential);
-    proposal
-}
-
-fn redact_json(raw: String, credential: &str) -> String {
-    if credential.is_empty() {
-        return raw;
-    }
-    if serde_json::value::RawValue::from_string(raw.clone()).is_err() {
-        return redact_text(raw, credential);
-    }
-
-    let mut redacted = String::with_capacity(raw.len());
-    let mut cursor = 0;
-    while cursor < raw.len() {
-        if raw.as_bytes()[cursor] == b'"' {
-            let mut end = cursor + 1;
-            let mut escaped = false;
-            while end < raw.len() {
-                let byte = raw.as_bytes()[end];
-                end += 1;
-                if escaped {
-                    escaped = false;
-                } else if byte == b'\\' {
-                    escaped = true;
-                } else if byte == b'"' {
-                    break;
-                }
-            }
-            let token = &raw[cursor..end];
-            let Ok(decoded) = serde_json::from_str::<String>(token) else {
-                return redact_text(raw, credential);
-            };
-            if decoded.contains(credential) {
-                let Ok(sanitized) =
-                    serde_json::to_string(&decoded.replace(credential, "[redacted]"))
-                else {
-                    return "\"[redacted]\"".to_string();
-                };
-                redacted.push_str(&sanitized);
-            } else {
-                redacted.push_str(token);
-            }
-            cursor = end;
-            continue;
-        }
-
-        if matches!(
-            raw.as_bytes()[cursor],
-            b'{' | b'}' | b'[' | b']' | b',' | b':'
-        ) || raw.as_bytes()[cursor].is_ascii_whitespace()
-        {
-            redacted.push(raw.as_bytes()[cursor] as char);
-            cursor += 1;
-            continue;
-        }
-
-        let start = cursor;
-        while cursor < raw.len()
-            && !matches!(
-                raw.as_bytes()[cursor],
-                b'{' | b'}' | b'[' | b']' | b',' | b':' | b' ' | b'\t' | b'\r' | b'\n'
-            )
-        {
-            cursor += 1;
-        }
-        let token = &raw[start..cursor];
-        if token.contains(credential) {
-            redacted.push_str("\"[redacted]\"");
-        } else {
-            redacted.push_str(token);
-        }
-    }
-    redacted
-}
-
-fn redact_part(part: AssistantPart, credential: &str) -> AssistantPart {
-    match part {
-        AssistantPart::Text(text) => AssistantPart::Text(redact_bounded_text(text, credential)),
-        AssistantPart::Thinking { text, signature } => AssistantPart::Thinking {
-            text: redact_bounded_text(text, credential),
-            signature: signature.map(|value| redact_bounded_text(value, credential)),
-        },
-        AssistantPart::RedactedThinking { data } => AssistantPart::RedactedThinking {
-            data: redact_bounded_text(data, credential),
-        },
-        AssistantPart::ToolCall(proposal) => {
-            AssistantPart::ToolCall(redact_proposal(proposal, credential))
-        }
-    }
-}
-
-fn redact_observation_fact(fact: ObservationFact, credential: &str) -> ObservationFact {
-    match fact {
-        ObservationFact::ExchangeEstablished(exchange) => {
-            ObservationFact::ExchangeEstablished(redact_exchange(exchange, credential))
-        }
-        ObservationFact::ProviderModelReported(model) => {
-            ObservationFact::ProviderModelReported(redact_reported_model(model, credential))
-        }
-        ObservationFact::TextDelta { index, text } => ObservationFact::TextDelta {
-            index,
-            text: redact_text(text, credential),
-        },
-        ObservationFact::ThinkingDelta { index, text } => ObservationFact::ThinkingDelta {
-            index,
-            text: redact_text(text, credential),
-        },
-        ObservationFact::ToolArgumentsDelta { index, fragment } => {
-            ObservationFact::ToolArgumentsDelta {
-                index,
-                fragment: redact_json(fragment, credential),
-            }
-        }
-        ObservationFact::ToolCallProposed(proposal) => {
-            ObservationFact::ToolCallProposed(redact_proposal(proposal, credential))
-        }
-        ObservationFact::FinishReported(finish) => {
-            ObservationFact::FinishReported(redact_finish(finish, credential))
-        }
-        fact @ (ObservationFact::SendCommenced | ObservationFact::UsageReported(_)) => fact,
-    }
-}
-
-/// Credential-sanitizes every provider-controlled or transport-rendered
-/// text in the evidence, per the runtime-substrate spec: a reflected key
-/// value in an error message, raw body, or rendered detail is replaced
-/// before the evidence leaves the adapter boundary. Typed facts are
-/// untouched.
-fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> TerminalEvidence {
-    let key_text = std::str::from_utf8(api_key.expose_bytes()).unwrap_or_default();
-    let redact = move |text: String| -> String { redact_text(text, key_text) };
-    let redact_native = |mut native: NativeErrorFacts| -> NativeErrorFacts {
-        native.error_token = native.error_token.map(redact);
-        native.error_code = native.error_code.map(redact);
-        native.message = native
-            .message
-            .map(|message| redact_native_message(message, key_text));
-        native
-    };
-    let redact_transport =
-        |facts: TransportFacts| -> TransportFacts { TransportFacts::new(redact(facts.detail)) };
-    match evidence {
-        TerminalEvidence::Completed(mut completion) => {
-            completion.exchange = redact_exchange(completion.exchange, key_text);
-            completion.message_id = completion
-                .message_id
-                .map(|message_id| ProviderMessageId::new(redact(message_id.as_str().to_string())));
-            completion.reported_model = completion
-                .reported_model
-                .map(|model| redact_reported_model(model, key_text));
-            completion.finish = redact_completion_finish(completion.finish, key_text);
-            completion.content = completion
-                .content
-                .into_iter()
-                .map(|part| redact_part(part, key_text))
-                .collect();
-            TerminalEvidence::Completed(completion)
-        }
-        TerminalEvidence::Refused(mut refusal) => {
-            refusal.exchange = redact_exchange(refusal.exchange, key_text);
-            refusal.message_id = refusal
-                .message_id
-                .map(|message_id| ProviderMessageId::new(redact(message_id.as_str().to_string())));
-            refusal.reported_model = refusal
-                .reported_model
-                .map(|model| redact_reported_model(model, key_text));
-            refusal.content = refusal
-                .content
-                .into_iter()
-                .map(|part| redact_part(part, key_text))
-                .collect();
-            TerminalEvidence::Refused(refusal)
-        }
-        TerminalEvidence::ProviderError(mut error) => {
-            error.exchange = redact_exchange(error.exchange, key_text);
-            error.reported_model = error
-                .reported_model
-                .map(|model| redact_reported_model(model, key_text));
-            error.native = redact_native(error.native);
-            TerminalEvidence::ProviderError(error)
-        }
-        TerminalEvidence::CancellationConfirmed(mut confirmed) => {
-            confirmed.exchange = redact_exchange(confirmed.exchange, key_text);
-            confirmed.reported_model = confirmed
-                .reported_model
-                .map(|model| redact_reported_model(model, key_text));
-            confirmed.native = redact_native(confirmed.native);
-            TerminalEvidence::CancellationConfirmed(confirmed)
-        }
-        TerminalEvidence::ProvenUnsent(unsent) => {
-            let cause = match unsent.cause {
-                UnsentCause::ConnectFailed(facts) => {
-                    UnsentCause::ConnectFailed(redact_transport(facts))
-                }
-                UnsentCause::SendIncompleteProvenUnacceptable(facts) => {
-                    UnsentCause::SendIncompleteProvenUnacceptable(redact_transport(facts))
-                }
-                UnsentCause::CancelledBeforeSend => UnsentCause::CancelledBeforeSend,
-            };
-            TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence { cause })
-        }
-        TerminalEvidence::BoundaryLoss(mut loss) => {
-            loss.exchange = redact_exchange(loss.exchange, key_text);
-            loss.reported_model = loss
-                .reported_model
-                .map(|model| redact_reported_model(model, key_text));
-            loss.finish_reported = loss
-                .finish_reported
-                .map(|finish| redact_finish(finish, key_text));
-            loss.cause = match loss.cause {
-                LossCause::TimedOut(facts) => LossCause::TimedOut(redact_transport(facts)),
-                LossCause::TransportFailed(facts) => {
-                    LossCause::TransportFailed(redact_transport(facts))
-                }
-                LossCause::ResponseBodyLost(facts) => {
-                    LossCause::ResponseBodyLost(redact_transport(facts))
-                }
-                LossCause::ResponseUnintelligible { detail } => LossCause::ResponseUnintelligible {
-                    detail: redact(detail),
-                },
-                LossCause::StreamProtocolViolation { detail } => {
-                    LossCause::StreamProtocolViolation {
-                        detail: redact(detail),
-                    }
-                }
-                LossCause::StreamEndedWithoutTerminalMarker { interruption } => {
-                    LossCause::StreamEndedWithoutTerminalMarker {
-                        interruption: match interruption {
-                            StreamInterruption::TransportFailure(facts) => {
-                                StreamInterruption::TransportFailure(redact_transport(facts))
-                            }
-                            StreamInterruption::TimedOut(facts) => {
-                                StreamInterruption::TimedOut(redact_transport(facts))
-                            }
-                            StreamInterruption::EndOfStream => StreamInterruption::EndOfStream,
-                        },
-                    }
-                }
-                cause @ (LossCause::CancellationRequested | LossCause::UnexpectedHttpStatus) => {
-                    cause
-                }
-            };
-            TerminalEvidence::BoundaryLoss(loss)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use serde::Serialize;
     use signalbox_model_runtime::{
-        AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, CredentialValue,
-        ExchangeFacts, LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
-        PreparationDefect, ProviderErrorEvidence, ProviderErrorKind, RefusalEvidence, SseFraming,
-        TerminalEvidence, TokenUsage,
+        CancellationSignal, CredentialRedactingSink, CredentialValue, ExchangeFacts, LossCause,
+        Observation, ObservationFact, ObservationSink, PreparationDefect, RefusalEvidence,
+        SseFraming, TerminalEvidence, TokenUsage,
     };
 
     use super::{
-        MAX_STREAMED_RESPONSE_BYTES, PrefixBudget, RedactingObservationSink, build_http_request,
-        process_streamed_chunk, redact_evidence, redact_json, redact_native_message,
-        serialize_request, streamed_response_prefix_len, without_unproven_refusal,
+        MAX_STREAMED_RESPONSE_BYTES, build_http_request, process_streamed_chunk,
+        without_unproven_refusal,
     };
     use crate::stream::StreamDecoder;
-
-    #[test]
-    fn inv_035_json_escaped_credentials_are_redacted_from_tool_arguments() {
-        let redacted = redact_json(r#"{"token":"key_\u006coop"}"#.to_string(), "key_loop");
-
-        assert_eq!(redacted, r#"{"token":"[redacted]"}"#);
-    }
-
-    #[test]
-    fn credential_reflected_as_a_json_primitive_is_redacted() {
-        assert_eq!(
-            redact_json(r#"{"value":1234}"#.to_string(), "23"),
-            r#"{"value":"[redacted]"}"#
-        );
-        assert_eq!(
-            redact_json(r#"{"value":true}"#.to_string(), "true"),
-            r#"{"value":"[redacted]"}"#
-        );
-        assert_eq!(
-            redact_json(r#"{"value":null}"#.to_string(), "null"),
-            r#"{"value":"[redacted]"}"#
-        );
-    }
-
-    #[test]
-    fn json_redaction_preserves_untouched_raw_lexemes_and_duplicate_keys() {
-        let raw = r#"{"token":"key_loop","id":184467440737095516160,"dup":1,"dup":2}"#;
-
-        assert_eq!(
-            redact_json(raw.to_string(), "key_loop"),
-            r#"{"token":"[redacted]","id":184467440737095516160,"dup":1,"dup":2}"#
-        );
-    }
-
-    #[test]
-    fn truncated_native_body_redacts_a_credential_prefix_at_the_cut() {
-        assert_eq!(
-            redact_native_message("safe key_ … [truncated]".to_string(), "key_loop"),
-            "safe [redacted] … [truncated]"
-        );
-    }
-
-    #[test]
-    fn json_escaped_credential_in_a_fallback_error_body_is_redacted() {
-        assert_eq!(
-            redact_native_message(r#"{"message":"key_\u006coop"}"#.to_string(), "key_loop"),
-            r#"{"message":"[redacted]"}"#
-        );
-    }
-
-    #[test]
-    fn large_json_fallback_body_is_sanitized_before_truncation() {
-        let body = format!(r#"{{"message":"key_\u006coop{}"}}"#, "x".repeat(2_200));
-
-        let redacted = redact_native_message(body, "key_loop");
-
-        assert!(redacted.starts_with(r#"{"message":"[redacted]"#));
-        assert!(redacted.ends_with(" … [truncated]"));
-        assert!(!redacted.contains(r"key_\u006coop"));
-        assert!(!redacted.contains("key_loop"));
-    }
-
-    #[test]
-    fn inv_035_native_error_code_is_credential_sanitized() {
-        let credential = CredentialValue::new(b"key_loop".to_vec());
-        let evidence = TerminalEvidence::ProviderError(ProviderErrorEvidence {
-            exchange: ExchangeFacts::default(),
-            reported_model: None,
-            kind: ProviderErrorKind::Unrecognized,
-            native: NativeErrorFacts {
-                error_token: None,
-                error_code: Some("echo-key_loop".to_string()),
-                message: None,
-            },
-            usage: TokenUsage::unreported(),
-        });
-
-        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &credential) else {
-            panic!("provider error remains provider error");
-        };
-        assert_eq!(error.native.error_code.as_deref(), Some("echo-[redacted]"));
-    }
-
-    #[test]
-    fn inv_035_final_content_cannot_reconstruct_a_credential_across_parts() {
-        let credential = CredentialValue::new(b"key_loop".to_vec());
-        let evidence = TerminalEvidence::Completed(CompletionEvidence {
-            exchange: ExchangeFacts::default(),
-            message_id: None,
-            reported_model: None,
-            finish: CompletionFinish::EndTurn,
-            content: vec![
-                AssistantPart::Text("safe key_".to_string()),
-                AssistantPart::Text("loop tail".to_string()),
-            ],
-            usage: TokenUsage::unreported(),
-        });
-
-        let TerminalEvidence::Completed(completion) = redact_evidence(evidence, &credential) else {
-            panic!("completion remains completion");
-        };
-        let joined = completion
-            .content
-            .iter()
-            .filter_map(|part| match part {
-                AssistantPart::Text(text) => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-
-        assert_eq!(joined, "safe [redacted]loop tail");
-        assert!(!joined.contains("key_loop"));
-    }
 
     #[test]
     fn refusal_without_full_upload_proof_is_known_failure_evidence() {
@@ -1578,23 +865,42 @@ mod tests {
         assert_eq!(error.usage.output_tokens, Some(5));
     }
 
-    struct SerializationFails;
-
-    impl Serialize for SerializationFails {
-        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            Err(serde::ser::Error::custom("fixture serialization failure"))
-        }
-    }
-
     #[test]
-    fn serialization_failure_is_a_preparation_defect() {
-        assert!(matches!(
-            serialize_request(&SerializationFails),
-            Err(PreparationDefect::SerializationFailed { .. })
-        ));
+    fn inv_035_complete_credential_ending_in_its_own_prefix_is_redacted_in_place() {
+        let credential = CredentialValue::new(b"synthetic_s".to_vec());
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &credential);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "echo synthetic_s".to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: " done".to_string(),
+            },
+        });
+        sink.flush();
+        drop(sink);
+
+        assert_eq!(
+            observed[0].fact,
+            ObservationFact::TextDelta {
+                index: 0,
+                text: "echo [redacted]".to_string(),
+            }
+        );
+        assert_eq!(
+            observed[1].fact,
+            ObservationFact::TextDelta {
+                index: 0,
+                text: " done".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1608,289 +914,6 @@ mod tests {
             build_http_request(builder),
             Err(PreparationDefect::RequestConstructionFailed { .. })
         ));
-    }
-
-    #[test]
-    fn buffered_prefix_is_redacted_before_metadata_and_cannot_join_a_later_tail() {
-        let mut observed = Vec::new();
-        let credential = CredentialValue::new(b"key_loop".to_vec());
-        let mut redacting = RedactingObservationSink::new(&mut observed, &credential);
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::TextDelta {
-                index: 0,
-                text: "safe key_".to_string(),
-            },
-        });
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::UsageReported(TokenUsage::unreported()),
-        });
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::TextDelta {
-                index: 0,
-                text: "loop".to_string(),
-            },
-        });
-        redacting.flush();
-        drop(redacting);
-
-        let metadata_index = observed
-            .iter()
-            .position(|observation| matches!(observation.fact, ObservationFact::UsageReported(_)))
-            .expect("usage is forwarded");
-        let text_before_metadata = observed[..metadata_index]
-            .iter()
-            .filter_map(|observation| match &observation.fact {
-                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-        let all_text = observed
-            .iter()
-            .filter_map(|observation| match &observation.fact {
-                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-        assert_eq!(text_before_metadata, "safe [redacted]");
-        assert_eq!(all_text, "safe [redacted]loop");
-        assert!(!all_text.contains("key_loop"));
-    }
-
-    #[test]
-    fn inv_035_overlapping_credential_prefixes_stay_held_between_deltas() {
-        let mut observed = Vec::new();
-        let credential = CredentialValue::new(b"aaaa".to_vec());
-        let mut redacting = RedactingObservationSink::new(&mut observed, &credential);
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::TextDelta {
-                index: 0,
-                text: "aaaaa".to_string(),
-            },
-        });
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::TextDelta {
-                index: 0,
-                text: "aaab".to_string(),
-            },
-        });
-        redacting.flush();
-        drop(redacting);
-
-        let emitted = observed
-            .iter()
-            .filter_map(|observation| match &observation.fact {
-                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-        assert!(!emitted.contains("aaaa"));
-        assert!(emitted.contains("[redacted]"));
-    }
-
-    #[test]
-    fn inv_035_complete_self_overlapping_credentials_are_redacted_before_suffix_retention() {
-        let mut observed = Vec::new();
-        let credential = CredentialValue::new(b"abcab".to_vec());
-        let mut redacting = RedactingObservationSink::new(&mut observed, &credential);
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::TextDelta {
-                index: 0,
-                text: "abcab".to_string(),
-            },
-        });
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::TextDelta {
-                index: 0,
-                text: "!".to_string(),
-            },
-        });
-        redacting.flush();
-        drop(redacting);
-
-        let emitted = observed
-            .iter()
-            .filter_map(|observation| match &observation.fact {
-                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-        assert_eq!(emitted, "[redacted]!");
-    }
-
-    #[test]
-    fn inv_035_complete_repeated_credential_is_redacted_before_a_prefix_tail() {
-        let mut observed = Vec::new();
-        let credential = CredentialValue::new(b"aaaa".to_vec());
-        let mut redacting = RedactingObservationSink::new(&mut observed, &credential);
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::TextDelta {
-                index: 0,
-                text: "aaaaa".to_string(),
-            },
-        });
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::TextDelta {
-                index: 0,
-                text: "x".to_string(),
-            },
-        });
-        redacting.flush();
-        drop(redacting);
-
-        let emitted = observed
-            .iter()
-            .filter_map(|observation| match &observation.fact {
-                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-        assert_eq!(emitted, "[redacted]ax");
-    }
-
-    #[test]
-    fn inv_035_complete_credential_ending_in_its_own_prefix_is_redacted_in_place() {
-        let mut observed = Vec::new();
-        let credential = CredentialValue::new(b"sk-ant-x9s".to_vec());
-        let mut redacting = RedactingObservationSink::new(&mut observed, &credential);
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::TextDelta {
-                index: 0,
-                text: "echo sk-ant-x9s".to_string(),
-            },
-        });
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::TextDelta {
-                index: 0,
-                text: " done".to_string(),
-            },
-        });
-        redacting.flush();
-        drop(redacting);
-
-        let emitted = observed
-            .iter()
-            .filter_map(|observation| match &observation.fact {
-                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-        assert_eq!(emitted, "echo [redacted] done");
-        assert!(!emitted.contains("sk-ant-x9s"));
-    }
-
-    #[test]
-    fn json_escaped_credential_is_redacted_before_a_tool_delta_is_forwarded() {
-        let mut observed = Vec::new();
-        let credential = CredentialValue::new(b"key_loop".to_vec());
-        let mut redacting = RedactingObservationSink::new(&mut observed, &credential);
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::ToolArgumentsDelta {
-                index: 0,
-                fragment: r#"{"token":"key_\u006coop"}"#.to_string(),
-            },
-        });
-        drop(redacting);
-
-        assert!(observed.iter().any(|observation| matches!(
-            &observation.fact,
-            ObservationFact::ToolArgumentsDelta { fragment, .. }
-                if fragment == r#"{"token":"[redacted]"}"#
-        )));
-    }
-
-    #[test]
-    fn pending_text_is_flushed_before_a_tool_delta_is_forwarded() {
-        let mut observed = Vec::new();
-        let credential = CredentialValue::new(b"key_loop".to_vec());
-        let mut redacting = RedactingObservationSink::new(&mut observed, &credential);
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::TextDelta {
-                index: 0,
-                text: "safe key_".to_string(),
-            },
-        });
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::ToolArgumentsDelta {
-                index: 1,
-                fragment: "{}".to_string(),
-            },
-        });
-        drop(redacting);
-
-        let text_before_tool = observed[..observed.len() - 1]
-            .iter()
-            .filter_map(|observation| match &observation.fact {
-                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-        assert_eq!(text_before_tool, "safe [redacted]");
-        assert!(matches!(
-            observed.last().expect("tool delta is forwarded").fact,
-            ObservationFact::ToolArgumentsDelta { .. }
-        ));
-    }
-
-    #[test]
-    fn pending_stream_text_is_flushed_before_a_different_field() {
-        let mut observed = Vec::new();
-        let credential = CredentialValue::new(b"key_loop".to_vec());
-        let mut redacting = RedactingObservationSink::new(&mut observed, &credential);
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::ThinkingDelta {
-                index: 0,
-                text: "k".to_string(),
-            },
-        });
-        redacting.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::TextDelta {
-                index: 1,
-                text: "later".to_string(),
-            },
-        });
-        redacting.flush();
-        drop(redacting);
-
-        assert!(matches!(
-            &observed[0].fact,
-            ObservationFact::ThinkingDelta { text, .. } if text == "[redacted]"
-        ));
-        assert!(matches!(
-            &observed[1].fact,
-            ObservationFact::TextDelta { text, .. } if text == "later"
-        ));
-    }
-
-    #[test]
-    fn streamed_response_budget_rejects_aggregate_overflow() {
-        assert_eq!(
-            streamed_response_prefix_len(MAX_STREAMED_RESPONSE_BYTES - 1, 1),
-            PrefixBudget::Accepted { len: 1 }
-        );
-        assert_eq!(
-            streamed_response_prefix_len(MAX_STREAMED_RESPONSE_BYTES - 1, 2),
-            PrefixBudget::Overflowed { accepted_len: 1 }
-        );
-        assert_eq!(
-            streamed_response_prefix_len(MAX_STREAMED_RESPONSE_BYTES, usize::MAX),
-            PrefixBudget::Overflowed { accepted_len: 0 }
-        );
     }
 
     #[test]
