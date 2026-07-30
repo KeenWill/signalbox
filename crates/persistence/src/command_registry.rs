@@ -3,29 +3,26 @@
 use signalbox_domain::DurableCommandId;
 use sqlx::{AssertSqlSafe, PgConnection, Row};
 
-use crate::mapping::durable_command_id_to_uuid;
+pub(crate) use crate::mapping::DurableCommandKind as CommandKind;
+use crate::mapping::{
+    durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
+};
 
-pub(crate) const CREATE_SESSION_KIND: &str = "create_session";
+pub(crate) const CREATE_SESSION_KIND: &str =
+    durable_command_kind_to_str(CommandKind::CreateSession);
 pub(crate) const CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND: &str =
-    "create_session_from_imported_frontier";
-pub(crate) const REPLACE_SESSION_DEFAULTS_KIND: &str = "replace_session_defaults";
-pub(crate) const REPLACE_SESSION_METADATA_KIND: &str = "replace_session_metadata";
-pub(crate) const SUBMIT_INPUT_KIND: &str = "submit_input";
-pub(crate) const DECIDE_TOOL_REQUEST_KIND: &str = "decide_tool_request";
-pub(crate) const REVIEW_WORKFLOW_KIND: &str = "review_workflow";
-pub(crate) const COMPACT_SESSION_KIND: &str = "compact_session";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CommandKind {
-    CreateSession,
-    CreateSessionFromImportedFrontier,
-    ReplaceSessionDefaults,
-    ReplaceSessionMetadata,
-    SubmitInput,
-    DecideToolRequest,
-    ReviewWorkflow,
-    CompactSession,
-}
+    durable_command_kind_to_str(CommandKind::CreateSessionFromImportedFrontier);
+pub(crate) const REPLACE_SESSION_DEFAULTS_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ReplaceSessionDefaults);
+pub(crate) const REPLACE_SESSION_METADATA_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ReplaceSessionMetadata);
+pub(crate) const SUBMIT_INPUT_KIND: &str = durable_command_kind_to_str(CommandKind::SubmitInput);
+pub(crate) const DECIDE_TOOL_REQUEST_KIND: &str =
+    durable_command_kind_to_str(CommandKind::DecideToolRequest);
+pub(crate) const REVIEW_WORKFLOW_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ReviewWorkflow);
+pub(crate) const COMPACT_SESSION_KIND: &str =
+    durable_command_kind_to_str(CommandKind::CompactSession);
 
 #[derive(Clone, Copy)]
 struct CommandKindDefinition {
@@ -133,10 +130,15 @@ pub(crate) async fn inspect(
         let spelling: String = row
             .try_get("command_kind")
             .map_err(RegistryInspectionError::Database)?;
+        let Some(kind) = durable_command_kind_from_str(&spelling) else {
+            return Err(RegistryInspectionError::Corruption(
+                RegistryCorruption::UnsupportedKind(spelling),
+            ));
+        };
         let definition = COMMAND_KIND_DEFINITIONS
             .iter()
             .copied()
-            .find(|candidate| candidate.spelling == spelling)
+            .find(|candidate| candidate.kind == kind)
             .ok_or_else(|| {
                 RegistryInspectionError::Corruption(RegistryCorruption::UnsupportedKind(spelling))
             })?;
