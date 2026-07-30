@@ -1,7 +1,8 @@
 use std::{error::Error, fmt, io};
 
 use signalbox_process_protocol::{
-    ErrorCode, ErrorDetail, FrameDecodeError, FrameEncodeError, RejectionDetail,
+    ErrorCode, ErrorDetail, FailedModelCallCause, FrameDecodeError, FrameEncodeError,
+    RejectionDetail,
 };
 
 #[derive(Debug)]
@@ -25,7 +26,7 @@ pub(crate) enum ClientError {
     AmbiguousMutation,
     Input(&'static str),
     TurnRecoveryRequired,
-    TurnFailed,
+    TurnFailed(Option<FailedModelCallCause>),
     TurnRefused,
     TurnCancelled,
     TurnReconciliationRequired,
@@ -71,7 +72,7 @@ impl ClientError {
             | Self::AmbiguousMutation
             | Self::Input(_)
             | Self::TurnRecoveryRequired
-            | Self::TurnFailed
+            | Self::TurnFailed(_)
             | Self::TurnRefused
             | Self::TurnCancelled
             | Self::TurnReconciliationRequired => Self::AmbiguousMutation,
@@ -128,7 +129,12 @@ impl fmt::Display for ClientError {
             Self::TurnRecoveryRequired => formatter.write_str(
                 "the submitted turn requires model-call recovery that the terminal cannot perform",
             ),
-            Self::TurnFailed => formatter.write_str("the submitted turn failed"),
+            Self::TurnFailed(None) => formatter.write_str("the submitted turn failed"),
+            Self::TurnFailed(Some(cause)) => write!(
+                formatter,
+                "the submitted turn failed: {}",
+                failed_model_call_cause(*cause)
+            ),
             Self::TurnRefused => formatter.write_str("the submitted turn was refused"),
             Self::TurnCancelled => formatter.write_str("the submitted turn was cancelled"),
             Self::TurnReconciliationRequired => {
@@ -154,11 +160,26 @@ impl Error for ClientError {
             | Self::SourceExceedsFrame
             | Self::ScanIncomplete { .. }
             | Self::TurnRecoveryRequired
-            | Self::TurnFailed
+            | Self::TurnFailed(_)
             | Self::TurnRefused
             | Self::TurnCancelled
             | Self::TurnReconciliationRequired => None,
         }
+    }
+}
+
+const fn failed_model_call_cause(cause: FailedModelCallCause) -> &'static str {
+    match cause {
+        FailedModelCallCause::CredentialRejected => "the provider rejected the credential",
+        FailedModelCallCause::PermissionDenied => "the credential lacks permission",
+        FailedModelCallCause::InvalidRequest => "the provider rejected the request as invalid",
+        FailedModelCallCause::TargetNotFound => "the requested model or resource was not found",
+        FailedModelCallCause::RequestTooLarge => "the request exceeded a provider size limit",
+        FailedModelCallCause::RateLimited => "the provider rate-limited the request; retry later",
+        FailedModelCallCause::QuotaExhausted => "the provider quota is exhausted",
+        FailedModelCallCause::Overloaded => "the provider is overloaded; retry later",
+        FailedModelCallCause::ProviderInternal => "the provider reported an internal error",
+        FailedModelCallCause::Unrecognized => "the provider reported an unrecognized error",
     }
 }
 
@@ -341,9 +362,17 @@ impl fmt::Display for RejectionDisplay {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_process_protocol::{ErrorCode, ErrorDetail};
+    use signalbox_process_protocol::{ErrorCode, ErrorDetail, FailedModelCallCause};
 
     use super::ClientError;
+
+    #[test]
+    fn provider_failure_cause_is_rendered_for_the_user() {
+        assert_eq!(
+            ClientError::TurnFailed(Some(FailedModelCallCause::QuotaExhausted)).to_string(),
+            "the submitted turn failed: the provider quota is exhausted"
+        );
+    }
 
     #[test]
     fn commit_ambiguous_mutation_names_the_complete_replay_inputs() {

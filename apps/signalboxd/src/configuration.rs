@@ -19,6 +19,7 @@ use signalbox_model_runtime::{
     CredentialValue,
 };
 use signalbox_process_protocol::MAX_MODEL_ALIAS_CATALOG_ENTRIES;
+use signalbox_tools_basic::WebFetchEgressPolicy;
 use toml_edit::{DocumentMut, Table};
 use uuid::Uuid;
 
@@ -36,6 +37,7 @@ pub struct HubModelConfiguration {
     direct_selections: HashSet<DirectModelSelection>,
     aliases: HashMap<ModelAlias, FrozenAliasDefinition>,
     compaction_prompt: Arc<str>,
+    web_fetch_egress_policy: WebFetchEgressPolicy,
 }
 
 impl HubModelConfiguration {
@@ -51,7 +53,7 @@ impl HubModelConfiguration {
             .map_err(|_| HubModelConfigurationError::InvalidDocument)?;
         reject_unknown_fields(
             document.as_table(),
-            &["version", "models", "aliases", "compaction"],
+            &["version", "models", "aliases", "compaction", "web_fetch"],
         )?;
         if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
             return Err(HubModelConfigurationError::UnsupportedVersion);
@@ -69,6 +71,32 @@ impl HubModelConfiguration {
             return Err(HubModelConfigurationError::InvalidCompactionPrompt);
         }
         let compaction_prompt: Arc<str> = Arc::from(compaction_prompt);
+        let web_fetch_egress_policy = document
+            .get("web_fetch")
+            .map(|item| {
+                let table = item
+                    .as_table()
+                    .ok_or(HubModelConfigurationError::InvalidWebFetchPolicy)?;
+                reject_unknown_fields(table, &["allowed_origins"])
+                    .map_err(|_| HubModelConfigurationError::InvalidWebFetchPolicy)?;
+                let origins = table
+                    .get("allowed_origins")
+                    .and_then(|item| item.as_array())
+                    .ok_or(HubModelConfigurationError::InvalidWebFetchPolicy)?;
+                let origins = origins
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or(HubModelConfigurationError::InvalidWebFetchPolicy)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                WebFetchEgressPolicy::try_from_allowed_origins(origins)
+                    .map_err(|_| HubModelConfigurationError::InvalidWebFetchPolicy)
+            })
+            .transpose()?
+            .unwrap_or_default();
         let models = document
             .get("models")
             .and_then(|item| item.as_array_of_tables())
@@ -157,6 +185,7 @@ impl HubModelConfiguration {
             direct_selections,
             aliases,
             compaction_prompt,
+            web_fetch_egress_policy,
         })
     }
 
@@ -173,6 +202,11 @@ impl HubModelConfiguration {
     /// Returns the exact configured compaction system prompt.
     pub fn compaction_prompt(&self) -> &str {
         &self.compaction_prompt
+    }
+
+    /// Returns the exact deployment-owned automatic web-fetch egress policy.
+    pub fn web_fetch_egress_policy(&self) -> WebFetchEgressPolicy {
+        self.web_fetch_egress_policy.clone()
     }
 
     /// Reports whether the configuration contains one direct selection key.
@@ -265,6 +299,8 @@ pub enum HubModelConfigurationError {
     InvalidLimit,
     /// The compaction prompt was empty, oversized, or contained NUL.
     InvalidCompactionPrompt,
+    /// The optional web-fetch table was malformed or named an invalid origin.
+    InvalidWebFetchPolicy,
     /// One direct selection appeared more than once.
     DuplicateSelection,
     /// One target was assigned conflicting runtime meanings.
@@ -295,6 +331,9 @@ impl fmt::Display for HubModelConfigurationError {
             Self::InvalidLimit => "model configuration contains an invalid token limit",
             Self::InvalidCompactionPrompt => {
                 "model configuration contains an invalid compaction prompt"
+            }
+            Self::InvalidWebFetchPolicy => {
+                "model configuration contains an invalid web_fetch egress policy"
             }
             Self::DuplicateSelection => "model configuration repeats a direct selection",
             Self::ConflictingTarget => "model configuration gives one target conflicting meaning",
@@ -393,6 +432,7 @@ mod tests {
 
     use signalbox_domain::{DirectModelSelection, ModelAlias};
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
+    use signalbox_tools_basic::WebFetchEgressPolicy;
     use uuid::Uuid;
 
     use super::{
@@ -406,6 +446,9 @@ version = 1
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
+
+[web_fetch]
+allowed_origins = ["https://example.com"]
 
 [[models]]
 selection_id = "10000000-0000-4000-8000-000000000001"
@@ -431,6 +474,11 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             Uuid::parse_str("30000000-0000-4000-8000-000000000001").expect("fixture UUID is valid"),
         );
         assert!(configuration.contains_selection(selection));
+        assert_eq!(
+            configuration.web_fetch_egress_policy(),
+            WebFetchEgressPolicy::try_from_allowed_origins([String::from("https://example.com")])
+                .expect("fixture egress origin is valid")
+        );
         assert_eq!(
             configuration
                 .resolve_alias(alias)
@@ -471,6 +519,36 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         assert_eq!(
             HubModelConfiguration::parse(&dangling).err(),
             Some(HubModelConfigurationError::DanglingAlias)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_each_malformed_web_fetch_policy_shape() {
+        let unknown_field = CONFIGURATION.replace(
+            r#"allowed_origins = ["https://example.com"]"#,
+            r#"allowed_origins = ["https://example.com"]
+extra = true"#,
+        );
+        let non_string_origin = CONFIGURATION.replace(
+            r#"allowed_origins = ["https://example.com"]"#,
+            "allowed_origins = [17]",
+        );
+        let non_origin_url = CONFIGURATION.replace(
+            r#"allowed_origins = ["https://example.com"]"#,
+            r#"allowed_origins = ["https://example.com/path"]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&unknown_field).err(),
+            Some(HubModelConfigurationError::InvalidWebFetchPolicy)
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&non_string_origin).err(),
+            Some(HubModelConfigurationError::InvalidWebFetchPolicy)
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&non_origin_url).err(),
+            Some(HubModelConfigurationError::InvalidWebFetchPolicy)
         );
     }
 

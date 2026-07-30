@@ -134,6 +134,7 @@ public struct SignalboxSynchronizationDiagnostic: Equatable, Sendable {
 public struct SignalboxSynchronizationSnapshot: Equatable, Sendable {
   public enum Record: Equatable, Sendable {
     case turn(SignalboxTranscriptTurn)
+    case modelCallUsage(SignalboxTranscriptModelCallUsage)
     case entry(SignalboxTranscriptEntryMessage)
     case textEntry(SignalboxTranscriptTextEntryMessage)
     case content(SignalboxTranscriptContent)
@@ -420,7 +421,10 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     case .diagnostic(let kind, let decodingDiagnostic):
       accumulator = currentAccumulator
       if let decodingDiagnostic {
-        return protocolFailure(stage: .history, message: decodingDiagnostic.message)
+        return protocolFailure(
+          stage: .history,
+          message: "Rejected malformed known process-protocol frame \(kind): \(decodingDiagnostic.message)"
+        )
       }
       return reportUnknown(
         kind: kind,
@@ -722,7 +726,10 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       refresh.accumulator = currentAccumulator
       activeRefresh = refresh
       if let decodingDiagnostic {
-        return protocolFailure(stage: .sideHistory, message: decodingDiagnostic.message)
+        return protocolFailure(
+          stage: .sideHistory,
+          message: "Rejected malformed known process-protocol frame \(kind): \(decodingDiagnostic.message)"
+        )
       }
       return reportUnknown(
         kind: kind,
@@ -1133,7 +1140,10 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         stage: currentStage
       )
     }
-    return protocolFailure(stage: currentStage, message: decodingDiagnostic.message)
+    return protocolFailure(
+      stage: currentStage,
+      message: "Rejected malformed known process-protocol frame \(kind): \(decodingDiagnostic.message)"
+    )
   }
 
   private mutating func reportUnknown(
@@ -1355,11 +1365,16 @@ private struct SignalboxSnapshotAccumulator: Sendable {
   let boundary: SignalboxTranscriptSnapshotBoundary
   let capacity: SignalboxSynchronizationSnapshotCapacity
   private var records: [SignalboxSynchronizationSnapshot.Record] = []
-  private var turnIDs: Set<SignalboxCanonicalUUID> = []
+  private var turnAcceptancePositions: [SignalboxCanonicalUUID: UInt64] = [:]
+  private var modelCallIDs: Set<SignalboxCanonicalUUID> = []
   private var entryIDs: Set<SignalboxSnapshotEntryIdentity> = []
   private var priorAcceptancePosition: UInt64?
+  private var priorModelCallTurnAcceptancePosition: UInt64?
+  private var priorModelCallID: String?
   private var turnCount: UInt64 = 0
+  private var modelCallCount: UInt64 = 0
   private var entryCount: UInt64 = 0
+  private var modelCallsEnded = false
   private var entriesStarted = false
   private var contentEntryIndex: UInt64?
   private var expectedFragmentIndex: UInt64 = 0
@@ -1387,10 +1402,13 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     case .transcriptTurn(let turn):
       guard
         !turn.state.isInvalidStoredProjection,
+        !modelCallsEnded,
         !entriesStarted,
         turn.acceptancePosition.rawValue != 0,
         priorAcceptancePosition.map({ $0 < turn.acceptancePosition.rawValue }) ?? true,
-        turnIDs.insert(turn.turnID).inserted
+        turnAcceptancePositions.updateValue(
+          turn.acceptancePosition.rawValue, forKey: turn.turnID
+        ) == nil
       else {
         return .invalid("Snapshot turns were not unique acceptance-order projections.")
       }
@@ -1400,9 +1418,45 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         return .invalid("Snapshot exceeded the configured native-client capacity.")
       }
       return .accepted
+    case .transcriptModelCallUsage(let evidence):
+      guard let turnAcceptancePosition = turnAcceptancePositions[evidence.turnID] else {
+        return .invalid("Snapshot model-call usage order or identities were invalid.")
+      }
+      let followsPriorModelCall = priorModelCallTurnAcceptancePosition.map { priorPosition in
+        turnAcceptancePosition > priorPosition
+          || (turnAcceptancePosition == priorPosition
+            && priorModelCallID.map { $0 < evidence.modelCallID.rawValue } == true)
+      } ?? true
+      guard
+        !modelCallsEnded,
+        !entriesStarted,
+        evidence.modelCallIndex.rawValue == modelCallCount,
+        followsPriorModelCall,
+        modelCallIDs.insert(evidence.modelCallID).inserted
+      else {
+        return .invalid("Snapshot model-call usage order or identities were invalid.")
+      }
+      priorModelCallTurnAcceptancePosition = turnAcceptancePosition
+      priorModelCallID = evidence.modelCallID.rawValue
+      modelCallCount = modelCallCount.addingReportingOverflow(1).partialValue
+      guard append(.modelCallUsage(evidence)) else {
+        return .invalid("Snapshot exceeded the configured native-client capacity.")
+      }
+      return .accepted
+    case .transcriptModelCallsEnd(let count):
+      guard
+        !modelCallsEnded,
+        !entriesStarted,
+        count.rawValue == modelCallCount
+      else {
+        return .invalid("Snapshot model-call evidence count was invalid.")
+      }
+      modelCallsEnded = true
+      return .accepted
     case .transcriptEntry(let entry):
       entriesStarted = true
       guard
+        modelCallsEnded,
         !entry.entry.hasUnknownStoredVariant,
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
@@ -1422,6 +1476,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     case .transcriptTextEntry(let entry):
       entriesStarted = true
       guard
+        modelCallsEnded,
         !entry.entry.hasUnknownStoredVariant,
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
@@ -1445,7 +1500,8 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         end.sessionID == boundary.sessionID,
         end.cursor == boundary.cursor,
         end.turnCount.rawValue == turnCount,
-        end.entryCount.rawValue == entryCount
+        end.entryCount.rawValue == entryCount,
+        modelCallsEnded
       else {
         return .invalid("Snapshot terminal identity, cursor, or counts were invalid.")
       }
@@ -1519,6 +1575,8 @@ extension SignalboxSynchronizationSnapshot.Record {
     switch self {
     case .turn(let turn):
       return turn.state.retainedUTF8Bytes
+    case .modelCallUsage:
+      return 0
     case .entry(let message):
       return message.entry.retainedUTF8Bytes
     case .textEntry(let message):

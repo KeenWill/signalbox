@@ -19,6 +19,17 @@ version = 1
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
 
+# web_fetch remains automatically approved only for these exact origins. An
+# absent or empty list disables its outbound requests. Add an origin only when
+# the deployment accepts it as an egress recipient for untrusted model context.
+[web_fetch]
+allowed_origins = [
+  "https://api.github.com",
+  "https://crates.io",
+  "https://docs.rs",
+  "https://github.com",
+]
+
 # Anthropic's most capable widely released model. Hard cap: 128000.
 [[models]]
 selection_id = "c70bd4e1-3699-458c-ae03-310a77763807"

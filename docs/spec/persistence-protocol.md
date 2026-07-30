@@ -15,10 +15,12 @@ were verified through PR #288 (`agent/audit-fix-docs-coherence`); the session
 system-prompt columns were verified through PR #286
 (`agent/session-system-prompt`); the terminal model-call token evidence columns
 and transcript reader were verified through this PR (`agent/token-usage`); the
-session-template provenance columns and storage version four were verified
-through PR #311 (`agent/session-templates-spec`); and the context-compaction
-transaction and lock inventory were verified against
-`agent/context-compaction-protocol`. This page covers the Postgres
+additive provider-failure cause column was verified through PR #330
+(`agent/audit-verified-fixes`); the session-template provenance columns and
+storage version four were verified through PR #311
+(`agent/session-templates-spec`); and the context-compaction transaction and
+lock inventory were verified against PR #314
+(`agent/context-compaction-protocol`). This page covers the Postgres
 representation in `crates/persistence` (source and migrations), migration
 discipline, durable command storage and replay equality, the fail-closed
 reconstitution boundary, the lock protocol, pending-steering durable state, the
@@ -138,9 +140,13 @@ Implemented table families (across the forward-only migrations):
   input without rounding. A nonterminal row must keep all four null, and a
   direct Prepared-to-terminal transition likewise requires all four null because
   no send occurred; the `cancelled` terminal disposition also requires all four
-  null because cancellation evidence reports no usage. The ordinary sent-call
-  terminal update installs the exact provider-reported fields alongside the
-  disposition before terminal-row immutability applies;
+  null because cancellation evidence reports no usage. Migration `202607310002`
+  adds nullable `terminal_provider_failure_cause`, constrained to the closed
+  provider taxonomy and present only on `known_failed` terminal rows. Migration
+  `202607310003` rejects a cause on a direct Prepared-to-terminal transition
+  because no provider send occurred. The ordinary sent-call terminal update
+  installs the exact provider-reported fields and optional classification
+  alongside the disposition before terminal-row immutability applies;
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_delta`,
   plus the resolved `context_frontier_member` compatibility projection;
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
@@ -637,9 +643,11 @@ then every terminal model call in turn-acceptance and call-identity order, then
 opens one database cursor over one resolution of the selected frontier chain. It
 validates declared counts and contiguous positions while advancing and decodes
 at most one row at a time. The model-call phase decodes every nullable token
-field through the full-range ordinal boundary; null remains absence.
-Active-phase, terminal-evidence, and acceptance-tail validation semantics are
-owned by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
+field through the full-range ordinal boundary; null remains absence. Failed-turn
+projection also decodes the nullable closed provider-failure cause and rejects a
+cause attached to any disposition other than `known_failed`. Active-phase,
+terminal-evidence, and acceptance-tail validation semantics are owned by
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired

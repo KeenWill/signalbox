@@ -265,11 +265,37 @@ pub enum ProcessFailedModelCallDisposition {
     Cancelled,
 }
 
+/// Persistence-owned closed classification of a definitive provider error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessProviderModelCallFailureCause {
+    /// The provider rejected the request credential.
+    CredentialRejected,
+    /// The credential lacked permission.
+    PermissionDenied,
+    /// The provider judged the request invalid.
+    InvalidRequest,
+    /// The requested model or resource was not found.
+    TargetNotFound,
+    /// The request exceeded a provider size limit.
+    RequestTooLarge,
+    /// The provider applied a transient rate limit.
+    RateLimited,
+    /// The account's available quota was exhausted.
+    QuotaExhausted,
+    /// The provider reported overload.
+    Overloaded,
+    /// The provider reported an internal error.
+    ProviderInternal,
+    /// The adapter did not recognize the definitive provider error.
+    Unrecognized,
+}
+
 /// Optional terminal model-call evidence for a failed turn.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessFailedTerminalModelCall {
     call: ModelCallId,
     disposition: ProcessFailedModelCallDisposition,
+    provider_failure_cause: Option<ProcessProviderModelCallFailureCause>,
 }
 
 impl ProcessFailedTerminalModelCall {
@@ -281,6 +307,11 @@ impl ProcessFailedTerminalModelCall {
     /// Returns the exact terminal model-call disposition.
     pub const fn disposition(&self) -> ProcessFailedModelCallDisposition {
         self.disposition
+    }
+
+    /// Returns the closed provider classification when this call retained one.
+    pub const fn provider_failure_cause(&self) -> Option<ProcessProviderModelCallFailureCause> {
+        self.provider_failure_cause
     }
 }
 
@@ -1929,6 +1960,8 @@ async fn load_next_transcript_turn(
             turn.terminal_tool_attempt_id,
             terminal_call.terminal_disposition_kind
                 AS terminal_model_call_disposition_kind,
+            terminal_call.terminal_provider_failure_cause
+                AS terminal_model_call_provider_failure_cause,
             accepted.accepted_input_id,
             accepted.acceptance_position AS accepted_position,
             accepted.origin_turn_id,
@@ -1974,6 +2007,28 @@ async fn load_next_transcript_turn(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(Into::into)
+}
+
+fn decode_provider_failure_cause(
+    value: &str,
+) -> Result<ProcessProviderModelCallFailureCause, ProcessReadError> {
+    match value {
+        "credential_rejected" => Ok(ProcessProviderModelCallFailureCause::CredentialRejected),
+        "permission_denied" => Ok(ProcessProviderModelCallFailureCause::PermissionDenied),
+        "invalid_request" => Ok(ProcessProviderModelCallFailureCause::InvalidRequest),
+        "target_not_found" => Ok(ProcessProviderModelCallFailureCause::TargetNotFound),
+        "request_too_large" => Ok(ProcessProviderModelCallFailureCause::RequestTooLarge),
+        "rate_limited" => Ok(ProcessProviderModelCallFailureCause::RateLimited),
+        "quota_exhausted" => Ok(ProcessProviderModelCallFailureCause::QuotaExhausted),
+        "overloaded" => Ok(ProcessProviderModelCallFailureCause::Overloaded),
+        "provider_internal" => Ok(ProcessProviderModelCallFailureCause::ProviderInternal),
+        "unrecognized" => Ok(ProcessProviderModelCallFailureCause::Unrecognized),
+        value => Err(ProcessReadCorruption::Unsupported {
+            field: "model-call provider failure cause",
+            value: value.to_owned(),
+        }
+        .into()),
+    }
 }
 
 fn decode_database_count(
@@ -2049,6 +2104,16 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     let terminal_tool_attempt: Option<Uuid> = row.try_get("terminal_tool_attempt_id")?;
     let terminal_call_disposition: Option<String> =
         row.try_get("terminal_model_call_disposition_kind")?;
+    let terminal_call_provider_failure_cause: Option<String> =
+        row.try_get("terminal_model_call_provider_failure_cause")?;
+    if terminal_call_provider_failure_cause.is_some()
+        && terminal_call_disposition.as_deref() != Some("known_failed")
+    {
+        return Err(ProcessReadCorruption::Inconsistent(
+            "provider failure cause without known-failed model call",
+        )
+        .into());
+    }
     let current_model_call: Option<Uuid> = row.try_get("current_model_call_id")?;
     let current_model_call_state: Option<String> = row.try_get("current_model_call_state_kind")?;
     let current_model_call_frontier: Option<Uuid> =
@@ -2448,6 +2513,10 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
                             .into());
                         }
                     },
+                    provider_failure_cause: terminal_call_provider_failure_cause
+                        .as_deref()
+                        .map(decode_provider_failure_cause)
+                        .transpose()?,
                 }),
             },
             Some(ContextFrontierId::from_uuid(frontier)),

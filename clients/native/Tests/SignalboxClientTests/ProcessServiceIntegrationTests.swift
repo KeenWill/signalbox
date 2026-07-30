@@ -190,6 +190,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     await requester.primary.send(
       try ProcessDriverFixture.snapshotStart(cursor: ProcessDriverFixture.snapshotCursor)
     )
+    await requester.primary.send(try ProcessDriverFixture.modelCallsEnd())
     await requester.primary.send(
       try ProcessDriverFixture.snapshotEnd(cursor: ProcessDriverFixture.snapshotCursor)
     )
@@ -205,6 +206,8 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     await requester.side.send(
       try ProcessDriverFixture.snapshotStart(cursor: ProcessDriverFixture.triggerCursor)
     )
+    await requester.side.waitForNextCallCount(ProcessDriverFixture.sideStartReadCount)
+    await requester.side.send(try ProcessDriverFixture.modelCallsEnd())
     await requester.side.waitForNextCallCount(ProcessDriverFixture.sideEndReadCount)
     await recorder.pauseNextPhase()
     await requester.side.send(
@@ -318,6 +321,15 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertEqual(message.text, ProcessProjectionFixture.contextSummaryText)
     XCTAssertEqual(message.role, .assistant)
+  }
+
+  func testFailedProviderCauseAppearsInNativeActivity() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithFailedProviderCause()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertEqual(projection.activity, ProcessProjectionFixture.quotaExhaustedActivity)
   }
 
   func testSnapshotPreservesPendingAcceptanceOrderAndActiveActivity() throws {
@@ -3088,9 +3100,10 @@ private enum ProcessDriverFixture {
   static let singleMetadataCount: UInt64 = 1
   static let twoMetadataCount: UInt64 = 2
   static let oneMetadataCount: UInt64 = 1
-  static let initialFollowReadCount = 3
-  static let bufferedFollowReadCount = 5
-  static let sideEndReadCount = 2
+  static let initialFollowReadCount = 4
+  static let bufferedFollowReadCount = 6
+  static let sideStartReadCount = 2
+  static let sideEndReadCount = 3
   static let snapshotCursor: UInt64 = 0
   static let triggerCursor: UInt64 = 1
   static let bufferedCursor: UInt64 = 2
@@ -3182,6 +3195,17 @@ private enum ProcessDriverFixture {
         "type":"transcript_snapshot_start",
         "session_id":"\(session)",
         "cursor":"\(cursor)"
+      }
+      """
+    )
+  }
+
+  static func modelCallsEnd() throws -> SignalboxProcessServerFrame {
+    try frame(
+      """
+      {
+        "type":"transcript_model_calls_end",
+        "model_call_count":"0"
       }
       """
     )
@@ -3449,6 +3473,12 @@ private enum ProcessDriverFixture {
 }
 
 private enum ProcessProjectionFixture {
+  static let emptyModelCallsBoundary = """
+    {
+      "type":"transcript_model_calls_end",
+      "model_call_count":"0"
+    }
+    """
   static let userText = "fixture materialized owner input"
   static let proposedAssistantText = "I will inspect the fixture before using the tool."
   static let proposedToolName = "inspect_fixture"
@@ -3477,6 +3507,10 @@ private enum ProcessProjectionFixture {
   static let queuedActivity = SignalboxProcessActivity(state: .queued, label: "Queued")
   static let completedActivity = SignalboxProcessActivity(state: .completed, label: "Completed")
   static let failedActivity = SignalboxProcessActivity(state: .failed, label: "Failed")
+  static let quotaExhaustedActivity = SignalboxProcessActivity(
+    state: .failed,
+    label: "Failed: provider quota exhausted"
+  )
   static let cancelledActivity = SignalboxProcessActivity(state: .cancelled, label: "Cancelled")
   static let waitingActivity = SignalboxProcessActivity(
     state: .waitingForToolDecision,
@@ -3509,6 +3543,66 @@ private enum ProcessProjectionFixture {
     [try SignalboxCanonicalUUID(validating: ProcessSubmissionFixture.acceptedInputID)]
   }
 
+  static func snapshotWithFailedProviderCause() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"failed",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call":{
+              "model_call_id":"\(ProcessDriverFixture.modelCall)",
+              "disposition":"known_failed",
+              "cause":"quota_exhausted"
+            }
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_call_usage",
+          "model_call_index":"0",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "usage":{
+            "input_tokens":null,
+            "output_tokens":null,
+            "cache_creation_input_tokens":null,
+            "cache_read_input_tokens":null
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"1",
+          "entry_count":"0"
+        }
+        """,
+      ]
+    )
+  }
+
   static func snapshotWithUserEntry() throws -> SignalboxSynchronizationSnapshot {
     var machine = SignalboxSessionSynchronizationMachine(
       sessionID: try ProcessDriverFixture.sessionID(),
@@ -3528,6 +3622,12 @@ private enum ProcessProjectionFixture {
           }
           """
         )
+      )
+    )
+    _ = machine.receive(
+      .frame(
+        generation: 1,
+        message: try message(emptyModelCallsBoundary)
       )
     )
     _ = machine.receive(
@@ -3605,6 +3705,7 @@ private enum ProcessProjectionFixture {
           "cursor":"1"
         }
         """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_text_entry",
@@ -3666,6 +3767,7 @@ private enum ProcessProjectionFixture {
           "cursor":"1"
         }
         """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_text_entry",
@@ -3716,6 +3818,7 @@ private enum ProcessProjectionFixture {
           "cursor":"1"
         }
         """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_entry",
@@ -3769,6 +3872,7 @@ private enum ProcessProjectionFixture {
           "cursor":"1"
         }
         """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_text_entry",
@@ -3848,6 +3952,7 @@ private enum ProcessProjectionFixture {
           "cursor":"1"
         }
         """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_entry",
@@ -3885,6 +3990,7 @@ private enum ProcessProjectionFixture {
           "cursor":"1"
         }
         """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_text_entry",
@@ -3978,6 +4084,7 @@ private enum ProcessProjectionFixture {
           }
         }
         """,
+        emptyModelCallsBoundary,
         """
         {
           "type":"transcript_snapshot_end",
